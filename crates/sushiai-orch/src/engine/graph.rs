@@ -321,6 +321,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
+    wake_orchestrator_for_done(app, task);
     ParentEnd::Finished
 }
 

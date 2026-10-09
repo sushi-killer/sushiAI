@@ -572,6 +572,7 @@ impl App {
             judged_findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Some(new.variant),
@@ -860,13 +861,50 @@ impl App {
             }
         }
 
+        let by_agent = p.source.as_deref().is_some_and(|s| !s.is_empty());
+        if by_agent {
+            if is_accept_option(&p.answer) {
+                return Err(
+                    "accepting an attempt as done is the owner's to pick: an agent cannot"
+                        .to_string(),
+                );
+            }
+            let exhausted = task
+                .question
+                .as_ref()
+                .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing);
+            let continues = task
+                .decisions
+                .iter()
+                .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
+                .count();
+            if exhausted
+                && continues >= MAX_ORCHESTRATOR_CONTINUES
+                && !p.answer.trim().eq_ignore_ascii_case("stop")
+            {
+                return Err(
+                    "this task already got the orchestrator's continues: the owner decides now"
+                        .to_string(),
+                );
+            }
+            self.agent_answers.lock().unwrap().insert(p.id.clone());
+        } else {
+            self.agent_answers.lock().unwrap().remove(&p.id);
+        }
+
         if p.answer.trim().eq_ignore_ascii_case("stop") {
             if let Some(ctrl) = self.controls.lock().unwrap().get(&p.id) {
                 ctrl.cancel.cancel();
             }
-            task.decisions.push("Owner: stop".to_string());
-            if let Some(question) = task.question.take() {
-                record_answered_question(&mut task, &question, "stop", AnsweredBy::Owner);
+            self.agent_answers.lock().unwrap().remove(&p.id);
+            let question = task.question.take();
+            if by_agent {
+                record_answer(&mut task, question.as_ref(), "stop", true);
+            } else {
+                task.decisions.push("Owner: stop".to_string());
+                if let Some(question) = question {
+                    record_answered_question(&mut task, &question, "stop", AnsweredBy::Owner);
+                }
             }
             task.status = TaskStatus::Stopped;
             task.updated_at = now_ms();
@@ -904,10 +942,9 @@ impl App {
             // No live parked loop (e.g. after a daemon restart): apply the
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
-            task.decisions.push(format!("Owner: {}", p.answer));
-            if let Some(question) = task.question.clone() {
-                record_answered_question(&mut task, &question, &p.answer, AnsweredBy::Owner);
-            }
+            let question = task.question.clone();
+            record_answer(&mut task, question.as_ref(), &p.answer, by_agent);
+            self.agent_answers.lock().unwrap().remove(&p.id);
             if let Some(n) = task
                 .question
                 .as_ref()

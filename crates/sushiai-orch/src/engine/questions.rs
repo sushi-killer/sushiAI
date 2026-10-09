@@ -4,7 +4,7 @@ use super::*;
 /// before "attempts keep failing" goes to the owner: enough to push past a
 /// fixable failure or a wrong review finding, not enough to burn the
 /// budget in a loop.
-const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
+pub(super) const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 
 /// The "attempts keep failing" question: the orchestrator triages it first
 /// (it sees the last failure, e.g. the review findings, and can say what to
@@ -41,7 +41,7 @@ pub(super) async fn wait_for_exhausted_answer(
             .await
             .map(|text| Answered {
                 text,
-                by_owner: true,
+                by_owner: !app.take_agent_answer(task_id),
                 shown,
             })
     }
@@ -152,7 +152,9 @@ pub(super) async fn wait_for_answer(
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
     }
-    park_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+    let answer = park_for_answer(app, task_id, task, pending_answer, cancel, permit).await;
+    app.take_agent_answer(task_id);
+    answer
 }
 
 /// Parks on a fresh one-shot channel until either `task.answer` delivers an
@@ -178,6 +180,7 @@ async fn park_for_answer(
     *pending_answer.lock().unwrap() = Some(tx);
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
+    wake_orchestrator_for_waiting(app, task);
     let result = tokio::select! {
         _ = cancel.cancelled() => None,
         answer = rx => answer.ok(),
@@ -188,10 +191,12 @@ async fn park_for_answer(
         // transition is applied to it rather than to a fresh load -- a
         // stale copy used to overwrite it with the question still set.
         Some(answer) => {
-            task.decisions.push(format!("Owner: {answer}"));
-            if let Some(question) = task.question.take() {
-                record_answered_question(task, &question, answer, AnsweredBy::Owner);
-            }
+            // The chat or an MCP client answered: an orchestrator line, which
+            // also counts toward the continue cap. Peeked, not taken: the
+            // caller reads it again to decide `by_owner`.
+            let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
+            let question = task.question.take();
+            record_answer(task, question.as_ref(), answer, by_agent);
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
@@ -210,6 +215,98 @@ async fn park_for_answer(
         }
     }
     result
+}
+
+/// The question text an orchestrator answer line carries. Triage may
+/// rewrite an "Attempts keep failing" question when it escalates, so that
+/// kind always uses the fixed text the continue cap counts by.
+pub(super) fn answer_line_question(q: &Question) -> &str {
+    if q.kind == QuestionKind::AttemptsFailing {
+        EXHAUSTED_QUESTION
+    } else {
+        &q.text
+    }
+}
+
+/// Records a parked question's answer: the owner's, or the orchestrator
+/// agent's (an `Orchestrator:` decision line and an orchestrator-answered
+/// question, which count toward the triage and continue bounds).
+pub(super) fn record_answer(
+    task: &mut Task,
+    question: Option<&Question>,
+    answer: &str,
+    by_agent: bool,
+) {
+    match (question, by_agent) {
+        (Some(q), true) => {
+            task.decisions.push(orchestrator_answer_line(
+                answer_line_question(q),
+                answer,
+                "answered by the orchestrator agent",
+            ));
+            record_answered_question(task, q, answer, AnsweredBy::Orchestrator);
+        }
+        (q, _) => {
+            task.decisions.push(format!("Owner: {answer}"));
+            if let Some(q) = q {
+                record_answered_question(task, q, answer, AnsweredBy::Owner);
+            }
+        }
+    }
+}
+
+impl App {
+    /// Whether the answer that just arrived for `task_id` came from the chat
+    /// or an MCP client rather than the app; clears the mark.
+    pub(super) fn take_agent_answer(&self, task_id: &str) -> bool {
+        self.agent_answers.lock().unwrap().remove(task_id)
+    }
+}
+
+/// Wakes the orchestrator chat (an overseer turn) for a task that just parked
+/// on a question nobody answered (triage escalated or was off), when
+/// `auto_answer` is on. Parking happens once per question, so this never wakes
+/// twice for the same one. An owner-only kind never wakes it: the owner
+/// answers those, and `task_answer` would refuse the agent anyway.
+pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
+    let Some(question) = task.question.as_ref() else {
+        return;
+    };
+    if !app.settings.read().unwrap().auto_answer || owner_only(question.kind) {
+        return;
+    }
+    let prompt = overseer_prompt("overseer_waiting", task);
+    chat::wake_overseer(app, &task.repo, prompt, false);
+}
+
+/// Wakes the overseer once, at the moment the task loop moves a top-level
+/// task into `done`, when `auto_answer` is on and nothing landed or opened a
+/// pull request yet. The task remembers it (`overseer_woken`), so a restart,
+/// an unarchive or a rebroadcast never wakes it again. A busy chat drops the
+/// wake; the next digest mentions the task.
+pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
+    if task.status != TaskStatus::Done
+        || task.parent.is_some()
+        || task.archived
+        || task.overseer_woken
+        || task.pr_url.is_some()
+        || task.landed_sha.is_some()
+        || !app.settings.read().unwrap().auto_answer
+    {
+        return;
+    }
+    let prompt = overseer_prompt("overseer_done", task);
+    // Marked either way: this is the one transition, not a retry loop.
+    task.overseer_woken = true;
+    let _ = app.store.save_task(task);
+    chat::wake_overseer(app, &task.repo, prompt, false);
+}
+
+/// A server-built overseer prompt (`prompts/orchestrator.yaml`) naming the task.
+fn overseer_prompt(key: &str, task: &Task) -> String {
+    crate::prompts::get(key)
+        .replace("{id}", &task.id)
+        .replace("{title}", &task.title)
 }
 
 /// A completed triage session: the decision, plus whatever it cost (the
@@ -430,7 +527,7 @@ async fn wait_for_triaged_answer(
                     );
                 } else {
                     let line = orchestrator_answer_line(
-                        &question.text,
+                        answer_line_question(&question),
                         &decision.answer,
                         &decision.reason,
                     );
@@ -473,7 +570,7 @@ async fn wait_for_triaged_answer(
         .await
         .map(|text| Answered {
             text,
-            by_owner: true,
+            by_owner: !app.take_agent_answer(task_id),
             shown,
         })
 }
@@ -601,4 +698,195 @@ pub(super) async fn ask_plan_question_with_triage(
         permit,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A waiting task in a real repo directory with the fake harness, and
+    /// the number of overseer turns that ran for it.
+    async fn waiting_wakes(auto_answer: bool, kind: QuestionKind) -> usize {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = auto_answer;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.to_string_lossy().to_string();
+        task.question = Some(Question::new(
+            "Which way?",
+            vec!["A".into(), "B".into()],
+            kind,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&task).unwrap();
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let pending = Arc::new(StdMutex::new(None));
+        let id = task.id.clone();
+        park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+        chat::wait_idle(&app, task.repo.as_str()).await;
+        chat::fake_overseer_calls(&repo)
+    }
+
+    #[tokio::test]
+    async fn a_parked_task_wakes_the_overseer_once_only_with_auto_answer_on() {
+        assert_eq!(waiting_wakes(true, QuestionKind::AgentQuestion).await, 1);
+        assert_eq!(waiting_wakes(false, QuestionKind::AgentQuestion).await, 0);
+        assert_eq!(waiting_wakes(true, QuestionKind::Budget).await, 0);
+    }
+
+    #[tokio::test]
+    async fn only_the_done_transition_wakes_the_overseer_once() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = task_with_status(TaskStatus::Done);
+        task.repo = repo.to_string_lossy().to_string();
+        app.store.save_task(&task).unwrap();
+        // A rebroadcast of an old done task wakes nothing.
+        app.broadcast_task(&task);
+        chat::wait_idle(&app, task.repo.as_str()).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 0);
+        wake_orchestrator_for_done(&app, &mut task);
+        chat::wait_idle(&app, task.repo.as_str()).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+        assert!(
+            app.store
+                .load_task(&task.id)
+                .unwrap()
+                .unwrap()
+                .overseer_woken
+        );
+        // Again (a restart, an unarchive) and a subtask: still one.
+        task.archived = false;
+        wake_orchestrator_for_done(&app, &mut task);
+        let mut part = task_with_status(TaskStatus::Done);
+        part.repo = task.repo.clone();
+        part.parent = Some(task.id.clone());
+        wake_orchestrator_for_done(&app, &mut part);
+        let mut landed = task_with_status(TaskStatus::Done);
+        landed.repo = task.repo.clone();
+        landed.landed_sha = Some("abc".into());
+        wake_orchestrator_for_done(&app, &mut landed);
+        chat::wait_idle(&app, task.repo.as_str()).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+    }
+
+    fn exhausted_task() -> Task {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.question = Some(Question::new(
+            "Attempts keep failing with a review failure: continue, change approach, or stop?",
+            vec![
+                "continue".into(),
+                brief::ACCEPT_LAST_ATTEMPT.into(),
+                "stop".into(),
+            ],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        ));
+        task
+    }
+
+    #[tokio::test]
+    async fn an_agent_sourced_answer_is_an_orchestrator_line_and_never_the_owners() {
+        let (app, _dir) = test_app();
+        let mut task = exhausted_task();
+        app.store.save_task(&task).unwrap();
+        let id = task.id.clone();
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let parked = {
+            let (app, pending, cancel, id) =
+                (app.clone(), pending.clone(), cancel.clone(), id.clone());
+            tokio::spawn(async move {
+                let answered =
+                    park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+                (answered, task)
+            })
+        };
+        let tx = loop {
+            if let Some(tx) = pending.lock().unwrap().take() {
+                break tx;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        app.agent_answers.lock().unwrap().insert(id.clone());
+        tx.send("continue".into()).unwrap();
+        let (answered, task) = parked.await.unwrap();
+        assert_eq!(answered.as_deref(), Some("continue"));
+        assert!(app.take_agent_answer(&id));
+        assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        assert_eq!(
+            task.decisions
+                .iter()
+                .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap() {
+        let (app, _dir) = test_app();
+        let mut task = exhausted_task();
+        app.store.save_task(&task).unwrap();
+        let accept = json!({"id": task.id, "answer": brief::ACCEPT_LAST_ATTEMPT, "source": "mcp"});
+        let err = app.handle_task_answer(accept).await.unwrap_err();
+        assert!(err.contains("owner's to pick"), "{err}");
+        for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
+            task.decisions
+                .push(format!("{EXHAUSTED_ANSWER_PREFIX} -> continue (r)"));
+        }
+        app.store.save_task(&task).unwrap();
+        let cont = json!({"id": task.id, "answer": "continue", "source": "mcp"});
+        let err = app.handle_task_answer(cont).await.unwrap_err();
+        assert!(err.contains("owner decides"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_escalated_exhausted_question_still_counts_toward_the_cap() {
+        let (app, _dir) = test_app();
+        let mut task = exhausted_task();
+        // Triage rewrote the text on escalation.
+        task.question.as_mut().unwrap().text = "Should I keep trying?".into();
+        app.store.save_task(&task).unwrap();
+        let q = task.question.clone();
+        for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
+            record_answer(&mut task, q.as_ref(), "continue", true);
+        }
+        assert_eq!(
+            task.decisions
+                .iter()
+                .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
+                .count(),
+            MAX_ORCHESTRATOR_CONTINUES
+        );
+        app.store.save_task(&task).unwrap();
+        let cont = json!({"id": task.id, "answer": "continue", "source": "chat"});
+        assert!(app.handle_task_answer(cont).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_agent_stop_is_an_orchestrator_line_and_pr_refuses_a_branch() {
+        let (app, _dir) = test_app();
+        let task = exhausted_task();
+        app.store.save_task(&task).unwrap();
+        let stop = json!({"id": task.id, "answer": "stop", "source": "chat"});
+        app.handle_task_answer(stop).await.unwrap();
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Orchestrator:")));
+        let err = app
+            .handle_task_pr(json!({"id": task.id, "branch": "main", "source": "chat"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("own branch"), "{err}");
+    }
 }

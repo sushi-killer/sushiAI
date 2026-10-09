@@ -87,6 +87,7 @@ mod tests {
             judged_findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),

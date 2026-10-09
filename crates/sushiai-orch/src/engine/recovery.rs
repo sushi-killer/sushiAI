@@ -55,6 +55,7 @@ impl App {
             }
         }
         self.spawn_landing_retries();
+        self.spawn_digest_timer();
         self.spawn_lead_touch_check();
         // A dependency question can have become moot while the daemon was
         // down; the graph clears it now, not at the next graph event.

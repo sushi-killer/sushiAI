@@ -1160,6 +1160,12 @@ pub async fn handle_cancel(
 enum Turn {
     Owner(ChatMode),
     Questions(Vec<String>),
+    /// A turn the server starts on its own (a waiting task, a finished task,
+    /// the morning digest): the prompt is built here, so it is trusted, and
+    /// the final text lands in the owner's chat session like an owner turn's.
+    Overseer {
+        read_only: bool,
+    },
 }
 
 const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.";
@@ -1408,6 +1414,35 @@ pub(super) fn wake(app: &App, repo: &str) {
     });
 }
 
+/// Starts an overseer turn for `repo` with a server-built `prompt`; its
+/// reply is appended to the repo's current chat session. `read_only` offers
+/// only the looking tools. Returns whether it started: not when a turn is
+/// already running, no route is configured or `repo` is not a directory.
+pub(super) fn wake_overseer(app: &App, repo: &str, prompt: String, read_only: bool) -> bool {
+    if !Path::new(repo).is_dir() || tokio::runtime::Handle::try_current().is_err() {
+        return false;
+    }
+    let Ok((session, route, cancel)) = begin_turn(app, repo) else {
+        return false;
+    };
+    save(app, repo, &session);
+    let app = app.arc();
+    let repo = repo.to_string();
+    tokio::spawn(async move {
+        run_turn(
+            &app,
+            repo,
+            session,
+            route,
+            prompt,
+            cancel,
+            Turn::Overseer { read_only },
+        )
+        .await;
+    });
+    true
+}
+
 /// The orchestrator agent's route: the one the owner picked, else the route
 /// that handles standard tasks.
 pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
@@ -1415,13 +1450,13 @@ pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
     find(&settings.orchestrator).or_else(|| find(settings.tiers.get(&Tier::Standard)?))
 }
 
-fn mcp_server(app: &App, task_mcp_file: Option<&Path>, mode: ChatMode) -> serde_json::Value {
+fn mcp_server(app: &App, task_mcp_file: Option<&Path>, read_only: bool) -> serde_json::Value {
     let mut server = json!({
         "command": app.exe_path,
         "args": ["mcp"],
         "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     });
-    if mode.read_only() {
+    if read_only {
         server["args"]
             .as_array_mut()
             .expect("args is an array")
@@ -1439,9 +1474,10 @@ fn claude_argv(
     settings_path: &Path,
     session: Option<&str>,
     mode: ChatMode,
+    read_only: bool,
     connected: &chat_tools::TurnTools,
 ) -> Vec<String> {
-    let offered: &[&str] = if mode.read_only() {
+    let offered: &[&str] = if read_only {
         &crate::mcp::READ_ONLY_TOOLS
     } else {
         &crate::mcp::ORCHESTRATOR_TOOLS
@@ -1771,24 +1807,25 @@ async fn run_turn(
 ) {
     let mode = match &turn {
         Turn::Owner(mode) => *mode,
-        Turn::Questions(_) => ChatMode::Chat,
+        Turn::Questions(_) | Turn::Overseer { .. } => ChatMode::Chat,
     };
+    let read_only = mode.read_only() || matches!(turn, Turn::Overseer { read_only: true });
     let dir = turn_dir(app, &repo);
     let _ = std::fs::create_dir_all(&dir);
     // Brainstorm and Plan never create tasks, so they have no task MCP to hand on.
-    let task_mcp = thread.task_mcp.as_ref().filter(|_| !mode.read_only());
+    let task_mcp = thread.task_mcp.as_ref().filter(|_| !read_only);
     let task_mcp_file = task_mcp.and_then(|mcp| {
         let file = dir.join("task-mcp.json");
         store::write_json_atomic(&file, &json!({"repo": repo, "mcp": mcp}))
             .ok()
             .map(|_| file)
     });
-    let server = mcp_server(app, task_mcp_file.as_deref(), mode);
+    let server = mcp_server(app, task_mcp_file.as_deref(), read_only);
     let settings = app.settings.read().unwrap().clone();
     // A question turn answers a task, not the owner: it gets no connected tools.
     let connected = match &turn {
         Turn::Owner(_) => chat_tools::for_turn(app, &settings).await,
-        Turn::Questions(_) => chat_tools::TurnTools::default(),
+        Turn::Questions(_) | Turn::Overseer { .. } => chat_tools::TurnTools::default(),
     };
     let session = thread.session_id.clone();
     let key_path = dir.join("key");
@@ -1816,6 +1853,7 @@ async fn run_turn(
                 &settings_path,
                 session.as_deref(),
                 mode,
+                read_only,
                 &connected,
             )
         }
@@ -1843,8 +1881,8 @@ async fn run_turn(
                 outcome.error,
                 &turn,
             ) {
-                (Some(reply), _, Turn::Owner(mode)) => {
-                    apply_reply(&mut thread, &reply, tools, *mode, &|server, tool| {
+                (Some(reply), _, Turn::Owner(_) | Turn::Overseer { .. }) => {
+                    apply_reply(&mut thread, &reply, tools, mode, &|server, tool| {
                         chat_tools::proposable(app, &settings, server, tool)
                     });
                 }
@@ -1861,14 +1899,14 @@ async fn run_turn(
                 (None, None, Turn::Owner(_)) => {
                     thread.error = Some("The orchestrator gave no reply.".into())
                 }
-                (None, None, Turn::Questions(_)) => {}
+                (None, None, Turn::Questions(_) | Turn::Overseer { .. }) => {}
             }
         }
         (Err(RunError::Cancelled), Turn::Owner(_)) => thread.error = Some("Stopped.".into()),
         (Err(RunError::Io(error) | RunError::NotFound(error)), Turn::Owner(_)) => {
             thread.error = Some(error)
         }
-        (Err(_), Turn::Questions(_)) => {}
+        (Err(_), Turn::Questions(_) | Turn::Overseer { .. }) => {}
     }
     finish_turn(app, &repo, &thread);
     // Questions that arrived during this turn get the next one.
@@ -2091,6 +2129,58 @@ pub async fn handle_action_decline(
     Ok(chats.thread_json())
 }
 
+/// Test support: points the Claude harness at a fake that records each
+/// prompt it is given in `.overseer-calls` in its cwd (the repo) and replies
+/// "Overseer note." Set once per process and never changed.
+#[cfg(test)]
+pub(crate) fn fake_overseer_harness() -> &'static Path {
+    static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    let (_, path) = SCRIPT.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("ORCHD_CLAUDE_BIN", &path);
+        (dir, path)
+    });
+    path
+}
+
+/// How many prompts the fake harness recorded in `repo`.
+#[cfg(test)]
+pub(crate) fn fake_overseer_calls(repo: &Path) -> usize {
+    std::fs::read_to_string(repo.join(".overseer-calls"))
+        .map(|t| t.matches("=====").count())
+        .unwrap_or(0)
+}
+
+/// Whether the repo's current chat session holds a message with this text.
+#[cfg(test)]
+pub(crate) fn thread_has_text(app: &App, repo: &str, text: &str) -> bool {
+    load(app, repo)
+        .current()
+        .messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.text == text)
+}
+
+/// Waits until no chat turn runs in `repo`.
+#[cfg(test)]
+pub(crate) async fn wait_idle(app: &App, repo: &str) {
+    for _ in 0..400 {
+        if !app.chat_turns.lock().unwrap().contains_key(repo) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("chat turn never ended");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,6 +2206,7 @@ mod tests {
             Path::new("/d/settings.json"),
             Some("sess"),
             ChatMode::Chat,
+            false,
             &chat_tools::TurnTools::default(),
         );
         let at = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
@@ -2765,6 +2856,7 @@ mod tests {
             judged_findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2978,6 +3070,7 @@ mod tests {
                     Path::new("/d/settings.json"),
                     session,
                     mode,
+                    mode.read_only(),
                     &chat_tools::TurnTools::default(),
                 );
                 let at =
@@ -3014,8 +3107,8 @@ mod tests {
     #[test]
     fn only_the_chat_mode_gets_a_writing_bridge() {
         let (app, _dir, _repo) = test_app();
-        let has_read_only = |mode| {
-            mcp_server(&app, None, mode)["args"]
+        let has_read_only = |mode: ChatMode| {
+            mcp_server(&app, None, mode.read_only())["args"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("--read-only"))

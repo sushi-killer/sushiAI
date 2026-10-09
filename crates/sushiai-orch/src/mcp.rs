@@ -26,16 +26,23 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What a Brainstorm or Plan turn gets (`--read-only`): looking, never changing.
-pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
+pub const READ_ONLY_TOOLS: [&str; 5] = [
+    "task_list",
+    "task_get",
+    "settings_get",
+    "repo_notes_list",
+    "costs_summary",
+];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
     "task_list",
     "task_get",
     "task_create",
     "task_backlog",
     "task_start",
     "task_report",
+    "task_pr",
     "task_lead_touch",
     "task_stop",
     "task_answer",
@@ -53,6 +60,7 @@ pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
     "repo_notes_list",
     "repo_notes_add",
     "repo_notes_remove",
+    "costs_summary",
 ];
 
 fn from_schema() -> Value {
@@ -154,6 +162,19 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             json!({
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_pr",
+            "task.pr",
+            "Open a pull request for a done top-level task: pushes the task's branch and opens the PR on the repo's remote. Use it when a task is done and green. Never merge: merging is the owner's.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string", "description": "PR title; defaults to the task title."},
+                },
                 "required": ["id"],
             }),
         ),
@@ -346,6 +367,22 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "required": ["repo", "id"],
             }),
         ),
+        (
+            "costs_summary",
+            "costs.summary",
+            "Spend and usage totals, read-only: by day, model, stage and task, with the lead-touch rate. Filter by repo, taskId, sinceDays or a from/to day (YYYY-MM-DD); groupBy adds breakdowns.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string"},
+                    "taskId": {"type": "string"},
+                    "sinceDays": {"type": "integer"},
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "groupBy": {"type": "array", "items": {"type": "string"}},
+                },
+            }),
+        ),
     ]
 }
 
@@ -533,6 +570,15 @@ fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
             obj.insert("source".to_string(), json!(source));
         }
     }
+    if method == "task.pr" {
+        // Task branch only: the bridge never forwards a branch, and marks the
+        // call so the backend refuses one too.
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("branch");
+            let source = if from_task { "mcp" } else { "chat" };
+            obj.insert("source".to_string(), json!(source));
+        }
+    }
     if method == "task.create" && args.get("source").is_none() {
         if let Some(obj) = args.as_object_mut() {
             let source = if from_task { "handoff" } else { "chat" };
@@ -659,10 +705,35 @@ mod tests {
     }
 
     #[test]
-    fn no_tool_maps_to_task_pr() {
+    fn task_pr_never_forwards_a_branch() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = seen.clone();
+        let bridge = Bridge {
+            call: Box::new(move |method, args| {
+                *sink.lock().unwrap() = Some((method.to_string(), args));
+                Ok(json!({}))
+            }),
+            task: None,
+            read_only: false,
+        };
+        let call =
+            json!({"name": "task_pr", "arguments": {"id": "t1", "branch": "main", "title": "T"}});
+        dispatch(&bridge, "tools/call", &call).unwrap();
+        let (method, args) = seen.lock().unwrap().take().unwrap();
+        assert_eq!(method, "task.pr");
+        assert!(args.get("branch").is_none());
+        assert_eq!(args["id"], "t1");
+        assert_eq!(args["source"], "chat");
+    }
+
+    #[test]
+    fn task_pr_is_an_orchestrator_only_tool() {
         assert!(tool_specs()
             .iter()
-            .all(|(_, method, ..)| *method != "task.pr"));
+            .any(|(name, method, ..)| *name == "task_pr" && *method == "task.pr"));
+        assert!(ORCHESTRATOR_TOOLS.contains(&"task_pr"));
+        assert!(!TASK_TOOLS.contains(&"task_pr"));
+        assert!(!READ_ONLY_TOOLS.contains(&"task_pr"));
     }
 
     #[test]
@@ -679,6 +750,7 @@ mod tests {
                 "task_backlog",
                 "task_start",
                 "task_report",
+                "task_pr",
                 "task_lead_touch",
                 "task_stop",
                 "task_answer",
@@ -696,6 +768,7 @@ mod tests {
                 "repo_notes_list",
                 "repo_notes_add",
                 "repo_notes_remove",
+                "costs_summary",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);

@@ -123,8 +123,16 @@ impl App {
             id: String,
             title: Option<String>,
             branch: Option<String>,
+            /// Set by the MCP bridge; the app sends none.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        if p.source.as_deref().is_some_and(|s| !s.is_empty()) && p.branch.is_some() {
+            return Err(
+                "an agent opens the pull request for the task's own branch only".to_string(),
+            );
+        }
         validate_task_id(&self.store, &p.id)?;
         let _guard = InFlight::take(&p.id)?;
         let task = self

@@ -291,6 +291,7 @@ pub(super) async fn ask_plan_question(
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
+        wake_orchestrator_for_waiting(app, &task);
     }
 
     let result = tokio::select! {
@@ -302,10 +303,17 @@ pub(super) async fn ask_plan_question(
     match &result {
         Some(answer) => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-                task.decisions
-                    .push(format!("Owner: {question_text} -> {answer}"));
-                if let Some(question) = task.question.take() {
-                    record_answered_question(&mut task, &question, answer, AnsweredBy::Owner);
+                // Peeked: the caller reads the mark again for its own wording.
+                let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
+                if by_agent {
+                    let question = task.question.take();
+                    record_answer(&mut task, question.as_ref(), answer, true);
+                } else {
+                    task.decisions
+                        .push(format!("Owner: {question_text} -> {answer}"));
+                    if let Some(question) = task.question.take() {
+                        record_answered_question(&mut task, &question, answer, AnsweredBy::Owner);
+                    }
                 }
                 task.status = TaskStatus::Drafting;
                 task.updated_at = now_ms();
@@ -761,9 +769,14 @@ pub(super) async fn run_plan_stage(
             .await
             {
                 Some(answer) => {
+                    let who = if app.take_agent_answer(task_id) {
+                        "Orchestrator"
+                    } else {
+                        "Owner"
+                    };
                     if let Ok(Some(mut t)) = app.store.load_task(task_id) {
                         let combined = format!(
-                            "{}\n\n(Owner clarification: {answer})",
+                            "{}\n\n({who} clarification: {answer})",
                             t.request.clone().unwrap_or_default()
                         );
                         t.request = Some(combined);

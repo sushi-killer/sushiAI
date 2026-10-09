@@ -157,6 +157,10 @@ pub struct Settings {
     /// answers given on their behalf.
     #[serde(default)]
     pub auto_answer: bool,
+    /// Local hour (0-23) at which the orchestrator chat is woken once a day
+    /// to write the owner a digest; `None` turns the digest off.
+    #[serde(default)]
+    pub digest_hour: Option<u8>,
     /// Routine task questions are answered by fixed rules and a cheap judge
     /// (at most three per task), each recorded as an assumption the owner can
     /// overturn. `false` sends every question to the owner as before.
@@ -575,6 +579,7 @@ impl Default for Settings {
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
             auto_answer: false,
+            digest_hour: None,
             answer_policy: true,
             experiments: default_experiments(),
             prices: default_prices(),
@@ -1307,6 +1312,10 @@ pub struct Task {
     /// The pull request `task.pr` opened for this task's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The overseer was already woken when this task finished: a restart,
+    /// an unarchive or a rebroadcast never wakes it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overseer_woken: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -2055,6 +2064,7 @@ mod tests {
             judged_findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2299,6 +2309,7 @@ mod tests {
             judged_findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2361,6 +2372,7 @@ mod tests {
             question_history: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),
@@ -2451,6 +2463,7 @@ mod tests {
             judged_findings: vec![],
             archived: true,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
             tier_fallback: None,
             variant: Default::default(),

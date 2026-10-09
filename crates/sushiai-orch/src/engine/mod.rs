@@ -43,6 +43,7 @@ mod cost;
 mod criteria;
 mod decision;
 mod deliverables;
+mod digest;
 mod finding_judge;
 mod graph;
 mod healing;
@@ -325,6 +326,10 @@ pub struct App {
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the held tool call a `task.answer` resolves.
     permission_waits: StdMutex<HashMap<String, oneshot::Sender<String>>>,
+    /// Tasks whose parked question the chat or an MCP client just answered
+    /// (`task.answer` with a source): the loop reads and clears it when the
+    /// answer arrives, so such an answer is never recorded as the owner's.
+    agent_answers: StdMutex<std::collections::HashSet<String>>,
     /// Keyed by task id: the files each live task holds (`leases.rs`).
     leases: StdMutex<HashMap<String, Lease>>,
     /// Held while a graph start counts a parent's running children and
@@ -518,6 +523,7 @@ impl App {
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
             permission_waits: StdMutex::new(HashMap::new()),
+            agent_answers: StdMutex::new(Default::default()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),

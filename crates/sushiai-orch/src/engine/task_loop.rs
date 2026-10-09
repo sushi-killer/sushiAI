@@ -1419,6 +1419,7 @@ pub(super) async fn run_task_loop(
                         task.updated_at = now_ms();
                         let _ = app.store.save_task(&task);
                         app.broadcast_task(&task);
+                        wake_orchestrator_for_done(&app, &mut task);
                         drop(permit);
                         app.finish_task_loop(&task_id);
                         return;
@@ -2737,6 +2738,7 @@ pub(super) async fn finish_attempt(
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
+    wake_orchestrator_for_done(app, task);
     *permit = None;
     app.finish_task_loop(task_id);
     Tail::Return

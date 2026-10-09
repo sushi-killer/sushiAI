@@ -35,6 +35,7 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 
 ## Promoted
 
+- 2026-10-10 An agent answer counted as the owner's → authority from the source. `an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap`.
 - 2026-10-07 Real-daemon tests skipped on CI (binary built after them) and hid Linux races → build first; they fail when `CI` is set. `tests/helpers/real-daemon.cjs`.
 - 2026-10-07 A new session's first `hook.open` came before its actor and was refused → wait for every live session without an actor. `a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not`.
 - 2026-10-07 A restart clamped saved bounds to a small CI screen → hidden test windows skip saved bounds. `smoke.mjs`.
@@ -56,6 +57,4 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
-- 2026-09-29 A kill lost uncommitted localStorage state → durable state goes in `sushiai.db`.
 - 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.
-- 2026-09-28 Trusted `rtk rewrite` (`rtk read` drops code) → allowlist. `rtk_rewrite_output_*`.

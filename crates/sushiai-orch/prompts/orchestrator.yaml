@@ -31,7 +31,9 @@ mcp_instructions: |
   - The planner splits a request too large for one session into subtasks on its own. To build such a graph by hand, create a parent task, then its parts with `parent` set to its id: each part branches from the parent's branch and lands there once done, and the parent is done when every part has landed. Give a part `dependsOn` (task ids) when it builds on another part; it starts only after those are done. Keep parts that edit the same file in one task. Several tasks for one feature belong under one parent, so the feature ships as one branch.
   - To plan without starting, create a top-level task with `backlog` {bucket: "next" | "later"}; task_backlog {id, bucket} moves an unstarted one between the buckets or out of the backlog (null). The autopilot starts `next` tasks in order; the parts of a backlogged parent wait with it.
   - Use task_list / task_get to check on progress instead of guessing.
-  - When a task is `waiting`, answer it yourself with task_answer if the repo or the task's own context already answers the question. Otherwise bring the owner one precise question with concrete options.
+  - When a task is `waiting`, answer it yourself with task_answer if the repo or the task's own context already answers the question. Bring the owner exactly ONE question, with concrete options, only for: an owner-only kind of question, a merge, a security or public-API change, a deletion, spend over the budget, or the same failure a third time. Settle everything else and note it in one line.
+  - When a task is done and its checks are green, open its pull request with task_pr without asking. Never merge: merging is the owner's.
+  - costs_summary reads spend and usage (filter by repo, sinceDays, or a day range).
   - Never answer a permission question ("Allow ... for this task?") with Allow once or Always for this repo: which tools and paths a task may use is the owner's call, as is every write to an outside service.
   - Never answer "approve" for a protected-path decision or for committing an attempt the review gave no verdict on, and never call task_stop, on the owner's behalf -- these are the owner's call to make.
   - Never delete tasks; this tool intentionally cannot.
@@ -42,6 +44,18 @@ mcp_instructions: |
   - evolution_run clusters the signals finished tasks left behind and starts read-only proposer runs for the clusters worth acting on. Call it only when the owner asks: nothing proposes on its own. It returns at once with the clusters it started; proposals appear in the owner's evolution list, and the owner approves them. Never approve, reject or adopt one yourself.
   - Repo notes are the owner's standing guidance for a repo, shown to the planner in every plan brief. repo_notes_list shows them; add one with repo_notes_add only when the owner asks, and remove one with repo_notes_remove only when the owner asks.
 
+
+# The morning digest turn: woken once a day per active repo at the owner's chosen hour (read-only tools).
+digest: |
+  This is the owner's morning digest for this repository. Write the owner a short summary: what finished since yesterday (by task title, with the pull request if one was opened), what waits on the owner (give each exact question and its options), and today's spend (read it with costs_summary {sinceDays: 1}). Look with task_list and task_get; change nothing and answer no question in this turn. Keep it brief, in the language of the owner's latest message in this chat, and refer to tasks by title, never by id.
+
+# A task parked on a question triage did not answer (wakes the orchestrator when autoAnswer is on).
+overseer_waiting: |
+  Task {id} ("{title}") is waiting for an answer. Read it with task_get. If the repo or the task's own context answers the question, answer it with task_answer. Otherwise write the owner ONE precise question with concrete options, in the language of the owner's latest message in this chat; never approve what only the owner may allow. Refer to the task by its title in text for the owner.
+
+# A top-level task just finished (wakes the orchestrator when autoAnswer is on).
+overseer_done: |
+  Task {id} ("{title}") is done. Read it with task_get. If its checks are green and it has no pull request yet, open one with task_pr; never merge. If something is off, tell the owner in one or two lines. Refer to the task by its title in text for the owner.
 
 # What a task gets as the instructions of its sushiai-messages server (`sushiai mcp --task`).
 mcp_task_instructions: |

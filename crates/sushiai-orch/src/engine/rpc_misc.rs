@@ -78,6 +78,9 @@ impl App {
         if p.settings.verify_timeout_secs == 0 {
             return Err("verifyTimeoutSecs must be at least 1".to_string());
         }
+        if p.settings.digest_hour.is_some_and(|h| h > 23) {
+            return Err("digestHour must be 0-23 or null".to_string());
+        }
         p.settings.experiments.check()?;
         let mut tool_ids = std::collections::HashSet::new();
         for tool in &p.settings.chat_tools {

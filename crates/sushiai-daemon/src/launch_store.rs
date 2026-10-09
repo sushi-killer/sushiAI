@@ -28,6 +28,7 @@ use crate::registry::unhex;
 
 const MAGIC: &[u8; 4] = b"SLK1";
 const NONCE_LEN: usize = 12;
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "sushiai-launch-key";
 
 /// What a wake needs besides the session record. No `Debug`: it holds secrets.

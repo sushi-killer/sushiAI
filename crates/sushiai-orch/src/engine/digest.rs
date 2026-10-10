@@ -208,19 +208,85 @@ mod tests {
             "done",
             Some("t1")
         ));
+        // The skipped wake is queued and fires when the digest turn ends.
+        for _ in 0..400 {
+            if chat::fake_overseer_calls(&repo) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         chat::wait_idle(&app, &repo_path).await;
         let log = overseer::read(&app.data_dir, Some(&repo_path), None);
         let kinds: Vec<_> = log.iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, ["digest", "skipped", "woke"], "{log:?}");
-        assert_eq!(log[0].text, "Overseer note.");
-        assert_eq!(log[1].task_id.as_deref(), Some("t1"));
-        assert!(log[1].text.contains("busy"), "{log:?}");
+        assert_eq!(
+            kinds,
+            ["asked_owner", "woke", "digest", "skipped", "woke"],
+            "{log:?}"
+        );
+        let skipped = log.iter().find(|e| e.kind == "skipped").unwrap();
+        assert_eq!(skipped.task_id.as_deref(), Some("t1"));
+        assert!(skipped.text.contains("busy"), "{log:?}");
+        assert_eq!(chat::fake_overseer_calls(&repo), 2);
         let mut seen = 0;
         while let Ok(event) = events.try_recv() {
             if matches!(event, Event::Overseer { .. }) {
                 seen += 1;
             }
         }
-        assert_eq!(seen, 3);
+        assert_eq!(seen, 5);
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_drops_queued_wakes_and_starts_no_new_turn() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_path = repo.to_string_lossy().to_string();
+        assert!(chat::wake_overseer(
+            &app,
+            &repo_path,
+            "p".into(),
+            true,
+            "digest",
+            None
+        ));
+        assert!(!chat::wake_overseer(
+            &app,
+            &repo_path,
+            "p".into(),
+            false,
+            "done",
+            Some("t1")
+        ));
+        assert_eq!(app.deferred_wakes.lock().unwrap().len(), 1);
+        app.shutdown();
+        assert!(app.deferred_wakes.lock().unwrap().is_empty());
+        chat::wait_idle(&app, &repo_path).await;
+        assert!(!chat::wake_overseer(
+            &app,
+            &repo_path,
+            "p".into(),
+            false,
+            "done",
+            Some("t2")
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(chat::fake_overseer_calls(&repo) <= 1);
+        assert!(!app.chat_turns.lock().unwrap().contains_key(&repo_path));
+    }
+
+    #[test]
+    fn an_answer_to_attempts_keep_failing_restarts_the_limit_pauses() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.queue.rate_pauses = 7;
+        let q = Question::new(
+            "Attempts keep failing",
+            vec!["continue".into()],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        );
+        record_answer(&mut task, Some(&q), "continue", false);
+        assert_eq!(task.queue.rate_pauses, 0);
     }
 }

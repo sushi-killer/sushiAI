@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 
 /// The same tool call (name + identical input) this many times in a row.
 const REPEATED_CALLS: u32 = 3;
-/// This many consecutive tool results that are errors.
+/// This many consecutive tool results that are errors with the same text
+/// (digits ignored). Audit 2026-10: all 13 loop kills in 186 tasks were this
+/// rule, firing on a normal red-green cycle (`cargo test` exit 101, a
+/// formatter diff, `git status` exit 1) whose output differs each time; a
+/// real loop repeats one error, so only a repeat counts.
 const ERROR_STREAK: u32 = 3;
 /// The same file edited this many times with no command run in between.
 // ponytail: any command counts as a check -- agents run a targeted test, not the
@@ -28,6 +32,7 @@ pub struct LoopDetector {
     last_call: Option<(String, String)>,
     call_run: u32,
     error_run: u32,
+    last_error: Option<String>,
     edits: BTreeMap<String, u32>,
 }
 
@@ -147,9 +152,22 @@ impl LoopDetector {
     fn result(&mut self, is_error: bool, text: String) -> Option<LoopHit> {
         if !is_error {
             self.error_run = 0;
+            self.last_error = None;
             return None;
         }
-        self.error_run += 1;
+        let key: String = text
+            .chars()
+            .filter(|c| !c.is_ascii_digit())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if self.last_error.as_ref() == Some(&key) {
+            self.error_run += 1;
+        } else {
+            self.error_run = 1;
+            self.last_error = Some(key);
+        }
         (self.error_run >= ERROR_STREAK).then(|| LoopHit {
             rule: "error_streak",
             detail: format!(
@@ -246,6 +264,22 @@ mod tests {
         )
         .is_none());
         assert_eq!(d.feed(&bad).unwrap().rule, "error_streak");
+    }
+
+    #[test]
+    fn failures_with_different_output_are_a_red_green_cycle_not_a_loop() {
+        let mut d = LoopDetector::new();
+        let lines: Vec<String> = ["test a failed", "formatter diff in b.rs", "git status", "c"]
+            .iter()
+            .map(|t| result(&format!("Exit code 1\n{t}"), false))
+            .collect();
+        assert!(run(&mut d, &lines).is_none());
+        // The same failure again, only its timing differs.
+        let mut d = LoopDetector::new();
+        let lines: Vec<String> = (1..=3)
+            .map(|n| result(&format!("Exit code 101\ntest x failed in {n}.{n}s"), false))
+            .collect();
+        assert_eq!(run(&mut d, &lines).unwrap().rule, "error_streak");
     }
 
     #[test]

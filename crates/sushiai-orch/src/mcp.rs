@@ -35,7 +35,7 @@ pub const READ_ONLY_TOOLS: [&str; 5] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 24] = [
     "task_list",
     "task_get",
     "task_create",
@@ -44,7 +44,6 @@ pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
     "task_report",
     "task_pr",
     "task_lead_touch",
-    "task_stop",
     "task_answer",
     "task_amend",
     "settings_get",
@@ -189,16 +188,6 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "touched": {"type": "boolean"},
                     "note": {"type": "string", "description": "What had to be fixed."},
                 },
-                "required": ["id"],
-            }),
-        ),
-        (
-            "task_stop",
-            "task.stop",
-            "Stop a running or waiting task.",
-            json!({
-                "type": "object",
-                "properties": {"id": {"type": "string"}},
                 "required": ["id"],
             }),
         ),
@@ -761,7 +750,6 @@ mod tests {
                 "task_report",
                 "task_pr",
                 "task_lead_touch",
-                "task_stop",
                 "task_answer",
                 "task_amend",
                 "settings_get",

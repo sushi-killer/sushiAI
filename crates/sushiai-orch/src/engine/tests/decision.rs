@@ -228,7 +228,7 @@ fn accepting_is_not_offered_after_other_failures_or_a_bad_verify() {
         FailureKind::Error,
         FailureKind::NoDeliverable,
     ] {
-        let mut task = failed_with(kind, &[Some(0)], &[]);
+        let mut task = failed_with(kind, &[Some(0)], &["a.rs"]);
         assert_eq!(
             options_after(&mut task, &[]),
             vec!["continue", "change approach", "stop"]
@@ -349,4 +349,79 @@ fn failure_signature_without_a_named_failure_skips_boilerplate_and_clean_summari
     // Nothing usable falls back to the first non-empty line.
     let sig = failure_signature(FailureKind::Verify, "\n\nplain output");
     assert!(sig.contains("plain output"), "{sig}");
+}
+
+#[test]
+fn a_harness_error_that_changed_nothing_does_not_spend_the_attempt_budget() {
+    let mut task = failed_with(FailureKind::Error, &[Some(0)], &[]);
+    assert!(advance_after_failure(&mut task, 1, &[]));
+    assert_eq!(task.status, TaskStatus::Queued);
+    // The same error three times in a row still reaches the owner.
+    let mut task = failed_with(FailureKind::Error, &[Some(0)], &[]);
+    task.attempts = (1..=3)
+        .map(|n| {
+            let mut a = attempt_with_failure(n, "error: boom");
+            a.failure.as_mut().unwrap().kind = FailureKind::Error;
+            a
+        })
+        .collect();
+    assert!(!advance_after_failure(&mut task, 9, &[]));
+}
+
+fn error_attempt(n: u32, status: AttemptStatus) -> Attempt {
+    // Each error carries a different id, so no two signatures match.
+    let mut a = attempt_with_failure(n, &format!("error: request req_{n}x failed"));
+    a.failure.as_mut().unwrap().kind = FailureKind::Error;
+    a.status = status;
+    a
+}
+
+#[test]
+fn varying_id_errors_stop_at_twice_the_attempt_budget() {
+    let mut task = task_with_status(TaskStatus::Running);
+    task.attempts = (1..=7).map(|n| error_attempt(n, AttemptStatus::Failed)).collect();
+    assert!(advance_after_failure(&mut task, 4, &[]));
+    task.attempts.push(error_attempt(8, AttemptStatus::Failed));
+    assert!(!advance_after_failure(&mut task, 4, &[]));
+}
+
+#[test]
+fn errors_alternating_with_pauses_still_stop_but_pauses_alone_do_not_count() {
+    let mut task = task_with_status(TaskStatus::Running);
+    let mut attempts = Vec::new();
+    for n in 1..=8 {
+        let status = if n % 2 == 0 {
+            AttemptStatus::Interrupted
+        } else {
+            AttemptStatus::Failed
+        };
+        attempts.push(error_attempt(n, status));
+    }
+    // Pauses that were real limit pauses stay out of the ceiling.
+    task.queue.paused_attempts = 4;
+    task.attempts = attempts.clone();
+    assert!(advance_after_failure(&mut task, 4, &[]));
+    // Interrupted attempts that were not limit pauses do count.
+    task.queue.paused_attempts = 0;
+    task.attempts = attempts;
+    assert!(!advance_after_failure(&mut task, 4, &[]));
+}
+
+#[test]
+fn ids_and_hashes_do_not_change_a_signature_and_interrupted_attempts_do_not_break_a_run() {
+    let sig = |d: &str| failure_signature(FailureKind::Error, d);
+    assert_eq!(
+        sig("Error: request req_01AbCdEfGh failed at deadbeef12"),
+        sig("Error: request req_09ZyXwVuTs failed at 0123abcd99")
+    );
+    assert_ne!(sig("Error: disk full"), sig("Error: out of memory"));
+    let mut interrupted = attempt_with_failure(2, "x");
+    interrupted.failure = None;
+    interrupted.status = AttemptStatus::Interrupted;
+    let attempts = vec![
+        attempt_with_failure(1, "s"),
+        interrupted,
+        attempt_with_failure(3, "s"),
+    ];
+    assert_eq!(consecutive_same_signature(&attempts, "s"), 2);
 }

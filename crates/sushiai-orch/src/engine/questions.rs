@@ -1,5 +1,24 @@
 use super::*;
 
+/// An answer on its way to a parked loop. `default_evidence` is set when the
+/// waiting SLA gave it (`wait_sla.rs`): the loop records a policy assumption
+/// with that evidence instead of an owner or orchestrator line.
+#[derive(Debug)]
+pub(super) struct Reply {
+    pub text: String,
+    pub default_evidence: Option<String>,
+}
+
+#[cfg(test)]
+impl From<&str> for Reply {
+    fn from(text: &str) -> Self {
+        Reply {
+            text: text.to_string(),
+            default_evidence: None,
+        }
+    }
+}
+
 /// How many times the orchestrator may extend a task's budget on its own
 /// before "attempts keep failing" goes to the owner: enough to push past a
 /// fixable failure or a wrong review finding, not enough to burn the
@@ -16,7 +35,7 @@ pub(super) async fn wait_for_exhausted_answer(
     task_id: &str,
     task: &mut Task,
     idx: usize,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<Answered> {
@@ -145,7 +164,7 @@ pub(super) async fn wait_for_answer(
     app: &Arc<App>,
     task_id: &str,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
@@ -169,7 +188,7 @@ async fn park_for_answer(
     app: &Arc<App>,
     task_id: &str,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
@@ -181,11 +200,13 @@ async fn park_for_answer(
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
     wake_orchestrator_for_waiting(app, task);
-    let result = tokio::select! {
+    let reply = tokio::select! {
         _ = cancel.cancelled() => None,
         answer = rx => answer.ok(),
     };
     *pending_answer.lock().unwrap() = None;
+    let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
+    let result = reply.map(|r| r.text);
     match &result {
         // The caller keeps using (and later saves) its own copy, so the
         // transition is applied to it rather than to a fresh load -- a
@@ -196,7 +217,13 @@ async fn park_for_answer(
             // caller reads it again to decide `by_owner`.
             let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
             let question = task.question.take();
-            record_answer(task, question.as_ref(), answer, by_agent);
+            record_answer_for(
+                task,
+                question.as_ref(),
+                answer,
+                by_agent,
+                evidence.as_deref(),
+            );
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
@@ -237,6 +264,10 @@ pub(super) fn record_answer(
     answer: &str,
     by_agent: bool,
 ) {
+    // An answer to "attempts keep failing" starts the limit pauses afresh.
+    if question.is_some_and(|q| q.kind == QuestionKind::AttemptsFailing) {
+        task.queue.rate_pauses = 0;
+    }
     match (question, by_agent) {
         (Some(q), true) => {
             task.decisions.push(orchestrator_answer_line(
@@ -252,6 +283,24 @@ pub(super) fn record_answer(
                 record_answered_question(task, q, answer, AnsweredBy::Owner);
             }
         }
+    }
+}
+
+/// [`record_answer`], or a policy assumption when the waiting SLA gave this
+/// answer (`wait_sla.rs`): a default the owner can overturn.
+pub(super) fn record_answer_for(
+    task: &mut Task,
+    question: Option<&Question>,
+    answer: &str,
+    by_agent: bool,
+    default_evidence: Option<&str>,
+) {
+    match (question, default_evidence) {
+        (Some(q), Some(evidence)) => {
+            let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
+            record_policy_answer(task, q, answer, "policy", evidence, attempt_n);
+        }
+        _ => record_answer(task, question, answer, by_agent),
     }
 }
 
@@ -457,7 +506,7 @@ pub(super) async fn wait_for_answer_with_triage(
     task_id: &str,
     task: &mut Task,
     idx: usize,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
@@ -476,7 +525,7 @@ async fn wait_for_triaged_answer(
     task_id: &str,
     task: &mut Task,
     idx: usize,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<Answered> {
@@ -594,7 +643,7 @@ pub(super) async fn ask_plan_question_with_triage(
     question_text: &str,
     options: Vec<String>,
     keep_text: bool,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {

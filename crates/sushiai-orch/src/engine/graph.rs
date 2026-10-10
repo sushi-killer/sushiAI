@@ -191,7 +191,7 @@ pub(super) fn apply_base_check_answer(task: &mut Task, question: &Question, answ
 async fn parent_base_preflight(
     app: &Arc<App>,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     pending_amend: &Arc<StdMutex<Option<Amendment>>>,
     cancel: &CancelToken,
 ) -> bool {
@@ -334,7 +334,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
 pub(super) async fn run_parent(
     app: &Arc<App>,
     task_id: &str,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     pending_amend: &Arc<StdMutex<Option<Amendment>>>,
     cancel: &CancelToken,
 ) -> ParentEnd {

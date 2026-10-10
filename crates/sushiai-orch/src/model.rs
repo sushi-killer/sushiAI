@@ -161,6 +161,15 @@ pub struct Settings {
     /// to write the owner a digest; `None` turns the digest off.
     #[serde(default)]
     pub digest_hour: Option<u8>,
+    /// While a question waits, wake the orchestrator chat again every this
+    /// many hours with a reminder (needs `auto_answer`); 0 = off.
+    #[serde(default)]
+    pub wait_remind_every_hours: u32,
+    /// A question that waited longer than this many hours is answered with
+    /// its cautious option, recorded as an assumption the owner can overturn;
+    /// 0 = off. Owner-only kinds and questions with no cautious option keep waiting.
+    #[serde(default)]
+    pub wait_default_after_hours: u32,
     /// Routine task questions are answered by fixed rules and a cheap judge
     /// (at most three per task), each recorded as an assumption the owner can
     /// overturn. `false` sends every question to the owner as before.
@@ -580,6 +589,8 @@ impl Default for Settings {
             orchestrator: String::new(),
             auto_answer: false,
             digest_hour: None,
+            wait_remind_every_hours: 0,
+            wait_default_after_hours: 0,
             answer_policy: true,
             experiments: default_experiments(),
             prices: default_prices(),
@@ -1344,6 +1355,22 @@ pub struct QueueState {
     /// autopilot starts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backlog: Option<Backlog>,
+    /// A usage or rate limit paused the task until this time (ms); the loop
+    /// resumes by itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<i64>,
+    /// Consecutive pauses for a usage or rate limit; sets the backoff and
+    /// the cap. Only a run that ends without an error resets it.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub rate_pauses: u32,
+    /// Attempts ever interrupted by such a pause: kept out of the hard
+    /// attempt ceiling, which counts every other implement attempt.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub paused_attempts: u32,
+    /// When the overseer was last reminded of this task's waiting question
+    /// (ms); the next reminder is one interval later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_reminded_at: Option<i64>,
 }
 
 /// Which planning bucket a backlog task is in; the autopilot only starts

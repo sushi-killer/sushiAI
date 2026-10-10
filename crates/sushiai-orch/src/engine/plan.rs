@@ -267,7 +267,7 @@ pub(super) async fn ask_plan_question(
     task_id: &str,
     question_text: &str,
     options: Vec<String>,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<String> {
@@ -294,20 +294,28 @@ pub(super) async fn ask_plan_question(
         wake_orchestrator_for_waiting(app, &task);
     }
 
-    let result = tokio::select! {
+    let reply = tokio::select! {
         _ = cancel.cancelled() => None,
         answer = rx => answer.ok(),
     };
     *pending_answer.lock().unwrap() = None;
+    let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
+    let result = reply.map(|r| r.text);
 
     match &result {
         Some(answer) => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 // Peeked: the caller reads the mark again for its own wording.
                 let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
-                if by_agent {
+                if by_agent || evidence.is_some() {
                     let question = task.question.take();
-                    record_answer(&mut task, question.as_ref(), answer, true);
+                    record_answer_for(
+                        &mut task,
+                        question.as_ref(),
+                        answer,
+                        true,
+                        evidence.as_deref(),
+                    );
                 } else {
                     task.decisions
                         .push(format!("Owner: {question_text} -> {answer}"));
@@ -401,7 +409,7 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
 pub(super) async fn run_plan_stage(
     app: &Arc<App>,
     task_id: &str,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
     auto_start_after_plan: bool,

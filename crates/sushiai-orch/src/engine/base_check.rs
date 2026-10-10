@@ -245,7 +245,7 @@ pub(super) async fn wait_on_broken_base(
     failed: &VerifyOutcome,
     base_run: &VerifyOutcome,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> BaseBreak {

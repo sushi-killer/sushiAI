@@ -171,7 +171,7 @@ pub(super) async fn wait_for_harness(
     task_id: &str,
     task: &mut Task,
     resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> bool {

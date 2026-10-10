@@ -57,6 +57,7 @@ mod permissions;
 mod plan;
 mod pr;
 mod questions;
+mod rate_limit;
 mod recovery;
 mod repo_notes;
 mod reports;
@@ -68,6 +69,7 @@ mod task_loop;
 #[cfg(test)]
 mod test_support;
 mod verify;
+mod wait_sla;
 mod worktrees;
 
 use advisor::*;
@@ -89,6 +91,7 @@ use leases::*;
 use lines::*;
 use plan::*;
 use questions::*;
+use rate_limit::*;
 use reports::*;
 use review::*;
 use routing::*;
@@ -218,7 +221,7 @@ struct TaskControl {
     /// the loop actually waits, taken (and consumed) by `task.answer`. No
     /// long-lived queue -- an answer that arrives when nobody is waiting is
     /// simply not delivered (`task.answer` rejects it before it gets here).
-    pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     /// An owner's `task.amend` for a task whose loop holds its own copy of
     /// the task: the loop applies it at its next attempt boundary, so no
     /// save of the loop's copy can overwrite it.
@@ -331,6 +334,9 @@ pub struct App {
     /// (`task.answer` with a source): the loop reads and clears it when the
     /// answer arrives, so such an answer is never recorded as the owner's.
     agent_answers: StdMutex<std::collections::HashSet<String>>,
+    /// Keyed by repo: overseer wakes skipped while its chat was busy; each
+    /// fires when that repo's turn ends.
+    deferred_wakes: StdMutex<HashMap<String, Vec<chat::DeferredWake>>>,
     /// Keyed by task id: the files each live task holds (`leases.rs`).
     leases: StdMutex<HashMap<String, Lease>>,
     /// Held while a graph start counts a parent's running children and
@@ -525,6 +531,7 @@ impl App {
             hook_tokens: RwLock::new(HashMap::new()),
             permission_waits: StdMutex::new(HashMap::new()),
             agent_answers: StdMutex::new(Default::default()),
+            deferred_wakes: StdMutex::new(HashMap::new()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),
@@ -597,6 +604,7 @@ impl App {
     pub fn shutdown_for(&self, disabling: bool) {
         self.disabling.store(disabling, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
+        self.deferred_wakes.lock().unwrap().clear();
         for ctrl in self.controls.lock().unwrap().values() {
             ctrl.cancel.cancel();
         }

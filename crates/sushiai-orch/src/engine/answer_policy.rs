@@ -121,6 +121,9 @@ pub(super) fn record_policy_answer(
     evidence: &str,
     attempt_n: u32,
 ) {
+    if question.kind == QuestionKind::AttemptsFailing {
+        task.queue.rate_pauses = 0;
+    }
     task.assumptions.push(Assumption {
         question: question.text.clone(),
         answer: answer.to_string(),

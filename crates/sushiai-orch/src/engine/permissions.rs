@@ -861,7 +861,7 @@ pub(super) async fn stop_for_denials(
     task: &mut Task,
     idx: usize,
     subjects: &[Subject],
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> LoopSignal {

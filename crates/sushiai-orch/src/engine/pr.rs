@@ -1,6 +1,7 @@
-//! `task.pr`: the owner pushes a finished task's branch to `origin` and opens
-//! a GitHub pull request against the repo's default branch. An owner action
-//! only: it is deliberately not an MCP tool, so an agent never pushes.
+//! `task.pr`: pushes a finished task's branch to `origin` and opens a GitHub
+//! pull request against the repo's default branch. The owner starts it from the
+//! app; the orchestrator agent may call it as the `task_pr` MCP tool. It pushes
+//! the task's own branch only, never the default branch, and never merges.
 
 use super::*;
 use std::collections::HashSet;

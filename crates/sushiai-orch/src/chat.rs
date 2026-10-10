@@ -688,6 +688,14 @@ fn save(app: &App, repo: &str, session: &ChatSession) {
 /// the reply (or have cleared messages restored by it).
 fn finish_turn(app: &App, repo: &str, session: &ChatSession) {
     write_session(app, repo, session, true);
+    fire_deferred_wakes(app, repo);
+}
+
+/// Frees the repo's turn slot without a session write, then runs the wakes
+/// that were waiting for it.
+fn release_turn(app: &App, repo: &str) {
+    app.chat_turns.lock().unwrap().remove(repo);
+    fire_deferred_wakes(app, repo);
 }
 
 fn write_session(app: &App, repo: &str, session: &ChatSession, end_turn: bool) {
@@ -1053,7 +1061,7 @@ pub async fn handle_create_proposal(
         turns.insert(repo.clone(), CancelToken::new());
     }
     let outcome = create_proposal(app, &repo, &message_id, &params, backlog).await;
-    app.chat_turns.lock().unwrap().remove(&repo);
+    release_turn(app, &repo);
     let (chats, created) = outcome?;
     broadcast(app, &chats);
     let (_, proposal) = find_proposal(&chats, &message_id)?;
@@ -1301,7 +1309,7 @@ pub async fn handle_edit(
         .iter()
         .position(|m| m.id == message_id && m.role == "user")
     else {
-        app.chat_turns.lock().unwrap().remove(&repo);
+        release_turn(app, &repo);
         return Err("that message is not one of the owner's messages in this chat".to_string());
     };
     let mode = requested_mode.unwrap_or(session.messages[index].mode);
@@ -1397,7 +1405,7 @@ pub(super) fn wake(app: &App, repo: &str) {
         return;
     };
     let Some((ids, questions)) = messages::take_for_orchestrator(app, repo) else {
-        app.chat_turns.lock().unwrap().remove(repo);
+        release_turn(app, repo);
         return;
     };
     save(app, repo, &session);
@@ -1418,6 +1426,88 @@ pub(super) fn wake(app: &App, repo: &str) {
     });
 }
 
+/// An overseer wake skipped because the chat was busy.
+pub(super) struct DeferredWake {
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<String>,
+}
+
+/// Remembers a skipped wake for `repo`, once per reason and task.
+fn defer_wake(
+    app: &App,
+    repo: &str,
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<&str>,
+) {
+    let mut all = app.deferred_wakes.lock().unwrap();
+    let queue = all.entry(repo.to_string()).or_default();
+    if !queue
+        .iter()
+        .any(|w| w.reason == reason && w.task_id.as_deref() == task_id)
+    {
+        queue.push(DeferredWake {
+            prompt,
+            read_only,
+            reason,
+            task_id: task_id.map(str::to_string),
+        });
+    }
+}
+
+/// Whether the task of a deferred wake still needs it: a waiting or reminder
+/// wake is moot once the question was answered.
+fn wake_still_needed(app: &App, w: &DeferredWake) -> bool {
+    let Some(id) = w.task_id.as_deref() else {
+        return true;
+    };
+    if !matches!(w.reason, "waiting" | "reminder") {
+        return true;
+    }
+    app.store
+        .load_task(id)
+        .ok()
+        .flatten()
+        .is_some_and(|t| t.status == TaskStatus::Waiting && t.question.is_some())
+}
+
+/// Fires the first deferred wake of `repo` that is still needed. The rest
+/// stay queued: the turn it starts fires the next one when it ends.
+pub(super) fn fire_deferred_wakes(app: &App, repo: &str) {
+    loop {
+        if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let next = {
+            let mut all = app.deferred_wakes.lock().unwrap();
+            let Some(queue) = all.get_mut(repo) else {
+                return;
+            };
+            if queue.is_empty() {
+                all.remove(repo);
+                return;
+            }
+            queue.remove(0)
+        };
+        if !wake_still_needed(app, &next) {
+            continue;
+        }
+        // Busy again re-queues it; a started wake ends the loop.
+        wake_overseer(
+            app,
+            repo,
+            next.prompt,
+            next.read_only,
+            next.reason,
+            next.task_id.as_deref(),
+        );
+        return;
+    }
+}
+
 /// Starts an overseer turn for `repo` with a server-built `prompt`; its
 /// reply is appended to the repo's current chat session. `read_only` offers
 /// only the looking tools. Returns whether it started: not when a turn is
@@ -1430,7 +1520,10 @@ pub(super) fn wake_overseer(
     reason: &'static str,
     task_id: Option<&str>,
 ) -> bool {
-    if !Path::new(repo).is_dir() || tokio::runtime::Handle::try_current().is_err() {
+    if !Path::new(repo).is_dir()
+        || tokio::runtime::Handle::try_current().is_err()
+        || app.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
+    {
         return false;
     }
     let (session, route, cancel) = match begin_turn(app, repo) {
@@ -1439,7 +1532,8 @@ pub(super) fn wake_overseer(
             // The digest retries every minute until it starts: log it once it does.
             if reason != "digest" {
                 let why = if error == BUSY {
-                    "chat is busy"
+                    defer_wake(app, repo, prompt, read_only, reason, task_id);
+                    "chat is busy, queued for the end of its turn"
                 } else {
                     "no route"
                 };
@@ -1720,11 +1814,10 @@ const MAX_TOOLS: usize = 8;
 const MAX_SUMMARY: usize = 120;
 
 /// Tools whose input names a task by `id`.
-const TASK_ID_TOOLS: [&str; 10] = [
+const TASK_ID_TOOLS: [&str; 9] = [
     "task_get",
     "task_backlog",
     "task_start",
-    "task_stop",
     "task_report",
     "task_answer",
     "task_amend",

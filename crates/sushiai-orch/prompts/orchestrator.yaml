@@ -35,7 +35,7 @@ mcp_instructions: |
   - When a task is done and its checks are green, open its pull request with task_pr without asking. Never merge: merging is the owner's.
   - costs_summary reads spend and usage (filter by repo, sinceDays, or a day range).
   - Never answer a permission question ("Allow ... for this task?") with Allow once or Always for this repo: which tools and paths a task may use is the owner's call, as is every write to an outside service.
-  - Never answer "approve" for a protected-path decision or for committing an attempt the review gave no verdict on, and never call task_stop, on the owner's behalf -- these are the owner's call to make.
+  - Never answer "approve" for a protected-path decision or for committing an attempt the review gave no verdict, on the owner's behalf -- these are the owner's call to make.
   - Never delete tasks; this tool intentionally cannot.
   - Tasks ask you questions without stopping (ask_orchestrator). One reaches you marked as a task's question with its message id: answer it with orchestrator_reply {question, text}. inbox_read shows everything sent to you.
   - peer_send {to, text} messages a task and peer_list {repo} lists a repository's tasks. A task reads a message on its next attempt; the attempt it is running is never interrupted.
@@ -52,6 +52,14 @@ digest: |
 # A task parked on a question triage did not answer (wakes the orchestrator when autoAnswer is on).
 overseer_waiting: |
   Task {id} ("{title}") is waiting for an answer. Read it with task_get. If the repo or the task's own context answers the question, answer it with task_answer. Otherwise write the owner ONE precise question with concrete options, in the language of the owner's latest message in this chat; never approve what only the owner may allow. Refer to the task by its title in text for the owner.
+
+# A task's question is still unanswered after the reminder interval (wakes the orchestrator when autoAnswer is on).
+overseer_reminder: |
+  Task {id} ("{title}") has waited a long time for an answer. Read it with task_get. If the repo or the task's own context answers the question, answer it with task_answer. Otherwise remind the owner in one or two lines with the exact question and its options; never approve what only the owner may allow. Refer to the task by its title in text for the owner.
+
+# The daemon restarted while questions waited (wakes the orchestrator once per repo when autoAnswer is on).
+overseer_restart: |
+  The orchestrator restarted and tasks in this repository are waiting for an answer. List them with task_list and read each with task_get. Answer the ones the repo or the task's own context already answers with task_answer; for the rest write the owner ONE precise question with concrete options, never approving what only the owner may allow. Refer to tasks by title in text for the owner.
 
 # A top-level task just finished (wakes the orchestrator when autoAnswer is on).
 overseer_done: |

@@ -9,7 +9,7 @@ use super::*;
 pub(super) async fn run_task_loop(
     app: Arc<App>,
     task_id: String,
-    pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     pending_amend: Arc<StdMutex<Option<Amendment>>>,
     cancel: CancelToken,
     auto_start_after_plan: bool,
@@ -34,6 +34,25 @@ pub(super) async fn run_task_loop(
                 return;
             }
         };
+
+        // A usage or rate limit pause that outlived the loop (a restart) is
+        // served first, holding no slot; the mark is cleared when it ends.
+        if let Some(until) = task.queue.paused_until {
+            let wait = (until - now_ms()).max(0) as u64;
+            let resumed = tokio::select! {
+                _ = cancel.cancelled() => false,
+                _ = tokio::time::sleep(Duration::from_millis(wait)) => true,
+            };
+            if !resumed {
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            task.queue.paused_until = None;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+        }
 
         // A worktree removed while the task was archived comes back before
         // anything touches it.
@@ -64,7 +83,7 @@ pub(super) async fn run_task_loop(
             let all = app.repo_tasks(&task.repo);
             if is_parent(&task, &all)
                 && parent_failure.is_none()
-                && (implement_attempt_count(&task) == 0
+                && (completed_implement_attempts(&task) == 0
                     || !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing))
             {
                 match run_parent(&app, &task_id, &pending_answer, &pending_amend, &cancel).await {
@@ -89,7 +108,7 @@ pub(super) async fn run_task_loop(
                         // A parent parked on a question (its base check) starts
                         // no subtask until it is answered.
                         || (p.status == TaskStatus::Waiting
-                            && implement_attempt_count(&task) == 0)
+                            && completed_implement_attempts(&task) == 0)
                 });
             if parent_blocked
                 || (!task.depends_on.is_empty()
@@ -109,7 +128,7 @@ pub(super) async fn run_task_loop(
             // slot taken, until that task lands, stops or fails.
             if !needs_planning(&task) {
                 let force = task.status == TaskStatus::Landing
-                    || implement_attempt_count(&task) > 0
+                    || completed_implement_attempts(&task) > 0
                     || parent_failure.is_some();
                 if !pass_lease_gate(&app, &mut task, force) {
                     app.finish_task_loop(&task_id);
@@ -230,7 +249,7 @@ pub(super) async fn run_task_loop(
 
         // A child may have been attached while this task waited for a slot:
         // it must never implement the whole request itself then.
-        if implement_attempt_count(&task) == 0 && parent_failure.is_none() {
+        if completed_implement_attempts(&task) == 0 && parent_failure.is_none() {
             let all = app.repo_tasks(&task.repo);
             if is_parent(&task, &all) {
                 drop(permit);
@@ -250,7 +269,9 @@ pub(super) async fn run_task_loop(
 
         // Explicit criteria are checked once, before the first attempt; a
         // planned brief was already checked in the plan stage.
-        if implement_attempt_count(&task) == 0 && !task.brief_check.done && parent_failure.is_none()
+        if completed_implement_attempts(&task) == 0
+            && !task.brief_check.done
+            && parent_failure.is_none()
         {
             let attempt_n = task.attempts.len() as u32 + 1;
             if let BriefAction::Cancelled =
@@ -268,7 +289,7 @@ pub(super) async fn run_task_loop(
 
         // A criterion the task has no tool for is put to the owner before an
         // attempt is spent on it.
-        if implement_attempt_count(&task) == 0
+        if completed_implement_attempts(&task) == 0
             && parent_failure.is_none()
             && !task.brief_check.missing_tool_asked
         {
@@ -304,7 +325,7 @@ pub(super) async fn run_task_loop(
         // Every check command runs on the base once: one the repository
         // cannot run is rewritten, one broken for an unrelated reason stops
         // gating, before an attempt is spent on either.
-        if implement_attempt_count(&task) == 0
+        if completed_implement_attempts(&task) == 0
             && !task.brief_check.feasibility_done
             && parent_failure.is_none()
         {
@@ -342,11 +363,11 @@ pub(super) async fn run_task_loop(
         // dependent begins on top of the work it waited for (a subtask on
         // its parent's head, with every earlier sibling landed).
         if let Some(prev_id) = task.queue.relay_of.clone() {
-            if implement_attempt_count(&task) == 0 && task.queue.relay_base.is_none() {
+            if completed_implement_attempts(&task) == 0 && task.queue.relay_base.is_none() {
                 start_relay_link(&app, &mut task, &prev_id).await;
             }
         }
-        if implement_attempt_count(&task) == 0
+        if completed_implement_attempts(&task) == 0
             && parent_failure.is_none()
             && (task.parent.is_some() || !task.depends_on.is_empty() || task.queue.waited_on_lease)
             && task.queue.relay_of.is_none()
@@ -374,7 +395,7 @@ pub(super) async fn run_task_loop(
         task.queue.waited_on_lease = false;
 
         if task.variant().grounded_checks
-            && implement_attempt_count(&task) == 0
+            && completed_implement_attempts(&task) == 0
             && needs_baseline(&task)
         {
             let wt = PathBuf::from(&task.worktree);
@@ -391,7 +412,7 @@ pub(super) async fn run_task_loop(
 
         // A check that already fails on the base can never be met by the
         // work: ask about it now, before an attempt is spent on it.
-        if implement_attempt_count(&task) == 0 && parent_failure.is_none() {
+        if completed_implement_attempts(&task) == 0 && parent_failure.is_none() {
             let unanswered: Vec<String> = task
                 .final_verify
                 .iter()
@@ -447,7 +468,7 @@ pub(super) async fn run_task_loop(
 
         let mut planner_tier_used = false;
         let mut no_planner_tier = false;
-        if implement_attempt_count(&task) == 0 {
+        if completed_implement_attempts(&task) == 0 {
             match task.planned_tier {
                 Some(tier) => {
                     task.tier = tier;
@@ -684,7 +705,7 @@ pub(super) async fn run_task_loop(
                 brief_text
             };
             let brief_text = match &task.brief_check.conflict {
-                Some(conflict) if implement_attempt_count(&task) == 0 => {
+                Some(conflict) if completed_implement_attempts(&task) == 0 => {
                     brief::with_block_before_report(
                         &brief_text,
                         &brief::conflict_block(conflict, task.variant().grounded_checks),
@@ -696,7 +717,7 @@ pub(super) async fn run_task_loop(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
             );
-            let brief_text = if implement_attempt_count(&task) == 0 {
+            let brief_text = if completed_implement_attempts(&task) == 0 {
                 brief::with_block_before_report(
                     &brief_text,
                     &brief::relay_block(&task, &app.repo_tasks(&task.repo)),
@@ -706,7 +727,7 @@ pub(super) async fn run_task_loop(
             };
             // A parent's first attempt gets what failed when it tried to finish.
             let brief_text = match &parent_failure {
-                Some(failure) if implement_attempt_count(&task) == 0 => {
+                Some(failure) if completed_implement_attempts(&task) == 0 => {
                     brief::with_block_before_report(
                         &brief_text,
                         &brief::parent_failure_block(failure),
@@ -1322,6 +1343,36 @@ pub(super) async fn run_task_loop(
                     return;
                 }
             }
+        }
+
+        // A usage or rate limit is not a failed attempt: the task pauses and
+        // resumes by itself.
+        if changed.is_empty() {
+            if let Some((error, wait)) = outcome.error.as_deref().and_then(|e| {
+                rate_limit_wait_secs(e, task.queue.rate_pauses, now_ms() / 1000).map(|w| (e, w))
+            }) {
+                let resumed = pause_for_rate_limit(
+                    &app,
+                    &task_id,
+                    &mut task,
+                    idx,
+                    error,
+                    wait,
+                    &cancel,
+                    &mut permit,
+                )
+                .await;
+                drop(permit);
+                if !resumed {
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+                continue;
+            }
+        }
+        // Only a run without an error ends a series of limit pauses.
+        if outcome.error.is_none() {
+            task.queue.rate_pauses = 0;
         }
 
         if changed.is_empty() {
@@ -2447,7 +2498,7 @@ pub(super) async fn finish_after_review(
     run_dir: &Path,
     settings: &Settings,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Tail {
@@ -2565,7 +2616,7 @@ pub(super) async fn finish_after_review(
             // Retry (any other answer): one more attempt on the newest
             // base, even when the attempt budget is spent.
             carry_onto_newest_base(task, worktree).await;
-            *attempt_budget = (*attempt_budget).max(implement_attempt_count(task) + 1);
+            *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
             app.broadcast_task(task);
@@ -2604,7 +2655,7 @@ pub(super) async fn finish_attempt(
     run_dir: &Path,
     settings: &Settings,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Tail {

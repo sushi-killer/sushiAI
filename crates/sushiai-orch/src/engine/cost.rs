@@ -200,7 +200,7 @@ pub(super) async fn wait_while_over_budget(
     task: &mut Task,
     run: &str,
     resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> bool {

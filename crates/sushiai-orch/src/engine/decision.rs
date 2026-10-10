@@ -66,26 +66,31 @@ fn find_error_line(text: &str) -> Option<&str> {
         })
 }
 
-/// Strips digits and absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
+/// Strips digits, ids and hashes (long tokens with a digit, hex) and
+/// absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
 /// across two runs still normalizes to the same signature) and collapses
 /// whitespace.
 pub(crate) fn normalize_signature_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '/' {
-            while let Some(&next) = chars.peek() {
-                if next.is_whitespace() {
-                    break;
-                }
-                chars.next();
-            }
+    for word in line.split_whitespace() {
+        // A path is cut at its first slash.
+        let word = word.split('/').next().unwrap_or("");
+        if word.is_empty() {
             continue;
         }
-        if c.is_ascii_digit() {
+        let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let ident = core.len() >= 8
+            && core
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        let hex = core.len() >= 7 && core.chars().all(|c| c.is_ascii_hexdigit());
+        // A request id, hash or token differs on every run of one failure.
+        if hex || (ident && core.chars().any(|c| c.is_ascii_digit())) {
+            out.push_str(" ID ");
             continue;
         }
-        out.push(c);
+        out.extend(word.chars().filter(|c| !c.is_ascii_digit()));
+        out.push(' ');
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -106,7 +111,11 @@ pub fn failure_signature(kind: FailureKind, detail: &str) -> String {
 /// happened.
 pub fn consecutive_same_signature(attempts: &[Attempt], signature: &str) -> u32 {
     let mut count = 0;
-    for a in attempts.iter().rev() {
+    for a in attempts
+        .iter()
+        .rev()
+        .filter(|a| a.status != AttemptStatus::Interrupted)
+    {
         match &a.failure {
             Some(f) if f.signature == signature => count += 1,
             _ => break,
@@ -209,6 +218,15 @@ pub(super) fn implement_attempt_count(task: &Task) -> u32 {
         .count() as u32
 }
 
+/// Implement attempts that ran to an end: an interrupted one (a restart, a
+/// limit pause) is no attempt for "has this task started implementing".
+pub(super) fn completed_implement_attempts(task: &Task) -> u32 {
+    task.attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement && a.status != AttemptStatus::Interrupted)
+        .count() as u32
+}
+
 /// Whether the latest implement attempt failed on a landing conflict: the
 /// next one only resolves it.
 pub(super) fn last_failure_is_conflict(task: &Task) -> bool {
@@ -264,6 +282,14 @@ pub(super) fn accept_offered(last: &Attempt, protected_paths: &[String]) -> bool
     }
 }
 
+/// The hard bound behind the relaxed `maxAttempts` count: every implement
+/// attempt, however it ended, except those a usage or rate limit paused, stops
+/// the task at twice the budget.
+fn ceiling_hit(task: &Task, max_attempts: u32) -> bool {
+    implement_attempt_count(task).saturating_sub(task.queue.paused_attempts)
+        >= max_attempts.saturating_mul(2)
+}
+
 pub(super) fn advance_after_failure(
     task: &mut Task,
     max_attempts: u32,
@@ -295,7 +321,11 @@ pub(super) fn advance_after_failure(
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Loop))
             .count() as u32,
         repeated_reviews: repeated_review_count(task),
-        attempt_n: implement_attempt_count(task),
+        attempt_n: if ceiling_hit(task, max_attempts) {
+            max_attempts.max(counted_attempts(task))
+        } else {
+            counted_attempts(task)
+        },
         max_attempts,
     };
     match decide_after_failure(&input) {
@@ -425,7 +455,7 @@ pub(super) async fn fail_and_continue(
     kind: FailureKind,
     detail: String,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> LoopSignal {
@@ -464,7 +494,7 @@ pub(super) async fn fail_or_accept(
     kind: FailureKind,
     detail: String,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> FailSignal {

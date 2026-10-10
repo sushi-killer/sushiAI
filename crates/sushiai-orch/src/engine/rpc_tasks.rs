@@ -735,6 +735,9 @@ impl App {
         #[derive(Deserialize)]
         struct P {
             id: String,
+            /// Why the task is stopped; optional.
+            #[serde(default)]
+            reason: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
@@ -752,6 +755,11 @@ impl App {
             .ok_or_else(|| "task not found".to_string())?;
         // A task in a graph can sit idle with no loop to cancel: a parent
         // while its children work, a task waiting for its dependencies.
+        let stop_line = stop_line(p.reason.as_deref());
+        let active = !matches!(
+            task.status,
+            TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
+        );
         let all = self.repo_tasks(&task.repo);
         let parent = is_parent(&task, &all);
         if parent {
@@ -782,6 +790,23 @@ impl App {
             self.broadcast_task(&task);
             self.advance_graph(&task.repo);
         }
+        if active && live {
+            // The loop saves its own copy as it winds down: the line goes in after.
+            let app = self.arc();
+            let id = p.id.clone();
+            tokio::spawn(async move {
+                for _ in 0..300 {
+                    if !app.controls.lock().unwrap().contains_key(&id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                app.append_decision(&id, stop_line);
+            });
+        } else if active {
+            self.append_decision(&p.id, stop_line);
+        }
+        let task = self.store.load_task(&p.id).ok().flatten().unwrap_or(task);
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -839,9 +864,17 @@ impl App {
             /// Set by the MCP bridge (`chat`, `mcp`); the app sends none.
             #[serde(default)]
             source: Option<String>,
+            /// With source `policy` (the waiting SLA): why this answer was given.
+            #[serde(default)]
+            evidence: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
+        let default_evidence = match (p.source.as_deref(), &p.evidence) {
+            (Some("policy"), Some(e)) => Some(e.clone()),
+            (Some("policy"), None) => return Err("a policy answer needs its evidence".to_string()),
+            _ => None,
+        };
         let mut task = self
             .store
             .load_task(&p.id)
@@ -941,20 +974,38 @@ impl App {
             }
         }
 
-        let delivered = {
+        let (delivered, has_control) = {
             let controls = self.controls.lock().unwrap();
-            controls
-                .get(&p.id)
+            let control = controls.get(&p.id);
+            let delivered = control
                 .and_then(|c| c.pending_answer.lock().unwrap().take())
-                .map(|tx| tx.send(p.answer.clone()).is_ok())
-                .unwrap_or(false)
+                .map(|tx| {
+                    tx.send(Reply {
+                        text: p.answer.clone(),
+                        default_evidence: default_evidence.clone(),
+                    })
+                    .is_ok()
+                })
+                .unwrap_or(false);
+            (delivered, control.is_some())
         };
+        // A default must not relaunch a loop whose question is being answered.
+        if !delivered && default_evidence.is_some() && has_control {
+            self.agent_answers.lock().unwrap().remove(&p.id);
+            return Err("the question was answered meanwhile".to_string());
+        }
         if !delivered {
             // No live parked loop (e.g. after a daemon restart): apply the
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
             let question = task.question.clone();
-            record_answer(&mut task, question.as_ref(), &p.answer, by_agent);
+            record_answer_for(
+                &mut task,
+                question.as_ref(),
+                &p.answer,
+                by_agent,
+                default_evidence.as_deref(),
+            );
             self.agent_answers.lock().unwrap().remove(&p.id);
             if let Some(n) = task
                 .question
@@ -1447,6 +1498,47 @@ mod answer_source_tests {
         answer(&app, &id, "use the second design", Some("mcp"))
             .await
             .unwrap();
-        assert_eq!(rx.await.unwrap(), "use the second design");
+        assert_eq!(rx.await.unwrap().text, "use the second design");
+    }
+}
+
+/// The decision line a stop leaves, so a stopped task says why.
+fn stop_line(reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(reason) => format!("Owner: stop (UI): {}", truncate_chars(reason, 300)),
+        None => "Owner: stop (UI)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_line_names_its_source_and_reason() {
+        assert_eq!(stop_line(None), "Owner: stop (UI)");
+        assert_eq!(
+            stop_line(Some(" wrong repo ")),
+            "Owner: stop (UI): wrong repo"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_an_idle_queued_task_records_who_and_why() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.queue.queue_reason = Some("waits for another".into());
+        app.store.save_task(&task).unwrap();
+        let out = app
+            .handle_task_stop(json!({"id": task.id, "reason": "not needed"}))
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "stopped");
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(task.decisions, ["Owner: stop (UI): not needed"]);
+        // Stopping it again adds nothing.
+        app.handle_task_stop(json!({"id": task.id})).await.unwrap();
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(task.decisions.len(), 1);
     }
 }

@@ -11,6 +11,7 @@ use crate::harness;
 use crate::hook;
 use crate::loop_detect::LoopDetector;
 use crate::model::*;
+use crate::overseer;
 use crate::store::{self, Store};
 use serde::Deserialize;
 use serde_json::json;
@@ -560,6 +561,15 @@ impl App {
         });
     }
 
+    /// Appends one overseer action to `overseer.jsonl` and broadcasts it.
+    pub(crate) fn record_overseer(&self, entry: crate::overseer::Entry) {
+        if crate::overseer::append(&self.data_dir, &entry).is_ok() {
+            let _ = self.events_tx.send(Event::Overseer {
+                entry: Box::new(entry),
+            });
+        }
+    }
+
     pub fn broadcast_log(&self, task_id: &str, attempt: u32, line: String) {
         let _ = self.events_tx.send(Event::Log {
             task_id: task_id.to_string(),
@@ -714,6 +724,7 @@ impl App {
             "task.amend" => self.handle_task_amend(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "costs.summary" => self.handle_costs_summary(params).await,
+            "overseer.log" => self.handle_overseer_log(params).await,
             "worktrees.gc" => self.handle_worktrees_gc(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,

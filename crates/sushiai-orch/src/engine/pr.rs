@@ -337,6 +337,9 @@ impl App {
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
+        if p.source.as_deref() == Some("overseer") {
+            self.record_overseer(overseer::Entry::new("pr", &task.repo, Some(&task.id), &url));
+        }
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 }

@@ -13,6 +13,7 @@ import type {
   FailureRow,
   Message,
   Note,
+  OverseerEntry,
   Proposal,
   Settings,
   SpendGroup,
@@ -60,6 +61,12 @@ export function orchestratorClientFor(host: string = LOCAL) {
       to?: string;
       groupBy: SpendGroup[];
     }) => call<SpendSummary>("costs.summary", params),
+    /** What the overseer did, newest first, across repos (or one `repo`). */
+    overseerLog: (repo?: string, limit?: number) =>
+      call<OverseerEntry[]>("overseer.log", {
+        ...(repo ? { repo } : {}),
+        ...(limit ? { limit } : {}),
+      }),
     taskEvidence: (id: string, path: string) =>
       call<{ dataUrl: string }>("task.evidence", { id, path }),
     taskOpenDeliverable: (id: string, path: string) =>

@@ -358,6 +358,12 @@ pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Res
     write_atomic(path, &json_bytes(value)?, None)
 }
 
+/// Atomically replaces a plain-text file the owner alone reads (the overseer
+/// log), mode 0600.
+pub fn write_text_private(path: &Path, text: &str) -> io::Result<()> {
+    write_atomic(path, text.as_bytes(), Some(0o600))
+}
+
 /// As `write_json_atomic`, for JSON that carries a secret: mode 0600 from the
 /// first byte (a run's settings embed its hook token).
 pub fn write_json_private<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {

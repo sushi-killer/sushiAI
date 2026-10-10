@@ -1,0 +1,106 @@
+/* Log (overseer actions): project filter, today's spend, one line per action. */
+.log-view {
+  gap: var(--gap-md);
+  container-type: inline-size;
+}
+.log-day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+.log-day > .orch-eyebrow {
+  margin: 0;
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+}
+.log-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+}
+.log-spent {
+  margin: 0 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.log-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.log-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 64px 110px 16px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--gap-md);
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 16px;
+  text-align: left;
+}
+.log-one .log-row {
+  grid-template-columns: 64px 16px minmax(0, 1fr);
+}
+/* A narrow pane drops the project column. */
+@container (max-width: 520px) {
+  .log-project {
+    display: none;
+  }
+  .log-row {
+    grid-template-columns: 64px 16px minmax(0, 1fr);
+  }
+}
+.log-row.clickable {
+  cursor: pointer;
+}
+button.log-row:hover {
+  background: var(--bg-hover);
+}
+.log-time,
+.log-project {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-kind {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.log-kind-woke,
+.log-kind-skipped {
+  color: var(--text-faint);
+}
+.log-kind-digest {
+  color: var(--text);
+}
+.log-kind-pr,
+.log-kind-answered {
+  color: var(--tone-ok);
+}
+.log-kind-asked_owner {
+  color: var(--tone-warning);
+}
+.log-kind-failed {
+  color: var(--tone-danger);
+}
+.log-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

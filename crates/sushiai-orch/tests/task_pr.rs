@@ -201,3 +201,37 @@ fn task_pr_surfaces_a_failing_gh_create_and_stores_no_url() {
         .request("task.get", serde_json::json!({"id": s.id}));
     assert!(stored.get("prUrl").is_none(), "{stored}");
 }
+
+#[test]
+fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
+    let s = setup();
+    let task = s
+        .daemon
+        .request("task.get", serde_json::json!({"id": s.id}));
+    let repo = task["repo"].as_str().unwrap().to_string();
+    s.daemon.request(
+        "task.pr",
+        serde_json::json!({"id": s.id, "title": "Owner PR", "branch": "feature/owner"}),
+    );
+    let log = s.daemon.request("overseer.log", serde_json::json!({}));
+    assert_eq!(log.as_array().unwrap().len(), 0, "{log}");
+
+    s.daemon
+        .request("task.pr", serde_json::json!({"id": s.id, "source": "chat"}));
+    let log = s.daemon.request("overseer.log", serde_json::json!({}));
+    assert_eq!(log.as_array().unwrap().len(), 0, "{log}");
+    s.daemon.request(
+        "task.pr",
+        serde_json::json!({"id": s.id, "source": "overseer"}),
+    );
+    let log = s
+        .daemon
+        .request("overseer.log", serde_json::json!({"repo": repo}));
+    assert_eq!(log[0]["kind"], "pr", "{log}");
+    assert_eq!(log[0]["text"], URL);
+    assert_eq!(log[0]["taskId"], s.id);
+    let other = s
+        .daemon
+        .request("overseer.log", serde_json::json!({"repo": "/elsewhere"}));
+    assert_eq!(other.as_array().unwrap().len(), 0);
+}

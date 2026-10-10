@@ -48,6 +48,8 @@ Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
 | `scopedChecks`               | list of `{repo?, command, paths}`                                                    | `[]`                                                                  | A command that runs only when the task's diff touches one of its `paths` globs; `command` is a glob over the whole command string. Without `repo` it applies to every repo.                                                                                                   | Advanced JSON                                    |
 | `chatTools`                  | list of connected MCP tools                                                          | `[]`                                                                  | Servers the orchestrator chat may use, each toggled on or off. Servers are definitions or references, never secrets.                                                                                                                                                          | Connected tools                                  |
 
+The Orchestrator panel's Log view lists what the orchestrator agent did when `autoAnswer` or `digestHour` woke it, across all projects (`<data>/overseer.jsonl`, last 2000 entries).
+
 ## `experiments` flags
 
 | Flag                                                                                      | Default | What it does                                                                                         |

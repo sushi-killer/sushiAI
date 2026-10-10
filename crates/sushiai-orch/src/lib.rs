@@ -16,6 +16,7 @@ pub mod legacy;
 pub mod loop_detect;
 pub mod mcp;
 pub mod model;
+pub mod overseer;
 pub mod prompts;
 pub mod report;
 pub mod skill;

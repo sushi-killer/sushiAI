@@ -77,7 +77,14 @@ impl App {
         for repo in repos {
             let last = days.get(&repo).map(String::as_str);
             if digest_due(digest_hour, hour, &today, last)
-                && chat::wake_overseer(self, &repo, crate::prompts::get("digest"), true)
+                && chat::wake_overseer(
+                    self,
+                    &repo,
+                    crate::prompts::get("digest"),
+                    true,
+                    "digest",
+                    None,
+                )
             {
                 days.insert(repo, today.clone());
                 changed = true;
@@ -143,5 +150,77 @@ mod tests {
         app.digest_tick(secs + 86_400);
         chat::wait_idle(&app, &repo_path).await;
         assert_eq!(chat::fake_overseer_calls(&repo), 2);
+    }
+
+    #[test]
+    fn a_turn_end_is_logged_by_what_the_overseer_did() {
+        let (app, _dir) = test_app();
+        let end = |started: i64, task: &str, end: chat::TurnEnd| {
+            chat::record_overseer_end(&app, "/r", "waiting", Some(task), started, Some(0.25), end)
+        };
+        // No answer: the reply is for the owner, with the turn's cost.
+        end(0, "t1", chat::TurnEnd::Reply("Which branch?\nmore".into()));
+        // The overseer answered during the turn: no owner note, still the cost.
+        app.record_overseer(overseer::Entry::new("answered", "/r", Some("t2"), "q"));
+        end(0, "t2", chat::TurnEnd::Reply("Answered.".into()));
+        end(0, "t3", chat::TurnEnd::Stopped);
+        end(0, "t4", chat::TurnEnd::Failed("harness exploded".into()));
+        let log = overseer::read(&app.data_dir, None, None);
+        let got: Vec<_> = log
+            .iter()
+            .rev()
+            .map(|e| (e.kind.as_str(), e.text.as_str(), e.cost_usd))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("asked_owner", "Which branch?", Some(0.25)),
+                ("answered", "q", None),
+                ("done", "Answered.", Some(0.25)),
+                ("skipped", "Stopped by you", Some(0.25)),
+                ("failed", "harness exploded", Some(0.25)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_overseer_log_records_a_wake_and_its_digest_and_a_busy_skip() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_path = repo.to_string_lossy().to_string();
+        let mut events = app.events_tx.subscribe();
+        assert!(chat::wake_overseer(
+            &app,
+            &repo_path,
+            "p".into(),
+            true,
+            "digest",
+            None
+        ));
+        // The chat is busy now: a second wake is skipped and logged.
+        assert!(!chat::wake_overseer(
+            &app,
+            &repo_path,
+            "p".into(),
+            false,
+            "done",
+            Some("t1")
+        ));
+        chat::wait_idle(&app, &repo_path).await;
+        let log = overseer::read(&app.data_dir, Some(&repo_path), None);
+        let kinds: Vec<_> = log.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["digest", "skipped", "woke"], "{log:?}");
+        assert_eq!(log[0].text, "Overseer note.");
+        assert_eq!(log[1].task_id.as_deref(), Some("t1"));
+        assert!(log[1].text.contains("busy"), "{log:?}");
+        let mut seen = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::Overseer { .. }) {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 3);
     }
 }

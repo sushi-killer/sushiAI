@@ -761,9 +761,36 @@ export type Proposal = {
 
 /** A proposal was stored or changed - an upsert by id. */
 export type ProposalEvent = { event: "proposal"; proposal: Proposal };
+/** One action of the overseer (the orchestrator agent woken by orchd), as
+ * `overseer.log` returns it. `text` is one short line. */
+export type OverseerEntry = {
+  ts: number;
+  repo: string;
+  kind:
+    | "woke"
+    | "answered"
+    | "pr"
+    | "asked_owner"
+    | "digest"
+    | "done"
+    | "skipped"
+    | "failed";
+  taskId?: string;
+  text: string;
+  costUsd?: number;
+};
+
+/** The overseer acted - appended to the log. */
+export type OverseerEvent = { event: "overseer"; entry: OverseerEntry };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
 export type OrchestratorEvent = (
-  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent
+  | TaskEvent
+  | LogEvent
+  | ChatEvent
+  | MessageEvent
+  | AuditEvent
+  | ProposalEvent
+  | OverseerEvent
 ) & {
   /** Set on an event relayed from a remote host ("ssh:<id>"); absent locally. */
   host?: string;
@@ -858,5 +885,6 @@ export type OrchestratorView =
   | { kind: "task"; id: string }
   | { kind: "improvements" }
   | { kind: "analytics" }
+  | { kind: "log" }
   | { kind: "archive" }
   | { kind: "messages" };

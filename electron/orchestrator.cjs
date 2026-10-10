@@ -68,6 +68,7 @@ const ALLOWED_METHODS = new Set([
   "task.backlog",
   "failures.catalogue",
   "costs.summary",
+  "overseer.log",
   "chat.get",
   "chat.send",
   "chat.edit",

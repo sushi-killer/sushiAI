@@ -36,6 +36,9 @@ pub enum Event {
     /// is stored or changes.
     #[serde(rename = "proposal")]
     Proposal { proposal: Box<serde_json::Value> },
+    /// One new `overseer.log` entry, when the overseer acts.
+    #[serde(rename = "overseer")]
+    Overseer { entry: Box<crate::overseer::Entry> },
 }
 
 #[cfg(test)]

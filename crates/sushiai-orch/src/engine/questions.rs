@@ -276,7 +276,7 @@ pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
         return;
     }
     let prompt = overseer_prompt("overseer_waiting", task);
-    chat::wake_overseer(app, &task.repo, prompt, false);
+    chat::wake_overseer(app, &task.repo, prompt, false, "waiting", Some(&task.id));
 }
 
 /// Wakes the overseer once, at the moment the task loop moves a top-level
@@ -299,7 +299,7 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
     // Marked either way: this is the one transition, not a retry loop.
     task.overseer_woken = true;
     let _ = app.store.save_task(task);
-    chat::wake_overseer(app, &task.repo, prompt, false);
+    chat::wake_overseer(app, &task.repo, prompt, false, "done", Some(&task.id));
 }
 
 /// A server-built overseer prompt (`prompts/orchestrator.yaml`) naming the task.

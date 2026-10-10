@@ -888,6 +888,17 @@ impl App {
                 );
             }
             self.agent_answers.lock().unwrap().insert(p.id.clone());
+            // Only a turn orchd woke is the overseer; the owner's chat is not.
+            if p.source.as_deref() == Some("overseer") {
+                let asked = task.question.as_ref().map_or("", |q| q.text.as_str());
+                let asked = asked.lines().next().unwrap_or("");
+                self.record_overseer(overseer::Entry::new(
+                    "answered",
+                    &task.repo,
+                    Some(&task.id),
+                    &format!("{} \u{2192} {}", truncate_chars(asked, 80), p.answer.trim()),
+                ));
+            }
         } else {
             self.agent_answers.lock().unwrap().remove(&p.id);
         }
@@ -1380,6 +1391,34 @@ mod answer_source_tests {
         answer(&app, &id, "stop", Some("mcp")).await.unwrap();
         let task = app.store.load_task(&id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn only_an_overseer_answer_is_logged_cut_to_200_chars() {
+        let (app, _dir) = test_app();
+        // The owner's own chat turn and an MCP client are agents, but not the overseer.
+        for source in ["chat", "mcp"] {
+            let id = waiting(&app, QuestionKind::PlanQuestion, &[]);
+            answer(&app, &id, "stop", Some(source)).await.unwrap();
+        }
+        assert!(overseer::read(&app.data_dir, None, None).is_empty());
+        let id = waiting(&app, QuestionKind::PlanQuestion, &[]);
+        let long = format!("stop {}", "x".repeat(400));
+        answer(&app, &id, &long, Some("overseer")).await.unwrap();
+        let log = overseer::read(&app.data_dir, None, None);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].kind, "answered");
+        assert_eq!(log[0].task_id.as_deref(), Some(id.as_str()));
+        assert_eq!(log[0].text.chars().count(), 200);
+        assert!(
+            log[0].text.starts_with("Allow it? \u{2192} stop xxx"),
+            "{}",
+            log[0].text
+        );
+
+        let id = waiting(&app, QuestionKind::PlanQuestion, &[]);
+        answer(&app, &id, "stop", None).await.unwrap();
+        assert_eq!(overseer::read(&app.data_dir, None, None).len(), 1);
     }
 
     #[tokio::test]

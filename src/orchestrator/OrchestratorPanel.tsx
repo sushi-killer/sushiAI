@@ -9,6 +9,7 @@ import {
 import {
   ArchiveRestore,
   ChartColumn,
+  ScrollText,
   ChevronDown,
   LayoutList,
   ListTodo,
@@ -87,6 +88,8 @@ import { ImprovementsView } from "./Improvements";
 import { improvementsBadge } from "./improvementsModel";
 import { useRecurringFailures } from "./useRecurringFailures";
 import { AnalyticsView } from "./Analytics";
+import { OverseerLogView } from "./OverseerLog";
+import { openTask } from "./moduleAttention";
 import { PlanView } from "./PlanView";
 
 type DaemonState = DaemonReach;
@@ -164,6 +167,7 @@ const VIEW_NAMES: Record<Exclude<View["kind"], "task">, string> = {
   messages: "Chat",
   improvements: "Improvements",
   analytics: "Analytics",
+  log: "Log",
   archive: "Archive",
 };
 
@@ -178,6 +182,8 @@ function viewIcon(kind: View["kind"]) {
       return <Sparkles size={14} />;
     case "analytics":
       return <ChartColumn size={14} />;
+    case "log":
+      return <ScrollText size={14} />;
     default:
       return <LayoutList size={14} />;
   }
@@ -740,7 +746,10 @@ function OrchestratorBody({
       : null;
   // Figma has no composer on Improvements or Analytics.
   const composerMode: "task" | "plan" | "ask" | null =
-    chatKind || current.kind === "improvements" || current.kind === "analytics"
+    chatKind ||
+    current.kind === "improvements" ||
+    current.kind === "analytics" ||
+    current.kind === "log"
       ? null
       : current.kind === "task"
         ? "ask"
@@ -808,6 +817,24 @@ function OrchestratorBody({
             cwd={cwd}
             refresh={refresh}
             onOpenTask={(id) => open({ kind: "task", id })}
+          />
+        );
+      case "log":
+        return (
+          <OverseerLogView
+            cwd={cwd}
+            dailyBudgetUsd={settings?.dailyBudgetUsd ?? 0}
+            onOpenChat={() => open({ kind: "chat" })}
+            onOpenTask={(entry) =>
+              entry.repo === cwd
+                ? open({ kind: "task", id: entry.taskId! })
+                : openTask({
+                    taskId: entry.taskId!,
+                    repo: entry.repo,
+                    focus: "summary",
+                    ...(host === LOCAL ? {} : { host }),
+                  })
+            }
           />
         );
       case "plan":

@@ -1165,6 +1165,10 @@ enum Turn {
     /// the final text lands in the owner's chat session like an owner turn's.
     Overseer {
         read_only: bool,
+        /// Why it woke (`waiting`, `done`, `digest`) and the task it concerns,
+        /// for the overseer log.
+        reason: &'static str,
+        task_id: Option<String>,
     },
 }
 
@@ -1418,16 +1422,47 @@ pub(super) fn wake(app: &App, repo: &str) {
 /// reply is appended to the repo's current chat session. `read_only` offers
 /// only the looking tools. Returns whether it started: not when a turn is
 /// already running, no route is configured or `repo` is not a directory.
-pub(super) fn wake_overseer(app: &App, repo: &str, prompt: String, read_only: bool) -> bool {
+pub(super) fn wake_overseer(
+    app: &App,
+    repo: &str,
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<&str>,
+) -> bool {
     if !Path::new(repo).is_dir() || tokio::runtime::Handle::try_current().is_err() {
         return false;
     }
-    let Ok((session, route, cancel)) = begin_turn(app, repo) else {
-        return false;
+    let (session, route, cancel) = match begin_turn(app, repo) {
+        Ok(started) => started,
+        Err(error) => {
+            // The digest retries every minute until it starts: log it once it does.
+            if reason != "digest" {
+                let why = if error == BUSY {
+                    "chat is busy"
+                } else {
+                    "no route"
+                };
+                app.record_overseer(overseer::Entry::new(
+                    "skipped",
+                    repo,
+                    task_id,
+                    &format!("Not woken ({reason}): {why}"),
+                ));
+            }
+            return false;
+        }
     };
+    app.record_overseer(overseer::Entry::new(
+        "woke",
+        repo,
+        task_id,
+        &format!("Woke for {reason}"),
+    ));
     save(app, repo, &session);
     let app = app.arc();
     let repo = repo.to_string();
+    let task_id = task_id.map(str::to_string);
     tokio::spawn(async move {
         run_turn(
             &app,
@@ -1436,7 +1471,11 @@ pub(super) fn wake_overseer(app: &App, repo: &str, prompt: String, read_only: bo
             route,
             prompt,
             cancel,
-            Turn::Overseer { read_only },
+            Turn::Overseer {
+                read_only,
+                reason,
+                task_id,
+            },
         )
         .await;
     });
@@ -1450,12 +1489,21 @@ pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
     find(&settings.orchestrator).or_else(|| find(settings.tiers.get(&Tier::Standard)?))
 }
 
-fn mcp_server(app: &App, task_mcp_file: Option<&Path>, read_only: bool) -> serde_json::Value {
+fn mcp_server(
+    app: &App,
+    task_mcp_file: Option<&Path>,
+    read_only: bool,
+    overseer: bool,
+) -> serde_json::Value {
     let mut server = json!({
         "command": app.exe_path,
         "args": ["mcp"],
         "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     });
+    if overseer {
+        // Lets the bridge tell a turn orchd woke from the owner's own chat.
+        server["env"]["ORCHD_BRIDGE_SOURCE"] = json!("overseer");
+    }
     if read_only {
         server["args"]
             .as_array_mut()
@@ -1805,11 +1853,19 @@ async fn run_turn(
     cancel: CancelToken,
     turn: Turn,
 ) {
+    let started = now_ms();
     let mode = match &turn {
         Turn::Owner(mode) => *mode,
         Turn::Questions(_) | Turn::Overseer { .. } => ChatMode::Chat,
     };
-    let read_only = mode.read_only() || matches!(turn, Turn::Overseer { read_only: true });
+    let read_only = mode.read_only()
+        || matches!(
+            turn,
+            Turn::Overseer {
+                read_only: true,
+                ..
+            }
+        );
     let dir = turn_dir(app, &repo);
     let _ = std::fs::create_dir_all(&dir);
     // Brainstorm and Plan never create tasks, so they have no task MCP to hand on.
@@ -1820,7 +1876,12 @@ async fn run_turn(
             .ok()
             .map(|_| file)
     });
-    let server = mcp_server(app, task_mcp_file.as_deref(), read_only);
+    let server = mcp_server(
+        app,
+        task_mcp_file.as_deref(),
+        read_only,
+        matches!(turn, Turn::Overseer { .. }),
+    );
     let settings = app.settings.read().unwrap().clone();
     // A question turn answers a task, not the owner: it gets no connected tools.
     let connected = match &turn {
@@ -1871,6 +1932,29 @@ async fn run_turn(
     // but the owner may have been shown a fresher note: keep this turn's
     // session.
     thread.note = None;
+    if let Turn::Overseer {
+        reason, task_id, ..
+    } = &turn
+    {
+        let (cost, end) = match &result {
+            Ok(o) => (
+                o.cost_usd,
+                match (
+                    o.final_text.as_ref().filter(|t| !t.trim().is_empty()),
+                    &o.error,
+                ) {
+                    (Some(reply), _) => TurnEnd::Reply(reply.clone()),
+                    (None, Some(error)) => TurnEnd::Failed(error.clone()),
+                    (None, None) => TurnEnd::Silent,
+                },
+            ),
+            Err(RunError::Cancelled) => (None, TurnEnd::Stopped),
+            Err(RunError::Io(error) | RunError::NotFound(error)) => {
+                (None, TurnEnd::Failed(error.clone()))
+            }
+        };
+        record_overseer_end(app, &repo, reason, task_id.as_deref(), started, cost, end);
+    }
     match (result, &turn) {
         (Ok(outcome), _) => {
             if outcome.session_id.is_some() {
@@ -1911,6 +1995,49 @@ async fn run_turn(
     finish_turn(app, &repo, &thread);
     // Questions that arrived during this turn get the next one.
     wake(app, &repo);
+}
+
+/// How an overseer turn ended, for the log.
+pub(super) enum TurnEnd {
+    Reply(String),
+    Stopped,
+    Failed(String),
+    Silent,
+}
+
+/// Logs how an overseer turn ended: stopped, failed, the digest's first line,
+/// what the agent left for the owner when it did not answer or open a pull
+/// request for the task itself, or a bare `done` that still carries the cost.
+pub(super) fn record_overseer_end(
+    app: &App,
+    repo: &str,
+    reason: &str,
+    task_id: Option<&str>,
+    started: i64,
+    cost_usd: Option<f64>,
+    end: TurnEnd,
+) {
+    let acted = || {
+        overseer::read(&app.data_dir, Some(repo), None)
+            .iter()
+            .any(|e| {
+                e.ts >= started
+                    && matches!(e.kind.as_str(), "answered" | "pr")
+                    && e.task_id.as_deref() == task_id
+            })
+    };
+    let (kind, text) = match end {
+        TurnEnd::Stopped => ("skipped", "Stopped by you".to_string()),
+        TurnEnd::Failed(error) => ("failed", error),
+        TurnEnd::Reply(reply) if reason == "digest" => ("digest", reply),
+        TurnEnd::Reply(reply) if !acted() => ("asked_owner", reply),
+        TurnEnd::Reply(reply) => ("done", reply),
+        TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string()),
+        TurnEnd::Silent => return,
+    };
+    let mut entry = overseer::Entry::new(kind, repo, task_id, &text);
+    entry.cost_usd = cost_usd;
+    app.record_overseer(entry);
 }
 
 async fn run(
@@ -3108,7 +3235,7 @@ mod tests {
     fn only_the_chat_mode_gets_a_writing_bridge() {
         let (app, _dir, _repo) = test_app();
         let has_read_only = |mode: ChatMode| {
-            mcp_server(&app, None, mode.read_only())["args"]
+            mcp_server(&app, None, mode.read_only(), false)["args"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("--read-only"))

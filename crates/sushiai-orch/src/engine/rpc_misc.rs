@@ -1,6 +1,23 @@
 use super::*;
 
 impl App {
+    /// `overseer.log {repo?, limit?}` -> the overseer's actions, newest first.
+    pub(super) async fn handle_overseer_log(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize, Default)]
+        struct P {
+            #[serde(default)]
+            repo: Option<String>,
+            #[serde(default)]
+            limit: Option<usize>,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        let entries = crate::overseer::read(&self.data_dir, p.repo.as_deref(), p.limit);
+        serde_json::to_value(entries).map_err(|e| e.to_string())
+    }
+
     /// `costs.summary {repo?, taskId?, sinceDays? | from? / to? (UTC YYYY-MM-DD, inclusive), groupBy: [stage|model|route|repo|task|day]}`
     /// -> `{rows: [{key, keys, costUsd, runs, tokens, cacheHitRate}], totals,
     /// leadTouch: {touched, marked, rate, byRepo, byWeek},

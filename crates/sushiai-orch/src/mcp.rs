@@ -530,7 +530,12 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
     let args = with_task_mcp(method, args, task_mcp);
-    let args = with_source(method, args, bridge.task.is_some());
+    let chat = if std::env::var("ORCHD_BRIDGE_SOURCE").as_deref() == Ok("overseer") {
+        "overseer"
+    } else {
+        "chat"
+    };
+    let args = with_source(method, args, bridge.task.is_some(), chat);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match (bridge.call)(method, args) {
         Ok(result) => tool_ok(result),
@@ -561,12 +566,14 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
 /// Records where a task created through this bridge started: the
 /// orchestrator chat agent (no task id) is `chat`, a task's own agent is
 /// `handoff`. A source the caller set itself is kept.
-fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
+/// `chat` names the source of a call made outside a task: `chat` for the
+/// owner's own chat turns, `overseer` for a turn orchd woke by itself.
+fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Value {
     if method == "task.answer" {
         // Never trusted from the caller: it marks the answer as not the
         // owner's, so orchd refuses an allow on an owner-only question.
         if let Some(obj) = args.as_object_mut() {
-            let source = if from_task { "mcp" } else { "chat" };
+            let source = if from_task { "mcp" } else { chat };
             obj.insert("source".to_string(), json!(source));
         }
     }
@@ -575,12 +582,14 @@ fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
         // call so the backend refuses one too.
         if let Some(obj) = args.as_object_mut() {
             obj.remove("branch");
-            let source = if from_task { "mcp" } else { "chat" };
+            let source = if from_task { "mcp" } else { chat };
             obj.insert("source".to_string(), json!(source));
         }
     }
     if method == "task.create" && args.get("source").is_none() {
         if let Some(obj) = args.as_object_mut() {
+            // A task source names who asked for the task, so an overseer
+            // turn creates one as the chat does.
             let source = if from_task { "handoff" } else { "chat" };
             obj.insert("source".to_string(), json!(source));
         }
@@ -1005,11 +1014,21 @@ mod answer_source_tests {
 
     #[test]
     fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {
-        let chat = with_source("task.answer", json!({"id": "t", "source": ""}), false);
+        let chat = with_source(
+            "task.answer",
+            json!({"id": "t", "source": ""}),
+            false,
+            "chat",
+        );
         assert_eq!(chat["source"], "chat");
-        let task = with_source("task.answer", json!({"id": "t"}), true);
+        let task = with_source("task.answer", json!({"id": "t"}), true, "chat");
         assert_eq!(task["source"], "mcp");
-        let other = with_source("task.start", json!({"id": "t"}), true);
+        let overseer = with_source("task.answer", json!({"id": "t"}), false, "overseer");
+        assert_eq!(overseer["source"], "overseer");
+        let other = with_source("task.start", json!({"id": "t"}), true, "chat");
         assert!(other.get("source").is_none());
+        let create = with_source("task.create", json!({}), false, "overseer");
+        assert_eq!(create["source"], "chat");
+        assert!(crate::model::TASK_SOURCES.contains(&"chat"));
     }
 }

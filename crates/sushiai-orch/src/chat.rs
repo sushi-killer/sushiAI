@@ -2128,7 +2128,7 @@ pub(super) fn record_overseer_end(
         TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string()),
         TurnEnd::Silent => return,
     };
-    let mut entry = overseer::Entry::new(kind, repo, task_id, &text);
+    let mut entry = overseer::Entry::new(kind, repo, task_id, &text).with_detail(&text);
     entry.cost_usd = cost_usd;
     app.record_overseer(entry);
 }

@@ -10,18 +10,22 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
-import { errorText } from "./helpers";
+import { errorText, formatCost } from "./helpers";
 import { hostOf } from "./hosts";
 import { projectName } from "./ownerAttention";
 import {
   addEntry,
+  detailText,
   displayText,
+  entryKey,
   filterEntries,
+  fullDateTime,
   groupByDay,
   projectOptions,
   rowTarget,
   spentLine,
   todayUtc,
+  toggleOpen,
 } from "./overseerLogModel";
 import type { OverseerEntry } from "./types";
 import { Chip } from "../ui";
@@ -78,6 +82,7 @@ export function OverseerLogView({
   const [budget, setBudget] = useState(dailyBudgetUsd);
   const [repo, setRepo] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [openKey, setOpenKey] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -166,41 +171,63 @@ export function OverseerLogView({
         <section key={day.label} className="log-day" aria-label={day.label}>
           <h3 className="orch-eyebrow">{day.label.toUpperCase()}</h3>
           <ul className={`log-list${repo ? " log-one" : ""}`}>
-            {day.entries.map((entry, index) => {
+            {day.entries.map((entry) => {
               const kind = KINDS[entry.kind] ?? KINDS.woke;
-              const body = (
-                <>
-                  <span className="log-time">{timeLabel(entry.ts)}</span>
-                  {!repo && (
-                    <span className="log-project" title={entry.repo}>
-                      {projectName(entry.repo)}
-                    </span>
-                  )}
-                  <span
-                    className={`log-kind log-kind-${entry.kind}`}
-                    role="img"
-                    aria-label={kind.label}
-                    title={kind.label}
-                  >
-                    {kind.icon}
-                  </span>
-                  <span className="log-text" title={entry.text}>
-                    {displayText(entry)}
-                  </span>
-                </>
-              );
+              const key = entryKey(entry);
+              const expanded = openKey === key;
+              const panelId = `log-detail-${key.replace(/[^\w-]/g, "_")}`;
               return (
-                <li key={`${entry.ts}-${entry.kind}-${index}`}>
-                  {opens(entry) ? (
-                    <button
-                      type="button"
-                      className="log-row clickable"
-                      onClick={() => open(entry)}
+                <li key={key}>
+                  <button
+                    type="button"
+                    className="log-row clickable"
+                    aria-expanded={expanded}
+                    aria-controls={expanded ? panelId : undefined}
+                    onClick={() => setOpenKey((cur) => toggleOpen(cur, key))}
+                  >
+                    <span className="log-time">{timeLabel(entry.ts)}</span>
+                    {!repo && (
+                      <span className="log-project" title={entry.repo}>
+                        {projectName(entry.repo)}
+                      </span>
+                    )}
+                    <span
+                      className={`log-kind log-kind-${entry.kind}`}
+                      role="img"
+                      aria-label={kind.label}
+                      title={kind.label}
                     >
-                      {body}
-                    </button>
-                  ) : (
-                    <div className="log-row">{body}</div>
+                      {kind.icon}
+                    </span>
+                    <span className="log-text">{displayText(entry)}</span>
+                  </button>
+                  {expanded && (
+                    <div className="log-detail" id={panelId}>
+                      <p className="log-meta">
+                        {[
+                          fullDateTime(entry.ts),
+                          projectName(entry.repo),
+                          kind.label,
+                          entry.costUsd ? formatCost(entry.costUsd) : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" \u00b7 ")}
+                      </p>
+                      <pre className="log-full">{detailText(entry)}</pre>
+                      {opens(entry) && (
+                        <div className="log-actions">
+                          <button
+                            type="button"
+                            className="log-link"
+                            onClick={() => open(entry)}
+                          >
+                            {rowTarget(entry) === "chat"
+                              ? "Open chat"
+                              : "Open task"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </li>
               );

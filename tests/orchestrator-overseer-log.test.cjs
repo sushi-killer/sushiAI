@@ -103,3 +103,30 @@ test("rows group by local day with Today and Yesterday labels", async () => {
     ],
   );
 });
+
+test("an opened row shows the full detail, else its own text", async () => {
+  const { detailText } = await model;
+  assert.equal(
+    detailText(
+      entry({ text: "Plan question → yes", detail: "Q?\n\nAnswer: yes\n" }),
+    ),
+    "Q?\n\nAnswer: yes",
+  );
+  assert.equal(detailText(entry({ text: " old row " })), "old row");
+});
+
+test("one row is open at a time and a second click closes it", async () => {
+  const { toggleOpen, entryKey } = await model;
+  assert.equal(toggleOpen(null, "a"), "a");
+  assert.equal(toggleOpen("a", "b"), "b");
+  assert.equal(toggleOpen("a", "a"), null);
+  assert.notEqual(entryKey(entry({ ts: 1 })), entryKey(entry({ ts: 2 })));
+  assert.notEqual(entryKey(entry({ taskId: "t1" })), entryKey(entry()));
+});
+
+test("the full date and time carries the year and the clock", async () => {
+  const { fullDateTime } = await model;
+  const text = fullDateTime(new Date(2026, 9, 8, 15, 5).getTime());
+  assert.match(text, /Oct 8, 2026/);
+  assert.match(text, /3:05\s?PM/);
+});

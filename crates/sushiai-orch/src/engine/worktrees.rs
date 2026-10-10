@@ -48,14 +48,21 @@ impl App {
             Ok((bytes, saved)) => {
                 task.worktree_removed = true;
                 task.decisions.push(format!(
-                    "Worktree: removed {} ({why}{}; the work is on {})",
+                    "Worktree: removed {} ({why}{}; {})",
                     task.worktree,
                     if saved {
                         ", uncommitted work saved to the wip ref"
                     } else {
                         ""
                     },
-                    task.branch
+                    if git::branch_exists(Path::new(&task.repo), &task.branch) {
+                        format!("the work is on {}", task.branch)
+                    } else {
+                        format!(
+                            "branch {} was removed after it landed on its parent's branch",
+                            task.branch
+                        )
+                    }
                 ));
                 Some(bytes)
             }

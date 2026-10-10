@@ -202,7 +202,7 @@ async fn parent_base_preflight(
         let finals: Vec<String> = task
             .final_verify
             .iter()
-            .filter(|c| !owner_answered_base_check(task, c, &task.base_sha))
+            .filter(|c| !base_check_answered(task, c, &task.base_sha))
             .cloned()
             .collect();
         let mut failed = failing_twice_on_base(app, task, &finals, cancel).await;
@@ -212,7 +212,7 @@ async fn parent_base_preflight(
                 .verify
                 .iter()
                 .filter(|c| !task.decisions.contains(&kept_check_line(c)))
-                .filter(|c| !owner_answered_base_check(task, c, &task.base_sha))
+                .filter(|c| !base_check_answered(task, c, &task.base_sha))
                 .cloned()
                 .collect();
             failed = failing_twice_on_base(app, task, &unkept, cancel).await;
@@ -242,7 +242,9 @@ async fn parent_base_preflight(
         };
         let policy_answered = task.assumptions.len() > assumed;
         if is_option(&answer, "stop") {
-            task.decisions.push("Owner: stop".to_string());
+            if let Some(who) = answerer_label(task) {
+                task.decisions.push(format!("{who}: stop"));
+            }
             task.question = None;
             task.status = TaskStatus::Stopped;
             task.updated_at = now_ms();
@@ -341,6 +343,14 @@ pub(super) async fn run_parent(
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return ParentEnd::Finished;
     };
+    // The parent's own checks run after the children landed: fix a grep that
+    // cannot run now (the children's loops fix theirs).
+    if heal_grep_dashes(&mut task) {
+        app.verify_cache.lock().unwrap().remove(task_id);
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
+    }
     let all = app.repo_tasks(&task.repo);
     // No child starts before the parent's own dependencies are done.
     match own_waits_state(&task, &all) {
@@ -571,7 +581,31 @@ pub(super) async fn run_parent(
         "Orchestrator: every subtask landed on {}",
         task.branch
     ));
+    remove_chain_branches(app, &mut task).await;
     land_parent(app, &mut task, cancel).await
+}
+
+/// Once a parent holds every subtask, the subtasks' own branches are only
+/// clutter: removes, locally, those fully contained in the parent branch.
+async fn remove_chain_branches(app: &Arc<App>, task: &mut Task) {
+    let candidates: Vec<(String, String)> = app
+        .repo_tasks(&task.repo)
+        .into_iter()
+        .filter(|t| t.parent.as_deref() == Some(task.id.as_str()) && t.branch != task.branch)
+        .map(|t| (t.id, t.branch))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let (repo, into) = (PathBuf::from(&task.repo), task.branch.clone());
+    let removed =
+        tokio::task::spawn_blocking(move || git::delete_merged_branches(&repo, &into, &candidates))
+            .await
+            .unwrap_or_default();
+    if !removed.is_empty() {
+        task.decisions
+            .push(format!("Branches: removed {}", removed.join(", ")));
+    }
 }
 
 /// The carry-onto-moved-base failure detail the agent gets: which files

@@ -923,13 +923,11 @@ impl App {
             self.agent_answers.lock().unwrap().insert(p.id.clone());
             // Only a turn orchd woke is the overseer; the owner's chat is not.
             if p.source.as_deref() == Some("overseer") {
-                let asked = task.question.as_ref().map_or("", |q| q.text.as_str());
-                let asked = asked.lines().next().unwrap_or("");
-                self.record_overseer(overseer::Entry::new(
-                    "answered",
+                self.record_overseer(overseer::Entry::answered(
                     &task.repo,
-                    Some(&task.id),
-                    &format!("{} \u{2192} {}", truncate_chars(asked, 80), p.answer.trim()),
+                    &task.id,
+                    task.question.as_ref(),
+                    &p.answer,
                 ));
             }
         } else {
@@ -1019,7 +1017,13 @@ impl App {
                 // answer applied, and the owner's answer is remembered.
                 if let Some(command) = pre_existing_command(&q).map(str::to_string) {
                     let base_sha = task.base_sha.clone();
-                    record_owner_base_check(&mut task, &command, &base_sha, &p.answer, false);
+                    record_owner_base_check(
+                        &mut task,
+                        &command,
+                        &base_sha,
+                        &p.answer,
+                        default_evidence.is_some(),
+                    );
                     apply_base_check_answer(&mut task, &q, &p.answer);
                     if is_option(&p.answer, PRE_EXISTING_DROP) {
                         self.verify_cache.lock().unwrap().remove(&task.id);
@@ -1462,10 +1466,12 @@ mod answer_source_tests {
         assert_eq!(log[0].task_id.as_deref(), Some(id.as_str()));
         assert_eq!(log[0].text.chars().count(), 200);
         assert!(
-            log[0].text.starts_with("Allow it? \u{2192} stop xxx"),
+            log[0].text.starts_with("Plan question \u{2192} stop xxx"),
             "{}",
             log[0].text
         );
+        let detail = log[0].detail.as_deref().unwrap();
+        assert!(detail.contains("Allow it?") && detail.ends_with(&"x".repeat(400)));
 
         let id = waiting(&app, QuestionKind::PlanQuestion, &[]);
         answer(&app, &id, "stop", None).await.unwrap();

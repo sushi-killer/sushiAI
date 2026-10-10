@@ -91,3 +91,29 @@ export function groupByDay(
 export function todayUtc(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
 }
+
+/** The expanded panel's body: the full detail, else the row's own text. */
+export function detailText(entry: OverseerEntry): string {
+  return (entry.detail ?? entry.text).trim();
+}
+
+/** "Oct 8, 2026, 3:05 PM" for the expanded panel. */
+export function fullDateTime(ts: number): string {
+  return new Date(ts).toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Which row is open after a click on `key`: one at a time, a second click closes. */
+export function toggleOpen(open: string | null, key: string): string | null {
+  return open === key ? null : key;
+}
+
+/** A stable key for a row, so the open state survives new entries on top. */
+export function entryKey(entry: OverseerEntry): string {
+  return `${entry.ts}|${entry.repo}|${entry.kind}|${entry.taskId ?? ""}`;
+}

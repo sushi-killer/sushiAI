@@ -777,6 +777,8 @@ export type OverseerEntry = {
     | "failed";
   taskId?: string;
   text: string;
+  /** The full text behind `text`; entries from before it existed have none. */
+  detail?: string;
   costUsd?: number;
 };
 

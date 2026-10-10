@@ -521,6 +521,8 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         a = rx => a.ok(),
     };
     app.permission_waits.lock().unwrap().remove(&ctx.task_id);
+    // `task.answer` marks an agent's answer (it may only deny here).
+    let by_agent = app.take_agent_answer(&ctx.task_id);
     if let Ok(Some(mut task)) = app.store.load_task(&ctx.task_id) {
         if task
             .question
@@ -529,8 +531,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         {
             task.question = None;
             if let Some(answer) = &answer {
-                task.decisions.push(format!("Owner: {answer}"));
-                record_answered_question(&mut task, &question, answer, AnsweredBy::Owner);
+                record_answer(&mut task, Some(&question), answer, by_agent);
                 task.status = TaskStatus::Running;
             }
             task.updated_at = now_ms();

@@ -104,3 +104,48 @@ button.log-row:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An opened row: the full text under it, wrapped and selectable. */
+.log-row[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+.log-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  margin: 2px 10px 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.log-meta {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.log-full {
+  max-height: 320px;
+  margin: 0;
+  overflow-y: auto;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+.log-actions {
+  display: flex;
+  gap: var(--gap-md);
+}
+.log-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.log-link:hover {
+  color: var(--text);
+}

@@ -133,6 +133,109 @@ pub(super) fn parse_feasibility(text: &str, criteria: usize) -> Option<Feasibili
     }
 }
 
+/// `grep` reads a pattern that starts with `-` as an option, so such a check
+/// cannot run. Returns `command` with `--` inserted before each such
+/// pattern, or `None` when nothing needs it. Quote-aware, and it leaves
+/// `-e`/`-f` forms alone (their next word is already an argument).
+pub(super) fn fix_grep_dashes(command: &str) -> Option<String> {
+    // Words with their byte offsets; quotes keep a word whole.
+    let mut words: Vec<(usize, String, bool)> = Vec::new();
+    let mut cur: Option<(usize, String, bool)> = None;
+    let mut quote: Option<char> = None;
+    for (i, c) in command.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.get_or_insert((i, String::new(), false)).1.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                cur.get_or_insert((i, String::new(), true)).2 = true;
+            }
+            (None, c) if c.is_whitespace() => words.extend(cur.take()),
+            (None, c) => cur.get_or_insert((i, String::new(), false)).1.push(c),
+        }
+    }
+    words.extend(cur);
+    let mut inserts: Vec<usize> = Vec::new();
+    let mut at_start = true;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].1.as_str();
+        if matches!(w, "&&" | "||" | ";" | "|" | "(") {
+            at_start = true;
+            i += 1;
+            continue;
+        }
+        if !(at_start && matches!(w, "grep" | "egrep" | "fgrep")) {
+            at_start = false;
+            i += 1;
+            continue;
+        }
+        at_start = false;
+        i += 1;
+        let mut takes_arg = false;
+        while i < words.len() {
+            let o = words[i].1.as_str();
+            // `--long` is an option quoted or not; a quoted word with one
+            // dash is the pattern.
+            if words[i].2 && !o.starts_with("--") {
+                break;
+            }
+            if o == "--" {
+                i = words.len();
+                takes_arg = true;
+                break;
+            }
+            let short_cluster = o.starts_with('-') && !o.starts_with("--") && o.len() > 1;
+            if short_cluster && o[1..].contains(['e', 'f']) {
+                takes_arg = true;
+                break;
+            }
+            if o.starts_with('-') && o.len() > 1 {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        if !takes_arg && i < words.len() && words[i].1.starts_with('-') && words[i].1.len() > 1 {
+            inserts.push(words[i].0);
+            i += 1;
+        }
+    }
+    if inserts.is_empty() {
+        return None;
+    }
+    let mut out = command.to_string();
+    for at in inserts.into_iter().rev() {
+        out.insert_str(at, "-- ");
+    }
+    Some(out)
+}
+
+/// Fixes, before any check runs, each grep check whose pattern starts with
+/// `-`; one decision line per command. Returns whether anything changed.
+pub(super) fn heal_grep_dashes(task: &mut Task) -> bool {
+    let mut changed: Vec<(String, String)> = Vec::new();
+    for c in task
+        .verify
+        .iter_mut()
+        .chain(task.final_verify.iter_mut())
+        .chain(task.checks.iter_mut().map(|c| &mut c.run))
+    {
+        if let Some(fixed) = fix_grep_dashes(c) {
+            if !changed.iter().any(|(old, _)| old == c) {
+                changed.push((c.clone(), fixed.clone()));
+            }
+            *c = fixed;
+        }
+    }
+    for (old, new) in &changed {
+        task.decisions.push(format!(
+            "Orchestrator: check {old} could not run (grep reads a pattern starting with `-` as an option); rewritten to {new}"
+        ));
+    }
+    !changed.is_empty()
+}
+
 /// Applies a ruling about `command`; `false` when it changed nothing.
 pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibility) -> bool {
     match ruling {
@@ -206,6 +309,13 @@ pub(super) async fn heal_feasibility(
     };
     if task.brief_check.feasibility_done {
         return true;
+    }
+    let mut task = task;
+    if heal_grep_dashes(&mut task) {
+        app.verify_cache.lock().unwrap().remove(task_id);
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
     }
     let Some(route) = judge_route(app) else {
         return true;
@@ -803,6 +913,52 @@ pub(super) async fn heal_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grep_patterns_starting_with_a_dash_get_a_double_dash() {
+        assert_eq!(
+            fix_grep_dashes("grep -qF '- `formatDuration` x' README.md").unwrap(),
+            "grep -qF -- '- `formatDuration` x' README.md"
+        );
+        assert_eq!(
+            fix_grep_dashes("test -f a && grep -q \"-x\" a | grep -c -v '-y' b").unwrap(),
+            "test -f a && grep -q -- \"-x\" a | grep -c -v -- '-y' b"
+        );
+        for fine in [
+            "grep -qF -- '- x' README.md",
+            "grep -qF 'x' README.md",
+            "grep -e '-x' a",
+            "grep -qe '-x' a",
+            "echo grep '-x'",
+            "grep -rn foo src",
+            "grep -rn --include='*.ts' foo src",
+            "grep --regexp='-x' src",
+            "grep --include='*.ts' --regexp=foo a",
+        ] {
+            assert_eq!(fix_grep_dashes(fine), None, "{fine}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_after_quoted_long_options_still_gets_the_double_dash() {
+        assert_eq!(
+            fix_grep_dashes("grep -rn --include='*.ts' '- x' src").unwrap(),
+            "grep -rn --include='*.ts' -- '- x' src"
+        );
+    }
+
+    #[test]
+    fn a_broken_grep_check_is_fixed_everywhere_with_one_decision_line() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
+        task.verify = vec!["grep -qF '- x' R.md".into(), "npm test".into()];
+        task.final_verify = vec!["grep -qF '- x' R.md".into()];
+        task.decisions.clear();
+        assert!(heal_grep_dashes(&mut task));
+        assert_eq!(task.verify, ["grep -qF -- '- x' R.md", "npm test"]);
+        assert_eq!(task.final_verify, ["grep -qF -- '- x' R.md"]);
+        assert_eq!(task.decisions.len(), 1);
+        assert!(!heal_grep_dashes(&mut task));
+    }
 
     #[test]
     fn ui_paths_are_told_by_extension_or_directory() {

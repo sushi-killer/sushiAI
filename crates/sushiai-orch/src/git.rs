@@ -64,7 +64,7 @@ pub fn slugify(title: &str, max_len: usize) -> String {
     out
 }
 
-fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+pub fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     Command::new("git")
         .args([
             "show-ref",
@@ -1090,6 +1090,11 @@ pub fn restore_worktree(
     if path.join(".git").exists() {
         return Ok(false);
     }
+    if !branch_exists(repo_root, branch) {
+        return Err(GitError(format!(
+            "branch {branch} no longer exists (a subtask branch is removed once it landed on its parent's branch)"
+        )));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| GitError(e.to_string()))?;
         let _ = exclude_worktree_root(repo_root, parent);
@@ -1149,6 +1154,37 @@ pub fn linked_worktrees(repo_root: &Path) -> Vec<PathBuf> {
 pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
     let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
     let _ = run(repo_root, &["branch", "-D", branch]);
+}
+
+/// Deletes, locally, each `(task id, branch)` that is fully contained in
+/// `into` (`merge-base --is-ancestor`) together with its saved-work ref. The
+/// ref is deleted with the sha that was checked, so a branch that moved
+/// meanwhile stays. `into` itself and a branch checked out in any worktree
+/// stay. Returns the branches removed.
+pub fn delete_merged_branches(
+    repo_root: &Path,
+    into: &str,
+    candidates: &[(String, String)],
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    for (task_id, branch) in candidates {
+        let full = format!("refs/heads/{branch}");
+        if branch == into || checkout_of(repo_root, branch).is_some() {
+            continue;
+        }
+        let Ok(sha) = run(repo_root, &["rev-parse", "--verify", "-q", &full]) else {
+            continue;
+        };
+        let sha = sha.trim();
+        if run(repo_root, &["merge-base", "--is-ancestor", sha, into]).is_err() {
+            continue;
+        }
+        if run(repo_root, &["update-ref", "-d", &full, sha]).is_ok() {
+            let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
+            removed.push(branch.clone());
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -1327,6 +1363,62 @@ mod tests {
         std::fs::write(dir.join("README.md"), "hello\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "init"]);
+    }
+
+    #[test]
+    fn delete_merged_branches_removes_only_contained_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let status = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["checkout", "-q", "-b", "task/parent"]);
+        git(&["branch", "task/chain-a"]);
+        git(&["checkout", "-q", "-b", "task/chain-b"]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "b"]);
+        git(&["checkout", "-q", "task/parent"]);
+        git(&["branch", "task/ahead", "task/chain-b"]);
+        git(&["merge", "-q", "--no-edit", "task/chain-b"]);
+        git(&["checkout", "-q", "-b", "task/unmerged"]);
+        std::fs::write(repo.join("u.txt"), "u\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "u"]);
+        git(&["checkout", "-q", "task/parent"]);
+        git(&["branch", "other"]);
+        // The checkout is on another branch, as in real use.
+        git(&["checkout", "-q", "other"]);
+
+        let pairs = |names: &[&str]| -> Vec<(String, String)> {
+            names
+                .iter()
+                .map(|n| (format!("id-{n}"), n.to_string()))
+                .collect()
+        };
+        let removed = delete_merged_branches(
+            &repo,
+            "task/parent",
+            &pairs(&[
+                "task/chain-a",
+                "task/chain-b",
+                "task/unmerged",
+                "task/parent",
+            ]),
+        );
+        assert_eq!(removed, vec!["task/chain-a", "task/chain-b"]);
+        let left = run(&repo, &["branch", "--format=%(refname:short)"]).unwrap();
+        let left: Vec<&str> = left.lines().collect();
+        assert!(left.contains(&"task/unmerged") && left.contains(&"task/parent"));
+        assert!(left.contains(&"other") && left.contains(&"task/ahead"));
+        assert!(!left.contains(&"task/chain-a") && !left.contains(&"task/chain-b"));
     }
 
     #[test]

@@ -416,7 +416,7 @@ pub(super) async fn run_task_loop(
             let unanswered: Vec<String> = task
                 .final_verify
                 .iter()
-                .filter(|c| !owner_answered_base_check(&task, c, &task.base_sha))
+                .filter(|c| !base_check_answered(&task, c, &task.base_sha))
                 .cloned()
                 .collect();
             if let Some(base_run) = failing_twice_on_base(&app, &task, &unanswered, &cancel).await {
@@ -1626,7 +1626,7 @@ pub(super) async fn run_task_loop(
             // attempt: a command that passed on the old base and fails on
             // the new one alone is the base's failure, not the attempt's.
             if attempt_start_base != task.base_sha
-                && !owner_answered_base_check(&task, &failed.command, &task.base_sha)
+                && !base_check_answered(&task, &failed.command, &task.base_sha)
             {
                 let base_dir = run_dir.join("verify-base");
                 if let Some(base_run) = broken_by_the_new_base(

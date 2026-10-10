@@ -442,7 +442,7 @@ pub fn relay_block(task: &Task, all: &[Task]) -> String {
         return String::new();
     };
     format!(
-        "## Relay: continue from {}\n\nThis task continues on the branch of the previous subtask; its commit is already in your worktree. You start with a fresh context, so this is what it reported:\n\n{}",
+        "## Relay: continue from {}\n\nThis task continues on the branch of the previous subtask; its commit is already in your worktree. Every dependency is already on your branch: do not merge, rebase or check out other branches. You start with a fresh context, so this is what it reported:\n\n{}",
         prev.title,
         landed_entry(prev)
     )
@@ -890,7 +890,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     Some((result, recorded_as_pass))
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
 
@@ -3333,6 +3333,26 @@ mod tests {
         task.id = "child".into();
         task.depends_on = ids.iter().map(|s| s.to_string()).collect();
         task
+    }
+
+    #[test]
+    fn a_relay_brief_says_dependencies_are_on_the_branch_and_not_to_merge() {
+        let dep = done_dependency("d1", 10);
+        let mut task = dependent_of(&["d1"]);
+        task.queue.relay_of = Some("d1".into());
+        let block = relay_block(&task, &[dep]);
+        assert!(block.contains("already on your branch"), "{block}");
+        assert!(block.contains("do not merge, rebase"), "{block}");
+    }
+
+    #[test]
+    fn the_plan_brief_asks_for_double_dash_before_grep_patterns() {
+        for brief in [
+            build_plan_brief("x", &Variant::default(), ""),
+            build_subtask_plan_brief("x", &Variant::default(), ""),
+        ] {
+            assert!(brief.contains("grep -qF -- '<pattern>'"), "{brief}");
+        }
     }
 
     #[test]

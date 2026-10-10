@@ -47,25 +47,30 @@ pub(super) fn is_option(answer: &str, option: &str) -> bool {
         .eq_ignore_ascii_case(option)
 }
 
-fn owner_base_check_prefix(command: &str, base_sha: &str) -> String {
+fn base_check_prefix(who: &str, command: &str, base_sha: &str) -> String {
     let sha: String = base_sha.chars().take(7).collect();
-    format!("Owner: base check {command} on {sha} -> ")
+    format!("{who}: base check {command} on {sha} -> ")
 }
 
-/// The decision line recording an owner's answer to a base-check question.
-pub(super) fn owner_base_check_line(command: &str, base_sha: &str, answer: &str) -> String {
-    format!("{}{answer}", owner_base_check_prefix(command, base_sha))
+/// The decision line recording an answer to a base-check question, by `who`
+/// (`Owner` or `Orchestrator`).
+pub(super) fn base_check_line(who: &str, command: &str, base_sha: &str, answer: &str) -> String {
+    format!("{}{answer}", base_check_prefix(who, command, base_sha))
 }
 
-/// Whether the owner already answered the base-check question for this
-/// command on this base.
-pub(super) fn owner_answered_base_check(task: &Task, command: &str, base_sha: &str) -> bool {
-    let prefix = owner_base_check_prefix(command, base_sha);
-    task.decisions.iter().any(|d| d.starts_with(&prefix))
+/// Whether the owner or the orchestrator agent already answered the
+/// base-check question for this command on this base.
+pub(super) fn base_check_answered(task: &Task, command: &str, base_sha: &str) -> bool {
+    let prefixes = ["Owner", "Orchestrator"].map(|who| base_check_prefix(who, command, base_sha));
+    task.decisions
+        .iter()
+        .any(|d| prefixes.iter().any(|p| d.starts_with(p)))
 }
 
-/// Records an owner answer to a base-check question about `command`, asked
-/// on `base_sha`, unless the answer policy gave it (`policy_answered`).
+/// Records an answer to a base-check question about `command`, asked on
+/// `base_sha`, unless the answer policy gave it (`policy_answered`). The line
+/// says who answered, read from the question history entry the wait just
+/// wrote: `Orchestrator:` for the agent, `Owner:` otherwise.
 pub(super) fn record_owner_base_check(
     task: &mut Task,
     command: &str,
@@ -74,8 +79,21 @@ pub(super) fn record_owner_base_check(
     policy_answered: bool,
 ) {
     if !policy_answered {
-        task.decisions
-            .push(owner_base_check_line(command, base_sha, answer));
+        if let Some(who) = answerer_label(task) {
+            task.decisions
+                .push(base_check_line(who, command, base_sha, answer));
+        }
+    }
+}
+
+/// Who gave the answer the wait just recorded: `Owner` (also when nothing
+/// was recorded), `Orchestrator` for the agent, `None` for a rule or judge,
+/// whose own line already says so.
+pub(super) fn answerer_label(task: &Task) -> Option<&'static str> {
+    match task.question_history.last().map(|h| h.answered_by) {
+        Some(AnsweredBy::Orchestrator) => Some("Orchestrator"),
+        Some(AnsweredBy::Policy | AnsweredBy::Judge) => None,
+        Some(AnsweredBy::Owner) | None => Some("Owner"),
     }
 }
 
@@ -531,17 +549,37 @@ mod tests {
     fn an_answered_pair_is_found_by_command_and_short_base_sha() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
         let sha = "0123456789abcdef";
-        assert!(!owner_answered_base_check(&task, "npm test", sha));
+        assert!(!base_check_answered(&task, "npm test", sha));
         record_owner_base_check(&mut task, "npm test", sha, "drop this check", true);
-        assert!(!owner_answered_base_check(&task, "npm test", sha));
+        assert!(!base_check_answered(&task, "npm test", sha));
         record_owner_base_check(&mut task, "npm test", sha, "drop this check", false);
         assert_eq!(
             task.decisions.last().unwrap(),
             "Owner: base check npm test on 0123456 -> drop this check"
         );
-        assert!(owner_answered_base_check(&task, "npm test", sha));
-        assert!(owner_answered_base_check(&task, "npm test", "0123456ffff"));
-        assert!(!owner_answered_base_check(&task, "npm test", "fedcba9876"));
-        assert!(!owner_answered_base_check(&task, "npm run lint", sha));
+        assert!(base_check_answered(&task, "npm test", sha));
+        assert!(base_check_answered(&task, "npm test", "0123456ffff"));
+        assert!(!base_check_answered(&task, "npm test", "fedcba9876"));
+        assert!(!base_check_answered(&task, "npm run lint", sha));
+    }
+
+    #[test]
+    fn an_orchestrator_answer_is_labelled_so_and_not_asked_again() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
+        let sha = "0123456789abcdef";
+        let q = pre_existing_question("npm test", sha, "tail");
+        crate::engine::answer_policy::record_answered_question(
+            &mut task,
+            &q,
+            "keep this check",
+            AnsweredBy::Orchestrator,
+        );
+        record_owner_base_check(&mut task, "npm test", sha, "keep this check", false);
+        assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        assert_eq!(
+            task.decisions.last().unwrap(),
+            "Orchestrator: base check npm test on 0123456 -> keep this check"
+        );
+        assert!(base_check_answered(&task, "npm test", sha));
     }
 }

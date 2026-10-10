@@ -595,18 +595,59 @@ pub fn bootstrap_worktree(main_root: &Path, worktree: &Path) -> std::io::Result<
         bootstrapped.push(rel.to_string());
     }
 
-    let main_modules = main_root.join("node_modules");
-    let worktree_modules = worktree.join("node_modules");
-    if main_modules.is_dir() && !worktree_modules.exists() {
+    for rel in node_modules_dirs(main_root) {
+        let main_modules = main_root.join(&rel);
+        let worktree_modules = worktree.join(&rel);
+        if worktree_modules.exists() || !worktree_modules.parent().is_some_and(Path::is_dir) {
+            continue;
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&main_modules, &worktree_modules)?;
-        bootstrapped.push("node_modules".to_string());
+        bootstrapped.push(rel);
     }
 
     if !bootstrapped.is_empty() {
         append_to_info_exclude(worktree, &bootstrapped)?;
     }
     Ok(())
+}
+
+/// `node_modules` dirs of the main checkout, as relative paths: the root one
+/// and those of packages one or two levels down (`hub/`, `hub/web/`).
+// ponytail: depth 2 covers nested packages seen so far; read workspaces from package.json if deeper ones appear.
+fn node_modules_dirs(main_root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut level = vec![String::new()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for rel in level {
+            let dir = main_root.join(&rel);
+            let join = |name: &str| {
+                if rel.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{rel}/{name}")
+                }
+            };
+            if dir.join("node_modules").is_dir() {
+                found.push(join("node_modules"));
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    continue;
+                }
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    next.push(join(&name));
+                }
+            }
+        }
+        level = next;
+    }
+    found
 }
 
 /// `git status --porcelain -z --untracked-files=all`, one path per returned
@@ -1730,8 +1771,11 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
         init_repo(&repo_root);
         std::fs::write(repo_root.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+        std::fs::create_dir_all(repo_root.join("hub/web")).unwrap();
+        std::fs::write(repo_root.join("hub/package.json"), "{}").unwrap();
+        std::fs::write(repo_root.join("hub/web/package.json"), "{}").unwrap();
         Command::new("git")
-            .args(["add", ".gitignore"])
+            .args(["add", ".gitignore", "hub"])
             .current_dir(&repo_root)
             .status()
             .unwrap();
@@ -1743,6 +1787,8 @@ mod tests {
         std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
         std::fs::create_dir_all(repo_root.join("node_modules/pkg")).unwrap();
         std::fs::write(repo_root.join("node_modules/pkg/index.js"), "").unwrap();
+        std::fs::create_dir_all(repo_root.join("hub/node_modules/vite")).unwrap();
+        std::fs::create_dir_all(repo_root.join("hub/web/node_modules/react")).unwrap();
 
         let branch = unique_branch_name(&repo_root, "Bootstrap test");
         let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
@@ -1756,12 +1802,14 @@ mod tests {
             "SECRET=1\n"
         );
         assert!(wt_path.join("node_modules/pkg/index.js").exists());
+        assert!(wt_path.join("hub/node_modules/vite").is_dir());
+        assert!(wt_path.join("hub/web/node_modules/react").is_dir());
 
         // Neither bootstrapped path is ever a "changed file".
         let changed = changed_files(&wt_path, &created.base_sha).unwrap();
         assert!(!changed
             .iter()
-            .any(|f| f == ".env" || f.starts_with("node_modules")));
+            .any(|f| f == ".env" || f.contains("node_modules")));
     }
 
     #[test]

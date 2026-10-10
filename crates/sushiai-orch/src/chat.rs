@@ -1559,6 +1559,10 @@ pub(super) fn wake_overseer(
             // The digest retries every minute until it starts: log it once it does.
             if reason != "digest" {
                 let why = if error == BUSY {
+                    // Queued for the overseer is already the overseer's: the
+                    // owner hears only when it hands the question on (or the
+                    // hold's TTL ends).
+                    app.hold_for_overseer(repo, reason, task_id);
                     defer_wake(app, repo, prompt, read_only, reason, task_id);
                     "chat is busy, queued for the end of its turn"
                 } else {
@@ -1574,8 +1578,6 @@ pub(super) fn wake_overseer(
             return false;
         }
     };
-    // Held only now that the turn really starts: a wake queued behind a long
-    // turn leaves the question with the owner.
     let held = app.hold_for_overseer(repo, reason, task_id);
     app.record_overseer(overseer::Entry::new(
         "woke",

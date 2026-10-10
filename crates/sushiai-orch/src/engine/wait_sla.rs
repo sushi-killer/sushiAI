@@ -366,8 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_queued_wake_holds_nothing_until_its_turn_starts_and_a_wake_that_cannot_run_never_does(
-    ) {
+    async fn a_queued_wake_holds_the_question_at_once_and_a_wake_that_cannot_run_never_does() {
         let _harness = chat::fake_overseer_harness();
         let (app, dir) = test_app();
         app.settings.write().unwrap().auto_answer = true;
@@ -376,13 +375,14 @@ mod tests {
         let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
         app.store.save_task(&task).unwrap();
         let repo_str = task.repo.clone();
-        // The chat is busy: the wake is queued and the owner keeps the question.
+        // The chat is busy: the wake is queued and already the overseer's,
+        // so the owner gets no notice for it.
         app.chat_turns
             .lock()
             .unwrap()
             .insert(repo_str.clone(), CancelToken::new());
         wake_orchestrator_for_waiting(&app, &task);
-        assert!(!held(&app, &task.id), "a queued wake holds nothing");
+        assert!(held(&app, &task.id), "a queued wake holds the question");
         // The busy turn ends: the queued wake runs, holds, then releases.
         let mut rx = app.events_tx.subscribe();
         app.chat_turns.lock().unwrap().remove(&repo_str);

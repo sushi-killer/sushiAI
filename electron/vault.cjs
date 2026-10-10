@@ -4,11 +4,16 @@
  * Read-only HashiCorp Vault KV v2 as a source of a project's values on This
  * Mac. The token is kept encrypted (safeStorage) in the app database; values
  * live in memory only, are never written or logged, and reach a project
- * through `projects.vault`, so the project store never loads this module.
+ * through the project store's generic environment-provider hook, so the
+ * project store never loads this module.
  */
 const { readStore, writeStore } = require("./app-db.cjs");
+const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
 
 const STORE = "vault-token";
+// The per-project config, keyed by project id.
+const PROJECTS_STORE = "vault-projects";
+const MAX_PATHS = 10;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = 5000;
 const MAX_TOKEN = 4096;
@@ -87,12 +92,66 @@ async function readAll(token, config) {
   return { ok: true, values };
 }
 
+/** A KV path or mount: relative segments, none empty, `.` or `..`, and no
+ * query or fragment, so it can only name a secret under its mount. */
+function vaultSegments(value, what) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (
+    !text ||
+    text.length > 500 ||
+    /[?#]/.test(text) ||
+    text.split("/").some((part) => !part || part === "." || part === "..")
+  )
+    throw new Error(`Enter a relative Vault ${what}.`);
+  return text;
+}
+
+/** A project's Vault settings, checked: an http(s) address without
+ * credentials (kept without a trailing slash), a mount (`secret` when none is
+ * given) and the KV paths read in order. */
+function vaultConfig(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Invalid Vault settings.");
+  let url;
+  try {
+    url = new URL(String(input.address ?? "").trim());
+  } catch {
+    url = null;
+  }
+  if (
+    !url ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw new Error("The Vault address must be an http(s) URL.");
+  if (
+    !Array.isArray(input.paths) ||
+    input.paths.length > MAX_PATHS ||
+    input.paths.some((item) => typeof item !== "string")
+  )
+    throw new Error(`Enter up to ${MAX_PATHS} Vault paths.`);
+  return {
+    address: url.href.replace(/\/+$/, ""),
+    mount:
+      input.mount === undefined || input.mount === null
+        ? "secret"
+        : vaultSegments(input.mount, "mount"),
+    paths: input.paths.map((item) => vaultSegments(item, "path")),
+  };
+}
+
+/** Wires the module in. Resolves `ready` once the one-time move of the old
+ * per-project settings out of the project store is over. */
 function registerVault({
   handle,
   projects,
   notices,
   safeStorage,
   userDataDir,
+  isEnabled,
 }) {
   // address+mount+paths -> { at, result: Promise, notified: Set<projectId> }
   const cache = new Map();
@@ -161,13 +220,13 @@ function registerVault({
     const key = `vault:${project.id}`;
     try {
       if (result.ok) {
-        if (noticed.delete(project.id)) notices.retract("vault", key);
+        if (noticed.delete(project.id)) notices.retract(VAULT_MANIFEST.id, key);
         return;
       }
       if (entry.notified.has(project.id)) return;
       entry.notified.add(project.id);
       noticed.add(project.id);
-      notices.publish("vault", {
+      notices.publish(VAULT_MANIFEST.id, {
         key,
         kind: "failed",
         title: "Vault",
@@ -179,43 +238,115 @@ function registerVault({
     }
   }
 
-  projects.vault = {
+  const NOTICE_SOURCE = VAULT_MANIFEST.id;
+
+  const storedConfig = (id) => {
+    const config = readStore(userDataDir, PROJECTS_STORE)[id];
+    return config?.paths?.length ? config : null;
+  };
+
+  /** The project's config; entries of projects that are gone are dropped. */
+  async function configOf(id) {
+    const stored = readStore(userDataDir, PROJECTS_STORE);
+    const known = new Set((await projects.list()).map((item) => item.id));
+    const kept = Object.fromEntries(
+      Object.entries(stored).filter(([key]) => known.has(key)),
+    );
+    if (Object.keys(kept).length !== Object.keys(stored).length)
+      writeStore(userDataDir, PROJECTS_STORE, kept);
+    return Object.hasOwn(kept, id) ? kept[id] : null;
+  }
+
+  // Old per-project settings lived in the project store: take them over once.
+  const ready = projects
+    .retireField("vault", async (found) => {
+      const stored = readStore(userDataDir, PROJECTS_STORE);
+      const next = { ...stored };
+      for (const [id, config] of Object.entries(found))
+        if (!Object.hasOwn(next, id))
+          try {
+            next[id] = vaultConfig(config);
+          } catch {
+            // An invalid old config is dropped, never copied as it is.
+          }
+      writeStore(userDataDir, PROJECTS_STORE, next);
+    })
+    .catch(() => {
+      console.warn("Vault: could not move the project settings");
+    });
+
+  projects.addEnvironmentProvider({
     /** The project's Vault values, {} when they cannot all be read. */
-    async values(project) {
-      const entry = entryFor(project.vault);
+    async values({ project, host }) {
+      if (!isEnabled() || host !== "local") return {};
+      await ready;
+      const config = storedConfig(project.id);
+      if (!config) return {};
+      const entry = entryFor(config);
       const result = await entry.result;
       report(project, entry, result);
       return result.ok ? { ...result.values } : {};
     },
-  };
+  });
 
-  notices.register("vault", async () => {});
+  notices.register(NOTICE_SOURCE, async () => {});
 
   handle("vault:token:status", () => ({ saved: Boolean(readToken()) }));
   handle("vault:token:set", (token) => setToken(token));
   handle("vault:token:clear", () => clearToken());
-  handle("projects:vault:set", (id, config) => projects.setVault(id, config));
+  handle("projects:vault:get", async (id) => {
+    await ready;
+    return configOf(id);
+  });
+  handle("projects:vault:set", async (id, config) => {
+    await ready;
+    if (!(await projects.get(id))) throw new Error("Unknown project.");
+    const next = config === null ? null : vaultConfig(config);
+    const stored = readStore(userDataDir, PROJECTS_STORE);
+    const previous = Object.hasOwn(stored, id) ? stored[id] : null;
+    const rest = { ...stored };
+    delete rest[id];
+    writeStore(
+      userDataDir,
+      PROJECTS_STORE,
+      next ? { ...rest, [id]: next } : rest,
+    );
+    for (const old of [previous, next])
+      if (old?.paths) cache.delete(cacheKey(old));
+    projects.environmentChanged();
+    return next;
+  });
   // A fresh read for the owner's Check: it replaces the cached one and sends
   // no notice. Names and a count only, never a value.
   handle("projects:vault:check", async (id) => {
+    await ready;
     const project = await projects.get(id);
     if (!project) throw new Error("Unknown project.");
-    if (!project.vault?.paths?.length)
+    const config = await configOf(id);
+    if (!config?.paths?.length)
       throw new Error("The project has no Vault paths.");
     const started = generation;
-    const result = await readAll(readToken(), project.vault);
+    const result = await readAll(readToken(), config);
     if (started === generation)
-      cache.set(cacheKey(project.vault), {
+      cache.set(cacheKey(config), {
         at: Date.now(),
         result: Promise.resolve(result),
         notified: new Set(),
       });
     if (!result.ok) return { ok: false, reason: result.reason };
     if (noticed.delete(project.id))
-      notices.retract("vault", `vault:${project.id}`);
+      notices.retract(NOTICE_SOURCE, `vault:${project.id}`);
     const names = Object.keys(result.values).sort();
     return { ok: true, names, count: names.length };
   });
+  return { ready };
 }
 
-module.exports = { registerVault, CACHE_TTL_MS, STORE };
+module.exports = {
+  registerVault,
+  vaultConfig,
+  vaultSegments,
+  CACHE_TTL_MS,
+  STORE,
+  PROJECTS_STORE,
+};

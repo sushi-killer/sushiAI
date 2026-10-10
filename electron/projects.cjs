@@ -50,66 +50,14 @@ function secretsOf(id, names) {
     );
 }
 
-const MAX_VAULT_PATHS = 10;
-
-/** A KV path or mount: relative segments, none empty, `.` or `..`, and no
- * query or fragment, so it can only name a secret under its mount. */
-function vaultSegments(value, what) {
-  const text = typeof value === "string" ? value.trim() : "";
-  if (
-    !text ||
-    text.length > 500 ||
-    /[?#]/.test(text) ||
-    text.split("/").some((part) => !part || part === "." || part === "..")
-  )
-    throw new Error(`Enter a relative Vault ${what}.`);
-  return text;
-}
-
-/** A project's Vault settings, checked: an http(s) address without
- * credentials (kept without a trailing slash), a mount (`secret` when none is
- * given) and the KV paths read in order. */
-function vaultConfig(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    throw new Error("Invalid Vault settings.");
-  let url;
-  try {
-    url = new URL(String(input.address ?? "").trim());
-  } catch {
-    url = null;
-  }
-  if (
-    !url ||
-    !["http:", "https:"].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  )
-    throw new Error("The Vault address must be an http(s) URL.");
-  if (
-    !Array.isArray(input.paths) ||
-    input.paths.length > MAX_VAULT_PATHS ||
-    input.paths.some((item) => typeof item !== "string")
-  )
-    throw new Error(`Enter up to ${MAX_VAULT_PATHS} Vault paths.`);
-  return {
-    address: url.href.replace(/\/+$/, ""),
-    mount:
-      input.mount === undefined || input.mount === null
-        ? "secret"
-        : vaultSegments(input.mount, "mount"),
-    paths: input.paths.map((item) => vaultSegments(item, "path")),
-  };
-}
-
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
 
 class Projects {
-  constructor({ userDataDir, safeStorage }) {
+  constructor({ userDataDir, safeStorage, providerTimeoutMs = 30000 }) {
     this.userDataDir = userDataDir;
+    this.providerTimeoutMs = providerTimeoutMs;
     this.safeStorage = safeStorage;
     this.lock = Promise.resolve();
     // `onSendChange(host)` lets whoever holds values for a host replace them
@@ -117,9 +65,44 @@ class Projects {
     this.onSendChange = null;
     // Anything a project holds was written: the daemons' copies are refreshed.
     this.onChange = null;
-    // `vault.values(project)` gives a project's Vault values on This Mac;
-    // set by electron/vault.cjs, so this store never loads it.
-    this.vault = null;
+    // Environment providers, in registration order: modules add values to a
+    // project's environment without this store knowing who they are.
+    this.providers = [];
+  }
+
+  /** Adds a source of environment values: `values({ project, stage, host })`
+   * resolves to a name -> value map. A later provider wins over an earlier
+   * one; hand-entered values win over all of them. */
+  addEnvironmentProvider(provider) {
+    if (typeof provider?.values !== "function")
+      throw new Error("An environment provider needs a values function.");
+    this.providers.push(provider);
+  }
+
+  /** A module changed what its provider returns: the daemons' copies are
+   * refreshed soon. */
+  environmentChanged() {
+    this.#changed();
+  }
+
+  /** Field names a module is moving out; an upsert keeps them until then. */
+  #retiring = new Set();
+
+  /** Hands the value of a stored project field to `receive({ [id]: value })`
+   * once, then drops the field. The field goes only after `receive`
+   * resolved, so a failed hand-over keeps it for the next start. */
+  retireField(name, receive) {
+    this.#retiring.add(name);
+    return this.#locked(async () => {
+      const projects = this.#load();
+      const values = {};
+      for (const [id, project] of Object.entries(projects))
+        if (project[name] !== undefined) values[id] = project[name];
+      if (!Object.keys(values).length) return;
+      await receive(values);
+      for (const id of Object.keys(values)) delete projects[id][name];
+      this.#save(projects);
+    });
   }
 
   /** Every SSH host the owner added gets a project's values: adding the host
@@ -460,9 +443,10 @@ class Projects {
         ? slugOf(existing)
         : uniqueSlug(projectSlug(input.name), projects),
       dismissed: existing?.dismissed ?? { env: [], mcp: [] },
-      // Changed only through setVault.
-      vault: existing?.vault,
     };
+    // A field still waiting for its module to take it stays on the row.
+    for (const name of this.#retiring)
+      if (existing?.[name] !== undefined) project[name] = existing[name];
     const previousNames = new Set(
       (existing?.env || []).map((entry) => entry.name),
     );
@@ -906,21 +890,6 @@ class Projects {
     });
   }
 
-  /** Sets where the project's values on This Mac come from in Vault; null
-   * removes it. Only the address, mount and paths are kept, never a value. */
-  setVault(id, config) {
-    return this.#locked(async () => {
-      const projects = this.#load();
-      const project = this.#own(projects, id);
-      if (!project) throw new Error("Unknown project.");
-      if (config === null) delete project.vault;
-      else project.vault = vaultConfig(config);
-      this.#save(projects);
-      this.#changed();
-      return this.#withHints(project, this.#secrets());
-    });
-  }
-
   async #setEncryptedValue(id, key, value) {
     if (typeof value !== "string") throw new Error("Enter a string value.");
     const projects = this.#load();
@@ -1020,12 +989,16 @@ class Projects {
   async environmentFor(id, stage = "agent", host = "local") {
     const project = await this.get(id);
     if (!project) return {};
-    // Vault values (This Mac only, every stage) come first: a hand-entered
-    // variable with a stored value overrides one, one without leaves it.
-    const env =
-      host === "local" && project.vault?.paths?.length && this.vault
-        ? { ...(await this.vault.values(project).catch(() => ({}))) }
-        : {};
+    // Provider values come first: a hand-entered variable with a stored
+    // value overrides one, one without leaves it. A host the owner withheld
+    // asks no provider.
+    const env = {};
+    if (await this.sendsValues(id, host))
+      for (const provider of this.providers)
+        Object.assign(
+          env,
+          await this.#providerValues(provider, project, stage, host),
+        );
     for (const entry of project.env) {
       const availableTo = entry.availableTo || ["setup", "agent"];
       if (!availableTo.includes(stage)) continue;
@@ -1033,6 +1006,27 @@ class Projects {
       if (value !== null) env[entry.name] = value;
     }
     return env;
+  }
+
+  /** One provider's values, {} when it throws, rejects or is too slow. */
+  async #providerValues(provider, project, stage, host) {
+    let timer;
+    try {
+      const values = await Promise.race([
+        Promise.resolve().then(() => provider.values({ project, stage, host })),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Environment provider timed out.")),
+            this.providerTimeoutMs,
+          );
+        }),
+      ]);
+      return values && typeof values === "object" ? { ...values } : {};
+    } catch {
+      return {};
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async resolveDirectory(directory) {

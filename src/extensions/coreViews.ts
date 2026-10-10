@@ -1,10 +1,11 @@
 import type { ComponentType } from "react";
 import type { ArgsPatch } from "./args.ts";
-import { FileText, ListTodo, type LucideIcon } from "lucide-react";
+import { FileText, KeyRound, ListTodo, type LucideIcon } from "lucide-react";
 import { PreviewView } from "./preview/PreviewView.tsx";
 import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
 import { OrchestrationView } from "../orchestrator/OrchestrationView.tsx";
 import { OrchestratorSettingsView } from "../orchestrator/OrchestratorSettingsView.tsx";
+import { VaultSettingsView } from "../vault/VaultSettingsView.tsx";
 
 export type LaunchAgentRequest = {
   agent: "claude" | "codex";
@@ -71,4 +72,5 @@ export const coreViews: Record<string, CoreViewEntry> = {
     View: OrchestratorSettingsView,
     icon: ListTodo,
   },
+  "vault.settings": { View: VaultSettingsView, icon: KeyRound },
 };

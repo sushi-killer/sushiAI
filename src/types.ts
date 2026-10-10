@@ -323,8 +323,6 @@ export type Project = {
     string,
     { withheld?: boolean; overrides?: Record<string, unknown> }
   >;
-  /** Where the project's values on This Mac are read from in Vault (KV v2). */
-  vault?: { address: string; mount: string; paths: string[] };
 };
 export type ProjectGitFailure = {
   kind: "auth" | "host-key" | "network" | "branch" | "path" | "other";
@@ -967,12 +965,16 @@ export interface Bridge {
   vaultTokenStatus(): Promise<{ saved: boolean }>;
   vaultTokenSet(token: string): Promise<{ saved: true }>;
   vaultTokenClear(): Promise<{ saved: false }>;
+  /** The project's Vault config, or null when it has none. */
+  projectVaultGet(
+    id: string,
+  ): Promise<{ address: string; mount: string; paths: string[] } | null>;
   /** Sets the project's Vault paths (mount defaults to `secret`); null
-   * removes them. */
+   * removes them. Resolves to what was stored. */
   projectVaultSet(
     id: string,
     config: { address: string; mount?: string; paths: string[] } | null,
-  ): Promise<Project>;
+  ): Promise<{ address: string; mount: string; paths: string[] } | null>;
   /** Reads the project's Vault paths now: names and a count, never values. */
   projectVaultCheck(
     id: string,

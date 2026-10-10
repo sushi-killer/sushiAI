@@ -210,6 +210,7 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   vaultTokenStatus: invoke("vault:token:status"),
   vaultTokenSet: invoke("vault:token:set"),
   vaultTokenClear: invoke("vault:token:clear"),
+  projectVaultGet: invoke("projects:vault:get"),
   projectVaultSet: invoke("projects:vault:set"),
   projectVaultCheck: invoke("projects:vault:check"),
   projectHostReady: invoke("projects:host:ready"),

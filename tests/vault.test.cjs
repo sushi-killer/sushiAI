@@ -6,7 +6,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { appDb, closeAppDb, readStore } = require("../electron/app-db.cjs");
 const { Projects } = require("../electron/projects.cjs");
-const { registerVault, STORE } = require("../electron/vault.cjs");
+const {
+  registerVault,
+  STORE,
+  PROJECTS_STORE,
+} = require("../electron/vault.cjs");
+const { VAULT_MANIFEST } = require("../electron/extensions/builtin-vault.cjs");
 const { sessionLaunchEnv } = require("../electron/project-session.cjs");
 const { OrchestratorService } = require("../electron/orchestrator.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
@@ -129,10 +134,16 @@ function fakeNotices() {
 
 /** A real project store in a fresh home with Vault registered on it, and a
  * project "Vault Demo" attached to a folder with two hand-entered variables:
- * HAND (with a value) and BLANK (without one). */
+ * HAND (with a value) and BLANK (without one). `beforeRegister(projects,
+ * home)` runs after the store exists and before the module is registered. */
 async function setup(
   t,
-  { safeStorage = fakeSafeStorage(), token = TOKEN } = {},
+  {
+    safeStorage = fakeSafeStorage(),
+    token = TOKEN,
+    isEnabled = () => true,
+    beforeRegister,
+  } = {},
 ) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "vault-test-"));
   const previousHome = process.env.HOME;
@@ -145,14 +156,6 @@ async function setup(
   const projects = new Projects({ userDataDir: home, safeStorage });
   const handlers = new Map();
   const notices = fakeNotices();
-  registerVault({
-    handle: (channel, callback) => handlers.set(channel, callback),
-    projects,
-    notices,
-    safeStorage,
-    userDataDir: home,
-  });
-  const ipc = async (channel, ...args) => handlers.get(channel)(...args);
   const cwd = path.join(home, "work", "demo");
   await fs.mkdir(cwd, { recursive: true });
   const project = await projects.attach({
@@ -166,6 +169,17 @@ async function setup(
       { name: "BLANK", secret: false, availableTo: STAGES },
     ],
   });
+  await beforeRegister?.(projects, home, project);
+  const { ready } = registerVault({
+    handle: (channel, callback) => handlers.set(channel, callback),
+    projects,
+    notices,
+    safeStorage,
+    userDataDir: home,
+    isEnabled,
+  });
+  await ready;
+  const ipc = async (channel, ...args) => handlers.get(channel)(...args);
   // Only the refused-storage tests pass no token, and they store nothing.
   if (token) {
     await projects.setSecret(project.id, "HAND", "hand-value");
@@ -191,8 +205,8 @@ test("two paths merge in order and a hand-entered value wins, at every stage", a
 
 test("an ssh host gets no Vault value and the reader is never asked", async (t) => {
   const vault = await fakeVault(t);
-  const { projects, project } = await setup(t);
-  await projects.setVault(project.id, {
+  const { projects, ipc, project } = await setup(t);
+  await ipc("projects:vault:set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -208,7 +222,7 @@ test("an ssh host gets no Vault value and the reader is never asked", async (t) 
 test("reads are cached and shared until the token changes", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await projects.setVault(project.id, {
+  await ipc("projects:vault:set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -245,7 +259,7 @@ for (const [name, configure, body] of [
   test(`${name} drops Vault values, keeps hand-entered ones and notifies once`, async (t) => {
     const vault = await fakeVault(t);
     const { projects, notices, ipc, project, cwd } = await setup(t);
-    await projects.setVault(project.id, {
+    await ipc("projects:vault:set", project.id, {
       address: await configure(vault, ipc),
       paths: PATHS,
     });
@@ -277,7 +291,7 @@ for (const [name, configure, body] of [
     });
     assert.deepEqual(notices.published, [
       {
-        source: "vault",
+        source: VAULT_MANIFEST.id,
         key: `vault:${project.id}`,
         kind: "failed",
         title: "Vault",
@@ -302,7 +316,10 @@ test("each failure has its own reason, and a good read retracts the notice", asy
     [["broken/x"], "Vault: error (500)"],
     [["garbled"], "Vault: unreadable reply"],
   ]) {
-    await projects.setVault(project.id, { address: vault.address, paths });
+    await ipc("projects:vault:set", project.id, {
+      address: vault.address,
+      paths,
+    });
     assert.deepEqual(
       await projects.environmentFor(project.id, "agent", "local"),
       { HAND: "hand-value" },
@@ -326,24 +343,24 @@ test("each failure has its own reason, and a good read retracts the notice", asy
   );
   assert.deepEqual(notices.retracted, []);
   await ipc("vault:token:set", TOKEN);
-  await projects.setVault(project.id, {
+  await ipc("projects:vault:set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
   await projects.environmentFor(project.id, "agent", "local");
   assert.deepEqual(notices.retracted, [
-    { source: "vault", key: `vault:${project.id}` },
+    { source: VAULT_MANIFEST.id, key: `vault:${project.id}` },
   ]);
   assert.deepEqual(
     notices.registered.map((item) => item.source),
-    ["vault"],
+    [VAULT_MANIFEST.id],
   );
 });
 
 test("a check reads fresh, gives names only and replaces the cached read", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await projects.setVault(project.id, {
+  await ipc("projects:vault:set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -385,10 +402,11 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
       SYNTHETIC,
     );
   replies.push(await ipc("projects:vault:check", project.id));
+  replies.push(await ipc("projects:vault:get", project.id));
   replies.push(await projects.get(project.id));
   // A refused path whose reply echoes the token and a value.
   const leaky = await projects.upsert({ name: "Leaky" });
-  await projects.setVault(leaky.id, {
+  await ipc("projects:vault:set", leaky.id, {
     address: vault.address,
     paths: ["app/over ride", "denied/x"],
   });
@@ -477,7 +495,7 @@ for (const [name, overrides] of [
     assert.deepEqual(Object.keys(readStore(home, STORE)), []);
   });
 
-test("setVault checks its input, defaults the mount and survives upsert", async (t) => {
+test("projects:vault:set checks its input, defaults the mount and survives upsert", async (t) => {
   const { projects, ipc, project } = await setup(t, { token: null });
   const base = { address: "http://127.0.0.1:8200", paths: ["app/one"] };
   for (const bad of [
@@ -500,29 +518,90 @@ test("setVault checks its input, defaults the mount and survives upsert", async 
     "http://127.0.0.1:8200",
   ])
     await assert.rejects(
-      projects.setVault(project.id, bad),
+      ipc("projects:vault:set", project.id, bad),
       undefined,
       JSON.stringify(bad),
     );
-  await assert.rejects(projects.setVault("missing", base), /Unknown project/);
-  const saved = await ipc("projects:vault:set", project.id, {
-    address: " https://vault.invalid:8200/ ",
-    paths: [" team/app ", "team/shared"],
-  });
+  await assert.rejects(
+    ipc("projects:vault:set", "missing", base),
+    /Unknown project/,
+  );
   const expected = {
     address: "https://vault.invalid:8200",
     mount: "secret",
     paths: ["team/app", "team/shared"],
   };
-  assert.deepEqual(saved.vault, expected);
-  await projects.upsert({ id: project.id, name: "Renamed" });
-  const renamed = await projects.get(project.id);
-  assert.equal(renamed.name, "Renamed");
-  assert.deepEqual(renamed.vault, expected);
   assert.deepEqual(
-    (await projects.setVault(project.id, { ...base, mount: "kv/team" })).vault,
+    await ipc("projects:vault:set", project.id, {
+      address: " https://vault.invalid:8200/ ",
+      paths: [" team/app ", "team/shared"],
+    }),
+    expected,
+  );
+  await projects.upsert({ id: project.id, name: "Renamed" });
+  assert.equal((await projects.get(project.id)).name, "Renamed");
+  assert.equal("vault" in (await projects.get(project.id)), false);
+  assert.deepEqual(await ipc("projects:vault:get", project.id), expected);
+  assert.deepEqual(
+    await ipc("projects:vault:set", project.id, { ...base, mount: "kv/team" }),
     { ...base, mount: "kv/team" },
   );
-  await projects.setVault(project.id, null);
-  assert.equal((await projects.get(project.id)).vault, undefined);
+  assert.equal(await ipc("projects:vault:set", project.id, null), null);
+  assert.equal(await ipc("projects:vault:get", project.id), null);
+});
+
+test("a stored project with the old vault field moves into the module", async (t) => {
+  const vault = await fakeVault(t);
+  const old = { address: vault.address, mount: "secret", paths: PATHS };
+  let projectId;
+  const { home, projects, ipc, project } = await setup(t, {
+    beforeRegister: async (store, dir, created) => {
+      projectId = created.id;
+      const db = appDb(dir);
+      const row = db
+        .prepare("SELECT data FROM projects WHERE id = ?")
+        .get(created.id);
+      db.prepare("UPDATE projects SET data = ? WHERE id = ?").run(
+        JSON.stringify({ ...JSON.parse(row.data), vault: old }),
+        created.id,
+      );
+    },
+  });
+  assert.equal(project.id, projectId);
+  assert.deepEqual(await ipc("projects:vault:get", project.id), old);
+  assert.equal("vault" in (await projects.get(project.id)), false);
+  const row = appDb(home)
+    .prepare("SELECT data FROM projects WHERE id = ?")
+    .get(project.id);
+  assert.equal("vault" in JSON.parse(row.data), false);
+  assert.deepEqual(readStore(home, PROJECTS_STORE)[project.id], old);
+  assert.deepEqual(
+    await projects.environmentFor(project.id, "agent", "local"),
+    { ...MERGED, HAND: "hand-value" },
+  );
+});
+
+test("with the module off the project keeps only hand-entered values and Vault is not asked", async (t) => {
+  const vault = await fakeVault(t);
+  let enabled = true;
+  const { projects, ipc, project } = await setup(t, {
+    isEnabled: () => enabled,
+  });
+  await ipc("projects:vault:set", project.id, {
+    address: vault.address,
+    paths: PATHS,
+  });
+  enabled = false;
+  for (const stage of STAGES)
+    assert.deepEqual(
+      await projects.environmentFor(project.id, stage, "local"),
+      { HAND: "hand-value" },
+      stage,
+    );
+  assert.equal(vault.total(), 0);
+  enabled = true;
+  assert.equal(
+    (await projects.environmentFor(project.id, "agent", "local")).SECRET_VALUE,
+    SYNTHETIC,
+  );
 });

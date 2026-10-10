@@ -1,6 +1,8 @@
-import type { ComponentType } from "react";
+import { lazy, type ComponentType } from "react";
 import type { Workspace } from "../types.ts";
 import { orchestratorModule } from "../orchestrator/module.ts";
+import type { ExtensionSnapshot } from "./types.ts";
+import { VAULT_EXTENSION_ID } from "../vault/id.ts";
 
 /** The module UI API: renderer hooks for built-in extensions only. It is not
  * part of the manifest and has no API version. This file is a composition
@@ -77,3 +79,35 @@ export type ModuleUi = {
 export const moduleUis: readonly ModuleUi[] = Object.freeze([
   orchestratorModule,
 ]);
+
+const ProjectVaultBlock = lazy(() =>
+  import("../vault/ProjectVaultBlock.tsx").then(
+    ({ ProjectVaultBlock: Component }) => ({ default: Component }),
+  ),
+);
+
+/** A block a module adds to a project's Environment page. */
+export type ProjectSection = {
+  extensionId: string;
+  Section: ComponentType<{ projectId: string }>;
+};
+
+/** A constant list, drawn in this order. */
+export const projectEnvironmentSections: readonly ProjectSection[] =
+  Object.freeze([
+    { extensionId: VAULT_EXTENSION_ID, Section: ProjectVaultBlock },
+  ]);
+
+/** The sections whose extension is active in `snapshot`. */
+export function activeProjectSections(
+  sections: readonly ProjectSection[],
+  snapshot: Pick<ExtensionSnapshot, "extensions">,
+): ProjectSection[] {
+  return sections.filter((section) =>
+    snapshot.extensions.some(
+      (extension) =>
+        extension.manifest.id === section.extensionId &&
+        extension.status === "active",
+    ),
+  );
+}

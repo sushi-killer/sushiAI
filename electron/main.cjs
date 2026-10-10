@@ -71,6 +71,7 @@ const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
+const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
@@ -107,7 +108,7 @@ const companions = createCompanions({
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
   companions,
-  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
+  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST, VAULT_MANIFEST],
   // Opting in to the Orchestrator is the owner's act.
   builtinsStartOff: [ORCHESTRATOR_MANIFEST.id],
   // Folders dropped here are read as JSON manifests and carry no code; the
@@ -408,6 +409,7 @@ require("./vault.cjs").registerVault({
   notices,
   safeStorage,
   userDataDir: app.getPath("userData"),
+  isEnabled: () => extensions.isEnabled(VAULT_MANIFEST.id),
 });
 const orchestratorNotices = createOrchestratorNotices({
   notices,

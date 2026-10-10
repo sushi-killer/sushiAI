@@ -5700,32 +5700,3 @@ iframe {
 .ssh-form .advanced label {
   margin-top: var(--gap-sm);
 }
-/* Vault token: below the hosts list; the field never shows the token. */
-.vault-token {
-  display: grid;
-  gap: 8px;
-  margin-top: 22px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
-.vault-token-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-.vault-token-state {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-.vault-token-row {
-  display: flex;
-  gap: 8px;
-}
-.vault-token-row input {
-  flex: 1;
-  min-width: 0;
-}
-.vault-token .muted {
-  margin: 0;
-}

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
-import type { Project } from "./types";
-import { Tag } from "./ui";
+import { Tag } from "../ui";
+import "./vault.css";
 
 type Draft = { address: string; mount: string; paths: string[] };
 type Check =
@@ -12,8 +12,9 @@ type Check =
 
 const PLACEHOLDERS = ["royal-ark/shared", "royal-ark/herald"];
 
-function draftOf(project: Project): Draft {
-  const vault = project.vault;
+type Config = { address: string; mount: string; paths: string[] };
+
+function draftOf(vault: Config | null): Draft {
   return {
     address: vault?.address ?? "",
     mount: vault?.mount ?? "",
@@ -31,30 +32,34 @@ function same(a: Draft, b: Draft): boolean {
 }
 
 /** Where This Mac reads the project's values from in Vault (KV v2). The
- * token lives in Settings → Connections; values are never shown here. */
-export function ProjectVaultBlock({
-  project,
-  setProject,
-}: {
-  project: Project;
-  setProject(project: Project | null): void;
-}) {
-  const [draft, setDraft] = useState<Draft>(() => draftOf(project));
+ * token lives in Settings → Vault; values are never shown here. */
+export function ProjectVaultBlock({ projectId }: { projectId: string }) {
+  const [saved, setSaved] = useState<Config | null>(null);
+  const [draft, setDraft] = useState<Draft>(() => draftOf(null));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [check, setCheck] = useState<Check>({ phase: "idle" });
-  const latest = useRef(project);
-  latest.current = project;
-  const saved = project.vault;
-  const savedDraft = draftOf(project);
-  const dirty = !same(draft, savedDraft);
+  const dirty = !same(draft, draftOf(saved));
   const savedPaths = saved?.paths.length ?? 0;
 
-  // Another tab or a reload changed the saved config: show what is stored.
+  // Show what is stored for this project.
   useEffect(() => {
-    setDraft(draftOf(latest.current));
+    let live = true;
+    setSaved(null);
+    setDraft(draftOf(null));
     setCheck({ phase: "idle" });
-  }, [project.id, project.vault]);
+    window.bridge
+      ?.projectVaultGet(projectId)
+      .then((config) => {
+        if (!live) return;
+        setSaved(config);
+        setDraft(draftOf(config));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [projectId]);
 
   function edit(next: Partial<Draft>) {
     setDraft((current) => ({ ...current, ...next }));
@@ -79,13 +84,15 @@ export function ProjectVaultBlock({
       const address = draft.address.trim();
       const mount = draft.mount.trim();
       const paths = draft.paths.map((path) => path.trim()).filter(Boolean);
-      const updated = await window.bridge.projectVaultSet(
-        project.id,
+      const config = await window.bridge.projectVaultSet(
+        projectId,
         !address && !paths.length
           ? null
           : { address, ...(mount ? { mount } : {}), paths },
       );
-      setProject(updated);
+      setSaved(config);
+      setDraft(draftOf(config));
+      setCheck({ phase: "idle" });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -97,7 +104,7 @@ export function ProjectVaultBlock({
     if (!window.bridge) return;
     setCheck({ phase: "running" });
     try {
-      const result = await window.bridge.projectVaultCheck(project.id);
+      const result = await window.bridge.projectVaultCheck(projectId);
       setCheck(
         result.ok
           ? { phase: "ok", names: result.names, count: result.count }

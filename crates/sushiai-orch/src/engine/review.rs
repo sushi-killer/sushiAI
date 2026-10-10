@@ -37,46 +37,61 @@ pub(super) fn review_floor(implementer: &Route, tier: Tier) -> u32 {
     route_strength(implementer).max(tier_floor)
 }
 
-/// The cheapest route at `floor` or above, skipping `exclude`; with none, the
-/// strongest one (cheapest first) when `fallback` is set. Unpriced routes
-/// sort after priced ones. Ties go to a route on a harness other than
-/// `other_than`'s, then to `own_id`, then settings order. The bool is true
-/// when the route reaches the floor.
+/// The route's strength when it is known: an explicit `strength`, else the
+/// model's default; `None` for a route with no model and no `strength`.
+pub(super) fn known_strength(route: &Route) -> Option<u32> {
+    route
+        .strength
+        .or_else(|| route.model.as_ref().map(|_| route_strength(route)))
+}
+
+/// Whether `route` is one of `excluded`, or runs the same harness and model as
+/// one of them.
+fn is_excluded(route: &Route, excluded: &[&Route]) -> bool {
+    excluded
+        .iter()
+        .any(|e| e.id == route.id || (e.harness == route.harness && e.model == route.model))
+}
+
+/// The best route whose strength is known and at `floor` or above, skipping
+/// `exclude` (by id, or by harness and model). Order: a priced route first,
+/// then a harness other than `other_than`'s, then the lower price, then
+/// settings order. With none at the floor, and `fallback` set, the route with
+/// the highest known strength (same order on a tie); a route of unknown
+/// strength ranks below every known one. The bool is true when the route
+/// reaches the floor.
 pub(super) fn cheapest_route_at<'a>(
     settings: &'a Settings,
     floor: u32,
-    exclude: Option<&str>,
+    exclude: &[&Route],
     other_than: &Route,
-    own_id: Option<&str>,
     fallback: bool,
 ) -> Option<(&'a Route, bool)> {
     let pool: Vec<(usize, &Route)> = settings
         .routes
         .iter()
         .enumerate()
-        .filter(|(_, r)| Some(r.id.as_str()) != exclude)
+        .filter(|(_, r)| !is_excluded(r, exclude))
         .collect();
     let key = |(i, r): &(usize, &Route)| {
         let cost = route_cost(&settings.prices, r);
         (
             cost.is_none(),
-            cost.unwrap_or(0.0),
             r.harness == other_than.harness,
-            Some(r.id.as_str()) != own_id,
+            cost.unwrap_or(0.0),
             *i,
         )
     };
     let cmp = |a: &(usize, &Route), b: &(usize, &Route)| {
         let (ka, kb) = (key(a), key(b));
         ka.0.cmp(&kb.0)
-            .then(ka.1.total_cmp(&kb.1))
-            .then(ka.2.cmp(&kb.2))
+            .then(ka.1.cmp(&kb.1))
+            .then(ka.2.total_cmp(&kb.2))
             .then(ka.3.cmp(&kb.3))
-            .then(ka.4.cmp(&kb.4))
     };
     if let Some(found) = pool
         .iter()
-        .filter(|(_, r)| route_strength(r) >= floor)
+        .filter(|(_, r)| known_strength(r).is_some_and(|s| s >= floor))
         .min_by(|a, b| cmp(a, b))
     {
         return Some((found.1, true));
@@ -84,17 +99,20 @@ pub(super) fn cheapest_route_at<'a>(
     if !fallback {
         return None;
     }
-    let top = pool.iter().map(|(_, r)| route_strength(r)).max()?;
+    let top = pool.iter().map(|(_, r)| known_strength(r)).max()?;
     pool.iter()
-        .filter(|(_, r)| route_strength(r) == top)
+        .filter(|(_, r)| known_strength(r) == top)
         .min_by(|a, b| cmp(a, b))
         .map(|(_, r)| (*r, false))
 }
 
 /// The review route and a one-line reason. An explicit `review` id is used
-/// as is. `"auto"` picks the cheapest route no weaker than
-/// `review_floor` (ties: another harness, then the implementer's own route),
-/// else the strongest one. `""` -> no review (handled by the caller).
+/// as is. `"auto"` never picks the implementer's route nor any route with its
+/// harness and model: it takes the best route of known strength at
+/// `review_floor` or above (priced, on another harness, then cheapest), else
+/// the strongest remaining one. Only when no other route exists does it fall
+/// back to the implementer's own route, reason `self-review: no other route`.
+/// `""` -> no review (handled by the caller).
 pub fn select_review_route<'a>(
     settings: &'a Settings,
     implementer: &Route,
@@ -105,19 +123,31 @@ pub fn select_review_route<'a>(
         return Some((route, "explicit setting".to_string()));
     }
     let floor = review_floor(implementer, tier);
-    let (route, reached) = cheapest_route_at(
-        settings,
-        floor,
-        None,
-        implementer,
-        Some(&implementer.id),
-        true,
-    )?;
+    let Some((route, reached)) =
+        cheapest_route_at(settings, floor, &[implementer], implementer, true)
+    else {
+        let own = settings
+            .routes
+            .iter()
+            .find(|r| r.id == implementer.id)
+            .or_else(|| {
+                settings
+                    .routes
+                    .iter()
+                    .find(|r| r.harness == implementer.harness && r.model == implementer.model)
+            })?;
+        return Some((own, "self-review: no other route".to_string()));
+    };
     let reason = if reached {
         format!(
             "{} tier, strength {}",
             tier_name(tier),
             route_strength(route)
+        )
+    } else if known_strength(route).is_none() {
+        format!(
+            "no route at strength {floor}; {} has no model and no strength: set strength on it",
+            route.id
         )
     } else {
         format!("no route at strength {floor}; strongest available")

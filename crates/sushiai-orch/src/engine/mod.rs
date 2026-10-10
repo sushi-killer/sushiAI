@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
+use tokio::sync::{broadcast, oneshot, watch, Notify, Semaphore};
 
 #[path = "../audit.rs"]
 mod audit;
@@ -354,6 +354,18 @@ pub struct App {
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// (tree hash, command) pairs that passed in a subtask's final run: a
+    /// parent on the same tree does not run that command again.
+    gate_passes: StdMutex<std::collections::HashSet<(String, String)>>,
+    /// Keyed by (base sha, command): background base runs in flight. The
+    /// receiver flips to `true` when the job is over; its result, if any, is
+    /// then in `base_runs`. One pair runs on base at most once per daemon.
+    base_jobs: StdMutex<HashMap<(String, String), watch::Receiver<bool>>>,
+    /// Pairs whose first base run failed and whose rerun passed (load-flaky).
+    base_flaky: StdMutex<std::collections::HashSet<(String, String)>>,
+    /// Cancelled by `shutdown_for` only: a task stop must not end a job
+    /// another task may be waiting on.
+    base_cancel: CancelToken,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
     /// Concurrency limit (`settings.parallel` at startup -- a live
@@ -543,6 +555,10 @@ impl App {
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(HashMap::new()),
+            gate_passes: StdMutex::new(Default::default()),
+            base_jobs: StdMutex::new(HashMap::new()),
+            base_flaky: StdMutex::new(Default::default()),
+            base_cancel: CancelToken::new(),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
             parallel_limit,
@@ -624,6 +640,7 @@ impl App {
         for cancel in self.proposals.lock().unwrap().values() {
             cancel.cancel();
         }
+        self.base_cancel.cancel();
     }
 
     /// The status a task takes when its loop is cancelled: `stopped` for an
@@ -695,6 +712,12 @@ impl App {
     /// goes only once its run has returned.
     pub fn any_audit_running(&self) -> bool {
         !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
+    }
+
+    /// Same again for background base runs: a key leaves `base_jobs` only
+    /// after its run returned and its scratch worktree is gone.
+    pub fn any_base_job_running(&self) -> bool {
+        !self.base_jobs.lock().unwrap().is_empty()
     }
 
     /// Appends a line to a task's `decisions` and persists it right away --

@@ -363,9 +363,12 @@ pub enum PlanOutcome {
 /// `stopped`/`failed` mid-draft, all correctly go back through planning
 /// instead of quietly falling through to implement with blank fields. Once
 /// one plan attempt has *passed*, this is permanently `false` for the rest
-/// of the task's life -- planning runs at most once, ever.
+/// of the task's life -- planning runs at most once, ever. A task its parent
+/// planner drafted completely (`planned_by_parent`) never runs it: the
+/// parent's draft is its plan.
 pub(super) fn needs_planning(task: &Task) -> bool {
     task.request.is_some()
+        && !task.planned_by_parent
         && !task
             .attempts
             .iter()
@@ -889,6 +892,7 @@ pub(super) async fn run_plan_stage(
                     by: "planner".to_string(),
                     kind: None,
                     attempt: None,
+                    commands: Vec::new(),
                     overturned: false,
                     owner_answer: None,
                 });
@@ -1022,9 +1026,10 @@ pub(super) async fn run_plan_stage(
     }
 }
 
-/// Turns a drafted task into a parent: one child per part, each drafted by
-/// its own planner, branching from the parent's branch, with `dependsOn`
-/// mapped from the parts' keys. The parent is left `running` (its loop then
+/// Turns a drafted task into a parent: one child per part, branching from
+/// the parent's branch, with `dependsOn` mapped from the parts' keys. A part
+/// the planner drafted completely (title, goal, criteria and verify) runs as
+/// drafted; an incomplete one is drafted by its own planner from its request. The parent is left `running` (its loop then
 /// starts the children) or `stopped` for the owner to review first.
 async fn split_into_subtasks(
     app: &Arc<App>,
@@ -1058,10 +1063,35 @@ async fn split_into_subtasks(
         })
         .collect();
     let now = now_ms();
+    let review_on = !app.settings.read().unwrap().review.is_empty();
+    let parent_worktree = PathBuf::from(&parent.worktree);
     let mut titles = Vec::new();
     let mut children: Vec<Task> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         let title = titles_by_key[part.key.trim()].clone();
+        let non_empty = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .filter(|c| !c.trim().is_empty())
+                .cloned()
+                .collect()
+        };
+        let drafted_verify = non_empty(&part.verify);
+        let (verify, judged) = if review_on {
+            split_verify_commands(&parent_worktree, &drafted_verify)
+        } else {
+            (drafted_verify, Vec::new())
+        };
+        let mut criteria = non_empty(&part.criteria);
+        criteria.extend(
+            judged
+                .into_iter()
+                .map(|v| format!("Checked by review (not a shell command): {v}")),
+        );
+        let goal = part.goal.trim().to_string();
+        let complete = !part.title.trim().is_empty()
+            && !goal.is_empty()
+            && !criteria.is_empty()
+            && !verify.is_empty();
         let created = app
             .create_task_record(NewTask {
                 backlog: None,
@@ -1069,10 +1099,10 @@ async fn split_into_subtasks(
                 repo_root: PathBuf::from(&parent.repo),
                 project_id: parent.project_id.clone(),
                 title: title.clone(),
-                goal: String::new(),
-                criteria: vec![],
-                verify: vec![],
-                final_verify: vec![],
+                goal,
+                criteria,
+                verify,
+                final_verify: non_empty(&part.final_verify),
                 checks: vec![],
                 held_out: None,
                 request: Some(subtask_request(&parent, &part.request)),
@@ -1097,7 +1127,7 @@ async fn split_into_subtasks(
                 created_at: now + i as i64,
             })
             .await;
-        let child = match created {
+        let mut child = match created {
             Ok(child) => child,
             Err(e) => {
                 // All parts or none: a partial split would leave the parent
@@ -1106,6 +1136,14 @@ async fn split_into_subtasks(
                 return Err(e);
             }
         };
+        child.planned_tier = part.tier;
+        child.visual_criteria = part.visual_criteria.clone();
+        child.planned_by_parent = complete;
+        if let Err(e) = app.store.save_task(&child) {
+            children.push(child);
+            discard_children(app, children).await;
+            return Err(e.to_string());
+        }
         if let Some(mcp) = &parent_mcp {
             let _ = std::fs::write(app.store.task_dir(&child.id).join("mcp.json"), mcp);
         }

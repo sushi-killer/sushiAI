@@ -526,8 +526,9 @@ fn parent_run(with_held: bool) -> (Setup, Value, tempfile::TempDir) {
             &[]
         },
     );
-    // The parent's verify fails on the empty base by design; the policy
-    // answers "keep this check" so the children start.
+    // The parent's verify fails on the empty base by design; its targets
+    // are absent there and the plan creates them, so the children start
+    // without a question.
     let mut settings = s.daemon.request("settings.get", json!({}));
     settings["answerPolicy"] = json!(true);
     s.daemon

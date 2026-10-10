@@ -727,6 +727,7 @@ async fn wait_for_triaged_answer(
                     asked_at: question.asked_at,
                     held_for_overseer: false,
                     held_at: None,
+                    commands: question.commands.clone(),
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));

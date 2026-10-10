@@ -2,6 +2,8 @@ use super::*;
 
 const CHECK_PROMPT: &str = "You check a coding task brief before an agent works on it. Two checks.\n1. Decide whether any two requirements below (the goal and the acceptance criteria) contradict each other, so that satisfying one makes another impossible. Ordinary tension or extra work is not a contradiction.\n2. The agent will have only the capabilities listed under `tools`. Decide whether a criterion can only be met with a capability none of them provides, such as moving an Asana task when no Asana tool is listed. Work on files, shell commands and the repository needs no extra tool, and neither does a criterion that only asks the agent to report something.\nReply with only JSON: {\"contradiction\": true|false, \"conflict\": \"<which two requirements, quoted briefly, or empty>\", \"missingTool\": null or {\"criterion\": <0-based index of the criterion>, \"capability\": \"<what is missing, in a few words>\", \"toolId\": \"<id of a listed connected tool that is off for this task and would provide it, or empty>\"}}";
 
+const REFRESH_PROMPT: &str = "A coding task was drafted before the tasks it builds on landed. Those tasks have landed and changed the files under `changedFiles`. Decide whether this task's `paths`, `verify` commands or `finalVerify` commands still name the right files and commands now that those files changed (a moved or renamed file, a new test file, a command whose target changed). Change only what is wrong and keep every other entry exactly as it is; never remove a check unless its target no longer exists, and never add a check that is not needed. Reply with only JSON: {\"verify\": [...], \"finalVerify\": [...], \"paths\": [...]}, each the complete list to use, or leave a field out to keep it.";
+
 const MAX_CONFLICT_CHARS: usize = 400;
 
 /// What the caller does after a check.
@@ -318,6 +320,199 @@ pub(super) async fn check_brief(
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
     action
+}
+
+/// The files the dependencies' last passed implement attempts changed.
+fn landed_files(app: &App, task: &Task) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for dep in task
+        .depends_on
+        .iter()
+        .filter_map(|id| app.store.load_task(id).ok().flatten())
+    {
+        let passed = dep
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
+        for f in passed.map(|a| a.changed_files.as_slice()).unwrap_or(&[]) {
+            if !files.contains(f) {
+                files.push(f.clone());
+            }
+        }
+    }
+    files
+}
+
+/// A string-array member of the reply; `None` when it is absent or not a list
+/// of strings.
+fn reply_list(v: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    v.get(key)?
+        .as_array()?
+        .iter()
+        .map(|x| x.as_str().map(|s| s.trim().to_string()))
+        .collect::<Option<Vec<_>>>()
+        .map(|l| l.into_iter().filter(|s| !s.is_empty()).collect())
+}
+
+/// Once per parent-drafted child, after its dependencies landed and before
+/// its first attempt: when what they changed touches the child's `paths`, or
+/// a file its verify/finalVerify commands name, one cheap judge run on the
+/// brief-check route may correct `verify`, `finalVerify` and `paths`. Never
+/// the title, goal, criteria or tier, and never a planner run. A rewrite that
+/// removes a shared check is refused. Returns `true` when the task was
+/// cancelled while the run was live (the flag is then not set).
+pub(super) async fn refresh_after_dependencies(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    cancel: &CancelToken,
+) -> bool {
+    let Ok(Some(task)) = app.store.load_task(task_id) else {
+        return false;
+    };
+    if !task.planned_by_parent
+        || task.depends_on.is_empty()
+        || task.brief_check.refreshed
+        || completed_implement_attempts(&task) > 0
+    {
+        return false;
+    }
+    let changed = landed_files(app, &task);
+    let commands: Vec<&String> = task.verify.iter().chain(&task.final_verify).collect();
+    let targets: Vec<String> = commands.iter().flat_map(|c| check_targets(c)).collect();
+    let touched = overlapping_path(&task.paths, &changed).is_some()
+        || changed.iter().any(|f| targets.iter().any(|t| t == f));
+    let settle = |decision: Option<String>, edit: &dyn Fn(&mut Task)| {
+        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+            edit(&mut t);
+            t.brief_check.refreshed = true;
+            t.decisions.extend(decision);
+            t.updated_at = now_ms();
+            let _ = app.store.save_task(&t);
+            app.broadcast_task(&t);
+        }
+    };
+    if !touched {
+        settle(None, &|_| {});
+        return false;
+    }
+    let Some((route_id, route, fallback)) = check_route(app) else {
+        settle(
+            Some("Refresh: skipped, the brief-check route is empty".to_string()),
+            &|_| {},
+        );
+        return false;
+    };
+    let Some(route) = route else {
+        settle(
+            Some(format!(
+                "Refresh: skipped, no route on an installed agent CLI for {route_id}"
+            )),
+            &|_| {},
+        );
+        return false;
+    };
+    let prompt = format!(
+        "{REFRESH_PROMPT}\n\n{}\n",
+        json!({
+            "changedFiles": changed,
+            "paths": task.paths,
+            "verify": task.verify,
+            "finalVerify": task.final_verify,
+        })
+    );
+    let reply = match run_judge(
+        app, &task, &route, attempt_n, "refresh", "refresh", &prompt, cancel,
+    )
+    .await
+    {
+        Ok((reply, cost)) => {
+            add_task_cost(app, task_id, cost);
+            reply
+        }
+        Err(RunError::Cancelled) => return true,
+        Err(RunError::Io(msg) | RunError::NotFound(msg)) => Err(msg),
+    };
+    let note = fallback.map(|n| format!("Refresh: {n}"));
+    let parsed = reply.and_then(|text| {
+        let (start, end) = (text.find('{'), text.rfind('}'));
+        let slice = start.zip(end).filter(|(s, e)| s < e);
+        let (s, e) = slice.ok_or_else(|| "the reply had no JSON".to_string())?;
+        serde_json::from_str::<serde_json::Value>(&text[s..=e])
+            .map_err(|_| "the reply was not valid JSON".to_string())
+    });
+    let v = match parsed {
+        Ok(v) => v,
+        Err(why) => {
+            let mut lines: Vec<String> = note.into_iter().collect();
+            lines.push(format!(
+                "Refresh: no usable answer ({}); kept as drafted",
+                truncate_chars(&why, 200)
+            ));
+            settle(Some(lines.join("\n")), &|_| {});
+            return false;
+        }
+    };
+    let Ok(Some(task)) = app.store.load_task(task_id) else {
+        return false;
+    };
+    // A rewrite that empties a list the draft had is a removal, not a fix.
+    let differs = |new: Option<Vec<String>>, old: &[String]| {
+        new.filter(|n| *n != old && (old.is_empty() || !n.is_empty()))
+    };
+    let verify = differs(reply_list(&v, "verify"), &task.verify);
+    let final_verify = differs(reply_list(&v, "finalVerify"), &task.final_verify);
+    let paths = differs(reply_list(&v, "paths"), &task.paths);
+    let amendment = Amendment {
+        verify: verify.clone(),
+        final_verify: final_verify.clone(),
+        ..Default::default()
+    };
+    let settings = app.settings.read().unwrap().clone();
+    let refused = (!amendment.is_empty())
+        .then(|| shared_check_amend_refusal(&settings, &task, &amendment))
+        .flatten();
+    let (verify, final_verify) = if refused.is_some() {
+        (None, None)
+    } else {
+        (verify, final_verify)
+    };
+    let mut fields: Vec<&str> = Vec::new();
+    if verify.is_some() {
+        fields.push("verify");
+    }
+    if final_verify.is_some() {
+        fields.push("finalVerify");
+    }
+    if paths.is_some() {
+        fields.push("paths");
+    }
+    let mut decision = match (&refused, fields.is_empty()) {
+        (Some(why), _) => format!("Refresh: refused, kept the old commands ({why})"),
+        (None, true) => "Refresh: no change".to_string(),
+        (None, false) => format!("Refresh: changed {}", fields.join(", ")),
+    };
+    if refused.is_some() && !fields.is_empty() {
+        decision.push_str(&format!("; changed {}", fields.join(", ")));
+    }
+    if verify.is_some() {
+        // Cached results belong to the old commands.
+        app.verify_cache.lock().unwrap().remove(task_id);
+    }
+    let lines: Vec<String> = note.into_iter().chain([decision]).collect();
+    settle(Some(lines.join("\n")), &|t| {
+        if let Some(v) = verify.clone() {
+            t.verify = v;
+        }
+        if let Some(v) = final_verify.clone() {
+            t.final_verify = v;
+        }
+        if let Some(p) = paths.clone() {
+            t.paths = p;
+        }
+    });
+    false
 }
 
 #[cfg(test)]

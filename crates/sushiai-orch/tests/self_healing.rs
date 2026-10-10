@@ -235,6 +235,29 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
 }
 
 #[test]
+fn a_final_only_command_is_not_judged_before_the_first_attempt() {
+    // A judge that would switch any command off is never asked about a
+    // command that is only in `finalVerify`: finals gate after review.
+    let feasibility =
+        js("{\"verdict\":\"unrelated\",\"reason\":\"the lint config is broken on main\"}");
+    let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
+    let check = "echo broken lint; exit 3";
+    let id = create(&s, json!({"finalVerify": [check]}));
+    let task = finished(&s, &id);
+    // The attempt ran first; only then does the final fail on the worktree
+    // and on the base, which is a question and no judge run.
+    assert_eq!(task["status"], "waiting", "{task}");
+    assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
+    assert_eq!(task["question"]["commands"], json!([check]), "{task}");
+    assert_eq!(implements(&task).len(), 1, "{task}");
+    assert_eq!(task["finalVerify"], json!([check]), "{task}");
+    assert!(task["briefCheck"]["nonGating"].is_null(), "{task}");
+    assert!(orchd_assumptions(&task).is_empty(), "{task}");
+    assert!(!decisions(&task).contains("non-gating"), "{task}");
+    cleanup(s, &task);
+}
+
+#[test]
 fn a_check_whose_program_is_missing_on_the_host_keeps_gating_and_says_so() {
     // Even a judge that would call it unrelated is never asked: exit 127 is
     // the host's PATH or toolchain, and a check must not quietly stop gating.

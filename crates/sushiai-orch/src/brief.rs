@@ -898,7 +898,7 @@ const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
-const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Draft every part completely, as you would a task of its own: `key`, `title`, `goal`, `criteria` (strings or `{\"text\": \"...\", \"visual\": true}`, as above), `verify`, `finalVerify`, `paths`, `tier` and `dependsOn`. A part with a title, goal, criteria and verify runs as drafted and is not planned again. Each part's `request` is what its own planner drafts from when the draft is incomplete, so keep it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. The top-level verify and finalVerify carry the whole-repo checks (the full CI script): they run once on the combined result, so a part's own finalVerify lists only checks for its own part. When the request fits one session, leave `subtasks` out.";
 
 /// The drafting-stage brief for a top-level task: the owner's request
 /// verbatim, then the fixed planning instructions and report format (spec:
@@ -941,8 +941,10 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
         extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
         format = format.replace(
             "]}]}\n```",
-            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"]}]}\n```",
+            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],\"finalVerify\":[],\"paths\":[\"src/...\"],\"tier\":\"mechanical|standard|hard\",\"dependsOn\":[],\"request\":\"...\"}]}\n```",
         );
+    } else {
+        extra.push_str(&format!("\n\n{PLAN_SUBTASK_GATE}"));
     }
     let past_work = if past_work.is_empty() {
         String::new()
@@ -984,7 +986,10 @@ const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an e
 
 const PLAN_PATHS: &str = "List in `paths` the repo-relative files or directories the task will edit, as narrowly as you can. Tasks on the same branch never edit one file at once: a task whose paths overlap another running task's waits for it, then continues on top of its landed work. Leave `paths` empty only when you cannot tell.";
 
-const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
+/// Added to a subtask's plan brief only: its parent runs the whole-repo checks.
+const PLAN_SUBTASK_GATE: &str = "This request is one part of a larger task. Whole-repo checks it shares with its parent (the full CI script) run once at the parent, on the combined result, so this part's `finalVerify` lists only checks for its own part.";
+
+const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.";
 
 /// Asks the reviewer for a ruling on every criterion.
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
@@ -1077,7 +1082,7 @@ pub struct PlanDraft {
     pub screenshot: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PlanSubtask {
     #[serde(default)]
     pub key: String,
@@ -1085,6 +1090,22 @@ pub struct PlanSubtask {
     pub title: String,
     #[serde(default)]
     pub request: String,
+    /// What the part achieves; with `criteria` and `verify` it makes a
+    /// complete draft the child runs from without its own planner.
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default, deserialize_with = "lenient_criteria")]
+    pub criteria: Vec<String>,
+    /// Criteria written as `{text, visual: true}`; filled by [`parse_plan`].
+    #[serde(skip)]
+    pub visual_criteria: Vec<String>,
+    #[serde(default)]
+    pub verify: Vec<String>,
+    #[serde(default, rename = "finalVerify")]
+    pub final_verify: Vec<String>,
+    /// Unknown or missing -> `None`.
+    #[serde(default, deserialize_with = "lenient_tier")]
+    pub tier: Option<Tier>,
     /// Keys of the parts this one builds on.
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Vec<String>,
@@ -1145,15 +1166,26 @@ pub(crate) fn lenient_tier<'de, D: serde::Deserializer<'de>>(
 pub fn parse_plan(text: &str) -> Option<PlanDraft> {
     let body = last_fenced_block(text, "sushi-plan")?;
     let mut draft: PlanDraft = serde_json::from_str(&body).ok()?;
-    if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("criteria").and_then(|c| c.as_array().cloned()))
-    {
-        draft.visual_criteria = items
-            .iter()
-            .filter(|c| c.get("visual").and_then(|v| v.as_bool()) == Some(true))
-            .filter_map(|c| c.get("text")?.as_str().map(str::to_string))
-            .collect();
+    let value: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+    let visual_of = |v: &serde_json::Value| -> Vec<String> {
+        v.get("criteria")
+            .and_then(|c| c.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|c| c.get("visual").and_then(|v| v.as_bool()) == Some(true))
+                    .filter_map(|c| c.get("text")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if let Some(v) = &value {
+        draft.visual_criteria = visual_of(v);
+        if let Some(parts) = v.get("subtasks").and_then(|s| s.as_array()) {
+            for (part, raw) in draft.subtasks.iter_mut().zip(parts) {
+                part.visual_criteria = visual_of(raw);
+            }
+        }
     }
     Some(draft)
 }
@@ -1898,6 +1930,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2053,6 +2086,17 @@ mod tests {
         let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("-- check:"));
         assert!(brief.contains("\"finalVerify\":[]"));
+    }
+
+    #[test]
+    fn only_a_subtask_plan_brief_says_whole_repo_checks_run_at_the_parent() {
+        let sentence = "run once at the parent, on the combined result";
+        let sub = build_subtask_plan_brief("r", &Variant::default(), "");
+        assert!(sub.contains(sentence));
+        let top = build_plan_brief("r", &Variant::default(), "");
+        assert!(!top.contains(sentence));
+        assert!(top.contains("run once on the combined result"));
+        assert!(top.contains("run at its parent"));
     }
 
     #[test]
@@ -2367,6 +2411,21 @@ mod tests {
         assert!(retry.contains("add dark mode"));
         assert!(retry.contains("sushi-plan"));
         assert!(retry.to_lowercase().contains("previous reply"));
+    }
+
+    #[test]
+    fn parse_plan_reads_a_complete_part_draft_and_its_visual_criteria() {
+        let text = "```sushi-plan\n{\"title\":\"T\",\"subtasks\":[{\"key\":\"a\",\"title\":\"A\",\"goal\":\"G\",\"criteria\":[\"c1\",{\"text\":\"c2\",\"visual\":true}],\"verify\":[\"true\"],\"finalVerify\":[\"x\"],\"tier\":\"hard\",\"request\":\"r\"},{\"key\":\"b\",\"request\":\"r\"}]}\n```";
+        let plan = parse_plan(text).unwrap();
+        let a = &plan.subtasks[0];
+        assert_eq!(a.goal, "G");
+        assert_eq!(a.criteria, vec!["c1", "c2"]);
+        assert_eq!(a.visual_criteria, vec!["c2"]);
+        assert_eq!(a.verify, vec!["true"]);
+        assert_eq!(a.final_verify, vec!["x"]);
+        assert_eq!(a.tier, Some(Tier::Hard));
+        let b = &plan.subtasks[1];
+        assert!(b.goal.is_empty() && b.criteria.is_empty() && b.tier.is_none());
     }
 
     #[test]

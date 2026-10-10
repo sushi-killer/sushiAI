@@ -192,6 +192,45 @@ pub(super) async fn scope_to_diff(
     }
 }
 
+/// Splits a subtask's `finalVerify` into the commands it runs and those its
+/// parent runs anyway (exact match after trim, against the parent's `verify`
+/// and `finalVerify`). Nothing is deferred for a top-level task, a parent that
+/// cannot be loaded, or a repo with `gateAt` "every". The stored list is
+/// never changed.
+pub(super) fn split_deferred(
+    app: &App,
+    settings: &Settings,
+    task: &Task,
+) -> (Vec<String>, Vec<String>) {
+    let all = || (task.final_verify.clone(), Vec::new());
+    let Some(parent_id) = task.parent.as_deref() else {
+        return all();
+    };
+    if !settings.gates_at_parent(&task.repo) {
+        return all();
+    }
+    let Ok(Some(parent)) = app.store.load_task(parent_id) else {
+        return all();
+    };
+    let at_parent: Vec<&str> = parent
+        .verify
+        .iter()
+        .chain(&parent.final_verify)
+        .map(|c| c.trim())
+        .collect();
+    let (deferred, run) = task
+        .final_verify
+        .iter()
+        .cloned()
+        .partition(|c| at_parent.contains(&c.trim()));
+    (run, deferred)
+}
+
+/// The decision line for a command deferred to the parent.
+pub(super) fn deferred_line(command: &str) -> String {
+    format!("Orchestrator: Deferred to parent: {command}")
+}
+
 /// Adds each skip line once.
 pub(super) fn record_skips(task: &mut Task, lines: Vec<String>) {
     for line in lines {

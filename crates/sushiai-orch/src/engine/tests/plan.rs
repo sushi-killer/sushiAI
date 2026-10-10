@@ -6,6 +6,7 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
         request: format!("do {key}"),
         depends_on: deps.iter().map(|d| d.to_string()).collect(),
         paths: vec![],
+        ..Default::default()
     };
     assert!(check_subtasks(&[part("a", &[]), part("b", &["a"])]).is_ok());
     assert!(check_subtasks(&[part("a", &[])]).is_err());
@@ -41,6 +42,7 @@ fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> brief::PlanSubtask {
         request: format!("do {key}"),
         depends_on: deps.iter().map(|d| d.to_string()).collect(),
         paths: paths.iter().map(|p| p.to_string()).collect(),
+        ..Default::default()
     }
 }
 

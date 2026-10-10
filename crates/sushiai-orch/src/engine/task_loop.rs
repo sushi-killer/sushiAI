@@ -267,6 +267,26 @@ pub(super) async fn run_task_loop(
             }
         }
 
+        // A parent-drafted child may have been drafted against files its
+        // dependencies then changed: one cheap refresh of its commands and
+        // paths, before its brief is checked.
+        if completed_implement_attempts(&task) == 0
+            && parent_failure.is_none()
+            && task.planned_by_parent
+            && !task.brief_check.refreshed
+        {
+            let attempt_n = task.attempts.len() as u32 + 1;
+            if refresh_after_dependencies(&app, &task_id, attempt_n, &cancel).await {
+                drop(permit);
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
+                task = reloaded;
+            }
+        }
+
         // Explicit criteria are checked once, before the first attempt; a
         // planned brief was already checked in the plan stage.
         if completed_implement_attempts(&task) == 0
@@ -410,63 +430,11 @@ pub(super) async fn run_task_loop(
         }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
 
-        // A check that already fails on the base can never be met by the
-        // work: ask about it now, before an attempt is spent on it.
+        // A final check that already fails on the base is looked up after
+        // the attempt, from the cache or the job started here: the first
+        // attempt does not wait for it.
         if completed_implement_attempts(&task) == 0 && parent_failure.is_none() {
-            let unanswered: Vec<String> = task
-                .final_verify
-                .iter()
-                .filter(|c| !base_check_answered(&task, c, &task.base_sha))
-                .cloned()
-                .collect();
-            if let Some(base_run) =
-                failing_twice_on_base(&app, &mut task, &unanswered, &cancel).await
-            {
-                let question =
-                    pre_existing_question(&base_run.command, &task.base_sha, &base_run.tail);
-                task.question = Some(question.clone());
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let assumed = task.assumptions.len();
-                let Some(answer) = wait_for_answer(
-                    &app,
-                    &task_id,
-                    &mut task,
-                    &pending_answer,
-                    &cancel,
-                    &mut permit,
-                )
-                .await
-                else {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                };
-                let policy_answered = task.assumptions.len() > assumed;
-                let base_sha = task.base_sha.clone();
-                record_owner_base_check(
-                    &mut task,
-                    &base_run.command,
-                    &base_sha,
-                    &answer,
-                    policy_answered,
-                );
-                let settings = app.settings.read().unwrap().clone();
-                let origin = origin_of_last_answer(&task);
-                if apply_base_check_answer(&settings, &mut task, &question, &answer, origin) {
-                    app.verify_cache.lock().unwrap().remove(&task_id);
-                } else {
-                    // Retry: on the newest base. On an unmoved one the
-                    // answered pair keeps the preflight from asking again.
-                    let wt = PathBuf::from(&task.worktree);
-                    carry_onto_newest_base(&mut task, &wt).await;
-                }
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
-                app.broadcast_task(&task);
-                drop(permit);
-                continue 'attempts;
-            }
+            start_final_base_jobs(&app, &task);
         }
 
         let mut planner_tier_used = false;
@@ -2483,6 +2451,19 @@ impl App {
     }
 }
 
+/// What a failing final check tells the next attempt.
+fn final_failure_detail(failed: &VerifyOutcome) -> String {
+    format!(
+        "Final check {} exited {}.\n{}",
+        failed.command,
+        failed
+            .code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        failed.tail
+    )
+}
+
 pub(super) enum Tail {
     Continue,
     Return,
@@ -2507,18 +2488,25 @@ pub(super) async fn finish_after_review(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Tail {
-    if !task.final_verify.is_empty() {
+    // The commands the parent runs anyway are left out of this run; the
+    // stored `finalVerify` is not changed.
+    let (to_run, deferred) = split_deferred(app, settings, task);
+    record_skips(task, deferred.iter().map(|c| deferred_line(c)).collect());
+    if !to_run.is_empty() {
         // Not through the verify cache: it keys on the diff alone and
         // would hand back the fast checks' results.
-        let (final_commands, skipped) = scope_to_diff(
-            app,
-            &task.repo,
-            worktree,
-            &task.base_sha,
-            &task.final_verify,
-        )
-        .await;
+        let (final_commands, skipped) =
+            scope_to_diff(app, &task.repo, worktree, &task.base_sha, &to_run).await;
         record_skips(task, skipped);
+        // The tree the finals run on, taken before they run: a parent whose
+        // final tree is the same one does not run a passed command again.
+        let tree = {
+            let wt = worktree.to_path_buf();
+            tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+        };
         let final_results = run_verify_commands(
             worktree,
             &run_dir.join("final"),
@@ -2534,6 +2522,12 @@ pub(super) async fn finish_after_review(
             app.finish_task_loop(task_id);
             return Tail::Return;
         }
+        if let Some(tree) = tree {
+            let mut passes = app.gate_passes.lock().unwrap();
+            for r in final_results.iter().filter(|r| r.code == Some(0)) {
+                passes.insert((tree.clone(), r.command.clone()));
+            }
+        }
         task.attempts[idx]
             .verify
             .extend(final_results.iter().cloned());
@@ -2542,26 +2536,55 @@ pub(super) async fn finish_after_review(
             .filter(|v| v.code != Some(0))
             .cloned()
             .collect();
-        for failed in &failed_finals {
-            let detail = format!(
-                "Final check {} exited {}.\n{}",
-                failed.command,
-                failed
-                    .code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-                failed.tail
-            );
-            let base_dir = run_dir.join("final-base");
-            let on_base = failing_on_base(app, task, failed, &base_dir, cancel).await;
-            let Some(base_run) = on_base else {
-                match fail_and_continue(
+        note_flaky_base_checks(app, task, &to_run);
+        // Every failing final goes through the base lookup (cache, else the
+        // in-flight job, else a job started now), never a second run.
+        let base_dir = run_dir.join("final-base");
+        let mut on_base: Vec<(VerifyOutcome, VerifyOutcome)> = Vec::new();
+        let mut ordinary: Vec<VerifyOutcome> = Vec::new();
+        for failed in failed_finals {
+            match failing_on_base(app, task, &failed, &base_dir, cancel).await {
+                Some(base_run) => on_base.push((failed, base_run)),
+                None => ordinary.push(failed),
+            }
+        }
+        if cancel.is_cancelled() {
+            interrupt_attempt(app, task, idx);
+            *permit = None;
+            app.finish_task_loop(task_id);
+            return Tail::Return;
+        }
+        // A base failure the plan explains (the files it names are created
+        // by the plan) or the owner kept is an ordinary failure.
+        let names: Vec<String> = on_base.iter().map(|(f, _)| f.command.clone()).collect();
+        let kept = keep_planned_checks(app, task, &names);
+        let mut pre_existing: Vec<VerifyOutcome> = Vec::new();
+        for (failed, base_run) in on_base {
+            if kept.contains(&failed.command) || is_kept(task, &failed.command) {
+                ordinary.push(failed);
+            } else {
+                pre_existing.push(base_run);
+            }
+        }
+        if !kept.is_empty() {
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(task);
+            app.broadcast_task(task);
+        }
+        let ordinary_detail = ordinary
+            .iter()
+            .map(final_failure_detail)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if pre_existing.is_empty() {
+            if !ordinary.is_empty() {
+                return match fail_and_continue(
                     app,
                     task_id,
                     task,
                     idx,
                     FailureKind::Verify,
-                    detail,
+                    ordinary_detail,
                     attempt_budget,
                     pending_answer,
                     cancel,
@@ -2571,23 +2594,31 @@ pub(super) async fn finish_after_review(
                 {
                     LoopSignal::Continue => {
                         *permit = None;
-                        return Tail::Continue;
+                        Tail::Continue
                     }
                     LoopSignal::Stop => {
                         *permit = None;
                         app.finish_task_loop(task_id);
-                        return Tail::Return;
+                        Tail::Return
                     }
-                }
-            };
-            // The failure is older than this task: no retry can fix it.
-            // The owner decides what the check is worth.
-            record_failure(task, idx, FailureKind::Verify, detail);
-            task.question = Some(pre_existing_question(
-                &failed.command,
-                &task.base_sha,
-                &base_run.tail,
-            ));
+                };
+            }
+        } else {
+            // The failure is older than this task: no retry can fix it. The
+            // owner decides, once for all of them, and no attempt is spent.
+            let mut detail: Vec<String> = pre_existing
+                .iter()
+                .map(|b| {
+                    let failed = final_results.iter().find(|v| v.command == b.command);
+                    failed.map(final_failure_detail).unwrap_or_default()
+                })
+                .collect();
+            if !ordinary_detail.is_empty() {
+                detail.push(ordinary_detail.clone());
+            }
+            record_failure(task, idx, FailureKind::Verify, detail.join("\n\n"));
+            let question = pre_existing_question(&pre_existing, &task.base_sha);
+            task.question = Some(question.clone());
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
             let assumed = task.assumptions.len();
@@ -2600,44 +2631,70 @@ pub(super) async fn finish_after_review(
             };
             let policy_answered = task.assumptions.len() > assumed;
             let base_sha = task.base_sha.clone();
-            record_owner_base_check(task, &failed.command, &base_sha, &answer, policy_answered);
-            if is_option(&answer, PRE_EXISTING_DROP) {
-                let settings = app.settings.read().unwrap().clone();
-                let origin = origin_of_last_answer(task);
-                match remove_check_command(&settings, task, &failed.command, origin) {
-                    Ok(()) => {
-                        task.decisions.push(format!(
-                            "Orchestrator: dropped final check {}",
-                            failed.command
-                        ));
-                        // The check no longer counts: the attempt is not failed.
-                        let a = &mut task.attempts[idx];
-                        a.status = AttemptStatus::Running;
-                        a.ended_at = None;
-                        a.failure = None;
-                        task.status = TaskStatus::Running;
-                        task.updated_at = now_ms();
-                        let _ = app.store.save_task(task);
-                        app.broadcast_task(task);
-                        continue;
-                    }
-                    // Refused: the check stays and the attempt stays failed;
-                    // the answer counts as a retry below.
-                    Err(why) => task.decisions.push(format!(
-                        "Orchestrator: check {} stays: {why}",
-                        failed.command
-                    )),
-                }
+            record_owner_base_check(
+                task,
+                &question.commands,
+                &base_sha,
+                &answer,
+                policy_answered,
+            );
+            let settings = app.settings.read().unwrap().clone();
+            let origin = origin_of_last_answer(task);
+            // Every removal goes through `remove_check_command`; a refused
+            // command stays and the answer counts as a retry for it.
+            if apply_base_check_answer(&settings, task, &question, &answer, origin) {
+                app.verify_cache.lock().unwrap().remove(task_id);
             }
-            // Retry (any other answer): one more attempt on the newest
-            // base, even when the attempt budget is spent.
-            carry_onto_newest_base(task, worktree).await;
-            *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
+            let stays = question
+                .commands
+                .iter()
+                .any(|c| task.final_verify.contains(c));
+            if stays {
+                // Retry (any other answer): one more attempt on the newest
+                // base, even when the attempt budget is spent.
+                carry_onto_newest_base(task, worktree).await;
+                *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                *permit = None;
+                return Tail::Continue;
+            }
+            // Every listed check is gone: the attempt is not failed by them.
+            let a = &mut task.attempts[idx];
+            a.status = AttemptStatus::Running;
+            a.ended_at = None;
+            a.failure = None;
+            task.status = TaskStatus::Running;
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
             app.broadcast_task(task);
-            *permit = None;
-            return Tail::Continue;
+            if !ordinary.is_empty() {
+                return match fail_and_continue(
+                    app,
+                    task_id,
+                    task,
+                    idx,
+                    FailureKind::Verify,
+                    ordinary_detail,
+                    attempt_budget,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue => {
+                        *permit = None;
+                        Tail::Continue
+                    }
+                    LoopSignal::Stop => {
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        Tail::Return
+                    }
+                };
+            }
         }
     }
     finish_attempt(

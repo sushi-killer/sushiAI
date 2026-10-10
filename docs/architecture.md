@@ -203,21 +203,39 @@ done) in (order, createdAt, id) order while live loops are below `parallel`.
 Starting clears the backlog and records who started it in `decisions`.
 
 A task graph is state the orchestrator keeps, never a split it decides: the planner
-may answer a top-level request with `subtasks` (keys, requests, `dependsOn`
-between keys), or the orchestrator agent builds one with `task.create
-{parent, dependsOn}`. A parent runs no implement attempt unless finishing fails (below); each child
-branches from the parent's branch, is drafted and run as a normal task, and
+may answer a top-level request with `subtasks` (keys, `dependsOn` between
+keys, and per part a title, goal, criteria, verify, finalVerify, paths, tier
+and a request), or the orchestrator agent builds one with `task.create
+{parent, dependsOn}`. A part with a title, goal, criteria and verify becomes a
+child that carries that draft (`plannedByParent`) and is not planned again;
+only an incomplete part is drafted by its own planner from its request. A parent runs no implement attempt unless finishing fails (below); each child
+branches from the parent's branch, is run as a normal task, and
 starts implementing only once its `dependsOn` tasks are done (it syncs to
-the parent's head first, so it sees their work). A finished child lands
+the parent's head first, so it sees their work). A parent-drafted child that
+depends on a task is refreshed once at that point: when a file the
+dependencies changed is under its `paths` or is a target of one of its check
+commands, one cheap run on the brief-check route (ledger stage `refresh`)
+may correct its `verify`, `finalVerify` and `paths`, never its title, goal,
+criteria or tier, and a rewrite that removes a shared check is refused. The
+brief check and the feasibility pass still run for it before attempt 1. A finished child lands
 through a per-parent merge queue: its work is carried onto the parent's
 current head, verify runs again when that head moved, and the parent's
 branch fast-forwards to the child's commit; a conflict or failing verify is
-an ordinary failure the agent retries. Before the first child starts, the
-parent's own verify and final checks run on its base (a failure is re-run
+an ordinary failure the agent retries. Before the first child starts,
+the parent's own `verify` commands run on its base (a failure is re-run
 once past the cache): one that still fails there parks the parent `waiting`
 with a keep / drop / stop question, and the children start only after the
-answer. When every child has landed, the parent runs its own verify and final
-checks on its branch (with `groundedChecks`, its checks were baselined before
+answer. Its `finalVerify` base runs go to background jobs and the children
+do not wait for them. A child leaves out the `finalVerify` commands its parent
+also lists (exact match after trim; `settings.gateAt` per repo, `"parent"` by
+default): the line `Deferred to parent: <command>` is recorded, its stored
+`finalVerify` is not changed, and the parent runs the command once on the
+final tree. A final run keeps its (tree hash, command) passes in memory, so
+under `"every"` the parent does not run a command that already passed on
+exactly its tree. When every child has landed, the parent runs its own
+verify and final checks on its branch; a final that fails there and on the
+base (the cache, else the in-flight job) and that the keep rule does not
+explain goes to one pre-existing question instead of an agent attempt (with `groundedChecks`, its checks were baselined before
 the first child started and its gated and held-out checks run once here). With
 `land` on it then lands on its base branch like a single task: carried onto
 the base head, squashed to one commit titled with its title, checked again
@@ -226,7 +244,8 @@ retried without re-running checks; a refused landing leaves it done on its own
 branch). A failing parent check, or a landing that conflicts or fails its
 re-check, is not the end of the graph: the parent gets an ordinary implement
 attempt on its own worktree, with the failure in its brief (one attempt for a
-failed check, `maxAttempts` for a landing), and waits with the
+failed check, with the failing command and its output tail in the brief,
+`maxAttempts` for a landing), and waits with the
 attempts-exhausted question when that is spent. `task.amend` on a parent with a
 live loop is applied right before its next check. Its
 cost is its plan plus its children. When something a task waits for ends
@@ -271,7 +290,7 @@ flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
   split["Verify entries that are not shell commands<br/>become review criteria"]
   baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
-  basecheck["Base preflight, before attempt 1<br/>finalVerify runs on the base (cached per sha + command);<br/>a failure is re-run once, failing twice asks the pre-existing question"]
+  basecheck["Background base jobs, started before attempt 1<br/>finalVerify runs on the base in the background (one job per sha + command,<br/>cached, a failure is re-run once); attempt 1 does not wait.<br/>A parent's verify still blocks, with one question"]
   tier["Tier<br/>planner's tier, else standard"]
   impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
@@ -284,7 +303,7 @@ flowchart TD
   protect["Protected paths<br/>owner approves"]
   review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report"]
   final["Final checks<br/>task.finalVerify, once, after review passes"]
-  baserun{"Same command on the base?<br/>throwaway worktree on base sha,<br/>cached per base + command"}
+  baserun{"Same command on the base?<br/>base lookup: the cache, else the in-flight job,<br/>else one job in a throwaway worktree on base sha"}
   commit["Commit on the task branch"]
   done([done])
   fail["Failure<br/>signature dedup, maybe escalate tier"]
@@ -293,7 +312,8 @@ flowchart TD
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
-  plan --> split --> baseline --> basecheck --> tier --> impl --> rebase --> verify
+  plan --> split --> baseline --> tier --> impl --> rebase --> verify
+  baseline -.->|"starts, does not wait"| basecheck
   impl -.- stall
   stall -->|stalled| fail
   verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> review
@@ -303,14 +323,15 @@ flowchart TD
   impl -.- impossible
   impossible -->|"drop criterion / retry / stop"| ownerQ
   ownerQ -->|drop criterion or retry| impl
-  ownerQ -->|"drop this check"| commit
-  basecheck -->|"a finalVerify check fails twice on the base"| ownerQ
+  ownerQ -->|"drop all"| commit
+  basecheck -.->|"result is cached for the lookup after the final checks"| baserun
   land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
   review -->|PASS| final -->|all exit 0| commit --> done
   final -->|all exit 0, subtask| land --> done
   final -->|non-zero| baserun
   baserun -->|passes on base| fail
-  baserun -->|also fails: retry after base is fixed / drop this check / stop| ownerQ
+  baserun -->|"keep rule: targets absent on base, the plan creates them"| fail
+  baserun -->|"every other final that also fails: ONE question lists them all (retry after the base is fixed / drop all / stop), no extra attempt"| ownerQ
   land -->|conflict / verify fails| fail
   review -->|"no verdict: review again once, same attempt"| review
   review -->|"no verdict twice"| ownerQ

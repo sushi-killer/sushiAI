@@ -32,7 +32,8 @@ pub struct Route {
     pub account_id: Option<String>,
     /// 1 (cheap, mechanical) to 3 (hard). Review routing never picks a route
     /// weaker than the implementer's; unset uses `route_strength`'s default
-    /// for the model.
+    /// for the model. A route with no model needs `strength` to meet a review
+    /// floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strength: Option<u32>,
 }
@@ -111,8 +112,10 @@ pub enum SandboxMode {
 pub struct Settings {
     pub routes: Vec<Route>,
     pub tiers: HashMap<Tier, String>,
-    /// Route id; "" = off, "auto" = first configured route whose harness
-    /// differs from the implement attempt's.
+    /// Route id; "" = off, "auto" = never the implementer's route nor one
+    /// with its harness and model: a priced route of known strength at the
+    /// floor on another harness first, else the strongest remaining route;
+    /// the implementer's own route only when no other route exists.
     pub review: String,
     pub sandbox: SandboxMode,
     pub allowed_domains: Vec<String>,
@@ -202,6 +205,10 @@ pub struct Settings {
     /// allowed. `land_on_default` decides for repos not in the map.
     #[serde(default)]
     pub land_on_default_repos: std::collections::BTreeMap<String, bool>,
+    /// Per repo path: where the whole-repo checks a subtask shares with its
+    /// parent run. A repo not in the map uses `Parent`.
+    #[serde(default)]
+    pub gate_at: std::collections::BTreeMap<String, GateAt>,
     /// Commands run in the repo's main checkout after a task lands.
     #[serde(default)]
     pub after_land: Vec<AfterLand>,
@@ -466,6 +473,10 @@ pub struct BriefCheck {
     /// Every check command was run on the base once (see `base_check`).
     #[serde(default)]
     pub feasibility_done: bool,
+    /// The refresh of a parent-drafted child after its dependencies landed
+    /// has run (or been skipped); it never runs twice.
+    #[serde(default)]
+    pub refreshed: bool,
     /// Commands that fail on the base for a reason unrelated to the task: kept
     /// out of the gates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -515,7 +526,27 @@ pub fn same_repo_path(a: &str, b: &str) -> bool {
         )
 }
 
+/// Where a subtask's finalVerify commands that its parent also runs are run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateAt {
+    /// Once, at the parent, on the final tree.
+    Parent,
+    /// In every subtask as well.
+    Every,
+}
+
 impl Settings {
+    /// Whether the checks a subtask shares with its parent run at the parent:
+    /// the per-repo entry when there is one, else true.
+    pub fn gates_at_parent(&self, repo: &str) -> bool {
+        self.gate_at
+            .iter()
+            .find(|(k, _)| same_repo_path(k, repo))
+            .map(|(_, at)| *at == GateAt::Parent)
+            .unwrap_or(true)
+    }
+
     /// Whether a task may land on `repo`'s default branch: the per-repo entry
     /// when there is one, else the global switch.
     pub fn may_land_on_default(&self, repo: &str) -> bool {
@@ -601,6 +632,7 @@ impl Default for Settings {
             worktree_root: default_worktree_root(),
             land_on_default: false,
             land_on_default_repos: Default::default(),
+            gate_at: Default::default(),
             after_land: vec![],
             scoped_checks: vec![],
             autopilot: false,
@@ -985,6 +1017,10 @@ pub struct Question {
     /// counts, so a hung overseer turn cannot hide a question for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_at: Option<i64>,
+    /// The check commands a base-check question is about, in listing order.
+    /// Empty for every other question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// How long a question stays held for the overseer.
@@ -1018,6 +1054,7 @@ impl Question {
             asked_at: Some(now_ms()),
             held_for_overseer: false,
             held_at: None,
+            commands: Vec::new(),
         }
     }
 }
@@ -1115,6 +1152,9 @@ pub struct Assumption {
     /// The attempt it was asked in (answer policy only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// The check commands a base-check answer covered (answer policy only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     pub overturned: bool,
     /// What the owner answered instead, once overturned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1283,6 +1323,10 @@ pub struct Task {
     /// The tier the planner chose; `None` when the task was not planned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
+    /// The parent planner drafted this task completely (title, goal, criteria
+    /// and verify), so it skips its own planner.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub planned_by_parent: bool,
     /// Set to `no planner tier` when the implement tier fell back to
     /// `Standard` because the planner chose none; cleared when the planner's
     /// tier is used, or a failure moves the task up a tier.
@@ -1970,6 +2014,25 @@ mod tests {
         assert_eq!(settings.brief_check_route, "auto");
     }
 
+    #[test]
+    fn gate_at_defaults_to_empty_and_an_unlisted_repo_gates_at_the_parent() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("gateAt");
+        let s: Settings = serde_json::from_value(v.clone()).unwrap();
+        assert!(s.gate_at.is_empty());
+        assert!(s.gates_at_parent("/some/repo"));
+        v["gateAt"] = serde_json::json!({"/a/b": "every", "/c/d": "parent"});
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert!(!s.gates_at_parent("/a/b"));
+        assert!(!s.gates_at_parent("/a/b/"));
+        assert!(s.gates_at_parent("/c/d"));
+        assert!(s.gates_at_parent("/e/f"));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["gateAt"]["/a/b"],
+            serde_json::json!("every")
+        );
+    }
+
     fn minimal_task_json() -> serde_json::Value {
         serde_json::json!({
             "id": "t", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
@@ -2121,6 +2184,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2366,6 +2430,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2429,6 +2494,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2520,6 +2586,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,

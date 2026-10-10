@@ -574,6 +574,7 @@ impl App {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Some(new.variant),
             eval_set: new.eval_set,
@@ -1023,11 +1024,11 @@ impl App {
             if let Some(q) = task.question.clone() {
                 // A base-check question: the task starts again only with the
                 // answer applied, and the owner's answer is remembered.
-                if let Some(command) = pre_existing_command(&q).map(str::to_string) {
+                if q.kind == QuestionKind::PreexistingFailure && !q.commands.is_empty() {
                     let base_sha = task.base_sha.clone();
                     record_owner_base_check(
                         &mut task,
-                        &command,
+                        &q.commands,
                         &base_sha,
                         &p.answer,
                         default_evidence.is_some(),
@@ -1462,9 +1463,13 @@ mod answer_source_tests {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.request = request.map(str::to_string);
         task.question = Some(base_check::pre_existing_question(
-            command,
+            &[VerifyOutcome {
+                command: command.to_string(),
+                code: Some(1),
+                tail: "boom".to_string(),
+                ms: 1,
+            }],
             "0123456789",
-            "boom",
         ));
         app.store.save_task(&task).unwrap();
         task.id

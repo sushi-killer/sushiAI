@@ -127,10 +127,8 @@ fn a_command_the_new_base_broke_waits_for_the_owner_without_costing_an_attempt()
     assert!(question.contains("already fails on base"), "{task}");
 
     // Dropping the check lets the same attempt finish: it never failed.
-    s.daemon.request(
-        "task.answer",
-        json!({"id": id, "answer": "drop this check"}),
-    );
+    s.daemon
+        .request("task.answer", json!({"id": id, "answer": "drop all"}));
     let done = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
         matches!(st, "failed" | "done")
     });

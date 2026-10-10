@@ -601,3 +601,138 @@ fn a_planned_screenshot_command_reaches_the_task_and_the_plan_brief_asks_for_it(
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);
 }
+
+/// The parent plan splits into two parts; `PART_B_JSON` is part B's draft.
+/// A child's planner (its request names `CHILD_REQ_*`) answers with a small
+/// plan of its own; an implement run writes a file per part.
+const PARENT_DRAFTS_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+out() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
+case "$input" in
+  *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *sushi-plan*)
+    case "$input" in
+      *CHILD_REQ_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\",{\"text\":\"a screenshot of a.txt\",\"visual\":true}],\"verify\":[\"test -f a.txt\"],\"finalVerify\":[\"true\"],\"paths\":[\"a.txt\"],\"tier\":\"standard\",\"request\":\"CHILD_REQ_A create a.txt\"},__PART_B__]}\n```"' ;;
+    esac
+    ;;
+  *MAKE_B*) echo b > b.txt; out "$report" ;;
+  *MAKE_A*) echo a > a.txt; out "$report" ;;
+  *) out "$report" ;;
+esac
+"#;
+
+const COMPLETE_PART_B: &str = r#"{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
+const INCOMPLETE_PART_B: &str =
+    r#"{\"key\":\"b\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
+
+fn run_split(
+    part_b: &str,
+) -> (
+    Daemon,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    serde_json::Value,
+) {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts.path(),
+        "fake-claude.sh",
+        &PARENT_DRAFTS_SCRIPT.replace("__PART_B__", part_b),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "build both parts",
+            "start": true,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = settle(&daemon, &parent_id);
+    (daemon, scripts, repo, parent)
+}
+
+fn children_of(daemon: &Daemon, parent: &serde_json::Value) -> Vec<serde_json::Value> {
+    let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
+    tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["parent"] == parent["id"])
+        .cloned()
+        .collect()
+}
+
+fn plan_attempts(task: &serde_json::Value) -> usize {
+    task["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "plan")
+        .count()
+}
+
+#[test]
+fn a_split_drafts_children_that_skip_their_own_planner() {
+    let (daemon, _scripts, _repo, parent) = run_split(COMPLETE_PART_B);
+    assert_eq!(parent["status"], "done", "{parent}");
+    let children = children_of(&daemon, &parent);
+    assert_eq!(children.len(), 2, "{children:?}");
+    for child in &children {
+        assert_eq!(child["status"], "done", "{child}");
+        assert_eq!(child["plannedByParent"], true, "{child}");
+        assert_eq!(plan_attempts(child), 0, "{child}");
+        assert!(!child["verify"].as_array().unwrap().is_empty(), "{child}");
+        assert!(!child["criteria"].as_array().unwrap().is_empty(), "{child}");
+        assert!(!child["goal"].as_str().unwrap().is_empty(), "{child}");
+    }
+    let a = children.iter().find(|c| c["title"] == "Part A").unwrap();
+    assert_eq!(a["finalVerify"], serde_json::json!(["true"]));
+    assert_eq!(a["paths"], serde_json::json!(["a.txt"]));
+    assert_eq!(a["plannedTier"], "standard");
+    assert_eq!(
+        a["visualCriteria"],
+        serde_json::json!(["a screenshot of a.txt"])
+    );
+
+    let costs: Vec<serde_json::Value> =
+        std::fs::read_to_string(daemon.data_dir().join("costs.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let planned: Vec<&serde_json::Value> = costs.iter().filter(|r| r["stage"] == "plan").collect();
+    assert!(!planned.is_empty(), "the parent was planned: {costs:?}");
+    assert!(
+        planned.iter().all(|r| r["taskId"] == parent["id"]),
+        "a child was planned: {planned:?}"
+    );
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_incomplete_part_draft_is_still_planned_by_its_own_planner() {
+    let (daemon, _scripts, _repo, parent) = run_split(INCOMPLETE_PART_B);
+    assert_eq!(parent["status"], "done", "{parent}");
+    let children = children_of(&daemon, &parent);
+    assert_eq!(children.len(), 2, "{children:?}");
+    let a = children.iter().find(|c| c["title"] == "Part A").unwrap();
+    assert_eq!(a["plannedByParent"], true, "{a}");
+    assert_eq!(plan_attempts(a), 0, "{a}");
+    let b = children.iter().find(|c| c["id"] != a["id"]).unwrap();
+    assert_ne!(b["plannedByParent"], true, "{b}");
+    assert_eq!(plan_attempts(b), 1, "{b}");
+    assert_eq!(b["status"], "done", "{b}");
+    daemon.shutdown_and_wait();
+}

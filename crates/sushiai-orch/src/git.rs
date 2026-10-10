@@ -820,6 +820,17 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
     result
 }
 
+/// Every file path of the commit `sha`, repo-relative (`git ls-tree -r
+/// --name-only`).
+pub fn tree_files(repo_root: &Path, sha: &str) -> Result<Vec<String>, GitError> {
+    let out = run(repo_root, &["ls-tree", "-r", "--name-only", sha])?;
+    Ok(out
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
 /// `git diff --name-only <old> <new>` between two tree ids.
 pub fn diff_trees_name_only(cwd: &Path, old: &str, new: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["diff", "--name-only", old, new])?;

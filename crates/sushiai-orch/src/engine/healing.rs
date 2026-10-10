@@ -53,6 +53,7 @@ fn overturnable(task: &mut Task, question: String, answer: String, evidence: Str
         by: "orchd".to_string(),
         kind: None,
         attempt: None,
+        commands: Vec::new(),
         overturned: false,
         owner_answer: None,
     });
@@ -338,7 +339,7 @@ pub(super) fn apply_feasibility(
     }
 }
 
-/// Runs every check command of the task on its base once (`base_check`);
+/// Runs the `verify` and `checks` commands of the task on its base once;
 /// each one that fails there goes to the judge, which leaves it (the task is
 /// meant to make it pass), rewrites it to a check the repository can run, or
 /// marks it non-gating. Settles for good, once per task. `false`: cancelled.
@@ -365,12 +366,12 @@ pub(super) async fn heal_feasibility(
         return true;
     };
     let mut commands: Vec<String> = Vec::new();
-    for c in task
-        .verify
-        .iter()
-        .chain(task.final_verify.iter())
-        .chain(task.checks.iter().map(|c| &c.run))
-    {
+    // `finalVerify` is not judged here: its base runs are background jobs
+    // and the finals gate after review. A command that is in `verify` as
+    // well is still judged. The finals are base-checked by
+    // `start_final_base_jobs`, which leaves out the ones deferred to the
+    // parent (`split_deferred`).
+    for c in task.verify.iter().chain(task.checks.iter().map(|c| &c.run)) {
         if !c.trim().is_empty() && !commands.contains(c) {
             commands.push(c.clone());
         }
@@ -387,8 +388,31 @@ pub(super) async fn heal_feasibility(
     let Ok(results) = ran else {
         return true;
     };
+    // A check that names files the plan creates is feasible by rule: no
+    // judge run, only the kept decision.
+    let failing: Vec<String> = results
+        .iter()
+        .filter(|r| r.code != Some(0))
+        .map(|r| r.command.clone())
+        .collect();
+    let kept = match app.store.load_task(task_id) {
+        Ok(Some(mut current)) => {
+            let kept = keep_planned_checks(app, &mut current, &failing);
+            if !kept.is_empty() {
+                current.updated_at = now_ms();
+                let _ = app.store.save_task(&current);
+                app.broadcast_task(&current);
+            }
+            kept
+        }
+        _ => return true,
+    };
     let mut rulings: Vec<(VerifyOutcome, Feasibility)> = Vec::new();
-    for (i, failed) in results.iter().filter(|r| r.code != Some(0)).enumerate() {
+    for (i, failed) in results
+        .iter()
+        .filter(|r| r.code != Some(0) && !kept.contains(&r.command))
+        .enumerate()
+    {
         let Ok(Some(current)) = app.store.load_task(task_id) else {
             return true;
         };

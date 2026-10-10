@@ -157,16 +157,11 @@ pub(super) enum ParentEnd {
     },
 }
 
-/// The decision line that keeps a parent's `verify` command although it
-/// fails on the base; it is what stops a relaunch from asking again.
-fn kept_check_line(command: &str) -> String {
-    format!("Orchestrator: kept check {command}, it fails on the base until the subtasks land")
-}
-
 /// Applies the owner's (or the policy's) answer to a base-check question of
-/// any task: `drop this check` removes the command, `keep this check`
-/// records that it stays. Shared by the live loops and the post-restart
-/// branch of `task.answer`.
+/// any task: `drop all` removes the commands, `keep all` records that they
+/// stay. Shared by the live loops and the post-restart branch of
+/// `task.answer`. `true` when at least one command was removed. A question
+/// without `commands` (persisted before they existed) applies nothing.
 pub(super) fn apply_base_check_answer(
     settings: &Settings,
     task: &mut Task,
@@ -174,37 +169,43 @@ pub(super) fn apply_base_check_answer(
     answer: &str,
     origin: Origin,
 ) -> bool {
-    let Some(command) = pre_existing_command(question).map(str::to_string) else {
+    if question.kind != QuestionKind::PreexistingFailure {
         return false;
-    };
+    }
     if is_option(answer, PRE_EXISTING_DROP) {
-        return match remove_check_command(settings, task, &command, origin) {
-            Ok(()) => {
-                task.decisions
-                    .push(format!("Orchestrator: dropped check {command}"));
-                true
+        let mut dropped = false;
+        for command in &question.commands {
+            match remove_check_command(settings, task, command, origin) {
+                Ok(()) => {
+                    task.decisions
+                        .push(format!("Orchestrator: dropped check {command}"));
+                    dropped = true;
+                }
+                // Refused: the check stays, the answer counts as a retry.
+                Err(why) => task
+                    .decisions
+                    .push(format!("Orchestrator: check {command} stays: {why}")),
             }
-            // Refused: the check stays, the answer counts as a retry.
-            Err(why) => {
-                task.decisions
-                    .push(format!("Orchestrator: check {command} stays: {why}"));
-                false
-            }
-        };
+        }
+        return dropped;
     }
     if question.options.iter().any(|o| o == PARENT_KEEP) {
-        let line = kept_check_line(&command);
-        if !task.decisions.contains(&line) {
-            task.decisions.push(line);
+        for command in &question.commands {
+            let line = kept_check_line(command, KEPT_BY_ANSWER);
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
         }
     }
     false
 }
 
-/// Before any subtask starts: the parent's own checks run on its base. A
-/// `finalVerify` and a `verify` that still fail there on a second run are
-/// asked about, and the subtasks start only after the answer. `false`: the
-/// loop has to end (cancelled, or stopped by the answer).
+/// Before any subtask starts: the parent's unkept `verify` commands run on
+/// its base. One that still fails there on a second run is asked about, and
+/// the subtasks start only after the answer. The parent's `finalVerify` base
+/// runs go to background jobs the subtasks do not wait for; they are looked
+/// up at the parent's own gate. `false`: the loop has to end (cancelled, or
+/// stopped by the answer).
 async fn parent_base_preflight(
     app: &Arc<App>,
     task: &mut Task,
@@ -216,37 +217,32 @@ async fn parent_base_preflight(
         // An amendment made while this loop was live (or parked on the
         // question) reaches every pass.
         apply_pending_amendment(app, task, pending_amend, cancel).await;
-        let finals: Vec<String> = task
-            .final_verify
+        start_final_base_jobs(app, task);
+        let unkept: Vec<String> = task
+            .verify
             .iter()
+            .filter(|c| !is_kept(task, c))
             .filter(|c| !base_check_answered(task, c, &task.base_sha))
             .cloned()
             .collect();
-        let mut failed = failing_twice_on_base(app, task, &finals, cancel).await;
-        let mut is_final = failed.is_some();
-        if failed.is_none() && !cancel.is_cancelled() {
-            let unkept: Vec<String> = task
-                .verify
-                .iter()
-                .filter(|c| !task.decisions.contains(&kept_check_line(c)))
-                .filter(|c| !base_check_answered(task, c, &task.base_sha))
-                .cloned()
-                .collect();
-            failed = failing_twice_on_base(app, task, &unkept, cancel).await;
-            is_final = false;
-        }
+        let mut failed = failing_twice_on_base(app, task, &unkept, cancel).await;
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(app, &task.id).await;
             return false;
         }
-        let Some(base_run) = failed else {
+        // The plan creates the files a check names: kept by rule, no question.
+        let names: Vec<String> = failed.iter().map(|f| f.command.clone()).collect();
+        let kept = keep_planned_checks(app, task, &names);
+        if !kept.is_empty() {
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(task);
+            app.broadcast_task(task);
+        }
+        failed.retain(|f| !kept.contains(&f.command));
+        if failed.is_empty() {
             return true;
-        };
-        let question = if is_final {
-            pre_existing_question(&base_run.command, &task.base_sha, &base_run.tail)
-        } else {
-            parent_check_question(&base_run.command, &task.base_sha, &base_run.tail)
-        };
+        }
+        let question = parent_checks_question(&failed, &task.base_sha);
         task.question = Some(question.clone());
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
@@ -272,7 +268,7 @@ async fn parent_base_preflight(
         }
         record_owner_base_check(
             task,
-            &base_run.command,
+            &question.commands,
             &task.base_sha.clone(),
             &answer,
             policy_answered,
@@ -282,15 +278,129 @@ async fn parent_base_preflight(
         let dropped = apply_base_check_answer(&settings, task, &question, &answer, origin);
         if dropped {
             app.verify_cache.lock().unwrap().remove(&task_id);
-        } else if is_final {
-            // Retry after the base is fixed: on the newest base.
-            let wt = PathBuf::from(&task.worktree);
-            carry_onto_newest_base(task, &wt).await;
         }
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
     }
+}
+
+/// What the parent's gate does after its checks ran.
+enum ParentGate {
+    /// Go on with these results (a dropped final no longer counts).
+    Go(Vec<VerifyOutcome>),
+    /// The work was carried onto the newest base: run the checks again.
+    Again,
+    /// The loop has to end (cancelled, or stopped by the answer).
+    End,
+}
+
+/// A final check of the parent that fails on its branch is looked up on the
+/// base (the cache, else the in-flight background job). One that also fails
+/// there and that the keep rule does not explain goes to ONE question
+/// instead of an agent attempt; the others stay ordinary failures.
+async fn parent_finals_on_base(
+    app: &Arc<App>,
+    task: &mut Task,
+    results: Vec<VerifyOutcome>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
+    cancel: &CancelToken,
+) -> ParentGate {
+    let failing_finals: Vec<VerifyOutcome> = results
+        .iter()
+        .filter(|v| v.code != Some(0))
+        .filter(|v| task.final_verify.contains(&v.command) && !task.verify.contains(&v.command))
+        .cloned()
+        .collect();
+    if failing_finals.is_empty() {
+        return ParentGate::Go(results);
+    }
+    let dir = app
+        .store
+        .task_dir(&task.id)
+        .join("runs")
+        .join("parent")
+        .join("final-base");
+    let mut on_base: Vec<VerifyOutcome> = Vec::new();
+    for failed in &failing_finals {
+        if let Some(base_run) = failing_on_base(app, task, failed, &dir, cancel).await {
+            on_base.push(base_run);
+        }
+    }
+    if cancel.is_cancelled() {
+        return ParentGate::End;
+    }
+    let names: Vec<String> = on_base.iter().map(|b| b.command.clone()).collect();
+    let kept = keep_planned_checks(app, task, &names);
+    if !kept.is_empty() {
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+    }
+    on_base.retain(|b| !kept.contains(&b.command) && !is_kept(task, &b.command));
+    if on_base.is_empty() {
+        return ParentGate::Go(results);
+    }
+    let question = pre_existing_question(&on_base, &task.base_sha);
+    task.question = Some(question.clone());
+    task.status = TaskStatus::Waiting;
+    task.updated_at = now_ms();
+    let task_id = task.id.clone();
+    let assumed = task.assumptions.len();
+    let Some(answer) =
+        wait_for_answer(app, &task_id, task, pending_answer, cancel, &mut None).await
+    else {
+        return ParentGate::End;
+    };
+    let policy_answered = task.assumptions.len() > assumed;
+    if is_option(&answer, "stop") {
+        if let Some(who) = answerer_label(task) {
+            task.decisions.push(format!("{who}: stop"));
+        }
+        task.question = None;
+        task.status = TaskStatus::Stopped;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        app.stop_children(&task_id, &task.repo);
+        return ParentGate::End;
+    }
+    let base_sha = task.base_sha.clone();
+    record_owner_base_check(
+        task,
+        &question.commands,
+        &base_sha,
+        &answer,
+        policy_answered,
+    );
+    let settings = app.settings.read().unwrap().clone();
+    let origin = origin_of_last_answer(task);
+    // Every removal goes through `remove_check_command`; a refused command
+    // stays and the answer counts as a retry.
+    if apply_base_check_answer(&settings, task, &question, &answer, origin) {
+        app.verify_cache.lock().unwrap().remove(&task_id);
+    }
+    task.status = TaskStatus::Running;
+    task.updated_at = now_ms();
+    if question
+        .commands
+        .iter()
+        .any(|c| task.final_verify.contains(c))
+    {
+        let wt = PathBuf::from(&task.worktree);
+        carry_onto_newest_base(task, &wt).await;
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        return ParentGate::Again;
+    }
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    ParentGate::Go(
+        results
+            .into_iter()
+            .filter(|v| !question.commands.contains(&v.command))
+            .collect(),
+    )
 }
 
 /// A parent whose checks passed (or that has none) is done; with
@@ -485,37 +595,57 @@ pub(super) async fn run_parent(
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
-    // An amendment made at any point (also while this loop waited for a
-    // slot) reaches this check.
-    apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
-    let Ok(Some(task)) = app.store.load_task(task_id) else {
-        return ParentEnd::Finished;
+    let (task, results, skipped) = loop {
+        // An amendment made at any point (also while this loop waited for a
+        // slot or an answer) reaches this check.
+        apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
+        let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+            return ParentEnd::Finished;
+        };
+        let checks: Vec<String> = task
+            .verify
+            .iter()
+            .chain(&task.final_verify)
+            .cloned()
+            .collect();
+        let (checks, skipped) = scope_to_diff(
+            app,
+            &task.repo,
+            Path::new(&task.worktree),
+            &task.base_sha,
+            &checks,
+        )
+        .await;
+        // A command that already passed on exactly this tree in a subtask
+        // is not run again; it counts as passed.
+        let (checks, passed_before) =
+            drop_passed_on_tree(app, Path::new(&task.worktree), checks).await;
+        let mut skipped = skipped;
+        skipped.extend(passed_before);
+        let sandbox = app.settings.read().unwrap().sandbox;
+        let results = run_verify_commands(
+            Path::new(&task.worktree),
+            &app.store.task_dir(task_id).join("runs").join("parent"),
+            &checks,
+            sandbox,
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            mark_stopped_if_not_already(app, task_id).await;
+            return ParentEnd::Finished;
+        }
+        match parent_finals_on_base(app, &mut task, results, pending_answer, cancel).await {
+            ParentGate::Go(results) => break (task, results, skipped),
+            ParentGate::Again => continue,
+            ParentGate::End => {
+                mark_stopped_if_not_already(app, task_id).await;
+                return ParentEnd::Finished;
+            }
+        }
     };
-
-    let checks: Vec<String> = task
-        .verify
-        .iter()
-        .chain(&task.final_verify)
-        .cloned()
-        .collect();
     let sandbox = app.settings.read().unwrap().sandbox;
-    let (checks, skipped) = scope_to_diff(
-        app,
-        &task.repo,
-        Path::new(&task.worktree),
-        &task.base_sha,
-        &checks,
-    )
-    .await;
-    let results = run_verify_commands(
-        Path::new(&task.worktree),
-        &app.store.task_dir(task_id).join("runs").join("parent"),
-        &checks,
-        sandbox,
-        &task.base_sha,
-        cancel,
-    )
-    .await;
     // Once, after verify and finalVerify: the gated checks, then the held-out
     // one. The line for a failure names its kind and criterion, and never the
     // held-out command.
@@ -602,6 +732,33 @@ pub(super) async fn run_parent(
     ));
     remove_chain_branches(app, &mut task).await;
     land_parent(app, &mut task, cancel).await
+}
+
+/// Splits `checks` into those still to run and one decision line per command
+/// that passed on this worktree's exact tree in a subtask's final run. Every
+/// command runs when the tree cannot be read.
+async fn drop_passed_on_tree(
+    app: &Arc<App>,
+    worktree: &Path,
+    checks: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let wt = worktree.to_path_buf();
+    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let Some(tree) = tree else {
+        return (checks, Vec::new());
+    };
+    let passes = app.gate_passes.lock().unwrap();
+    let (passed, rest): (Vec<String>, Vec<String>) = checks
+        .into_iter()
+        .partition(|c| passes.contains(&(tree.clone(), c.clone())));
+    let lines = passed
+        .iter()
+        .map(|c| format!("Orchestrator: {c} passed on this tree in a subtask; not run again"))
+        .collect();
+    (rest, lines)
 }
 
 /// Once a parent holds every subtask, the subtasks' own branches are only

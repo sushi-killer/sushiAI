@@ -894,10 +894,14 @@ fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, 
     settings["maxAttempts"] = serde_json::json!(6);
     settings["answerPolicy"] = serde_json::json!(false);
     settings["review"] = serde_json::json!("claude-opus");
-    // Sonnet stays the implementer but is too weak to judge, so the judge is Codex.
+    // Sonnet stays the implementer but is too weak to judge, so the judge is
+    // Codex; a route with no model has no known strength until one is set.
     for route in settings["routes"].as_array_mut().unwrap() {
         if route["id"] == "claude-sonnet" {
             route["strength"] = serde_json::json!(1);
+        }
+        if route["id"] == "codex" {
+            route["strength"] = serde_json::json!(3);
         }
     }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));

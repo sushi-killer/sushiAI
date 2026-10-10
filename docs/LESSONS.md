@@ -35,6 +35,7 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 
 ## Promoted
 
+- 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-10 An agent answer counted as the owner's → authority from the source. `an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap`.
 - 2026-10-07 Real-daemon tests skipped on CI (binary built after them) and hid Linux races → build first; they fail when `CI` is set. `tests/helpers/real-daemon.cjs`.
 - 2026-10-07 A new session's first `hook.open` came before its actor and was refused → wait for every live session without an actor. `a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not`.

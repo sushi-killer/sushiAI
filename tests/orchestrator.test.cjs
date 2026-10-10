@@ -446,6 +446,53 @@ test("orch.event arrives per host: a local one as is, a remote one tagged with i
   assert.equal(relayed.length, 2);
 });
 
+test("a question held for the overseer raises no notice until the overseer hands it on", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, notices } = await listening(manager);
+  const waiting = (held) => ({
+    id: "t1",
+    title: "T",
+    repo: "/r",
+    status: "waiting",
+    question: {
+      text: "Which?",
+      options: ["a", "b"],
+      heldForOverseer: held,
+      heldAt: Date.now(),
+    },
+  });
+  manager.notify("local", "orch.event", { event: "task", task: waiting(true) });
+  assert.equal(notices.length, 0);
+  manager.notify("local", "orch.event", {
+    event: "task",
+    task: waiting(false),
+  });
+  assert.equal(notices.length, 1);
+  hosts.close();
+});
+
+test("a hold older than ten minutes no longer silences the notice", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, notices } = await listening(manager);
+  manager.notify("local", "orch.event", {
+    event: "task",
+    task: {
+      id: "t9",
+      title: "T",
+      repo: "/r",
+      status: "waiting",
+      question: {
+        text: "Which?",
+        options: ["a"],
+        heldForOverseer: true,
+        heldAt: Date.now() - 11 * 60 * 1000,
+      },
+    },
+  });
+  assert.equal(notices.length, 1);
+  hosts.close();
+});
+
 test("events and notices are kept per host: the same task id on two hosts notifies twice", async () => {
   const manager = twoHosts({ "orch.task.list": () => [] });
   const { hosts, notices } = await listening(manager);

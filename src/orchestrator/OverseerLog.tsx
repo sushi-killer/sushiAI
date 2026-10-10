@@ -12,23 +12,20 @@ import {
 import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
 import { errorText, formatCost } from "./helpers";
 import { hostOf } from "./hosts";
-import { projectName } from "./ownerAttention";
 import {
   addEntry,
+  belongsToProject,
   detailText,
   displayText,
   entryKey,
-  filterEntries,
   fullDateTime,
   groupByDay,
-  projectOptions,
   rowTarget,
   spentLine,
-  todayUtc,
+  spentTodayQuery,
   toggleOpen,
 } from "./overseerLogModel";
 import type { OverseerEntry } from "./types";
-import { Chip } from "../ui";
 import "./overseer-log.css";
 
 const KINDS: Record<OverseerEntry["kind"], { icon: ReactNode; label: string }> =
@@ -59,8 +56,8 @@ function timeLabel(ts: number): string {
   });
 }
 
-/** The overseer's Log: what the orchestrator agent did across all projects,
- * newest first, with a project filter and today's spend on top. */
+/** The overseer's Log: what the orchestrator agent did in this panel's
+ * project, newest first, with the project's spend today on top. */
 export function OverseerLogView({
   cwd,
   dailyBudgetUsd,
@@ -70,17 +67,18 @@ export function OverseerLogView({
   cwd: string;
   /** The panel's last read of the setting; the view reads it again itself. */
   dailyBudgetUsd: number;
-  /** Opens a task of any project. */
-  onOpenTask: (entry: OverseerEntry) => void;
-  /** Opens the chat of `cwd`'s project (rows of other projects open none). */
+  /** Opens a task of this project. */
+  onOpenTask: (taskId: string) => void;
+  /** Opens the chat of this project. */
   onOpenChat: () => void;
 }) {
   const client = useOrchestratorClient();
   const host = useOrchestratorHost();
   const [entries, setEntries] = useState<OverseerEntry[] | null>(null);
-  const [spent, setSpent] = useState<number | null>(null);
+  const [spent, setSpent] = useState<{ project: number; all: number } | null>(
+    null,
+  );
   const [budget, setBudget] = useState(dailyBudgetUsd);
-  const [repo, setRepo] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [openKey, setOpenKey] = useState<string | null>(null);
 
@@ -88,10 +86,18 @@ export function OverseerLogView({
     let cancelled = false;
     // Today's spend and the budget, read again on every overseer event.
     const refresh = () => {
-      const today = todayUtc();
-      client
-        .costsSummary({ from: today, to: today, groupBy: [] })
-        .then((s) => !cancelled && setSpent(s.totals.costUsd))
+      Promise.all([
+        client.costsSummary(spentTodayQuery(cwd)),
+        client.costsSummary(spentTodayQuery()),
+      ])
+        .then(
+          ([project, all]) =>
+            !cancelled &&
+            setSpent({
+              project: project.totals.costUsd,
+              all: all.totals.costUsd,
+            }),
+        )
         .catch(() => {});
       client
         .settingsGet()
@@ -99,7 +105,7 @@ export function OverseerLogView({
         .catch(() => {});
     };
     client
-      .overseerLog(undefined, 2000)
+      .overseerLog(cwd, 2000)
       // Entries that arrived while the list loaded stay.
       .then(
         (list) =>
@@ -108,7 +114,12 @@ export function OverseerLogView({
       .catch((e) => !cancelled && setError(errorText(e)));
     refresh();
     const off = window.bridge?.onOrchestrator((event) => {
-      if (event.event !== "overseer" || hostOf(event) !== host) return;
+      if (
+        event.event !== "overseer" ||
+        hostOf(event) !== host ||
+        !belongsToProject(event.entry, cwd)
+      )
+        return;
       setEntries((old) => addEntry(old ?? [], event.entry));
       refresh();
     });
@@ -116,52 +127,31 @@ export function OverseerLogView({
       cancelled = true;
       off?.();
     };
-  }, [client, host]);
+  }, [client, host, cwd]);
 
-  const options = useMemo(() => projectOptions(entries ?? []), [entries]);
-  const shown = useMemo(
-    () => filterEntries(entries ?? [], repo),
-    [entries, repo],
-  );
-  const days = useMemo(() => groupByDay(shown), [shown]);
+  const days = useMemo(() => groupByDay(entries ?? []), [entries]);
 
-  function open(entry: OverseerEntry) {
-    if (rowTarget(entry) === "chat" && entry.repo === cwd) onOpenChat();
-    else if (entry.taskId) onOpenTask(entry);
-  }
+  const open = (entry: OverseerEntry) =>
+    rowTarget(entry) === "chat" ? onOpenChat() : onOpenTask(entry.taskId!);
   const opens = (entry: OverseerEntry) =>
-    (rowTarget(entry) === "chat" && entry.repo === cwd) || !!entry.taskId;
+    rowTarget(entry) === "chat" || !!entry.taskId;
 
   return (
     <div className="orch-view-scroll log-view">
       <div className="log-head">
         <h2 className="orch-view-title">Log</h2>
         {spent !== null && (
-          <p className="log-spent">{spentLine(spent, budget)}</p>
+          <p className="log-spent">
+            {spentLine(spent.project, spent.all, budget)}
+          </p>
         )}
       </div>
-      {options.length >= 2 && (
-        <div className="log-filter" role="group" aria-label="Project">
-          <Chip selected={repo === null} onClick={() => setRepo(null)}>
-            All
-          </Chip>
-          {options.map((option) => (
-            <Chip
-              key={option.repo}
-              selected={repo === option.repo}
-              onClick={() => setRepo(option.repo)}
-            >
-              {option.name}
-            </Chip>
-          ))}
-        </div>
-      )}
       {error && (
         <p className="log-empty" role="alert">
           {error}
         </p>
       )}
-      {entries && shown.length === 0 && !error && (
+      {entries && entries.length === 0 && !error && (
         <p className="log-empty">
           Nothing yet. When the overseer wakes, answers a task or opens a PR, it
           shows up here.
@@ -170,7 +160,7 @@ export function OverseerLogView({
       {days.map((day) => (
         <section key={day.label} className="log-day" aria-label={day.label}>
           <h3 className="orch-eyebrow">{day.label.toUpperCase()}</h3>
-          <ul className={`log-list${repo ? " log-one" : ""}`}>
+          <ul className="log-list">
             {day.entries.map((entry) => {
               const kind = KINDS[entry.kind] ?? KINDS.woke;
               const key = entryKey(entry);
@@ -186,11 +176,6 @@ export function OverseerLogView({
                     onClick={() => setOpenKey((cur) => toggleOpen(cur, key))}
                   >
                     <span className="log-time">{timeLabel(entry.ts)}</span>
-                    {!repo && (
-                      <span className="log-project" title={entry.repo}>
-                        {projectName(entry.repo)}
-                      </span>
-                    )}
                     <span
                       className={`log-kind log-kind-${entry.kind}`}
                       role="img"
@@ -206,7 +191,6 @@ export function OverseerLogView({
                       <p className="log-meta">
                         {[
                           fullDateTime(entry.ts),
-                          projectName(entry.repo),
                           kind.label,
                           entry.costUsd ? formatCost(entry.costUsd) : "",
                         ]

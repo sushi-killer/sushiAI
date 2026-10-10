@@ -550,9 +550,19 @@ pub(super) fn pending_acceptance(task: &Task) -> Option<usize> {
 /// Owner answer `drop criterion`: removes criterion `n`, its checks and a
 /// held-out check on it, and shifts the later checks down by one. Shared by
 /// the live loop and the post-restart branch of `task.answer`.
-pub(super) fn drop_criterion(task: &mut Task, n: usize) {
+pub(super) fn drop_criterion(
+    settings: &Settings,
+    task: &mut Task,
+    n: usize,
+    origin: Origin,
+) -> Result<(), String> {
     if n >= task.criteria.len() {
-        return;
+        return Ok(());
+    }
+    if let Some(why) = removal_refusal(settings, task, &criterion_commands(task, n), origin) {
+        task.decisions
+            .push(format!("Orchestrator: criterion {n} stays: {why}"));
+        return Err(why);
     }
     let text = task.criteria.remove(n);
     task.checks.retain(|c| c.criterion != n);
@@ -567,6 +577,7 @@ pub(super) fn drop_criterion(task: &mut Task, n: usize) {
     task.decisions.push(format!(
         "Orchestrator: dropped criterion {n} ({text}) as the owner answered"
     ));
+    Ok(())
 }
 
 const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
@@ -617,7 +628,7 @@ mod grounded_checks_tests {
         task.criteria = vec!["zero".into(), "one".into(), "two".into()];
         task.checks = vec![check(0, "a"), check(1, "b"), check(2, "c"), check(1, "b2")];
         task.held_out = Some(check(2, "h"));
-        drop_criterion(&mut task, 1);
+        let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Owner);
         assert_eq!(task.criteria, vec!["zero", "two"]);
         assert_eq!(task.checks, vec![check(0, "a"), check(1, "c")]);
         assert_eq!(task.held_out, Some(check(1, "h")));
@@ -626,12 +637,12 @@ mod grounded_checks_tests {
             vec!["Orchestrator: dropped criterion 1 (one) as the owner answered"]
         );
         // The held-out check goes with its own criterion.
-        drop_criterion(&mut task, 1);
+        let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Owner);
         assert_eq!(task.held_out, None);
         assert_eq!(task.checks, vec![check(0, "a")]);
         // Out of range: nothing happens.
         let before = task.decisions.len();
-        drop_criterion(&mut task, 9);
+        let _ = drop_criterion(&Settings::default(), &mut task, 9, Origin::Owner);
         assert_eq!(task.decisions.len(), before);
     }
 

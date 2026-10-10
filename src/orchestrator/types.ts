@@ -194,6 +194,11 @@ export type Question = {
   askedBy?: AskedBy;
   /** When it was asked, ms epoch; absent like `askedBy`. */
   askedAt?: number;
+  /** The orchestrator agent has a turn running (or queued) for this question:
+   * the owner is not asked yet. Absent when false. */
+  heldForOverseer?: boolean;
+  /** When the hold began, ms epoch. A hold counts for ten minutes only. */
+  heldAt?: number;
 };
 
 /** One answered question in `Task.questionHistory`. */

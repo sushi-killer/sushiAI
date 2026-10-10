@@ -167,21 +167,38 @@ fn kept_check_line(command: &str) -> String {
 /// any task: `drop this check` removes the command, `keep this check`
 /// records that it stays. Shared by the live loops and the post-restart
 /// branch of `task.answer`.
-pub(super) fn apply_base_check_answer(task: &mut Task, question: &Question, answer: &str) {
+pub(super) fn apply_base_check_answer(
+    settings: &Settings,
+    task: &mut Task,
+    question: &Question,
+    answer: &str,
+    origin: Origin,
+) -> bool {
     let Some(command) = pre_existing_command(question).map(str::to_string) else {
-        return;
+        return false;
     };
     if is_option(answer, PRE_EXISTING_DROP) {
-        task.verify.retain(|c| c != &command);
-        task.final_verify.retain(|c| c != &command);
-        task.decisions
-            .push(format!("Orchestrator: dropped check {command}"));
-    } else if question.options.iter().any(|o| o == PARENT_KEEP) {
+        return match remove_check_command(settings, task, &command, origin) {
+            Ok(()) => {
+                task.decisions
+                    .push(format!("Orchestrator: dropped check {command}"));
+                true
+            }
+            // Refused: the check stays, the answer counts as a retry.
+            Err(why) => {
+                task.decisions
+                    .push(format!("Orchestrator: check {command} stays: {why}"));
+                false
+            }
+        };
+    }
+    if question.options.iter().any(|o| o == PARENT_KEEP) {
         let line = kept_check_line(&command);
         if !task.decisions.contains(&line) {
             task.decisions.push(line);
         }
     }
+    false
 }
 
 /// Before any subtask starts: the parent's own checks run on its base. A
@@ -260,8 +277,10 @@ async fn parent_base_preflight(
             &answer,
             policy_answered,
         );
-        apply_base_check_answer(task, &question, &answer);
-        if is_option(&answer, PRE_EXISTING_DROP) {
+        let settings = app.settings.read().unwrap().clone();
+        let origin = origin_of_last_answer(task);
+        let dropped = apply_base_check_answer(&settings, task, &question, &answer, origin);
+        if dropped {
             app.verify_cache.lock().unwrap().remove(&task_id);
         } else if is_final {
             // Retry after the base is fixed: on the newest base.

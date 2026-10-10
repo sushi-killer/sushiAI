@@ -807,7 +807,9 @@ pub(super) fn apply_missing_answer(
             .get(missing.criterion)
             .cloned()
             .unwrap_or_default();
-        drop_criterion(task, missing.criterion);
+        let settings = app.settings.read().unwrap().clone();
+        let origin = origin_of_last_answer(task);
+        let _ = drop_criterion(&settings, task, missing.criterion, origin);
         task.decisions.push(format!(
             "Brief check: \"{text}\" needs {}; it is an owner action, not this task's",
             missing.capability

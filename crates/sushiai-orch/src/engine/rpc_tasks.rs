@@ -896,6 +896,12 @@ impl App {
 
         let by_agent = p.source.as_deref().is_some_and(|s| !s.is_empty());
         if by_agent {
+            if let Some(q) = task.question.as_ref() {
+                let settings = self.settings.read().unwrap();
+                if let Some(why) = shared_check_drop_refusal(&settings, &task, q, &p.answer) {
+                    return Err(why);
+                }
+            }
             if is_accept_option(&p.answer) {
                 return Err(
                     "accepting an attempt as done is the owner's to pick: an agent cannot"
@@ -1010,7 +1016,9 @@ impl App {
                 .as_ref()
                 .and_then(|q| impossible_drop_target(q, &p.answer))
             {
-                drop_criterion(&mut task, n);
+                let settings = self.settings.read().unwrap().clone();
+                let origin = origin_of_last_answer(&task);
+                let _ = drop_criterion(&settings, &mut task, n, origin);
             }
             if let Some(q) = task.question.clone() {
                 // A base-check question: the task starts again only with the
@@ -1024,7 +1032,9 @@ impl App {
                         &p.answer,
                         default_evidence.is_some(),
                     );
-                    apply_base_check_answer(&mut task, &q, &p.answer);
+                    let settings = self.settings.read().unwrap().clone();
+                    let origin = origin_of_last_answer(&task);
+                    apply_base_check_answer(&settings, &mut task, &q, &p.answer, origin);
                     if is_option(&p.answer, PRE_EXISTING_DROP) {
                         self.verify_cache.lock().unwrap().remove(&task.id);
                     }
@@ -1164,6 +1174,24 @@ impl App {
             .load_task(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
+        if params
+            .get("source")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            // Checked against what the task will be once an amendment still
+            // pending is applied, so it cannot overwrite the owner's.
+            let mut effective = task.clone();
+            if let Some(ctrl) = self.controls.lock().unwrap().get(&id) {
+                if let Some(pending) = ctrl.pending_amend.lock().unwrap().clone() {
+                    pending.apply(&mut effective);
+                }
+            }
+            let settings = self.settings.read().unwrap();
+            if let Some(why) = shared_check_amend_refusal(&settings, &effective, &amendment) {
+                return Err(why);
+            }
+        }
         if task.archived {
             return Err("task is archived".to_string());
         }
@@ -1427,6 +1455,318 @@ mod answer_source_tests {
             assert!(task.question.is_some(), "{kind:?} is still pending");
             assert!(rx.try_recv().is_err(), "{kind:?}: nothing was delivered");
         }
+    }
+
+    /// A waiting base-check question about `command`, the task's request being `request`.
+    fn waiting_base_check(app: &App, command: &str, request: Option<&str>) -> String {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.request = request.map(str::to_string);
+        task.question = Some(base_check::pre_existing_question(
+            command,
+            "0123456789",
+            "boom",
+        ));
+        app.store.save_task(&task).unwrap();
+        task.id
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_cannot_drop_a_shared_check_but_may_retry_or_stop() {
+        let (app, _dir) = test_app();
+        {
+            let mut settings = app.settings.write().unwrap();
+            settings.scoped_checks.push(ScopedCheck {
+                repo: None,
+                command: "make lint*".to_string(),
+                paths: vec!["src/**".to_string()],
+            });
+        }
+        let drop = base_check::PRE_EXISTING_DROP;
+        for (command, request) in [
+            ("npm run ci", None),
+            ("  cargo   test ", None),
+            ("make lint-all", None),
+            (
+                "./scripts/gate.sh --strict",
+                Some("Fix the bug; run ./scripts/gate.sh --strict at the end"),
+            ),
+        ] {
+            for source in ["overseer", "mcp", "chat"] {
+                let id = waiting_base_check(&app, command, request);
+                let err = answer(&app, &id, &format!("{drop}."), Some(source))
+                    .await
+                    .unwrap_err();
+                assert!(err.contains("only the owner may drop"), "{command}: {err}");
+                let task = app.store.load_task(&id).unwrap().unwrap();
+                assert_eq!(task.status, TaskStatus::Waiting, "{command} still waits");
+            }
+        }
+        // A waiting-SLA default (source policy) is refused the same way.
+        let id = waiting_base_check(&app, "npm run ci", None);
+        let err = app
+            .handle_task_answer(
+                json!({"id": id, "answer": drop, "source": "policy", "evidence": "waited"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("only the owner may drop"), "{err}");
+        let id = waiting_base_check(&app, "npm run ci", None);
+        answer(&app, &id, "stop", Some("overseer")).await.unwrap();
+        assert_eq!(
+            app.store.load_task(&id).unwrap().unwrap().status,
+            TaskStatus::Stopped
+        );
+        // The owner (no source) may drop it, and an agent may drop a task-specific check.
+        let id = waiting_base_check(&app, "npm run ci", None);
+        answer(&app, &id, drop, None).await.unwrap();
+        let id = waiting_base_check(&app, "node --test tests/planner-made.test.cjs", None);
+        answer(&app, &id, drop, Some("overseer")).await.unwrap();
+    }
+
+    #[test]
+    fn a_ci_entry_is_found_through_flags_cd_env_pipes_and_chains() {
+        let (settings, task) = (Settings::default(), task_with_status(TaskStatus::Waiting));
+        let shared = |c: &str| answer_policy::is_shared_check(&settings, &task, c);
+        for command in [
+            "npm run ci --silent",
+            "cd web && cargo test",
+            "CI=1 npm test",
+            "npm run ci 2>&1 | tail -20",
+            "echo start; yarn test",
+            "cargo test -p sushiai-orch",
+            "(cd web && npm test)",
+            "env CI=1 npm test",
+            "timeout 900 cargo test",
+        ] {
+            assert!(shared(command), "{command}");
+        }
+        for command in [
+            "node --test tests/one.test.cjs",
+            "npm run test:desktop",
+            "echo npm run ci",
+            "grep -r 'cargo test' docs",
+        ] {
+            assert!(!shared(command), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_amendment_cannot_remove_a_shared_check_but_the_owner_can() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.verify = vec![
+            "npm run ci".into(),
+            "node --test tests/mine.test.cjs".into(),
+        ];
+        task.final_verify = vec!["cargo test".into()];
+        app.store.save_task(&task).unwrap();
+        let id = task.id.clone();
+        for (field, value) in [
+            ("verify", json!(["node --test tests/mine.test.cjs"])),
+            ("finalVerify", json!([])),
+        ] {
+            let params = json!({"id": id, field: value, "source": "overseer"});
+            let err = app.handle_task_amend(params).await.unwrap_err();
+            assert!(err.contains("only the owner may drop"), "{field}: {err}");
+        }
+        // Keeping the shared check while dropping a task-specific one is fine.
+        let keep = json!({"id": id, "verify": ["npm run ci"], "source": "mcp"});
+        app.handle_task_amend(keep).await.unwrap();
+        // The owner (no source) may remove it.
+        let owner = json!({"id": id, "finalVerify": []});
+        app.handle_task_amend(owner).await.unwrap();
+    }
+
+    /// A waiting `Impossible` question about criterion 0, which carries `npm test`.
+    fn waiting_impossible(app: &App) -> String {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["Tests pass -- check: npm test".into(), "Docs exist".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "npm test".into(),
+            baseline: None,
+        }];
+        task.question = Some(Question::new(
+            "Criterion 0 cannot be met as written: x. Evidence: y",
+            vec!["drop criterion".into(), "retry".into(), "stop".into()],
+            QuestionKind::Impossible,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&task).unwrap();
+        task.id
+    }
+
+    #[tokio::test]
+    async fn dropping_a_criterion_that_carries_a_shared_check_is_the_owners() {
+        let (app, _dir) = test_app();
+        for source in ["overseer", "mcp", "chat"] {
+            let id = waiting_impossible(&app);
+            let err = answer(&app, &id, "drop criterion", Some(source))
+                .await
+                .unwrap_err();
+            assert!(err.contains("only the owner may drop"), "{source}: {err}");
+            let task = app.store.load_task(&id).unwrap().unwrap();
+            assert_eq!((task.criteria.len(), task.checks.len()), (2, 1));
+        }
+        // Retrying is open to an agent.
+        let id = waiting_impossible(&app);
+        answer(&app, &id, "retry", Some("overseer")).await.unwrap();
+        // The owner drops it: the criterion and its check go.
+        let id = waiting_impossible(&app);
+        answer(&app, &id, "drop criterion", None).await.unwrap();
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!((task.criteria.len(), task.checks.len()), (1, 0));
+    }
+
+    #[test]
+    fn the_removal_choke_point_refuses_a_non_owner_for_every_kind_of_removal() {
+        let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["A -- check: cargo test".into()];
+        task.verify = vec![
+            "npm run ci".into(),
+            "node --test tests/mine.test.cjs".into(),
+        ];
+        use answer_policy::Origin::{Other, Owner};
+        assert!(decision::drop_criterion(&settings, &mut task, 0, Other).is_err());
+        assert_eq!(task.criteria.len(), 1, "still there");
+        assert!(
+            answer_policy::remove_check_command(&settings, &mut task, "npm run ci", Other).is_err()
+        );
+        assert!(answer_policy::remove_check_command(
+            &settings,
+            &mut task,
+            "node --test tests/mine.test.cjs",
+            Other
+        )
+        .is_ok());
+        assert_eq!(task.verify, vec!["npm run ci".to_string()]);
+        let ruled = healing::apply_feasibility(
+            &settings,
+            &mut task,
+            "npm run ci",
+            healing::Feasibility::Unrelated { reason: "x".into() },
+        );
+        assert!(ruled && task.verify == vec!["npm run ci".to_string()]);
+        assert!(task.brief_check.non_gating.is_empty());
+        assert!(decision::drop_criterion(&settings, &mut task, 0, Owner).is_ok());
+        assert!(task.criteria.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_amendment_cannot_drop_a_shared_held_out_or_criterion_check_or_overwrite_a_pending_one(
+    ) {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.criteria = vec!["A -- check: npm test".into(), "B".into()];
+        task.held_out = Some(Check {
+            criterion: 1,
+            run: "cargo test".into(),
+            baseline: None,
+        });
+        task.verify = vec!["node --test tests/mine.test.cjs".into()];
+        app.store.save_task(&task).unwrap();
+        let id = task.id.clone();
+        for params in [
+            json!({"id": id, "heldOut": null, "source": "overseer"}),
+            json!({"id": id, "heldOut": {"criterion": 1, "run": "true"}, "source": "overseer"}),
+            json!({"id": id, "criteria": ["A", "B"], "source": "overseer"}),
+            json!({"id": id, "criteria": ["A -- check: npm test"], "source": "mcp"}),
+        ] {
+            let err = app.handle_task_amend(params.clone()).await.unwrap_err();
+            assert!(err.contains("only the owner may drop"), "{params}: {err}");
+        }
+        // Keeping them is fine.
+        let keep =
+            json!({"id": id, "criteria": ["A -- check: npm test", "B", "C"], "source": "overseer"});
+        app.handle_task_amend(keep).await.unwrap();
+
+        // The owner's pending amendment adds `npm run ci`; an agent's later
+        // amendment of verify without it cannot overwrite it.
+        let pending_slot = Arc::new(StdMutex::new(None));
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: CancelToken::new(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: pending_slot.clone(),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        app.handle_task_amend(
+            json!({"id": id, "verify": ["node --test tests/mine.test.cjs", "npm run ci"]}),
+        )
+        .await
+        .unwrap();
+        assert!(pending_slot.lock().unwrap().is_some());
+        let err = app
+            .handle_task_amend(json!({"id": id, "verify": ["node --test tests/mine.test.cjs"], "source": "overseer"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("only the owner may drop"), "{err}");
+    }
+
+    #[test]
+    fn a_judge_cannot_rewrite_a_criterion_to_lose_its_shared_check() {
+        let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["Works -- check: cargo test".into(), "Docs".into()];
+        let rewrite = healing::Feasibility::Rewrite {
+            command: "true".into(),
+            criterion: Some((0, "Works -- check: grep -q ok f".into())),
+            reason: "r".into(),
+        };
+        assert!(healing::apply_feasibility(
+            &settings, &mut task, "x", rewrite
+        ));
+        assert_eq!(task.criteria[0], "Works -- check: cargo test");
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("only the owner may drop")));
+        // A task-specific criterion can be reworded.
+        task.criteria[1] = "Docs -- check: grep -q docs d.md".into();
+        assert!(healing::amend_criterion_for_test(
+            &settings,
+            &mut task,
+            1,
+            "Docs -- check: test -f d.md"
+        )
+        .is_ok());
+        // Keeping the shared command is fine.
+        assert!(healing::amend_criterion_for_test(
+            &settings,
+            &mut task,
+            0,
+            "Works well -- check: cargo test"
+        )
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_after_land_command_is_a_shared_check_only_for_its_repo() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = "/repo/a".to_string();
+        let settings = {
+            let mut s = app.settings.write().unwrap();
+            s.after_land.push(AfterLand {
+                repo: "/repo/a".to_string(),
+                run: "just rebuild".to_string(),
+            });
+            s.clone()
+        };
+        assert!(answer_policy::is_shared_check(
+            &settings,
+            &task,
+            "just rebuild"
+        ));
+        task.repo = "/repo/b".to_string();
+        assert!(!answer_policy::is_shared_check(
+            &settings,
+            &task,
+            "just rebuild"
+        ));
     }
 
     #[tokio::test]

@@ -9,6 +9,9 @@ impl App {
     /// queued or drafting tasks simply resume. A `waiting` task needs no loop
     /// until its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
+        // No overseer turn survives a restart: nothing is held any more.
+        // First, so a resumed loop never parks beside a stale hold.
+        self.release_stale_holds();
         let prices = self.settings.read().unwrap().prices.clone();
         let recovered = self.store.recover_interrupted_with(
             |task, idx| self.run_fate(task, idx),

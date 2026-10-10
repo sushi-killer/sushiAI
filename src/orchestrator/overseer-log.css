@@ -17,11 +17,6 @@
   justify-content: space-between;
   gap: var(--gap-md);
 }
-.log-filter {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--gap-sm);
-}
 .log-spent {
   margin: 0 0 0 auto;
   color: var(--text-faint);
@@ -41,7 +36,7 @@
 }
 .log-row {
   display: grid;
-  grid-template-columns: 64px 110px 16px minmax(0, 1fr);
+  grid-template-columns: 64px 16px minmax(0, 1fr);
   align-items: center;
   gap: var(--gap-md);
   width: 100%;
@@ -52,26 +47,13 @@
   line-height: 16px;
   text-align: left;
 }
-.log-one .log-row {
-  grid-template-columns: 64px 16px minmax(0, 1fr);
-}
-/* A narrow pane drops the project column. */
-@container (max-width: 520px) {
-  .log-project {
-    display: none;
-  }
-  .log-row {
-    grid-template-columns: 64px 16px minmax(0, 1fr);
-  }
-}
 .log-row.clickable {
   cursor: pointer;
 }
 button.log-row:hover {
   background: var(--bg-hover);
 }
-.log-time,
-.log-project {
+.log-time {
   overflow: hidden;
   color: var(--text-faint);
   font-size: var(--text-xs);

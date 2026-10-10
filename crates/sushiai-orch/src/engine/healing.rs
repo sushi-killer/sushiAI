@@ -58,17 +58,38 @@ fn overturnable(task: &mut Task, question: String, answer: String, evidence: Str
     });
 }
 
-/// Replaces criterion `i` with `text`, keeping its visual mark.
-fn amend_criterion(task: &mut Task, i: usize, text: &str) {
+/// Replaces criterion `i` with `text`, keeping its visual mark. A judge may
+/// not take a shared check out of the criterion's `-- check:` part
+/// (`removal_refusal`): then nothing changes and the reason comes back.
+fn amend_criterion(
+    settings: &Settings,
+    task: &mut Task,
+    i: usize,
+    text: &str,
+) -> Result<(), String> {
+    if let Some(why) = criterion_text_refusal(settings, task, i, text) {
+        return Err(why);
+    }
     let old = std::mem::replace(&mut task.criteria[i], text.to_string());
     for v in task.visual_criteria.iter_mut().filter(|v| **v == old) {
         *v = text.to_string();
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 1. Feasibility of a check on the base
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(super) fn amend_criterion_for_test(
+    settings: &Settings,
+    task: &mut Task,
+    i: usize,
+    text: &str,
+) -> Result<(), String> {
+    amend_criterion(settings, task, i, text)
+}
 
 const FEASIBILITY_PROMPT: &str = "You judge whether a check command of a coding task can work in this repository. The command was run on the repository as it is before any work and exited non-zero. You may read files in the working directory but change nothing.\n\nAnswer with one verdict:\n- `feasible`: it fails as it should, because the task is meant to make it pass (for example a test for the new behaviour).\n- `rewrite`: the repository cannot run this kind of check (the test runner, harness, script or tool it needs does not exist here). Give `command`, the nearest check this repository can really run and that exits 0 only when the criterion holds, and `criterionText` when the criterion's own `-- check:` wording must change with it.\n- `unrelated`: it fails for a reason that has nothing to do with the task (a broken environment, a flaky or already broken test, a missing credential).\n\nReply with only JSON: {\"verdict\": \"feasible|rewrite|unrelated\", \"command\": \"\", \"criterion\": <index or null>, \"criterionText\": \"\", \"reason\": \"<one sentence>\"}";
 
@@ -237,7 +258,22 @@ pub(super) fn heal_grep_dashes(task: &mut Task) -> bool {
 }
 
 /// Applies a ruling about `command`; `false` when it changed nothing.
-pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibility) -> bool {
+pub(super) fn apply_feasibility(
+    settings: &Settings,
+    task: &mut Task,
+    command: &str,
+    ruling: Feasibility,
+) -> bool {
+    // A ruling is never the owner's: a shared check keeps gating as written
+    // and reaches the twice-on-base question.
+    if !matches!(ruling, Feasibility::AsWritten) {
+        if let Some(why) = removal_refusal(settings, task, &[command.to_string()], Origin::Other) {
+            task.decisions.push(format!(
+                "Orchestrator: check {command} keeps gating as written: {why}"
+            ));
+            return true;
+        }
+    }
     match ruling {
         Feasibility::AsWritten => false,
         Feasibility::Rewrite {
@@ -247,6 +283,14 @@ pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibil
         } => {
             if new == command {
                 return false;
+            }
+            if let Some((i, text)) = &criterion {
+                if let Some(why) = criterion_text_refusal(settings, task, *i, text) {
+                    task.decisions.push(format!(
+                        "Orchestrator: check {command} keeps gating as written: {why}"
+                    ));
+                    return true;
+                }
             }
             for c in task
                 .verify
@@ -262,7 +306,7 @@ pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibil
             );
             if let Some((i, text)) = criterion {
                 line.push_str(&format!("; criterion amended to: {text}"));
-                amend_criterion(task, i, &text);
+                let _ = amend_criterion(settings, task, i, &text);
             }
             task.decisions.push(line);
             overturnable(
@@ -391,7 +435,8 @@ pub(super) async fn heal_feasibility(
             changed = true;
             continue;
         }
-        changed |= apply_feasibility(&mut task, &failed.command, ruling);
+        let settings = app.settings.read().unwrap().clone();
+        changed |= apply_feasibility(&settings, &mut task, &failed.command, ruling);
     }
     if changed {
         app.verify_cache.lock().unwrap().remove(task_id);
@@ -559,7 +604,13 @@ pub(super) async fn heal_repeated_unmet(
     let (a, b) = (rep.earlier.0, rep.current.0);
     match ruling {
         Some(Ruling::Infeasible { criterion, reason }) => {
-            amend_criterion(task, rep.criterion, &criterion);
+            let settings = app.settings.read().unwrap().clone();
+            if let Err(why) = amend_criterion(&settings, task, rep.criterion, &criterion) {
+                task.decisions.push(format!(
+                    "Orchestrator: criterion \"{old}\" stays as written: {why}"
+                ));
+                return Ok(false);
+            }
             task.decisions.push(format!(
                 "Orchestrator: criterion \"{old}\" was unmet in attempts {a} and {b} and is infeasible as written ({reason}); amended to \"{criterion}\""
             ));
@@ -894,7 +945,13 @@ pub(super) async fn heal_answers(
         if old == text {
             continue;
         }
-        amend_criterion(task, i, &text);
+        let settings = app.settings.read().unwrap().clone();
+        if let Err(why) = amend_criterion(&settings, task, i, &text) {
+            task.decisions.push(format!(
+                "Orchestrator: criterion \"{old}\" stays as written: {why}"
+            ));
+            continue;
+        }
         task.decisions.push(format!(
             "Orchestrator: criterion \"{old}\" contradicts the owner's answer; amended to \"{text}\""
         ));

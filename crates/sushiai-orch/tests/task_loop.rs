@@ -4,6 +4,7 @@
 mod common;
 
 use common::*;
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -348,6 +349,25 @@ fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
+/// Waits until the daemon has saved the run's pgid. The harness script runs
+/// (and touches its marker) a moment before the daemon records the group, and a
+/// restart can only follow a run whose group it knows: killing the daemon in
+/// that gap legitimately interrupts and requeues the attempt.
+fn wait_for_saved_pgid(socket: &Path, id: &str) {
+    let start = Instant::now();
+    loop {
+        let t = request_on(socket, "task.get", serde_json::json!({"id": id}));
+        if t["attempts"][0]["pgid"].is_i64() {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the run's pgid was never saved: {t}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
     let scripts_dir = tempfile::tempdir().unwrap();
@@ -392,6 +412,7 @@ fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    wait_for_saved_pgid(&socket1, &id);
     first.kill().unwrap();
     let _ = first.wait();
 
@@ -467,6 +488,7 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    wait_for_saved_pgid(&socket1, &id);
     if stop_first {
         request_on(&socket1, "task.stop", serde_json::json!({"id": id}));
         let start = Instant::now();

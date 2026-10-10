@@ -302,20 +302,30 @@ pub(super) async fn wait_on_broken_base(
     let policy_answered = task.assumptions.len() > assumed;
     record_owner_base_check(task, &command, &base_sha, &answer, policy_answered);
     if is_option(&answer, PRE_EXISTING_DROP) {
-        task.verify.retain(|c| c != &command);
-        task.decisions
-            .push(format!("Orchestrator: dropped check {command}"));
-        app.verify_cache.lock().unwrap().remove(task_id);
-        *attempt_budget -= 1;
-        let a = &mut task.attempts[idx];
-        a.status = AttemptStatus::Running;
-        a.ended_at = None;
-        a.failure = None;
-        task.status = TaskStatus::Running;
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
-        app.broadcast_task(task);
-        return BaseBreak::Dropped;
+        let settings = app.settings.read().unwrap().clone();
+        let origin = origin_of_last_answer(task);
+        match remove_check_command(&settings, task, &command, origin) {
+            Ok(()) => {
+                task.decisions
+                    .push(format!("Orchestrator: dropped check {command}"));
+                app.verify_cache.lock().unwrap().remove(task_id);
+                *attempt_budget -= 1;
+                let a = &mut task.attempts[idx];
+                a.status = AttemptStatus::Running;
+                a.ended_at = None;
+                a.failure = None;
+                task.status = TaskStatus::Running;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+                return BaseBreak::Dropped;
+            }
+            // Refused: the check stays and the attempt stays failed. The
+            // answer counts as a retry on the newest base.
+            Err(why) => task
+                .decisions
+                .push(format!("Orchestrator: check {command} stays: {why}")),
+        }
     }
     let wt = PathBuf::from(&task.worktree);
     carry_onto_newest_base(task, &wt).await;
@@ -325,10 +335,30 @@ pub(super) async fn wait_on_broken_base(
     BaseBreak::Retry
 }
 
+/// Waits for the turn of `repo`'s base-check pairs; `None` when cancelled.
+async fn lock_base_checks(
+    app: &App,
+    repo: &str,
+    cancel: &CancelToken,
+) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let lock = app
+        .base_check_locks
+        .lock()
+        .unwrap()
+        .entry(repo.to_string())
+        .or_default()
+        .clone();
+    tokio::select! {
+        guard = lock.lock_owned() => Some(guard),
+        _ = cancel.cancelled() => None,
+    }
+}
+
 /// Runs `checks` on the task's base before its first implement attempt. A
-/// command that exits non-zero is run once more on the base, past the cache,
-/// so a load-flaky test does not count; the first one that fails both times
-/// is returned. `None` when every command passes, the base cannot be checked
+/// command that exits non-zero is run once more on the base, past the cache
+/// and with no other base-check pair of its repo beside it, so a load-flaky test does not count (the task
+/// records `base check <cmd> flaky on <sha>: passed on rerun`); the first one
+/// that fails both times is returned. `None` when every command passes, the base cannot be checked
 /// out, or the run was cancelled.
 ///
 /// A single task passes only its `final_verify`: those are the whole-repo
@@ -337,7 +367,7 @@ pub(super) async fn wait_on_broken_base(
 /// base is what it is for. A parent also passes its `verify`, and asks first.
 pub(super) async fn failing_twice_on_base(
     app: &Arc<App>,
-    task: &Task,
+    task: &mut Task,
     checks: &[String],
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
@@ -357,6 +387,11 @@ pub(super) async fn failing_twice_on_base(
     if commands.is_empty() {
         return None;
     }
+    // The run and its rerun are one unit per repo: the rerun of a flaky
+    // command has no other pair of this repo's base checks beside it. The
+    // cache is read only once the lock is held, so a pair that ran meanwhile
+    // is not repeated.
+    let _alone = lock_base_checks(app, &task.repo, cancel).await?;
     let dir = app.store.task_dir(&task.id);
     let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0);
     let first = run_on_base(
@@ -395,6 +430,14 @@ pub(super) async fn failing_twice_on_base(
     .ok()?;
     if cancel.is_cancelled() {
         return None;
+    }
+    for c in &failed {
+        if second.iter().any(|r| &r.command == c && !fails(r)) {
+            task.decisions.push(format!(
+                "Orchestrator: base check {c} flaky on {}: passed on rerun",
+                short_sha(&task.base_sha)
+            ));
+        }
     }
     second.into_iter().find(fails)
 }
@@ -534,6 +577,100 @@ pub(super) async fn apply_pending_amendment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn base_check_pairs_of_one_repo_run_one_at_a_time() {
+        let (app, dir) = crate::engine::test_support::test_app();
+        let task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
+        let lock = app
+            .base_check_locks
+            .lock()
+            .unwrap()
+            .entry(task.repo.clone())
+            .or_default()
+            .clone();
+        let _busy = lock.lock().await;
+        let cancel = CancelToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            stopper.cancel();
+        });
+        let started = std::time::Instant::now();
+        // Another pair of the same repo is running: this one waits for it
+        // (here until it is cancelled) instead of running beside it.
+        let mut task = task;
+        let failed = failing_twice_on_base(&app, &mut task, &["true".to_string()], &cancel).await;
+        assert!(failed.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(
+            !dir.path().join("data/base-runs").exists(),
+            "it never started"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_drop_leaves_the_check_and_the_failed_attempt_and_retries() {
+        let (app, _dir) = crate::engine::test_support::test_app();
+        app.settings.write().unwrap().answer_policy = false;
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        task.verify = vec!["npm run ci".into()];
+        task.attempts = vec![crate::engine::test_support::attempt_with_failure(1, "x")];
+        task.attempts[0].status = AttemptStatus::Failed;
+        app.store.save_task(&task).unwrap();
+        let id = task.id.clone();
+        let failed = VerifyOutcome {
+            command: "npm run ci".into(),
+            code: Some(1),
+            tail: "boom".into(),
+            ms: 1,
+        };
+        let pending: Arc<StdMutex<Option<oneshot::Sender<Reply>>>> = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let mut budget = 3u32;
+        let mut permit = None;
+        // An agent's "drop this check" that got past the RPC gate (the
+        // setting changed in between, say) is still refused by the loop.
+        let deliver = async {
+            loop {
+                let tx = pending.lock().unwrap().take();
+                if let Some(tx) = tx {
+                    app.agent_answers.lock().unwrap().insert(id.clone());
+                    tx.send(Reply {
+                        text: PRE_EXISTING_DROP.to_string(),
+                        default_evidence: None,
+                    })
+                    .ok();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let (end, ()) = tokio::join!(
+            wait_on_broken_base(
+                &app,
+                &id,
+                &mut task,
+                0,
+                &failed,
+                &failed,
+                &mut budget,
+                &pending,
+                &cancel,
+                &mut permit,
+            ),
+            deliver
+        );
+        assert!(matches!(end, BaseBreak::Retry));
+        assert_eq!(task.verify, vec!["npm run ci".to_string()]);
+        assert_eq!(task.attempts[0].status, AttemptStatus::Failed);
+        assert!(task.attempts[0].failure.is_some());
+        assert_ne!(task.status, TaskStatus::Running);
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("check npm run ci stays")));
+    }
 
     #[test]
     fn options_match_ignoring_case_space_and_trailing_punctuation() {

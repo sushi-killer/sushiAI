@@ -1177,7 +1177,23 @@ enum Turn {
         /// for the overseer log.
         reason: &'static str,
         task_id: Option<String>,
+        /// The question holds this turn made (task id, hold time).
+        held: Vec<(String, i64)>,
     },
+}
+
+/// Whether a wake for task `id` waits in `repo`'s queue behind the running
+/// turn (a restart wake covers every task of the repo).
+pub(super) fn wake_queued_for(app: &App, repo: &str, id: &str) -> bool {
+    app.deferred_wakes
+        .lock()
+        .unwrap()
+        .get(repo)
+        .is_some_and(|q| {
+            q.iter().any(|w| {
+                w.task_id.as_deref() == Some(id) || (w.task_id.is_none() && w.reason == "restart")
+            })
+        })
 }
 
 const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.";
@@ -1434,6 +1450,17 @@ pub(super) struct DeferredWake {
     task_id: Option<String>,
 }
 
+/// A queued wake for tests.
+#[cfg(test)]
+pub(super) fn test_deferred_wake(reason: &'static str, task_id: &str) -> DeferredWake {
+    DeferredWake {
+        prompt: String::new(),
+        read_only: false,
+        reason,
+        task_id: Some(task_id.to_string()),
+    }
+}
+
 /// Remembers a skipped wake for `repo`, once per reason and task.
 fn defer_wake(
     app: &App,
@@ -1547,6 +1574,9 @@ pub(super) fn wake_overseer(
             return false;
         }
     };
+    // Held only now that the turn really starts: a wake queued behind a long
+    // turn leaves the question with the owner.
+    let held = app.hold_for_overseer(repo, reason, task_id);
     app.record_overseer(overseer::Entry::new(
         "woke",
         repo,
@@ -1569,6 +1599,7 @@ pub(super) fn wake_overseer(
                 read_only,
                 reason,
                 task_id,
+                held,
             },
         )
         .await;
@@ -2014,11 +2045,28 @@ async fn run_turn(
         Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), mode, &connected),
     };
 
+    // An overseer turn that hangs is cancelled, so it can neither hold a
+    // question nor block the chat for good.
+    let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timer = matches!(turn, Turn::Overseer { .. }).then(|| {
+        let (cancel, flag) = (cancel.clone(), timed_out.clone());
+        let limit = app
+            .overseer_turn_timeout_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(limit)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            cancel.cancel();
+        })
+    });
     let (result, tools) = match run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await {
         Ok((outcome, tools)) => (Ok(outcome), tools),
         Err(error) => (Err(error), Vec::new()),
     };
     let _ = std::fs::remove_file(&key_path);
+    if let Some(timer) = timer {
+        timer.abort();
+    }
 
     // Messages sent meanwhile are impossible (the turn slot stays held until
     // `finish_turn`, so the session can't be switched or cleared under it),
@@ -2026,7 +2074,10 @@ async fn run_turn(
     // session.
     thread.note = None;
     if let Turn::Overseer {
-        reason, task_id, ..
+        reason,
+        task_id,
+        held,
+        ..
     } = &turn
     {
         let (cost, end) = match &result {
@@ -2041,12 +2092,17 @@ async fn run_turn(
                     (None, None) => TurnEnd::Silent,
                 },
             ),
+            Err(RunError::Cancelled) if timed_out.load(std::sync::atomic::Ordering::SeqCst) => {
+                (None, TurnEnd::Failed("timed out".to_string()))
+            }
             Err(RunError::Cancelled) => (None, TurnEnd::Stopped),
             Err(RunError::Io(error) | RunError::NotFound(error)) => {
                 (None, TurnEnd::Failed(error.clone()))
             }
         };
         record_overseer_end(app, &repo, reason, task_id.as_deref(), started, cost, end);
+        // Still waiting after the turn: it escalated, the owner is asked now.
+        app.release_holds(&repo, held);
     }
     match (result, &turn) {
         (Ok(outcome), _) => {
@@ -2360,7 +2416,7 @@ pub(crate) fn fake_overseer_harness() -> &'static Path {
         let path = dir.path().join("fake-claude.sh");
         std::fs::write(
             &path,
-            "#!/bin/sh\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
+            "#!/bin/sh\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;

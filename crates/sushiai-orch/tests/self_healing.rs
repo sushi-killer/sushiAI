@@ -257,6 +257,28 @@ fn a_check_whose_program_is_missing_on_the_host_keeps_gating_and_says_so() {
 }
 
 #[test]
+fn a_shared_check_is_never_switched_off_or_rewritten_by_the_judge() {
+    let check = "npm test --version; exit 3";
+    for ruling in [
+        "{\"verdict\":\"unrelated\",\"reason\":\"broken on main\"}",
+        "{\"verdict\":\"rewrite\",\"command\":\"true\",\"reason\":\"no runner\"}",
+    ] {
+        let feasibility = js(ruling);
+        let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
+        let id = create(&s, json!({"verify": [check]}));
+        let task = finished(&s, &id);
+        assert_eq!(task["verify"], json!([check]), "{task}");
+        assert!(task["briefCheck"]["nonGating"].is_null(), "{task}");
+        assert!(
+            decisions(&task).contains("keeps gating as written"),
+            "{task}"
+        );
+        assert!(orchd_assumptions(&task).is_empty(), "{task}");
+        cleanup(s, &task);
+    }
+}
+
+#[test]
 fn a_check_that_fails_on_the_base_as_it_should_stays_as_written() {
     let feasibility =
         js("{\"verdict\":\"feasible\",\"reason\":\"the work is meant to make it pass\"}");

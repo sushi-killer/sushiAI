@@ -726,6 +726,14 @@ class OrchestratorService {
     if (!this.notify) return;
     if (!task || typeof task !== "object" || task.archived) return;
     const changed = previous !== undefined && previous !== task.status;
+    // The overseer is on it: the notice comes only if it hands the question on.
+    // A hold older than ten minutes no longer counts (HOLD_TTL_MS in model.rs).
+    if (
+      task.status === "waiting" &&
+      task.question?.heldForOverseer &&
+      Date.now() - Number(task.question.heldAt || 0) < 10 * 60 * 1000
+    )
+      return;
     let key;
     if (task.status === "waiting")
       key = `input:${task.id}:${task.question?.text || ""}`;

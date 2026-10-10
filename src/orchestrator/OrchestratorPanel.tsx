@@ -67,7 +67,7 @@ import {
   upsertTask,
   type OrchestratorLiveState,
 } from "./helpers";
-import { needsOwner } from "./ownerAttention";
+import { needsOwnerNow } from "./ownerAttention";
 import { upsertProposal } from "./improvementsModel";
 import type {
   ChatMessage,
@@ -89,7 +89,6 @@ import { improvementsBadge } from "./improvementsModel";
 import { useRecurringFailures } from "./useRecurringFailures";
 import { AnalyticsView } from "./Analytics";
 import { OverseerLogView } from "./OverseerLog";
-import { openTask } from "./moduleAttention";
 import { PlanView } from "./PlanView";
 
 type DaemonState = DaemonReach;
@@ -709,7 +708,7 @@ function OrchestratorBody({
   const connecting = daemonState === "loading" && lastSeenAt === null && !error;
   const offline = daemonState !== "ready";
   const refresh = live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join();
-  const needYou = tasks.filter(needsOwner).length;
+  const needYou = tasks.filter((t) => needsOwnerNow(t)).length;
   const running = runningCount(tasks);
   const improvementsCount = improvementsBadge(
     proposals,
@@ -825,16 +824,7 @@ function OrchestratorBody({
             cwd={cwd}
             dailyBudgetUsd={settings?.dailyBudgetUsd ?? 0}
             onOpenChat={() => open({ kind: "chat" })}
-            onOpenTask={(entry) =>
-              entry.repo === cwd
-                ? open({ kind: "task", id: entry.taskId! })
-                : openTask({
-                    taskId: entry.taskId!,
-                    repo: entry.repo,
-                    focus: "summary",
-                    ...(host === LOCAL ? {} : { host }),
-                  })
-            }
+            onOpenTask={(id) => open({ kind: "task", id })}
           />
         );
       case "plan":

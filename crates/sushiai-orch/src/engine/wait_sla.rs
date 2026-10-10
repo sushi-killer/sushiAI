@@ -31,6 +31,7 @@ impl App {
     /// cautious option (recorded as a policy assumption); otherwise one past
     /// a `waitRemindEveryHours` interval wakes the overseer with a reminder.
     pub(super) async fn wait_sla_tick(&self, now: i64) {
+        self.release_expired_holds(now);
         let (remind, default, auto_answer) = {
             let s = self.settings.read().unwrap();
             (
@@ -309,6 +310,203 @@ mod tests {
         chat::wait_idle(&app, &repo.to_string_lossy()).await;
         assert_eq!(chat::fake_overseer_calls(&repo), 1);
         assert_eq!(chat::fake_overseer_calls(&owner_repo), 0);
+    }
+
+    /// The `heldForOverseer` flag of each broadcast of task `id`, in order.
+    fn held_flags(rx: &mut broadcast::Receiver<Event>, id: &str) -> Vec<bool> {
+        let mut flags = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::Task { task } = event {
+                if task.id == id {
+                    flags.push(task.question.as_ref().is_some_and(|q| q.held_for_overseer));
+                }
+            }
+        }
+        flags
+    }
+
+    #[tokio::test]
+    async fn a_question_is_held_while_the_overseer_turn_runs_and_released_when_it_escalates() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        let owner_repo = dir.path().join("owner");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&owner_repo).unwrap();
+        let plain = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        let owner = waiting_in(&owner_repo, QuestionKind::Permission, &["Allow once"]);
+        app.store.save_task(&plain).unwrap();
+        app.store.save_task(&owner).unwrap();
+        let mut rx = app.events_tx.subscribe();
+        app.wake_overseer_for_waiting_after_restart();
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &repo.to_string_lossy()).await;
+        // The fake overseer answers nothing: the turn ended with the question open.
+        let flags = held_flags(&mut rx, &plain.id);
+        assert_eq!(flags, vec![true, false], "held, then released");
+        let after = app.store.load_task(&plain.id).unwrap().unwrap();
+        assert!(!after.question.unwrap().held_for_overseer);
+        assert!(
+            held_flags(&mut rx, &owner.id).is_empty(),
+            "owner-only never changes"
+        );
+        let owner = app.store.load_task(&owner.id).unwrap().unwrap();
+        assert!(!owner.question.unwrap().held_for_overseer);
+    }
+
+    fn held(app: &App, id: &str) -> bool {
+        app.store
+            .load_task(id)
+            .unwrap()
+            .unwrap()
+            .question
+            .unwrap()
+            .held_for_overseer
+    }
+
+    #[tokio::test]
+    async fn a_queued_wake_holds_nothing_until_its_turn_starts_and_a_wake_that_cannot_run_never_does(
+    ) {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        app.store.save_task(&task).unwrap();
+        let repo_str = task.repo.clone();
+        // The chat is busy: the wake is queued and the owner keeps the question.
+        app.chat_turns
+            .lock()
+            .unwrap()
+            .insert(repo_str.clone(), CancelToken::new());
+        wake_orchestrator_for_waiting(&app, &task);
+        assert!(!held(&app, &task.id), "a queued wake holds nothing");
+        // The busy turn ends: the queued wake runs, holds, then releases.
+        let mut rx = app.events_tx.subscribe();
+        app.chat_turns.lock().unwrap().remove(&repo_str);
+        chat::fire_deferred_wakes(&app, &repo_str);
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &repo_str).await;
+        assert_eq!(held_flags(&mut rx, &task.id), vec![true, false]);
+        assert!(!held(&app, &task.id));
+        // A daemon shutting down cannot wake it: nothing is held.
+        app.shutting_down.store(true, Ordering::SeqCst);
+        wake_orchestrator_for_waiting(&app, &task);
+        assert!(!held(&app, &task.id));
+    }
+
+    #[tokio::test]
+    async fn a_hold_expires_after_ten_minutes_and_the_tick_releases_it() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        let q = task.question.as_mut().unwrap();
+        q.held_for_overseer = true;
+        q.held_at = Some(T0);
+        assert!(q.held_now(T0 + HOLD_TTL_MS - 1));
+        assert!(!q.held_now(T0 + HOLD_TTL_MS));
+        app.store.save_task(&task).unwrap();
+        let mut rx = app.events_tx.subscribe();
+        app.wait_sla_tick(T0 + 1000).await;
+        // Fresh in the test's eyes? The tick compares with the clock it is given.
+        assert!(held(&app, &task.id), "still within ten minutes");
+        app.wait_sla_tick(T0 + HOLD_TTL_MS + 1000).await;
+        assert!(!held(&app, &task.id));
+        assert_eq!(held_flags(&mut rx, &task.id), vec![false]);
+        assert!(app
+            .store
+            .load_task(&task.id)
+            .unwrap()
+            .unwrap()
+            .question
+            .unwrap()
+            .held_at
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hung_overseer_turn_is_cancelled_logged_as_timed_out_and_releases_its_hold() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        {
+            let mut s = app.settings.write().unwrap();
+            s.auto_answer = true;
+        }
+        app.overseer_turn_timeout_ms
+            .store(400, std::sync::atomic::Ordering::SeqCst);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        // The fake harness sleeps 30 s when this file exists.
+        std::fs::write(repo.join(".overseer-slow"), "").unwrap();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        app.store.save_task(&task).unwrap();
+        let repo_str = task.repo.clone();
+        let started = std::time::Instant::now();
+        wake_orchestrator_for_waiting(&app, &task);
+        assert!(held(&app, &task.id), "held while the turn runs");
+        chat::wait_idle(&app, &repo_str).await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!held(&app, &task.id), "released when the turn timed out");
+        let log = crate::overseer::read(&app.data_dir, Some(&repo_str), None);
+        assert!(
+            log.iter()
+                .any(|e| e.kind == "failed" && e.text.contains("timed out")),
+            "{log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_releases_only_its_own_hold_and_not_when_another_wake_is_queued() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        let repo_str = task.repo.clone();
+        let q = task.question.as_mut().unwrap();
+        q.held_for_overseer = true;
+        q.held_at = Some(2000);
+        app.store.save_task(&task).unwrap();
+        // An older turn's hold is not this question's current hold.
+        app.release_holds(&repo_str, &[(task.id.clone(), 1000)]);
+        assert!(held(&app, &task.id));
+        // A queued wake for the task will hold it again: no flicker.
+        app.deferred_wakes.lock().unwrap().insert(
+            repo_str.clone(),
+            vec![chat::test_deferred_wake("waiting", &task.id)],
+        );
+        app.release_holds(&repo_str, &[(task.id.clone(), 2000)]);
+        assert!(held(&app, &task.id));
+        app.deferred_wakes.lock().unwrap().clear();
+        app.release_holds(&repo_str, &[(task.id.clone(), 2000)]);
+        assert!(!held(&app, &task.id));
+    }
+
+    #[tokio::test]
+    async fn holds_left_by_a_stopped_daemon_are_released_on_start() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        let q = task.question.as_mut().unwrap();
+        q.held_for_overseer = true;
+        q.held_at = Some(now_ms());
+        app.store.save_task(&task).unwrap();
+        app.release_stale_holds();
+        assert!(!held(&app, &task.id));
+    }
+
+    #[test]
+    fn the_flag_is_omitted_when_false_and_camel_case_when_true() {
+        let mut q = Question::new("Which?", vec![], QuestionKind::AgentQuestion, AskedBy::Plan);
+        assert!(serde_json::to_value(&q)
+            .unwrap()
+            .get("heldForOverseer")
+            .is_none());
+        q.held_for_overseer = true;
+        assert_eq!(serde_json::to_value(&q).unwrap()["heldForOverseer"], true);
     }
 
     #[tokio::test]

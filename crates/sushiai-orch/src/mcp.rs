@@ -558,7 +558,7 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
 /// `chat` names the source of a call made outside a task: `chat` for the
 /// owner's own chat turns, `overseer` for a turn orchd woke by itself.
 fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Value {
-    if method == "task.answer" {
+    if method == "task.answer" || method == "task.amend" {
         // Never trusted from the caller: it marks the answer as not the
         // owner's, so orchd refuses an allow on an owner-only question.
         if let Some(obj) = args.as_object_mut() {
@@ -1018,5 +1018,18 @@ mod answer_source_tests {
         let create = with_source("task.create", json!({}), false, "overseer");
         assert_eq!(create["source"], "chat");
         assert!(crate::model::TASK_SOURCES.contains(&"chat"));
+    }
+
+    #[test]
+    fn a_task_amend_always_carries_the_bridges_source_whatever_the_caller_sent() {
+        let overseer = with_source(
+            "task.amend",
+            json!({"id": "t", "source": ""}),
+            false,
+            "overseer",
+        );
+        assert_eq!(overseer["source"], "overseer");
+        let task = with_source("task.amend", json!({"id": "t"}), true, "overseer");
+        assert_eq!(task["source"], "mcp");
     }
 }

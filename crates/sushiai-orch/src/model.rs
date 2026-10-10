@@ -504,22 +504,24 @@ fn default_planner() -> String {
     "claude-opus".to_string()
 }
 
+/// Whether two repo paths name the same folder: symlinked paths (macOS
+/// /var -> /private/var) do.
+pub fn same_repo_path(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 impl Settings {
     /// Whether a task may land on `repo`'s default branch: the per-repo entry
     /// when there is one, else the global switch.
     pub fn may_land_on_default(&self, repo: &str) -> bool {
-        // Symlinked paths (macOS /var -> /private/var) name the same repo.
-        let same = |a: &str, b: &str| {
-            let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
-            a == b
-                || matches!(
-                    (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-                    (Ok(x), Ok(y)) if x == y
-                )
-        };
         self.land_on_default_repos
             .iter()
-            .find(|(k, _)| same(k, repo))
+            .find(|(k, _)| same_repo_path(k, repo))
             .map(|(_, allowed)| *allowed)
             .unwrap_or(self.land_on_default)
     }
@@ -974,6 +976,30 @@ pub struct Question {
     /// When it was asked (ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_at: Option<i64>,
+    /// An overseer turn was started (or queued) for this question and has not
+    /// ended: the owner is not asked yet. Cleared when the turn ends with the
+    /// question still open, or when no turn can run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_for_overseer: bool,
+    /// When the hold began (ms). A hold older than [`HOLD_TTL_MS`] no longer
+    /// counts, so a hung overseer turn cannot hide a question for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_at: Option<i64>,
+}
+
+/// How long a question stays held for the overseer.
+pub const HOLD_TTL_MS: i64 = 10 * 60 * 1000;
+
+impl Question {
+    /// Whether the overseer still holds this question at `now`.
+    pub fn held_now(&self, now: i64) -> bool {
+        self.held_for_overseer && self.held_at.is_some_and(|at| now - at < HOLD_TTL_MS)
+    }
+
+    pub fn release(&mut self) {
+        self.held_for_overseer = false;
+        self.held_at = None;
+    }
 }
 
 impl Question {
@@ -990,6 +1016,8 @@ impl Question {
             kind,
             asked_by: Some(asked_by),
             asked_at: Some(now_ms()),
+            held_for_overseer: false,
+            held_at: None,
         }
     }
 }

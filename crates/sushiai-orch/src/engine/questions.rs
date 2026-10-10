@@ -198,8 +198,15 @@ async fn park_for_answer(
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
     let _ = app.store.save_task(task);
-    app.broadcast_task(task);
+    // The wake may hold the question for the overseer; the broadcast that
+    // shows the waiting task carries that, so the app never sees it unheld first.
     wake_orchestrator_for_waiting(app, task);
+    if let (Some(q), Ok(Some(saved))) = (task.question.as_mut(), app.store.load_task(task_id)) {
+        if let Some(s) = saved.question {
+            (q.held_for_overseer, q.held_at) = (s.held_for_overseer, s.held_at);
+        }
+    }
+    app.broadcast_task(task);
     let reply = tokio::select! {
         _ = cancel.cancelled() => None,
         answer = rx => answer.ok(),
@@ -309,6 +316,105 @@ impl App {
     /// or an MCP client rather than the app; clears the mark.
     pub(super) fn take_agent_answer(&self, task_id: &str) -> bool {
         self.agent_answers.lock().unwrap().remove(task_id)
+    }
+}
+
+impl App {
+    /// Holds the waiting questions an overseer turn of `reason` that has just
+    /// started is about to look at: the one named by `task_id` for a
+    /// `waiting` or `reminder` wake, every non-owner-only one in `repo` for a
+    /// `restart` wake. Owner-only kinds are never held. Returns what it held
+    /// as (task id, hold time), so only that hold is released at the turn's
+    /// end. Saved and broadcast.
+    pub(crate) fn hold_for_overseer(
+        &self,
+        repo: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) -> Vec<(String, i64)> {
+        let tasks: Vec<Task> = match (reason, task_id) {
+            ("waiting" | "reminder", Some(id)) => self
+                .store
+                .load_task(id)
+                .ok()
+                .flatten()
+                .into_iter()
+                .collect(),
+            ("restart", _) => self
+                .store
+                .list_tasks()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| t.repo == repo)
+                .collect(),
+            _ => return Vec::new(),
+        };
+        let at = now_ms();
+        let mut held = Vec::new();
+        for mut task in tasks {
+            if task.status != TaskStatus::Waiting || task.archived {
+                continue;
+            }
+            let Some(q) = task.question.as_mut().filter(|q| !owner_only(q.kind)) else {
+                continue;
+            };
+            q.held_for_overseer = true;
+            q.held_at = Some(at);
+            held.push((task.id.clone(), at));
+            let _ = self.store.save_task(&task);
+            self.broadcast_task(&task);
+        }
+        held
+    }
+
+    /// Ends the holds a finished turn made, each only if it is still the same
+    /// hold (a newer turn or question replaced it otherwise) and no queued
+    /// wake for that task is about to hold it again.
+    pub(crate) fn release_holds(&self, repo: &str, held: &[(String, i64)]) {
+        for (id, at) in held {
+            if chat::wake_queued_for(self, repo, id) {
+                continue;
+            }
+            let Ok(Some(mut task)) = self.store.load_task(id) else {
+                continue;
+            };
+            if task
+                .question
+                .as_ref()
+                .is_some_and(|q| q.held_at == Some(*at))
+            {
+                if let Some(q) = task.question.as_mut() {
+                    q.release();
+                }
+                let _ = self.store.save_task(&task);
+                self.broadcast_task(&task);
+            }
+        }
+    }
+
+    /// Releases every hold that `keep` does not keep.
+    fn release_holds_where(&self, keep: impl Fn(&Question) -> bool) {
+        for mut task in self.store.list_tasks().unwrap_or_default() {
+            if let Some(q) = task
+                .question
+                .as_mut()
+                .filter(|q| q.held_for_overseer && !keep(q))
+            {
+                q.release();
+                let _ = self.store.save_task(&task);
+                self.broadcast_task(&task);
+            }
+        }
+    }
+
+    /// A daemon that stopped mid-turn left its holds behind: no turn runs now.
+    pub(crate) fn release_stale_holds(&self) {
+        self.release_holds_where(|_| false);
+    }
+
+    /// Holds older than [`HOLD_TTL_MS`] end, whatever the turn is doing.
+    pub(crate) fn release_expired_holds(&self, now: i64) {
+        self.release_holds_where(|q| q.held_now(now));
     }
 }
 
@@ -553,7 +659,18 @@ async fn wait_for_triaged_answer(
             task.cost_usd += cost;
         }
         let agrees = agrees_with(&decision, cautious.as_deref());
+        // An answer that removes a shared check is the owner's: triage hands
+        // the question on instead.
+        let owner_only_removal = matches!(decision.action, brief::TriageAction::Answer)
+            && shared_check_drop_refusal(
+                &app.settings.read().unwrap(),
+                task,
+                &question,
+                &decision.answer,
+            )
+            .is_some();
         match decision.action {
+            brief::TriageAction::Answer if owner_only_removal => {}
             brief::TriageAction::Answer if !agrees && !auto_answer => {}
             brief::TriageAction::Answer => {
                 if agrees {
@@ -608,6 +725,8 @@ async fn wait_for_triaged_answer(
                     kind: question.kind,
                     asked_by: question.asked_by,
                     asked_at: question.asked_at,
+                    held_for_overseer: false,
+                    held_at: None,
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));

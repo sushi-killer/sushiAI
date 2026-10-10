@@ -419,7 +419,9 @@ pub(super) async fn run_task_loop(
                 .filter(|c| !base_check_answered(&task, c, &task.base_sha))
                 .cloned()
                 .collect();
-            if let Some(base_run) = failing_twice_on_base(&app, &task, &unanswered, &cancel).await {
+            if let Some(base_run) =
+                failing_twice_on_base(&app, &mut task, &unanswered, &cancel).await
+            {
                 let question =
                     pre_existing_question(&base_run.command, &task.base_sha, &base_run.tail);
                 task.question = Some(question.clone());
@@ -449,8 +451,9 @@ pub(super) async fn run_task_loop(
                     &answer,
                     policy_answered,
                 );
-                if is_option(&answer, PRE_EXISTING_DROP) {
-                    apply_base_check_answer(&mut task, &question, &answer);
+                let settings = app.settings.read().unwrap().clone();
+                let origin = origin_of_last_answer(&task);
+                if apply_base_check_answer(&settings, &mut task, &question, &answer, origin) {
                     app.verify_cache.lock().unwrap().remove(&task_id);
                 } else {
                     // Retry: on the newest base. On an unmoved one the
@@ -1230,7 +1233,9 @@ pub(super) async fn run_task_loop(
                     }
                     Some(answer) => {
                         if let Some(n) = impossible_drop_target(&question, &answer) {
-                            drop_criterion(&mut task, n);
+                            let settings = app.settings.read().unwrap().clone();
+                            let origin = origin_of_last_answer(&task);
+                            let _ = drop_criterion(&settings, &mut task, n, origin);
                             task.updated_at = now_ms();
                             let _ = app.store.save_task(&task);
                             app.broadcast_task(&task);
@@ -2597,21 +2602,32 @@ pub(super) async fn finish_after_review(
             let base_sha = task.base_sha.clone();
             record_owner_base_check(task, &failed.command, &base_sha, &answer, policy_answered);
             if is_option(&answer, PRE_EXISTING_DROP) {
-                task.final_verify.retain(|c| c != &failed.command);
-                task.decisions.push(format!(
-                    "Orchestrator: dropped final check {}",
-                    failed.command
-                ));
-                // The check no longer counts: the attempt is not failed.
-                let a = &mut task.attempts[idx];
-                a.status = AttemptStatus::Running;
-                a.ended_at = None;
-                a.failure = None;
-                task.status = TaskStatus::Running;
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
-                app.broadcast_task(task);
-                continue;
+                let settings = app.settings.read().unwrap().clone();
+                let origin = origin_of_last_answer(task);
+                match remove_check_command(&settings, task, &failed.command, origin) {
+                    Ok(()) => {
+                        task.decisions.push(format!(
+                            "Orchestrator: dropped final check {}",
+                            failed.command
+                        ));
+                        // The check no longer counts: the attempt is not failed.
+                        let a = &mut task.attempts[idx];
+                        a.status = AttemptStatus::Running;
+                        a.ended_at = None;
+                        a.failure = None;
+                        task.status = TaskStatus::Running;
+                        task.updated_at = now_ms();
+                        let _ = app.store.save_task(task);
+                        app.broadcast_task(task);
+                        continue;
+                    }
+                    // Refused: the check stays and the attempt stays failed;
+                    // the answer counts as a retry below.
+                    Err(why) => task.decisions.push(format!(
+                        "Orchestrator: check {} stays: {why}",
+                        failed.command
+                    )),
+                }
             }
             // Retry (any other answer): one more attempt on the newest
             // base, even when the attempt budget is spent.

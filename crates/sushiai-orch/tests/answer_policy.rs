@@ -268,6 +268,45 @@ fn an_impossible_claim_with_true_evidence_is_dropped_by_the_judge() {
 }
 
 #[test]
+fn a_verified_impossible_claim_on_a_shared_check_criterion_goes_to_the_owner() {
+    let s = setup(
+        &[
+            ("IMPOSSIBLE", "1"),
+            (
+                "JUDGE_REPLY",
+                r#""{\"verified\": true, \"reason\": \"the file it names does not exist\"}""#,
+            ),
+        ],
+        |settings| {
+            settings["review"] = json!("");
+            settings["briefCheckRoute"] = json!("claude-sonnet");
+        },
+    );
+    let id = create(
+        &s,
+        json!({
+            "criteria": ["zero", "one -- check: npm test", "two"],
+            "variant": {"groundedChecks": true},
+            "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
+        }),
+    );
+    let task = finished(&s, &id);
+    assert_eq!(task["status"], "waiting", "task JSON: {task}");
+    assert_eq!(task["question"]["kind"], "impossible", "{task}");
+    assert_eq!(task["criteria"].as_array().unwrap().len(), 3, "{task}");
+    assert!(policy_assumptions(&task).is_empty(), "{task}");
+    assert!(s.log.path().join("judge.ran").exists());
+    // The owner (no source) may drop it.
+    s.daemon
+        .request("task.answer", json!({"id": id, "answer": "drop criterion"}));
+    let after = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
+        matches!(st, "done" | "failed" | "stopped")
+    });
+    assert_eq!(after["criteria"].as_array().unwrap().len(), 2, "{after}");
+    cleanup(s, &after);
+}
+
+#[test]
 fn an_impossible_claim_with_false_evidence_is_retried() {
     let s = setup(
         &[

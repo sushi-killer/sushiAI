@@ -323,6 +323,8 @@ pub struct App {
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
     /// Keyed by repo: the orchestrator chat turn running for it, if any.
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
+    /// How long an overseer turn may run before it is cancelled (ms).
+    overseer_turn_timeout_ms: std::sync::atomic::AtomicU64,
     /// Keyed by audit id: the `repo.audit` runs still in flight.
     audits: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
@@ -363,6 +365,9 @@ pub struct App {
     /// Keyed by parent task id: held while one child lands on the parent's
     /// branch, so landings onto one branch happen one at a time.
     landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Keyed by repo: one base-commit check runs at a time per repo, so a
+    /// rerun of a failed base check never competes with another one.
+    base_check_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Set by `shutdown()`: the loops it cancels end `stopped`, and that
     /// must not read as a dependency ending.
     shutting_down: AtomicBool,
@@ -526,6 +531,7 @@ impl App {
             events_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
+            overseer_turn_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
@@ -541,6 +547,7 @@ impl App {
             slots,
             parallel_limit,
             landing_locks: StdMutex::new(HashMap::new()),
+            base_check_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
             evolution_lock: tokio::sync::Mutex::new(()),

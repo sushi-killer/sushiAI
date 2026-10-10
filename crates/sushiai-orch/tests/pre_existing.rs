@@ -390,6 +390,19 @@ fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert!(done["question"].is_null(), "{done}");
+    let base = done["baseSha"].as_str().unwrap();
+    let flaky = format!(
+        "Orchestrator: base check {check} flaky on {}: passed on rerun",
+        &base[..8]
+    );
+    assert!(
+        done["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == &json!(flaky)),
+        "{done}"
+    );
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     let _ = std::fs::remove_dir_all(worktree);

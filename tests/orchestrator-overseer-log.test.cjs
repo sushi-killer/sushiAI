@@ -25,25 +25,40 @@ test("addEntry keeps newest first, ignores a repeat and caps the list", async ()
   assert.equal(addEntry(list, entry({ ts: 9 }), 2).length, 2);
 });
 
-test("the filter lists each project once by name and narrows the rows", async () => {
-  const { projectOptions, filterEntries } = await model;
-  const list = [
-    entry({ repo: "/work/zeta" }),
-    entry({ repo: "/work/app" }),
-    entry({ repo: "/work/app", ts: 2 }),
-  ];
-  assert.deepEqual(
-    projectOptions(list).map((o) => o.name),
-    ["app", "zeta"],
-  );
-  assert.equal(filterEntries(list, "/work/app").length, 2);
-  assert.equal(filterEntries(list, null).length, 3);
+test("the log model has no project filter: the view asks for one repo", async () => {
+  const m = await model;
+  assert.equal(m.projectOptions, undefined);
+  assert.equal(m.filterEntries, undefined);
 });
 
-test("the spend line hides the budget when it is 0", async () => {
+test("the spend query is this project's UTC day and only its entries are kept", async () => {
+  const { spentTodayQuery, belongsToProject } = await model;
+  const late = Date.UTC(2026, 9, 8, 23, 30);
+  assert.deepEqual(spentTodayQuery("/work/app", late), {
+    repo: "/work/app",
+    from: "2026-10-08",
+    to: "2026-10-08",
+    groupBy: [],
+  });
+  assert.deepEqual(spentTodayQuery(undefined, late), {
+    from: "2026-10-08",
+    to: "2026-10-08",
+    groupBy: [],
+  });
+  assert.equal(belongsToProject(entry(), "/work/app"), true);
+  assert.equal(
+    belongsToProject(entry({ repo: "/work/other" }), "/work/app"),
+    false,
+  );
+});
+
+test("the spend line shows the project and the global total against the budget, or the project alone", async () => {
   const { spentLine } = await model;
-  assert.equal(spentLine(1.2, 5), "Spent today $1.20 of $5.00");
-  assert.equal(spentLine(1.2, 0), "Spent today $1.20");
+  assert.equal(
+    spentLine(1.2, 3, 5),
+    "This project $1.20 \u00b7 all $3.00 of $5.00",
+  );
+  assert.equal(spentLine(1.2, 3, 0), "Spent today $1.20");
 });
 
 test("a digest or owner note opens the chat, other rows their task", async () => {

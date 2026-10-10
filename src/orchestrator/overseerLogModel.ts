@@ -1,7 +1,6 @@
-// Pure logic behind the Log view: merging live entries, filtering by project,
+// Pure logic behind the Log view: merging live entries,
 // the "spent today" line and what a row opens. No React, no bridge.
 import { formatCost } from "./helpers.ts";
-import { projectName } from "./ownerAttention.ts";
 import type { OverseerEntry } from "./types.ts";
 
 /** Newest first, like `overseer.log`. */
@@ -20,28 +19,16 @@ export function addEntry(
   return [entry, ...entries].sort((a, b) => b.ts - a.ts).slice(0, limit);
 }
 
-/** The projects that have entries, by name, for the filter. */
-export function projectOptions(
-  entries: OverseerEntry[],
-): { repo: string; name: string }[] {
-  const repos = [...new Set(entries.map((e) => e.repo))];
-  return repos
-    .map((repo) => ({ repo, name: projectName(repo) }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function filterEntries(
-  entries: OverseerEntry[],
-  repo: string | null,
-): OverseerEntry[] {
-  return repo ? entries.filter((e) => e.repo === repo) : entries;
-}
-
-/** "Spent today $1.20 of $5.00"; the budget part is hidden when it is 0. */
-export function spentLine(spent: number, budget: number): string {
+/** "This project $1.20 · all $3.00 of $5.00" with a budget; the project's
+ * figure alone ("Spent today $1.20") when the budget is 0. */
+export function spentLine(
+  project: number,
+  all: number,
+  budget: number,
+): string {
   return budget > 0
-    ? `Spent today ${formatCost(spent)} of ${formatCost(budget)}`
-    : `Spent today ${formatCost(spent)}`;
+    ? `This project ${formatCost(project)} \u00b7 all ${formatCost(all)} of ${formatCost(budget)}`
+    : `Spent today ${formatCost(project)}`;
 }
 
 /** What a row opens: a digest or an owner note goes to the repo's chat; any
@@ -90,6 +77,23 @@ export function groupByDay(
 /** Today's UTC date, the window the daily budget gate counts. */
 export function todayUtc(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
+}
+
+/** The `costs.summary` query behind "Spent today" for the UTC day: one
+ * project, or every project without `repo`. */
+export function spentTodayQuery(repo?: string, now = Date.now()) {
+  const today = todayUtc(now);
+  return {
+    ...(repo ? { repo } : {}),
+    from: today,
+    to: today,
+    groupBy: [] as never[],
+  };
+}
+
+/** Whether a live overseer entry belongs in the Log of project `repo`. */
+export function belongsToProject(entry: OverseerEntry, repo: string): boolean {
+  return entry.repo === repo;
 }
 
 /** The expanded panel's body: the full detail, else the row's own text. */

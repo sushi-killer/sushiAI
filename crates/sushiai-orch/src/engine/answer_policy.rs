@@ -62,6 +62,256 @@ pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
     }
 }
 
+/// Leading tokens of a repo's own CI entry. A command segment that starts
+/// with one of these (after `cd <dir>` and `VAR=x`) is shared.
+const CI_ENTRIES: [&[&str]; 11] = [
+    &["npm", "run", "ci"],
+    &["npm", "test"],
+    &["npm", "run", "test"],
+    &["pnpm", "test"],
+    &["pnpm", "run", "ci"],
+    &["pnpm", "ci"],
+    &["yarn", "test"],
+    &["yarn", "ci"],
+    &["cargo", "test"],
+    &["make", "test"],
+    &["make", "ci"],
+];
+
+fn is_assignment(token: &str) -> bool {
+    token.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Whether one shell segment runs a CI entry: its leading `cd <dir>` and
+/// `VAR=x` words are skipped, the rest starts with an entry's tokens.
+fn segment_runs_ci(segment: &str) -> bool {
+    let mut tokens: Vec<&str> = segment.split_whitespace().collect();
+    loop {
+        match tokens.as_slice() {
+            ["cd", _, ..] | ["timeout", _, ..] => tokens.drain(..2),
+            ["env", ..] => tokens.drain(..1),
+            [first, ..] if is_assignment(first) => tokens.drain(..1),
+            _ => break,
+        };
+    }
+    CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
+}
+
+/// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
+fn runs_ci_entry(command: &str) -> bool {
+    command
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace([';', '|'], "\n")
+        .replace(['(', ')'], " ")
+        .lines()
+        .any(segment_runs_ci)
+}
+
+/// Whether `command` is a check the owner or the repo stands behind: the
+/// repo's CI entry, a `scopedChecks` or `afterLand` entry of the settings, or
+/// a command written in the owner's own task request. Only the owner may drop
+/// such a check; a planner-invented, task-specific one stays droppable.
+// ponytail: a heuristic over the command text. Flag-first spellings
+// (`npm run --silent ci`), `pnpm run test`, wrappers beyond cd/env/timeout and
+// shell functions are missed. Upgrade path: read the repo's package.json
+// scripts (and Makefile targets) and match a command against what `ci` and
+// `test` really run.
+pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
+    let flat = |c: &str| c.split_whitespace().collect::<Vec<_>>().join(" ");
+    let command = flat(command);
+    if command.is_empty() {
+        return false;
+    }
+    runs_ci_entry(&command)
+        || settings.scoped_checks.iter().any(|e| {
+            e.repo
+                .as_deref()
+                .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
+                && (glob_match(&e.command, &command) || flat(&e.command) == command)
+        })
+        || settings
+            .after_land
+            .iter()
+            .any(|a| crate::model::same_repo_path(&a.repo, &task.repo) && flat(&a.run) == command)
+        || task
+            .request
+            .as_deref()
+            .is_some_and(|r| flat(r).contains(&command))
+}
+
+/// The refusal for a non-owner who tries to drop `command`, a shared check.
+fn shared_check_refusal(command: &str) -> String {
+    format!(
+        "`{command}` is a shared check (the repo's CI entry, a repo setting or the owner's own): only the owner may drop it. An agent can answer \"{}\" or \"stop\", otherwise the owner decides",
+        base_check::PRE_EXISTING_RETRY
+    )
+}
+
+/// Who asks for a removal: the owner, or anyone else (the overseer, a chat or
+/// MCP client, the answer policy, the judge, a feasibility ruling).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Origin {
+    Owner,
+    Other,
+}
+
+/// The origin of the answer the wait just recorded in the question history
+/// (`Owner` also when nothing was recorded).
+pub(super) fn origin_of_last_answer(task: &Task) -> Origin {
+    match task.question_history.last().map(|h| h.answered_by) {
+        Some(AnsweredBy::Owner) | None => Origin::Owner,
+        Some(_) => Origin::Other,
+    }
+}
+
+/// THE choke point of check removal: every path that removes or replaces a
+/// command in `verify`, `finalVerify`, `checks` or the held-out check (a drop
+/// answer, a dropped criterion, an amendment, a feasibility ruling) asks here
+/// first. Anyone but the owner is refused when one of `commands` is shared;
+/// the caller then keeps the check and escalates to the owner.
+pub(super) fn removal_refusal(
+    settings: &Settings,
+    task: &Task,
+    commands: &[String],
+    origin: Origin,
+) -> Option<String> {
+    if origin == Origin::Owner {
+        return None;
+    }
+    commands
+        .iter()
+        .find(|c| is_shared_check(settings, task, c))
+        .map(|c| shared_check_refusal(c))
+}
+
+/// The commands that go with criterion `n`: its checks, a held-out check on
+/// it and the command its `-- check:` part names.
+pub(super) fn criterion_commands(task: &Task, n: usize) -> Vec<String> {
+    let mut out: Vec<String> = task
+        .checks
+        .iter()
+        .chain(task.held_out.as_ref())
+        .filter(|c| c.criterion == n)
+        .map(|c| c.run.clone())
+        .collect();
+    if let Some((_, cmd)) = task.criteria.get(n).and_then(|t| t.split_once("-- check:")) {
+        out.push(cmd.trim().to_string());
+    }
+    out
+}
+
+/// The command a criterion's `-- check:` part names.
+fn text_check(text: &str) -> Option<String> {
+    let (_, cmd) = text.split_once("-- check:")?;
+    let cmd = cmd.trim();
+    (!cmd.is_empty()).then(|| cmd.to_string())
+}
+
+/// The refusal for a judge replacing criterion `i` with `new_text` when that
+/// takes a shared check out of its `-- check:` part.
+pub(super) fn criterion_text_refusal(
+    settings: &Settings,
+    task: &Task,
+    i: usize,
+    new_text: &str,
+) -> Option<String> {
+    let old = task.criteria.get(i).and_then(|t| text_check(t))?;
+    if new_text.contains(&old) {
+        return None;
+    }
+    removal_refusal(settings, task, &[old], Origin::Other)
+}
+
+/// Removes `command` from `verify`, `finalVerify` and `checks`, unless
+/// `removal_refusal` says only the owner may.
+pub(super) fn remove_check_command(
+    settings: &Settings,
+    task: &mut Task,
+    command: &str,
+    origin: Origin,
+) -> Result<(), String> {
+    if let Some(why) = removal_refusal(settings, task, &[command.to_string()], origin) {
+        return Err(why);
+    }
+    task.verify.retain(|c| c != command);
+    task.final_verify.retain(|c| c != command);
+    task.checks.retain(|c| c.run != command);
+    Ok(())
+}
+
+/// Why a non-owner `answer` to `question` must not be given, when it removes
+/// a shared check: "drop this check" on a base-check question, or "drop
+/// criterion" on an impossible one whose criterion carries one. Only the
+/// owner may; others may retry or stop. Callers that answer by rule, judge or
+/// triage escalate to the owner instead.
+pub(super) fn shared_check_drop_refusal(
+    settings: &Settings,
+    task: &Task,
+    question: &Question,
+    answer: &str,
+) -> Option<String> {
+    let commands: Vec<String> = if let Some(command) = pre_existing_command(question) {
+        if !is_option(answer, base_check::PRE_EXISTING_DROP) {
+            return None;
+        }
+        vec![command.to_string()]
+    } else if let Some(n) = impossible_drop_target(question, answer) {
+        criterion_commands(task, n)
+    } else {
+        return None;
+    };
+    removal_refusal(settings, task, &commands, Origin::Other)
+}
+
+/// The refusal for a non-owner amendment that removes a shared check from
+/// `verify`, `finalVerify`, `checks`, the held-out check or a criterion's
+/// `-- check:` part: the same rule as dropping one. `task` is the state the
+/// amendment lands on (see `effective_task`).
+pub(super) fn shared_check_amend_refusal(
+    settings: &Settings,
+    task: &Task,
+    amendment: &Amendment,
+) -> Option<String> {
+    let gone = |old: &[String], new: &Option<Vec<String>>| -> Vec<String> {
+        new.as_ref().map_or_else(Vec::new, |new| {
+            old.iter().filter(|c| !new.contains(c)).cloned().collect()
+        })
+    };
+    let old_checks: Vec<String> = task.checks.iter().map(|c| c.run.clone()).collect();
+    let new_checks = amendment
+        .checks
+        .as_ref()
+        .map(|cs| cs.iter().map(|c| c.run.clone()).collect::<Vec<_>>());
+    let mut removed = [
+        gone(&task.verify, &amendment.verify),
+        gone(&task.final_verify, &amendment.final_verify),
+        gone(&old_checks, &new_checks),
+    ]
+    .concat();
+    // The held-out check, when the amendment replaces or clears it.
+    if let (Some(old), Some(new)) = (&task.held_out, &amendment.held_out) {
+        if new.as_ref().is_none_or(|n| n.run != old.run) {
+            removed.push(old.run.clone());
+        }
+    }
+    // A criterion whose `-- check:` command is no longer named by any new
+    // criterion, and every criterion that falls off the end.
+    if let Some(new) = &amendment.criteria {
+        for (n, old) in task.criteria.iter().enumerate() {
+            let check_gone = text_check(old).is_some_and(|c| !new.iter().any(|t| t.contains(&c)));
+            if check_gone || n >= new.len() {
+                removed.extend(criterion_commands(task, n));
+            }
+        }
+    }
+    removal_refusal(settings, task, &removed, Origin::Other)
+}
+
 /// The fixed rule for `question`: its answer and why. Each rule fires once
 /// (the review rule once per attempt); a repeat goes on as before.
 fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(String, String)> {
@@ -182,6 +432,13 @@ pub(super) async fn try_policy_answer(
         QuestionKind::Impossible => {
             let (answer, reason) =
                 judge_impossible(app, task, &question, attempt_n, cancel).await?;
+            // Dropping a criterion that carries a shared check is the owner's.
+            let refused =
+                shared_check_drop_refusal(&app.settings.read().unwrap(), task, &question, &answer);
+            if let Some(why) = refused {
+                task.decisions.push(format!("Answer judge: {why}"));
+                return None;
+            }
             (answer, "judge", reason)
         }
         _ => {

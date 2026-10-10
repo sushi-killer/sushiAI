@@ -6,6 +6,7 @@ import type { ConnectionProfile, Project } from "./types";
 import { Banner, Tag, Toggle } from "./ui";
 import type { Tone } from "./ui/tone";
 import { ProjectPage } from "./ProjectPage";
+import { ProjectVaultBlock } from "./ProjectVaultBlock";
 
 type Status = "new" | "exists" | "same" | "differs";
 type Choice = "import" | "override" | "skip";
@@ -507,6 +508,7 @@ export function ProjectEnvironmentTab({
               "Setup only — the install step can use it; the agent never receives it (private registry). MCP only — reaches an MCP server through ${VAR}; never in the agent’s environment."
             }
           </p>
+          <ProjectVaultBlock project={project} setProject={setProject} />
         </>
       ) : (
         <p className="pd-empty">Loading project environment…</p>

@@ -50,6 +50,59 @@ function secretsOf(id, names) {
     );
 }
 
+const MAX_VAULT_PATHS = 10;
+
+/** A KV path or mount: relative segments, none empty, `.` or `..`, and no
+ * query or fragment, so it can only name a secret under its mount. */
+function vaultSegments(value, what) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (
+    !text ||
+    text.length > 500 ||
+    /[?#]/.test(text) ||
+    text.split("/").some((part) => !part || part === "." || part === "..")
+  )
+    throw new Error(`Enter a relative Vault ${what}.`);
+  return text;
+}
+
+/** A project's Vault settings, checked: an http(s) address without
+ * credentials (kept without a trailing slash), a mount (`secret` when none is
+ * given) and the KV paths read in order. */
+function vaultConfig(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Invalid Vault settings.");
+  let url;
+  try {
+    url = new URL(String(input.address ?? "").trim());
+  } catch {
+    url = null;
+  }
+  if (
+    !url ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw new Error("The Vault address must be an http(s) URL.");
+  if (
+    !Array.isArray(input.paths) ||
+    input.paths.length > MAX_VAULT_PATHS ||
+    input.paths.some((item) => typeof item !== "string")
+  )
+    throw new Error(`Enter up to ${MAX_VAULT_PATHS} Vault paths.`);
+  return {
+    address: url.href.replace(/\/+$/, ""),
+    mount:
+      input.mount === undefined || input.mount === null
+        ? "secret"
+        : vaultSegments(input.mount, "mount"),
+    paths: input.paths.map((item) => vaultSegments(item, "path")),
+  };
+}
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
@@ -64,6 +117,9 @@ class Projects {
     this.onSendChange = null;
     // Anything a project holds was written: the daemons' copies are refreshed.
     this.onChange = null;
+    // `vault.values(project)` gives a project's Vault values on This Mac;
+    // set by electron/vault.cjs, so this store never loads it.
+    this.vault = null;
   }
 
   /** Every SSH host the owner added gets a project's values: adding the host
@@ -404,6 +460,8 @@ class Projects {
         ? slugOf(existing)
         : uniqueSlug(projectSlug(input.name), projects),
       dismissed: existing?.dismissed ?? { env: [], mcp: [] },
+      // Changed only through setVault.
+      vault: existing?.vault,
     };
     const previousNames = new Set(
       (existing?.env || []).map((entry) => entry.name),
@@ -848,6 +906,21 @@ class Projects {
     });
   }
 
+  /** Sets where the project's values on This Mac come from in Vault; null
+   * removes it. Only the address, mount and paths are kept, never a value. */
+  setVault(id, config) {
+    return this.#locked(async () => {
+      const projects = this.#load();
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      if (config === null) delete project.vault;
+      else project.vault = vaultConfig(config);
+      this.#save(projects);
+      this.#changed();
+      return this.#withHints(project, this.#secrets());
+    });
+  }
+
   async #setEncryptedValue(id, key, value) {
     if (typeof value !== "string") throw new Error("Enter a string value.");
     const projects = this.#load();
@@ -947,7 +1020,12 @@ class Projects {
   async environmentFor(id, stage = "agent", host = "local") {
     const project = await this.get(id);
     if (!project) return {};
-    const env = {};
+    // Vault values (This Mac only, every stage) come first: a hand-entered
+    // variable with a stored value overrides one, one without leaves it.
+    const env =
+      host === "local" && project.vault?.paths?.length && this.vault
+        ? { ...(await this.vault.values(project).catch(() => ({}))) }
+        : {};
     for (const entry of project.env) {
       const availableTo = entry.availableTo || ["setup", "agent"];
       if (!availableTo.includes(stage)) continue;

@@ -46,6 +46,7 @@ flowchart TB
       terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, bounded output credit + xterm acknowledgements"]
       hostInstall["host-install.cjs, host-setup.cjs<br/>install and update sushiai on a host"]
       projectStore[("sushiai.db<br/>projects, folders, safeStorage secrets")]
+      vaultReader["vault.cjs<br/>read-only Vault KV v2 reader: token in safeStorage,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice"]
       gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
@@ -82,12 +83,16 @@ flowchart TB
     notices -->|"onAction"| orchSvc
     mascotSvc & attention -->|orchestrator-open, open-inbox,<br/>attention-open| preload
     devRestart -->|Core updated notice| notices
+    vaultReader -->|"Vault values via projects.vault,<br/>This Mac only (never an SSH host)"| projectStore
+    vaultReader -->|"read failed / recovered"| notices
     wsState -->|"session.open -> useOpenSignals:<br/>open a core surface as the companion half of the agent pane"| previewPane
     previewPane <-->|"project-preview (annotate), project-inspect read"| preload <--> previewSrv
     previewPane -->|"comments: session.input;<br/>Start task: session launch with a prompt /goal"| preload
     shortcut(["global Alt+Space"]) -->|fold / unfold| mascotSvc
   end
   macos[("macOS tray, Dock,<br/>Notification Center")]
+  hashiVault[("HashiCorp Vault<br/>KV v2, outside the app")]
+  hashiVault -->|"GET /v1/mount/data/path<br/>with X-Vault-Token"| vaultReader
   profile[("userData<br/>sushiai.db")]
   attention --> macos
   wsSnap & winState --> profile

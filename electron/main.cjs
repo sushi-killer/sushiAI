@@ -402,6 +402,13 @@ notices.register("app", async (_key, actionId) => {
   devRestart = true;
   app.quit();
 });
+require("./vault.cjs").registerVault({
+  handle,
+  projects,
+  notices,
+  safeStorage,
+  userDataDir: app.getPath("userData"),
+});
 const orchestratorNotices = createOrchestratorNotices({
   notices,
   getService: () => orchestrator,

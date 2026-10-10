@@ -166,41 +166,47 @@ test("resolves a model profile to its provider settings and key", async () => {
   }
 });
 
-test("appends the [1m] model-id suffix for a Claude-family model at a million-token context window, instead of declaring it", async () => {
+test("suffixes the model id with [1m] at a million-token window, whatever the model", async () => {
   const f = await fixture();
   try {
     const provider = await f.providers.upsertProvider({ kind: "openrouter" });
     await f.providers.setProviderKey(provider.id, "or-key");
-    const profile = await f.providers.upsertProfile({
-      providerId: provider.id,
-      modelId: "~anthropic/claude-sonnet-latest",
-      contextWindow: 1_000_000,
-    });
-    const resolved = await f.providers.resolveEnv(profile.id);
-    assert.equal(resolved.model, "~anthropic/claude-sonnet-latest[1m]");
-    assert.equal(
-      resolved.settings.ANTHROPIC_MODEL,
-      "~anthropic/claude-sonnet-latest[1m]",
-    );
-    assert.equal(resolved.settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+    for (const modelId of ["~anthropic/claude-sonnet-latest", "vendor/model"]) {
+      const profile = await f.providers.upsertProfile({
+        providerId: provider.id,
+        modelId,
+        contextWindow: 1_000_000,
+      });
+      const resolved = await f.providers.resolveEnv(profile.id);
+      assert.equal(resolved.model, `${modelId}[1m]`);
+      assert.equal(resolved.settings.ANTHROPIC_MODEL, `${modelId}[1m]`);
+      assert.equal(resolved.settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+    }
   } finally {
     await f.cleanup();
   }
 });
 
-test("declares CLAUDE_CODE_MAX_CONTEXT_TOKENS for a non-Claude model's context window instead of suffixing the id", async () => {
+test("declares any smaller window instead of suffixing the id, whatever the model", async () => {
   const f = await fixture();
   try {
-    const provider = await f.providers.upsertProvider({ kind: "opencode-go" });
-    await f.providers.setProviderKey(provider.id, "zen-key");
-    const profile = await f.providers.upsertProfile({
-      providerId: provider.id,
-      modelId: "deepseek/deepseek-v4-pro",
-      contextWindow: 128000,
-    });
-    const resolved = await f.providers.resolveEnv(profile.id);
-    assert.equal(resolved.model, "deepseek/deepseek-v4-pro");
-    assert.equal(resolved.settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "128000");
+    const provider = await f.providers.upsertProvider({ kind: "openrouter" });
+    await f.providers.setProviderKey(provider.id, "or-key");
+    for (const modelId of ["~anthropic/claude-sonnet-latest", "vendor/model"]) {
+      for (const contextWindow of [128_000, 200_000, 256_000, 512_000]) {
+        const profile = await f.providers.upsertProfile({
+          providerId: provider.id,
+          modelId,
+          contextWindow,
+        });
+        const resolved = await f.providers.resolveEnv(profile.id);
+        assert.equal(resolved.model, modelId);
+        assert.equal(
+          resolved.settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
+          String(contextWindow),
+        );
+      }
+    }
   } finally {
     await f.cleanup();
   }

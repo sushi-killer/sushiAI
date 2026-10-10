@@ -47,8 +47,6 @@ const PRESETS = {
 const MODEL_RE = /^[\w./:~[\]-]{1,128}$/;
 const CONTEXT_WINDOWS = [128000, 200000, 256000, 512000, 1000000];
 const MILLION = 1_000_000;
-const isClaudeFamily = (modelId) => modelId.toLowerCase().includes("claude");
-
 function keyHint(key) {
   const tail = key.slice(-4);
   return key.length > 8 ? `${key.slice(0, 3)}…${tail}` : "…" + tail;
@@ -301,14 +299,15 @@ class ModelProviders {
       throw new Error(
         `No API key saved for ${provider.label}. Add one in Preferences → Providers.`,
       );
-    const claudeFamily = isClaudeFamily(profile.modelId);
-    // The 1M window is a model-id suffix for a Claude-family model (Claude
-    // Code strips it before sending and adds the matching anthropic-beta);
-    // for anything else the window is only settable by declaring it, since
-    // Claude Code otherwise assumes 200K for a model it doesn't recognize.
+    // The profile's window is the one thing Claude Code has to be told, and it
+    // has two levers. A million is the `[1m]` model-id suffix: Claude Code
+    // strips it before sending, assumes a million-token window for an id it
+    // does not recognize, and adds the matching `context-1m-2025-08-07`
+    // anthropic-beta. Anything smaller is declared below, because that lever
+    // moves the number only and sends no beta.
     const wantsMillion = profile.contextWindow >= MILLION;
     const launchModelId =
-      claudeFamily && wantsMillion && !profile.modelId.endsWith("[1m]")
+      wantsMillion && !profile.modelId.endsWith("[1m]")
         ? `${profile.modelId}[1m]`
         : profile.modelId;
     // No ANTHROPIC_API_KEY/AUTH_TOKEN here: the key goes through
@@ -322,7 +321,7 @@ class ModelProviders {
       ANTHROPIC_DEFAULT_SONNET_MODEL: launchModelId,
       ANTHROPIC_DEFAULT_HAIKU_MODEL: launchModelId,
     };
-    if (profile.contextWindow && !claudeFamily)
+    if (profile.contextWindow && !wantsMillion)
       settings.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(profile.contextWindow);
     return { settings, key, model: launchModelId, label: profile.label };
   }

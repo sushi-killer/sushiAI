@@ -441,8 +441,9 @@ async function stubborn(t) {
   });
   await built.manager.setEnabled(ID, true);
   await built.manager.approve(ID);
-  // A second start proves the first was written off as failed.
-  await waitFor(() => dirs.pids().length >= 2, "a retry");
+  // A second start proves the first was written off as failed. Two node
+  // spawns plus the hello timeout can take seconds on a loaded machine.
+  await waitFor(() => dirs.pids().length >= 2, "a retry", 30000);
   return { dirs, ...built };
 }
 

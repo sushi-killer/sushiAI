@@ -16,7 +16,7 @@
     "test:terminal": "node scripts/terminal-rendering.mjs",
     "package": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dir && node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app",
     "install:app": "node scripts/install-app.mjs",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "install-electron && electron-builder install-app-deps",
     "format": "prettier --write src electron scripts tests *.json *.ts *.html README.md",
     "icon": "node scripts/icon.mjs",
     "test:remote": "node scripts/features-smoke.mjs",

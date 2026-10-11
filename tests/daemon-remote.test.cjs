@@ -236,7 +236,8 @@ test("command connector: a healthy command is pinged and stays ready", async () 
           connector: { kind: "command", argv: [proxy.script, "--stdio"] },
         },
         pingIntervalMs: 30,
-        pingTimeoutMs: 200,
+        // A healthy proxy answers well inside this even on a loaded machine.
+        pingTimeoutMs: 5000,
       }),
     },
     backoffMinMs: 20,

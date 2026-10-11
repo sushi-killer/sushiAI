@@ -130,7 +130,7 @@ fn decisions(task: &serde_json::Value) -> Vec<String> {
 }
 
 fn settle(s: &Setup, id: &str) -> serde_json::Value {
-    poll_until(&s.daemon, id, Duration::from_secs(30), |st| {
+    poll_until(&s.daemon, id, |st| {
         st == "done" || st == "failed" || st == "stopped" || st == "waiting"
     })
 }
@@ -214,6 +214,7 @@ fn with_no_harness_the_task_waits_with_an_install_question_and_spends_no_attempt
     // Answering while nothing is installed asks again; still no attempt.
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "retry"}));
+    // Absence check: this window gives a forbidden attempt time to start.
     std::thread::sleep(Duration::from_millis(500));
     let again = s.daemon.request("task.get", json!({"id": id}));
     assert_eq!(again["status"], "waiting", "{again}");

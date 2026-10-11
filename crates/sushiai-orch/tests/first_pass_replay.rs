@@ -7,7 +7,6 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 fn decisions(task: &Value) -> Vec<String> {
     task["decisions"]
@@ -99,7 +98,7 @@ mod gated {
             }),
         );
         let id = created["id"].as_str().unwrap().to_string();
-        let task = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
+        let task = poll_until(&daemon, &id, |s| {
             matches!(s, "done" | "failed" | "stopped" | "waiting")
         });
         let calls = std::fs::read_to_string(&log)
@@ -249,7 +248,7 @@ mod merged {
             }),
         );
         let id = created["id"].as_str().unwrap().to_string();
-        let task = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
+        let task = poll_until(&daemon, &id, |s| {
             matches!(s, "done" | "failed" | "stopped" | "waiting")
         });
         Run {
@@ -423,7 +422,7 @@ mod reviewed {
                 }),
             );
             let id = task["id"].as_str().unwrap().to_string();
-            let settled = poll_task_status(&self.daemon, &id, Duration::from_secs(90));
+            let settled = poll_task_status(&self.daemon, &id);
             (id, settled)
         }
 

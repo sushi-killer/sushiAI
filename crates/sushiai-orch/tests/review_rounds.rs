@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake for every Claude role. A review brief ("## Review...") takes the
 /// n-th line of `$LOG_DIR/review.plan` (the last line again when n runs
@@ -136,7 +135,7 @@ impl Rig {
             }),
         );
         let id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&self.daemon, &id, Duration::from_secs(90));
+        let settled = poll_task_status(&self.daemon, &id);
         (id, settled)
     }
 
@@ -294,7 +293,7 @@ fn the_owner_gets_no_retry_after_round_two() {
     );
     rig.daemon
         .request("task.answer", json!({"id": id, "answer": "approve"}));
-    let done = poll_until(&rig.daemon, &id, Duration::from_secs(90), |s| {
+    let done = poll_until(&rig.daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(done["status"], "done", "{done}");

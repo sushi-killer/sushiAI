@@ -9,7 +9,6 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// Runs are numbered by `$GATES/run_<n>`. The run holds while `$GATES/hold`
 /// exists, then behaves as `$GATES/mode_<n>` (or `mode`) says: `ok` writes a
@@ -170,7 +169,7 @@ impl Env {
     }
 
     fn until(&self, id: &str, status: &str) -> serde_json::Value {
-        poll_until(&self.daemon, id, Duration::from_secs(30), |s| s == status)
+        poll_until(&self.daemon, id, |s| s == status)
     }
 
     fn token(&self, n: usize) -> String {
@@ -215,11 +214,7 @@ impl Env {
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let begin = Instant::now();
-    while !cond() {
-        assert!(begin.elapsed() < Duration::from_secs(30), "never: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn verdict(result: &serde_json::Value) -> (String, String) {
@@ -586,7 +581,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
         }),
     );
     let id = created["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+    let waiting = poll_until(&daemon, &id, |s| s == "waiting");
 
     let calls = std::fs::read_to_string(gates.path().join("calls")).unwrap();
     assert_eq!(
@@ -616,7 +611,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
         "task.answer",
         json!({"id": id, "answer": "I will do it: drop the criterion"}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["criteria"], json!(["The code compiles"]));
     assert!(decisions(&done).contains("it is an owner action, not this task's"));
     let calls = std::fs::read_to_string(gates.path().join("calls")).unwrap();

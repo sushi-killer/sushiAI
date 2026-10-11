@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake plays every role. `$LOG_DIR` counts implement runs
 /// (`implement.<n>`) and review runs (`review.<n>`). The implement body sees
@@ -105,7 +104,7 @@ fn cleanup(s: Setup, tasks: &[&Value]) {
         .collect();
     s.daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt);
+        remove_dir_retrying(wt);
     }
 }
 
@@ -404,7 +403,7 @@ fn a_task_that_lands_on_its_base_branch_gets_landed_at_and_the_landing_diff_stat
         json!({"files": 1, "added": 1, "removed": 0})
     );
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(done["worktree"].as_str().unwrap());
+    remove_dir_retrying(done["worktree"].as_str().unwrap());
 }
 
 const GRAPH_SCRIPT: &str = r#"#!/bin/sh
@@ -448,7 +447,7 @@ fn subtasks_that_land_on_their_parent_get_landed_at_and_their_own_diff_stat() {
         "task.answer",
         json!({"id": parent_id, "answer": "keep this check"}),
     );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -474,6 +473,6 @@ fn subtasks_that_land_on_their_parent_get_landed_at_and_their_own_diff_stat() {
     }
     daemon.shutdown_and_wait();
     for t in std::iter::once(&parent).chain(children.iter().copied()) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }

@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
 
 /// A fake Claude that plans with `plan` (written next to the script), answers
 /// triage by escalating with a sharpened question, and implements trivially.
@@ -92,7 +91,7 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, true);
     let id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &id, Duration::from_secs(20), finished);
+    let settled = poll_until(&daemon, &id, finished);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     let assumptions = settled["assumptions"].as_array().unwrap();
     assert_eq!(assumptions.len(), 2, "{settled}");
@@ -102,7 +101,7 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
     assert_eq!(assumptions[0]["by"], "planner");
     assert_eq!(assumptions[0]["overturned"], false);
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -118,12 +117,12 @@ fn without_the_flag_every_question_is_still_asked() {
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), false, true);
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), finished);
+    let waiting = poll_until(&daemon, &id, finished);
     assert_eq!(waiting["status"], "waiting", "{waiting}");
     assert_eq!(waiting["question"]["text"], "Which default theme?");
     assert!(waiting.get("assumptions").is_none(), "{waiting}");
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -141,7 +140,7 @@ fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, true);
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), finished);
+    let waiting = poll_until(&daemon, &id, finished);
     assert_eq!(waiting["status"], "waiting", "{waiting}");
     let text = waiting["question"]["text"].as_str().unwrap();
     assert!(text.contains("Drop the old table?"), "{text}");
@@ -152,12 +151,10 @@ fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     assert_eq!(waiting["assumptions"].as_array().unwrap().len(), 1);
 
     daemon.request("task.answer", json!({"id": id, "answer": "no to both"}));
-    let settled = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let settled = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(settled["status"], "done", "{settled}");
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -173,7 +170,7 @@ fn overturn_marks_the_assumption_and_reaches_the_next_attempt() {
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, false);
     let id = task["id"].as_str().unwrap().to_string();
-    let stopped = poll_until(&daemon, &id, Duration::from_secs(20), finished);
+    let stopped = poll_until(&daemon, &id, finished);
     assert_eq!(stopped["status"], "stopped", "{stopped}");
     assert_eq!(stopped["assumptions"].as_array().unwrap().len(), 1);
 
@@ -188,9 +185,7 @@ fn overturn_marks_the_assumption_and_reaches_the_next_attempt() {
     );
 
     daemon.request("task.start", json!({"id": id}));
-    let settled = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed")
-    });
+    let settled = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed"));
     assert_eq!(settled["status"], "done", "{settled}");
     let n = settled["attempts"].as_array().unwrap().last().unwrap()["n"].clone();
     let brief = std::fs::read_to_string(
@@ -222,5 +217,5 @@ fn overturn_marks_the_assumption_and_reaches_the_next_attempt() {
     let latest = daemon.request("task.get", json!({"id": id}));
     assert_eq!(latest["assumptions"][0]["ownerAnswer"], "dark after all");
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }

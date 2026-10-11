@@ -13,18 +13,15 @@ const { createHostInstaller } = require("../electron/host-setup.cjs");
 const { setupHost } = require("../electron/host-setup.cjs");
 const { makeHost } = require("./helpers/fake-host.cjs");
 const { realDaemon } = require("./helpers/real-daemon.cjs");
+const {
+  DEADLINE_MS,
+  until,
+  pidStart,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 
 const { binary, skip } = realDaemon();
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const until = async (check, ms = 20000, what = "condition") => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const value = await check();
-    if (value) return value;
-    await sleep(25);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 
 test(
   "real daemon over a fake ssh: not installed, install, ready, shell session, echo",
@@ -37,11 +34,24 @@ test(
       if (previous === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = previous;
     });
-    const host = await makeHost(t);
+    // One ordered step, registered before makeHost so it runs before the
+    // host root is removed: close the manager, stop the daemon and every
+    // session holder seen, and wait for their exit.
+    let manager;
+    let host;
+    const holders = new Map();
+    t.after(async () => {
+      manager?.close();
+      const lock = path.join(host?.home ?? "", ".sushiai", "daemon.lock");
+      if (host && fs.existsSync(lock))
+        await stopPid(Number.parseInt(fs.readFileSync(lock, "utf8"), 10));
+      for (const [holder, start] of holders) await stopPid(holder, { start });
+    });
+    host = await makeHost(t);
     const profile = host.connections.list()[0];
     const bytes = fs.readFileSync(binary);
     const dist = fs.mkdtempSync(path.join("/tmp", "host-dist-"));
-    t.after(() => fs.rmSync(dist, { recursive: true, force: true }));
+    t.after(() => removeDir(dist));
     fs.mkdirSync(path.join(dist, "t"));
     fs.writeFileSync(path.join(dist, "t", "sushiai"), bytes, { mode: 0o755 });
     const platform = execFileSync("uname", ["-sm"], {
@@ -57,7 +67,7 @@ test(
       },
     };
 
-    const manager = createDaemonManager({
+    manager = createDaemonManager({
       connectors: remoteConnectors(host.connections.profiles, {
         ssh: host.connections.ssh,
         args: (p) => host.connections.args(p),
@@ -66,29 +76,13 @@ test(
       backoffMaxMs: 200,
     });
     const hostName = profile.id;
-    let sessionId;
-    let handle;
-    t.after(async () => {
-      try {
-        if (sessionId) {
-          await handle?.detach();
-          await manager.request(hostName, "session.close", {
-            id: sessionId,
-            graceful: false,
-          });
-        }
-        await manager.request(hostName, "daemon.shutdown", {});
-      } catch {
-        // The daemon is already gone.
-      }
-      await sleep(400);
-      manager.close();
-    });
+    const request = (method, params) =>
+      manager.request(hostName, method, params, { timeoutMs: DEADLINE_MS });
     const state = () => manager.states().find((s) => s.host === hostName);
     manager.start();
     // The profile has no autoConnect: the user connects it by hand.
     await manager.retry(hostName);
-    await until(() => state().state === "failed", 20000, "not installed");
+    await until(() => state().state === "failed", "not installed");
     assert.equal(state().reason, "not_installed");
 
     const installer = createHostInstaller({
@@ -103,7 +97,7 @@ test(
     assert.equal(state().state, "ready");
     assert.ok(state().capabilities.includes("sessions"));
 
-    const created = await manager.request(hostName, "session.create", {
+    const created = await request("session.create", {
       cwd: host.home,
       cols: 80,
       rows: 24,
@@ -111,21 +105,19 @@ test(
       env: {},
       idempotencyKey: "e2e-1",
     });
-    sessionId = created.id ?? created.sessionId;
+    const sessionId = created.id ?? created.sessionId;
     assert.ok(sessionId);
+    for (const entry of await request("session.list", {}))
+      if (entry.holderPid)
+        holders.set(entry.holderPid, pidStart(entry.holderPid));
     let output = "";
-    handle = await manager.attach(
-      hostName,
-      sessionId,
-      { scrollback: 0 },
-      (data) => {
-        output += data.toString("utf8");
-      },
-    );
-    await manager.request(hostName, "session.input", {
+    await manager.attach(hostName, sessionId, { scrollback: 0 }, (data) => {
+      output += data.toString("utf8");
+    });
+    await request("session.input", {
       id: sessionId,
       data: "echo MARKER_$((20+22))\n",
     });
-    await until(() => output.includes("MARKER_42"), 15000, "echo output");
+    await until(() => output.includes("MARKER_42"), "echo output");
   },
 );

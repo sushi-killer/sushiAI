@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// Any `Orchestrator:` line except the standing no-planner-tier note.
 fn is_triage_decision(line: &str) -> bool {
@@ -41,7 +40,7 @@ fn a_task_without_a_planner_tier_runs_on_the_standard_route() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(settled["tier"], "standard", "{settled}");
     assert_eq!(
@@ -59,7 +58,7 @@ fn a_task_without_a_planner_tier_runs_on_the_standard_route() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Reports `blocked` the first time (a blocked report goes straight into
@@ -122,7 +121,7 @@ fn triage_answer_lets_the_task_continue_without_the_owner() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(
         settled["status"], "done",
         "triage should have answered the blocked question itself: {settled}"
@@ -147,7 +146,7 @@ fn triage_answer_lets_the_task_continue_without_the_owner() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Fails verify until its brief carries the orchestrator's instruction;
@@ -200,7 +199,7 @@ fn the_orchestrator_answers_attempts_keep_failing_and_the_task_passes() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "waiting" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -213,7 +212,7 @@ fn the_orchestrator_answers_attempts_keep_failing_and_the_task_passes() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Always reports `blocked`; triage always escalates with a sharpened
@@ -265,9 +264,7 @@ fn triage_escalate_waits_for_the_owner_with_the_sharpened_question() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert_eq!(
         waiting["question"]["text"], "Pick the auth approach: OAuth or API key?",
         "the owner should see triage's sharpened question, not the original: {waiting}"
@@ -287,7 +284,7 @@ fn triage_escalate_waits_for_the_owner_with_the_sharpened_question() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Reports `complete` on a change under a protected path -- the resulting
@@ -341,9 +338,7 @@ fn protected_path_approval_is_never_triaged() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert!(
         waiting["question"]["text"]
             .as_str()
@@ -361,7 +356,7 @@ fn protected_path_approval_is_never_triaged() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -395,9 +390,7 @@ fn orchestrator_off_goes_straight_to_the_owner() {
 
     // The script would escalate with a *different*, sharpened question if
     // triage ever ran -- the owner seeing the original proves it didn't.
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert_eq!(
         waiting["question"]["text"], "Which auth approach?",
         "orchestrator = \"\" must skip triage entirely: {waiting}"
@@ -412,5 +405,5 @@ fn orchestrator_off_goes_straight_to_the_owner() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

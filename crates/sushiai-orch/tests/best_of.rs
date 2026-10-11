@@ -111,7 +111,7 @@ fn sibling_gone(repo: &Path, task: &Value) {
 fn finish(daemon: Daemon, task: &Value) {
     let wt = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(wt);
+    remove_dir_retrying(wt);
 }
 
 #[test]

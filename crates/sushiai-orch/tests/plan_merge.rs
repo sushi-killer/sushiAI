@@ -5,7 +5,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// Plans the request as `$PARTS` (a ready `subtasks` JSON array body), plans
 /// a child from its `PART_` marker, and implements by writing the lines the
@@ -84,7 +83,7 @@ fn run(parts: &str, first_attempt_lines: &str) -> Run {
         }),
     );
     let id = created["id"].as_str().unwrap().to_string();
-    let task = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
+    let task = poll_until(&daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     let verify_log = std::fs::read_to_string(&verify_log)

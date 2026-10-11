@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 fn planner_daemon() -> (Daemon, tempfile::TempDir) {
     let scripts = tempfile::tempdir().unwrap();
@@ -95,7 +94,7 @@ fn plan_brief(daemon: &Daemon, repo: &Path, request: &str, extra: Value) -> Stri
     }
     let task = daemon.request("task.create", params);
     let id = task["id"].as_str().unwrap().to_string();
-    poll_until(daemon, &id, Duration::from_secs(20), |s| {
+    poll_until(daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     run_file(daemon, &id, "plan/brief.md")
@@ -458,7 +457,7 @@ fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
     assert!(!settings.contains("Keep it small"));
 
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(15));
+    let _ = wait_for_exit(child);
     let socket2 = socket_of(data.path());
     let second = spawn_daemon(data.path(), &[]);
     wait_for_socket(&socket2);
@@ -473,7 +472,7 @@ fn repo_notes_round_trip_through_a_subdirectory_and_a_restart() {
     let gone = request_on(&socket2, "repo.notes.list", json!({"repo": repo_str}));
     assert_eq!(gone["notes"], json!([]));
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
+    let _ = wait_for_exit(second);
 }
 
 fn approve_case(form: &str, change: &str) -> (Value, Value) {
@@ -506,7 +505,7 @@ fn approve_case(form: &str, change: &str) -> (Value, Value) {
     );
     assert_eq!(approved["status"], "approved", "{approved}");
     let task_id = approved["taskId"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(settled["status"], "done", "{settled}");

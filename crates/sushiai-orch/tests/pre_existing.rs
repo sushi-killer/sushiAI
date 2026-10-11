@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// Implements (writes a marker) and, as the reviewer, answers a plain PASS.
 const FAKE: &str = r###"#!/bin/sh
@@ -48,16 +47,12 @@ fn spawn(scripts: &Path) -> Daemon {
 }
 
 fn waiting_with_attempts(daemon: &Daemon, id: &str, n: usize) -> Value {
-    poll_until(daemon, id, Duration::from_secs(30), |s| s == "waiting");
-    let start = std::time::Instant::now();
-    loop {
+    poll_until(daemon, id, |s| s == "waiting");
+    wait_until(&format!("task {id} to wait after {n} attempts"), || {
         let task = daemon.request("task.get", json!({"id": id}));
-        if task["status"] == "waiting" && task["attempts"].as_array().unwrap().len() == n {
-            return task;
-        }
-        assert!(start.elapsed() < Duration::from_secs(30), "{task}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        (task["status"] == "waiting" && task["attempts"].as_array().unwrap().len() == n)
+            .then_some(task)
+    })
 }
 
 fn lines(path: &Path) -> usize {
@@ -97,7 +92,7 @@ fn a_final_check_that_fails_twice_on_base_waits_before_any_attempt_and_leaves_no
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -107,9 +102,7 @@ fn a_check_that_passes_on_base_still_retries() {
     let repo = init_git_repo();
     // Fails only where the implementer's marker exists.
     let id = start(&daemon, repo.path(), "test ! -f CHANGED_MARKER.txt");
-    let task = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
-        matches!(s, "waiting" | "failed" | "done")
-    });
+    let task = poll_until(&daemon, &id, |s| matches!(s, "waiting" | "failed" | "done"));
     assert!(
         task["attempts"].as_array().unwrap().len() > 1,
         "retried as before: {task}"
@@ -120,7 +113,7 @@ fn a_check_that_passes_on_base_still_retries() {
         .contains("already fails on base"));
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -137,7 +130,7 @@ fn drop_this_check_removes_it_and_the_first_attempt_lands() {
         "task.answer",
         json!({"id": id, "answer": "drop this check"}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     // An empty list is left out of the JSON.
     assert!(
@@ -175,7 +168,7 @@ fn retry_after_the_base_is_fixed_moves_to_the_new_base_and_runs_the_first_attemp
     git_out(repo.path(), &["commit", "-q", "-m", "fix the base"]);
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
 
-    let done = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert_ne!(done["baseSha"].as_str().unwrap(), old_base);
     assert!(
@@ -187,7 +180,7 @@ fn retry_after_the_base_is_fixed_moves_to_the_new_base_and_runs_the_first_attemp
     );
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -204,7 +197,7 @@ fn an_owner_retry_on_an_unmoved_base_keeps_the_check_and_runs_attempt_one() {
     // Nothing moved on the base: the answer sticks, the check stays and the
     // first attempt runs without a second question.
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert_eq!(done["finalVerify"][0], check.as_str(), "{done}");
     let decisions: Vec<&str> = done["decisions"]
@@ -223,7 +216,7 @@ fn an_owner_retry_on_an_unmoved_base_keeps_the_check_and_runs_attempt_one() {
 
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -240,7 +233,7 @@ fn an_answer_matches_its_option_whatever_its_case_or_trailing_punctuation() {
         "task.answer",
         json!({"id": id, "answer": "Drop this check."}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert!(
         done["finalVerify"].as_array().is_none_or(Vec::is_empty),
@@ -300,15 +293,10 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     );
     let id = task["id"].as_str().unwrap().to_string();
     let wait_waiting = |socket: &Path| {
-        let start = std::time::Instant::now();
-        loop {
+        wait_until("the task to wait", || {
             let t = request_on(socket, "task.get", json!({"id": id}));
-            if t["status"] == "waiting" {
-                return t;
-            }
-            assert!(start.elapsed() < Duration::from_secs(30), "{t}");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+            (t["status"] == "waiting").then_some(t)
+        })
     };
     let waiting = wait_waiting(&socket1);
     assert_eq!(
@@ -317,7 +305,7 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     );
     let base_sha = waiting["baseSha"].as_str().unwrap().to_string();
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(15));
+    let _ = wait_for_exit(first);
 
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &env);
@@ -329,15 +317,10 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
         "task.answer",
         json!({"id": id, "answer": "drop this check"}),
     );
-    let start = std::time::Instant::now();
-    let done = loop {
+    let done = wait_until("the task to end", || {
         let t = request_on(&socket2, "task.get", json!({"id": id}));
-        if matches!(t["status"].as_str(), Some("done" | "failed")) {
-            break t;
-        }
-        assert!(start.elapsed() < Duration::from_secs(30), "{t}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        matches!(t["status"].as_str(), Some("done" | "failed")).then_some(t)
+    });
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     for field in ["verify", "finalVerify"] {
@@ -369,8 +352,8 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     assert_eq!(drops, 1, "{decisions:?}");
 
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -385,9 +368,7 @@ fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
         c = count.display()
     );
     let id = start(&daemon, repo.path(), &check);
-    let done = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "waiting" | "failed")
-    });
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert!(done["question"].is_null(), "{done}");
@@ -406,7 +387,7 @@ fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
     );
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -421,5 +402,5 @@ fn stop_leaves_the_task_stopped() {
     assert_eq!(stopped["status"], "stopped", "{stopped}");
     let worktree = waiting["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

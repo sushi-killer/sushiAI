@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// One fake for every role: the plan reply asks for a verify that only the
 /// second implement attempt satisfies, so the task plans, implements twice,
@@ -54,7 +53,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(30), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "{settled}");
@@ -114,7 +113,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 fn write_records(data: &std::path::Path, rows: &[(i64, &str, f64)]) {

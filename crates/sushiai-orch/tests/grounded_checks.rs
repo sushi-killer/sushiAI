@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake plays every role. `$LOG_DIR` keeps each run's brief
 /// (`brief.<pid>`), the reviewer's brief (`review-brief.md`) and a marker per
@@ -111,7 +110,7 @@ fn cleanup(s: Setup, tasks: &[&Value]) {
         .collect();
     s.daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt);
+        remove_dir_retrying(wt);
     }
 }
 
@@ -359,7 +358,7 @@ fi"#,
 
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "drop criterion"}));
-    let done = poll_until(&s.daemon, &id, Duration::from_secs(30), |st| {
+    let done = poll_until(&s.daemon, &id, |st| {
         st == "done" || st == "failed" || st == "stopped"
     });
     assert_eq!(done["status"], "done", "task JSON: {done}");

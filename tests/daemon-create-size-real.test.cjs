@@ -10,17 +10,14 @@ const { toDaemonLaunch } = require("../src/workspace/session-launch.ts");
 const { rememberTerminalSize } = require("../src/terminal-sizing.ts");
 
 const { realDaemon } = require("./helpers/real-daemon.cjs");
+const {
+  DEADLINE_MS,
+  until,
+  pidStart,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 const { binary, skip } = realDaemon();
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check, what, ms = 10000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await wait(25);
-  }
-}
 
 test(
   "a launch from a measured 40x9 pane starts the session at 40x9 and never resizes it",
@@ -40,20 +37,24 @@ test(
       stdio: "ignore",
     });
     const exited = new Promise((resolve) => daemon.once("exit", resolve));
+    const timeout = { timeoutMs: DEADLINE_MS };
+    const holders = new Map();
     let client;
     try {
       const socketPath = path.join(home, "daemon.sock");
       client = await until(async () => {
         if (!fs.existsSync(socketPath)) return undefined;
-        return connectDaemon({ socketPath, clientName: "size-test" }).catch(
-          () => undefined,
-        );
+        return connectDaemon({
+          socketPath,
+          clientName: "size-test",
+          helloTimeoutMs: DEADLINE_MS,
+        }).catch(() => undefined);
       }, "the daemon socket");
       const methods = [];
       const manager = {
         request: (_host, method, params) => {
           methods.push(method);
-          return client.request(method, params);
+          return client.request(method, params, timeout);
         },
         attach: (_host, id, _options, onBytes) => client.attach(id, onBytes),
       };
@@ -75,6 +76,9 @@ test(
       assert.equal(request.cols, 40);
       assert.equal(request.rows, 9);
       const { sessionId } = await launcher.launch(request);
+      for (const entry of await client.request("session.list", {}, timeout))
+        if (entry.holderPid)
+          holders.set(entry.holderPid, pidStart(entry.holderPid));
 
       const sent = [];
       const handlers = createTerminalHandlers({
@@ -102,19 +106,19 @@ test(
       await until(() => /^\d+ \d+\r?$/m.test(text()), "stty output");
       assert.match(text(), /^9 40\r?$/m);
       assert.ok(!methods.includes("session.resize"), "no resize was sent");
-      await client.request("session.close", { id: sessionId, graceful: false });
+      await client.request(
+        "session.close",
+        { id: sessionId, graceful: false },
+        timeout,
+      );
     } finally {
-      await client?.request("daemon.shutdown", {}).catch(() => {});
+      // One ordered step: close the client, stop the daemon and the session
+      // holders seen, wait for their exit, then remove the home.
       client?.close();
-      const stopped = await Promise.race([
-        exited,
-        wait(5000).then(() => false),
-      ]);
-      if (stopped === false) {
-        daemon.kill("SIGTERM");
-        await exited;
-      }
-      fs.rmSync(home, { recursive: true, force: true });
+      await stopPid(daemon.pid);
+      for (const [holder, start] of holders) await stopPid(holder, { start });
+      await exited;
+      removeDir(home);
     }
   },
 );

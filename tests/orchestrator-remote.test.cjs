@@ -15,28 +15,19 @@ const {
   PREFLIGHT_SCRIPT,
 } = require("../electron/host-setup.cjs");
 
+const { until, removeDir } = require("./helpers/deadline.cjs");
+
 const cleanups = [];
 test.afterEach(async () => {
   while (cleanups.length) await cleanups.pop()();
 });
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const until = async (check, ms = 5000) => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const value = await check();
-    if (value) return value;
-    await sleep(10);
-  }
-  throw new Error("timed out");
-};
 
 const PROFILE = { id: "host-1", host: "user@devbox", name: "Devbox" };
 const ENDPOINT = `ssh:${PROFILE.id}`;
 
 function fakeProxy(mode = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fop-"));
-  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(() => removeDir(dir));
   const script = path.join(dir, "ssh");
   fs.writeFileSync(
     script,
@@ -118,7 +109,7 @@ test("a remote task is created through the proxy, its events come back tagged wi
   assert.equal(manager.states()[0].state, "ready");
 
   // The module's event arrives with the host.
-  await until(() => relayed.length > 0);
+  await until(() => relayed.length > 0, "the relayed orchestrator event");
   assert.equal(relayed[0][0], "orchestrator-event");
   assert.equal(relayed[0][1].task.host, ENDPOINT);
   assert.equal(relayed[0][1].host, ENDPOINT);

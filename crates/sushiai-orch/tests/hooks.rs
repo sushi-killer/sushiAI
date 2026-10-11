@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 #[test]
 fn stop_hook_blocks_on_failing_verify_then_task_passes_once_fixed() {
@@ -41,7 +40,7 @@ fn stop_hook_blocks_on_failing_verify_then_task_passes_once_fixed() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 1);
@@ -65,7 +64,7 @@ fn stop_hook_blocks_on_failing_verify_then_task_passes_once_fixed() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 // -- Claude implement run hooks -------------------------------------------
@@ -95,7 +94,7 @@ fn a_claude_implement_run_gets_only_the_orchd_hooks_and_no_env() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
 
     let settings: serde_json::Value =
@@ -108,5 +107,5 @@ fn a_claude_implement_run_gets_only_the_orchd_hooks_and_no_env() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

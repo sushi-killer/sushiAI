@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// Answers by what it is asked. A planner brief that carries the gate's
 /// findings gets `$SECOND_DRAFT`, any other `$FIRST_DRAFT`; the review prompt
@@ -86,7 +85,7 @@ fn run(first: &str, second: &str, review_route: &str, review_result: &str) -> Ru
         }),
     );
     let id = created["id"].as_str().unwrap().to_string();
-    let task = poll_until(&daemon, &id, Duration::from_secs(30), |s| {
+    let task = poll_until(&daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     let calls = std::fs::read_to_string(&log)

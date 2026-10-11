@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use serde_json::json;
-use std::time::Duration;
 
 #[test]
 fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
@@ -48,14 +47,7 @@ fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let begun = std::time::Instant::now();
-    while !started.exists() {
-        assert!(
-            begun.elapsed() < Duration::from_secs(20),
-            "attempt never began"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the attempt to begin", || started.exists().then_some(()));
     let amended = daemon.request(
         "task.amend",
         json!({"id": id, "criteria": ["the NEWCRITERION holds"]}),
@@ -63,7 +55,7 @@ fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
     assert_eq!(amended["pending"], true, "{amended}");
     std::fs::write(&go, "").unwrap();
 
-    let done = poll_task_status(&daemon, &id, Duration::from_secs(30));
+    let done = poll_task_status(&daemon, &id);
     assert_eq!(done["status"], "done", "{done}");
     let brief = std::fs::read_to_string(&brief_log).unwrap();
     assert!(brief.contains("NEWCRITERION"), "{brief}");
@@ -77,7 +69,7 @@ fn an_amendment_during_an_attempt_reaches_the_next_review_brief() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -138,7 +130,7 @@ fn amended_checks_are_baselined_on_the_base_and_only_failing_ones_gate() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -176,7 +168,7 @@ fn amending_criteria_replaces_the_visual_flags_with_the_amended_ones() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -210,5 +202,5 @@ fn amending_the_screenshot_command_sets_and_clears_it() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

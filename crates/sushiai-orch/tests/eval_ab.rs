@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 
 #[test]
 fn task_create_rejects_an_unknown_variant_flag() {
@@ -83,7 +82,7 @@ fn the_planner_s_tier_routes_the_task() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "{settled}");
@@ -109,7 +108,7 @@ fn the_planner_s_tier_routes_the_task() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Runs `sushiai orch eval run` against `daemon` from `repo`; `(exit ok, stdout, stderr)`.
@@ -213,7 +212,7 @@ fn eval_run_creates_one_task_at_the_resolved_base_with_its_eval_fields() {
         .collect();
     daemon.shutdown_and_wait();
     for w in worktrees {
-        let _ = std::fs::remove_dir_all(w);
+        remove_dir_retrying(w);
     }
 }
 
@@ -248,7 +247,7 @@ fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
         "{task}"
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "{settled}");
@@ -285,7 +284,7 @@ fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
     assert!(other["variant"].get("plannerRoute").is_none(), "{other}");
     assert!(other["variant"].get("tierRoutes").is_none(), "{other}");
     let other_id = other["id"].as_str().unwrap().to_string();
-    let other_settled = poll_until(&daemon, &other_id, Duration::from_secs(15), |s| {
+    let other_settled = poll_until(&daemon, &other_id, |s| {
         s == "stopped" || s == "done" || s == "failed"
     });
     assert_eq!(
@@ -303,7 +302,7 @@ fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
 
     daemon.shutdown_and_wait();
     for t in [&task, &other] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -423,7 +422,7 @@ fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
     let mut worktrees = vec![];
     for (task, code) in [(&good, 0), (&bad, 3)] {
         let id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_until(&daemon, &id, Duration::from_secs(30), |s| {
+        let settled = poll_until(&daemon, &id, |s| {
             s == "done" || s == "failed" || s == "stopped" || s == "waiting"
         });
         assert_eq!(settled["status"], "done", "{settled}");
@@ -456,7 +455,7 @@ fn a_done_eval_task_counts_as_a_success_only_when_its_check_passes() {
 
     daemon.shutdown_and_wait();
     for w in worktrees {
-        let _ = std::fs::remove_dir_all(w);
+        remove_dir_retrying(w);
     }
 }
 

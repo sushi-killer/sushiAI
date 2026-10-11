@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Writes `<name>.txt` for the task whose goal names `FILE_<name>`. A task
 /// holds until `$GATES/hold_<name>` is gone; `$GATES/started_<name>` says it
@@ -94,17 +94,11 @@ fn started(gates: &Path, name: &str) -> bool {
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let begin = Instant::now();
-    while !cond() {
-        assert!(begin.elapsed() < Duration::from_secs(30), "never: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
-    poll_until(daemon, id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    })
+    poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
 fn get(daemon: &Daemon, id: &str) -> serde_json::Value {
@@ -150,6 +144,7 @@ fn backlog_buckets_append_move_and_clear() {
     assert!(order_b > order_a, "{a} {b}");
     // Nothing started a backlog task, whatever `start` defaults to.
     let c = create(&env, "c", json!({"backlog": {"bucket": "later"}}));
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(500));
     assert!(!started(env.gates.path(), "c"));
     assert_eq!(get(&env.daemon, &id_of(&c))["status"], "queued");
@@ -257,6 +252,7 @@ fn a_backlog_task_is_never_started_by_the_graph_or_recovery() {
     assert_eq!(get(&daemon, &wid)["status"], "queued");
     let done = until_done(&daemon, &dep_id);
     assert_eq!(done["status"], "done", "{done}");
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(1000));
     let w = get(&daemon, &wid);
     assert_eq!(w["status"], "queued", "{w}");
@@ -264,6 +260,7 @@ fn a_backlog_task_is_never_started_by_the_graph_or_recovery() {
 
     // Restart onto the same data dir.
     daemon.restart(&refs);
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let w = get(&daemon, &wid);
     assert_eq!(w["status"], "queued", "{w}");
@@ -304,6 +301,7 @@ fn autopilot_is_off_by_default() {
         "o",
         json!({"start": false, "backlog": {"bucket": "next"}}),
     );
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(800));
     assert!(!started(env.gates.path(), "o"));
     assert_eq!(get(&env.daemon, &id_of(&t))["status"], "queued");
@@ -346,6 +344,7 @@ fn autopilot_starts_ready_next_tasks_in_order_within_parallel() {
     set_autopilot(&env.daemon, true);
 
     wait_for("a started", || started(g, "a"));
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(500));
     // parallel 1: one loop at a time, and c waits for its dependency.
     assert!(!started(g, "b") && !started(g, "c"), "one at a time");
@@ -358,6 +357,7 @@ fn autopilot_starts_ready_next_tasks_in_order_within_parallel() {
     assert!(!started(g, "c"));
     release(g, "b");
     until_done(&env.daemon, &id_of(&b));
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(500));
     assert!(!started(g, "c"), "its dependency is not done");
 
@@ -373,6 +373,7 @@ fn autopilot_starts_ready_next_tasks_in_order_within_parallel() {
     assert!(c_done.get("backlog").is_none(), "{c_done}");
     assert!(decisions(&c_done).contains("Autopilot: started from the next backlog"));
 
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(800));
     assert!(!started(g, "d"), "later bucket is never started");
     assert!(!started(g, "n"), "no backlog is never started");

@@ -106,6 +106,7 @@ mod tests {
             code: Some(code),
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         }
     }
 

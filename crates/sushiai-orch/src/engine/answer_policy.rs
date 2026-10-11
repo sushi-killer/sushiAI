@@ -709,6 +709,7 @@ mod tests {
                 code: Some(1),
                 tail: "boom".to_string(),
                 ms: 1,
+                ..Default::default()
             })
             .collect();
         let mut q = base_check::pre_existing_question(&failed, "0123456789");

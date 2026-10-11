@@ -299,7 +299,7 @@ pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), Verif
 fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutcome>) {
     let rows: Vec<StoredBaseRun> = cache
         .iter()
-        .filter(|(_, o)| o.code.is_some())
+        .filter(|(_, o)| o.code.is_some() && !timed_out_under_load(o))
         .take(BASE_RUNS_KEPT)
         .map(|((sha, _), o)| StoredBaseRun {
             base_sha: sha.clone(),
@@ -322,8 +322,10 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// cancelled). Results are cached on the app per (base sha, command), so the
 /// same command on an unchanged base runs once. `Err` only when the checkout
 /// itself could not be made; the caller then knows nothing about the base.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
@@ -370,9 +372,16 @@ pub(super) async fn run_on_base(
             err => err,
         };
         let ran = match setup {
-            Ok(()) => {
-                Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, base_sha, cancel).await)
-            }
+            Ok(()) => Ok(run_verify_commands(
+                CheckContext::new(app, task_id),
+                &wt,
+                run_dir,
+                &missing,
+                sandbox,
+                base_sha,
+                cancel,
+            )
+            .await),
             Err(e) => Err(format!("could not check out {base_sha}: {e}")),
         };
         let (repo_path, wt3) = (PathBuf::from(repo), wt.clone());
@@ -386,7 +395,7 @@ pub(super) async fn run_on_base(
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
             // A timeout says nothing about the commit: never stored.
-            if !cancelled && r.code.is_some() {
+            if !cancelled && r.code.is_some() && !timed_out_under_load(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
             }
             known.insert(c.clone(), r);
@@ -404,8 +413,10 @@ pub(super) async fn run_on_base(
 /// under `run_dir`). `None` when the base cannot be checked out or the wait
 /// was cancelled: nothing is known then. `background` picks the lane of a job
 /// started here (see `start_base_jobs`).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn base_result(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     command: &str,
@@ -415,6 +426,7 @@ pub(super) async fn base_result(
 ) -> Option<VerifyOutcome> {
     start_base_jobs(
         app,
+        task_id,
         repo,
         base_sha,
         &[command.to_string()],
@@ -435,8 +447,12 @@ pub(super) async fn failing_on_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
+    if timed_out_under_load(failed) {
+        return None;
+    }
     let base = base_result(
         app,
+        Some(&task.id),
         &task.repo,
         &task.base_sha,
         &failed.command,
@@ -445,7 +461,7 @@ pub(super) async fn failing_on_base(
         true,
     )
     .await?;
-    base.code.is_some_and(|c| c != 0).then_some(base)
+    (base.code.is_some_and(|c| c != 0) && !timed_out_under_load(&base)).then_some(base)
 }
 
 /// A `verify` command that failed after the work was carried onto a moved
@@ -462,10 +478,14 @@ pub(super) async fn broken_by_the_new_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
+    if timed_out_under_load(failed) {
+        return None;
+    }
     // A `verify` command: its lookups use the blocking lane, so a slow
     // background final of the same repo never holds them back.
     let on_new = base_result(
         app,
+        Some(&task.id),
         &task.repo,
         &task.base_sha,
         &failed.command,
@@ -474,9 +494,10 @@ pub(super) async fn broken_by_the_new_base(
         false,
     )
     .await
-    .filter(|b| b.code.is_some_and(|c| c != 0))?;
+    .filter(|b| b.code.is_some_and(|c| c != 0) && !timed_out_under_load(b))?;
     let on_old = base_result(
         app,
+        Some(&task.id),
         &task.repo,
         old_base,
         &failed.command,
@@ -514,7 +535,7 @@ pub(super) async fn wait_on_broken_base(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> BaseBreak {
     let command = failed.command.clone();
     let base_sha = task.base_sha.clone();
@@ -635,6 +656,7 @@ async fn lock_base_checks(
 /// the others the blocking lane.
 pub(super) fn start_base_jobs(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
@@ -660,6 +682,7 @@ pub(super) fn start_base_jobs(
     if todo.is_empty() {
         return;
     }
+    let task_id = task_id.map(str::to_string);
     let (app, repo, base_sha, run_dir) = (
         app.clone(),
         repo.to_string(),
@@ -696,12 +719,22 @@ pub(super) fn start_base_jobs(
             todo: todo.clone(),
             tx,
         };
-        run_base_job(&app, &repo, &base_sha, &todo, &run_dir, background).await;
+        run_base_job(
+            &app,
+            task_id.as_deref(),
+            &repo,
+            &base_sha,
+            &todo,
+            &run_dir,
+            background,
+        )
+        .await;
     });
 }
 
 async fn run_base_job(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
@@ -712,9 +745,10 @@ async fn run_base_job(
     let Some(_alone) = lock_base_checks(app, repo, background, &cancel).await else {
         return;
     };
-    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0);
+    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0) && !timed_out_under_load(r);
     let Ok(first) = run_on_base(
         app,
+        task_id,
         repo,
         base_sha,
         commands,
@@ -741,6 +775,7 @@ async fn run_base_job(
     }
     let Ok(second) = run_on_base(
         app,
+        task_id,
         repo,
         base_sha,
         &failed,
@@ -753,7 +788,7 @@ async fn run_base_job(
     };
     let mut flaky = app.base_flaky.lock().unwrap();
     for c in &failed {
-        if second.iter().any(|r| &r.command == c && !fails(r)) {
+        if second.iter().any(|r| &r.command == c && r.code == Some(0)) {
             flaky.insert((base_sha.to_string(), c.clone()));
         }
     }
@@ -819,11 +854,20 @@ pub(super) async fn failing_twice_on_base(
         return Vec::new();
     }
     let dir = app.store.task_dir(&task.id);
-    start_base_jobs(app, &task.repo, &task.base_sha, &commands, &dir, false);
+    start_base_jobs(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &dir,
+        false,
+    );
     let mut failing = Vec::new();
     for c in &commands {
         if let Some(r) = wait_for_base(app, &task.base_sha, c, cancel).await {
-            if r.code.is_some_and(|code| code != 0) {
+            record_check_outcomes(app, task, std::slice::from_ref(&r));
+            if r.code.is_some_and(|code| code != 0) && !timed_out_under_load(&r) {
                 failing.push(r);
             }
         }
@@ -870,7 +914,15 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         return;
     }
     let dir = app.store.task_dir(&task.id);
-    start_base_jobs(app, &task.repo, &task.base_sha, &commands, &dir, true);
+    start_base_jobs(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &dir,
+        true,
+    );
 }
 
 /// Baselines the checks that have none yet on the base commit (not in the
@@ -887,8 +939,19 @@ pub(super) async fn baseline_on_base(
     }
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
-    match run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await {
+    match run_on_base(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &run_dir,
+        cancel,
+    )
+    .await
+    {
         Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
+            record_check_outcomes(app, task, &results);
             record_baselines(task, &todo, &results)
         }
         _ => false,
@@ -1015,6 +1078,7 @@ mod tests {
             code: Some(code),
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         }
     }
 
@@ -1031,6 +1095,7 @@ mod tests {
             tokio::spawn(async move {
                 base_result(
                     &app,
+                    None,
                     "/no/such/repo",
                     "abc",
                     "npm run ci",
@@ -1063,6 +1128,7 @@ mod tests {
         let run_dir = dir.path().join("runs");
         let got = base_result(
             &app,
+            None,
             "/no/such/repo",
             "abc",
             "npm run ci",
@@ -1124,6 +1190,7 @@ mod tests {
             code: Some(1),
             tail: "boom".into(),
             ms: 1,
+            ..Default::default()
         };
         let pending: Arc<StdMutex<Option<oneshot::Sender<Reply>>>> = Arc::new(StdMutex::new(None));
         let cancel = CancelToken::new();
@@ -1246,6 +1313,7 @@ mod tests {
             code: Some(1),
             tail: "tail".into(),
             ms: 1,
+            ..Default::default()
         };
         let q = pre_existing_question(&[failed], sha);
         crate::engine::answer_policy::record_answered_question(

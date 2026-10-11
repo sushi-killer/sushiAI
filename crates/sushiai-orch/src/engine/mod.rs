@@ -66,6 +66,7 @@ mod review;
 mod routing;
 mod rpc_misc;
 mod rpc_tasks;
+mod slots;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
@@ -98,6 +99,7 @@ use reports::*;
 use review::*;
 use routing::*;
 use rpc_tasks::*;
+use slots::{ResizableSlots, SlotPermit};
 use task_loop::*;
 #[cfg(test)]
 use test_support::*;
@@ -377,12 +379,14 @@ pub struct App {
     base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
-    /// Concurrency limit (`settings.parallel` at startup -- a live
-    /// `settings.set` change takes effect on the next restart, not
-    /// immediately; resizing a `Semaphore` down isn't a thing tokio
-    /// supports, and the spec explicitly allows skipping this).
-    slots: Arc<Semaphore>,
-    parallel_limit: u32,
+    /// Live task-loop limit. Shrinking retires free permits first, then
+    /// held permits as their owners finish.
+    slots: Arc<ResizableSlots>,
+    /// Shared by all check runners on this daemon, independent of agent slots.
+    check_slots: Arc<ResizableSlots>,
+    check_load: RwLock<fn() -> (f64, u32)>,
+    /// Hook and background check lines awaiting the loop's own Task copy.
+    check_decisions: StdMutex<HashMap<String, Vec<String>>>,
     /// Keyed by parent task id: held while one child lands on the parent's
     /// branch, so landings onto one branch happen one at a time.
     landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -538,8 +542,8 @@ impl App {
         let store = Store::new(&data_dir)?;
         let settings = store.load_settings()?;
         let (events_tx, _) = broadcast::channel(1024);
-        let parallel_limit = settings.parallel.max(1);
-        let slots = Arc::new(Semaphore::new(parallel_limit as usize));
+        let slots = ResizableSlots::new(settings.parallel.max(1) as usize);
+        let check_slots = ResizableSlots::new(settings.heavy_check_limit() as usize);
 
         let messages = messages::load(&data_dir);
         let base_runs_dir = data_dir.clone();
@@ -572,7 +576,9 @@ impl App {
             base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
-            parallel_limit,
+            check_slots,
+            check_load: RwLock::new(verify::machine_load),
+            check_decisions: StdMutex::new(HashMap::new()),
             landing_locks: StdMutex::new(HashMap::new()),
             base_check_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),

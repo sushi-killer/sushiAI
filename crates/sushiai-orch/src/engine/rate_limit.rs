@@ -89,7 +89,7 @@ pub(super) async fn pause_for_rate_limit(
     error: &str,
     wait_secs: u64,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> bool {
     let attempt_n = task.attempts[idx].n;
     task.attempts[idx].status = AttemptStatus::Interrupted;

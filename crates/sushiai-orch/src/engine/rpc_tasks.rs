@@ -1538,6 +1538,7 @@ mod answer_source_tests {
                 code: Some(1),
                 tail: "boom".to_string(),
                 ms: 1,
+                ..Default::default()
             }],
             "0123456789",
         ));

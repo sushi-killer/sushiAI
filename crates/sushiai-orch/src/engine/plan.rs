@@ -269,7 +269,7 @@ pub(super) async fn ask_plan_question(
     options: Vec<String>,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     // Same as wait_for_answer: a task parked on a question holds no slot.
     permit.take();
@@ -684,7 +684,7 @@ pub(super) async fn run_plan_stage(
     task_id: &str,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
     auto_start_after_plan: bool,
 ) -> PlanOutcome {
     let mut clarify_rounds: u32 = 0;

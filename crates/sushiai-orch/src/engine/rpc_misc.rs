@@ -110,10 +110,16 @@ impl App {
         }
         p.settings.experiments.check_routes(&p.settings.routes)?;
         p.settings.check_presets()?;
-        self.store
-            .save_settings(&p.settings)
-            .map_err(|e| e.to_string())?;
-        *self.settings.write().unwrap() = p.settings.clone();
+        {
+            let mut settings = self.settings.write().unwrap();
+            self.store
+                .save_settings(&p.settings)
+                .map_err(|e| e.to_string())?;
+            self.slots.resize(p.settings.parallel.max(1) as usize);
+            self.check_slots
+                .resize(p.settings.heavy_check_limit() as usize);
+            *settings = p.settings.clone();
+        }
         self.refresh_availability();
         set_verify_timeout_secs(p.settings.verify_timeout_secs);
         self.advance_autopilot();

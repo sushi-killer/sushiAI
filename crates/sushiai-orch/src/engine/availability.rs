@@ -173,7 +173,7 @@ pub(super) async fn wait_for_harness(
     resume_status: TaskStatus,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> bool {
     if app.any_harness_available() {
         return true;

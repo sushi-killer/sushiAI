@@ -597,7 +597,7 @@ pub(super) async fn run_parent(
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
-    let (task, results, skipped) = loop {
+    let (mut task, results, skipped) = loop {
         // An amendment made at any point (also while this loop waited for a
         // slot or an answer) reaches this check.
         apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
@@ -626,6 +626,7 @@ pub(super) async fn run_parent(
         skipped.extend(passed_before);
         let sandbox = app.settings.read().unwrap().sandbox;
         let results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
             Path::new(&task.worktree),
             &app.store.task_dir(task_id).join("runs").join("parent"),
             &checks,
@@ -634,6 +635,7 @@ pub(super) async fn run_parent(
             cancel,
         )
         .await;
+        record_check_outcomes(app, &mut task, &results);
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(app, task_id).await;
             return ParentEnd::Finished;
@@ -654,11 +656,21 @@ pub(super) async fn run_parent(
     let mut grounded_failure: Option<String> = None;
     if task.variant().grounded_checks && results.iter().all(|v| v.code == Some(0)) {
         let dir = app.store.task_dir(task_id).join("runs").join("parent");
-        let wt = Path::new(&task.worktree);
+        let worktree = task.worktree.clone();
+        let wt = Path::new(&worktree);
         let gated = gated_checks(&task);
         let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
-        let gated_results =
-            run_verify_commands(wt, &dir, &commands, sandbox, &task.base_sha, cancel).await;
+        let gated_results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
+            wt,
+            &dir,
+            &commands,
+            sandbox,
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        record_check_outcomes(app, &mut task, &gated_results);
         if let Some((check, failed)) = gated
             .iter()
             .zip(&gated_results)
@@ -676,7 +688,17 @@ pub(super) async fn run_parent(
                 tail_chars(failed.tail.trim(), 600)
             ));
         } else if let Some(held) = gated_held_out(&task) {
-            let (result, detail) = run_held_out(&task, &held, wt, &dir, sandbox, cancel).await;
+            let (result, detail) = run_held_out(
+                CheckContext::new(app, Some(&task.id)),
+                &task,
+                &held,
+                wt,
+                &dir,
+                sandbox,
+                cancel,
+            )
+            .await;
+            record_check_outcomes(app, &mut task, std::slice::from_ref(&result));
             if detail.is_some() {
                 grounded_failure = Some(format!(
                     "Orchestrator: every subtask landed, but the held-out check for criterion {} failed (heldout) on {}: {}",
@@ -691,9 +713,11 @@ pub(super) async fn run_parent(
         mark_stopped_if_not_already(app, task_id).await;
         return ParentEnd::Finished;
     }
+    let decisions = task.decisions;
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return ParentEnd::Finished;
     };
+    record_skips(&mut task, decisions);
     task.cost_usd = parent_cost(&task, &app.repo_tasks(&task.repo));
     record_skips(&mut task, skipped);
     let failure = match results.iter().find(|v| v.code != Some(0)) {
@@ -1092,6 +1116,7 @@ pub(super) async fn carry_and_check(
             if cancel.is_cancelled() {
                 return Err(Landing::Cancelled);
             }
+            record_check_outcomes(app, task, &results);
             if let Some(idx) = idx {
                 task.attempts[idx].verify = results.clone();
             }
@@ -1114,6 +1139,7 @@ pub(super) async fn carry_and_check(
             if !extra_final.is_empty() {
                 let sandbox = app.settings.read().unwrap().sandbox;
                 let finals = run_verify_commands(
+                    CheckContext::new(app, Some(&task.id)),
                     worktree,
                     &run_dir.join("final-land"),
                     &extra_final,
@@ -1122,6 +1148,7 @@ pub(super) async fn carry_and_check(
                     cancel,
                 )
                 .await;
+                record_check_outcomes(app, task, &finals);
                 if cancel.is_cancelled() {
                     return Err(Landing::Cancelled);
                 }
@@ -1494,6 +1521,7 @@ mod tests {
             code,
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         }
     }
 

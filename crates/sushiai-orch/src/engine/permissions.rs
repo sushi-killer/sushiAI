@@ -866,7 +866,7 @@ pub(super) async fn stop_for_denials(
     subjects: &[Subject],
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> LoopSignal {
     let names = question_text(subjects);
     let names = names

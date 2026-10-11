@@ -152,7 +152,7 @@ impl App {
         if !enabled {
             return;
         }
-        let limit = parallel.max(1).min(self.parallel_limit) as usize;
+        let limit = parallel.max(1) as usize;
         let _admit = self.autopilot_admission.lock().unwrap();
         let all = self.store.list_tasks().unwrap_or_default();
         let mut next: Vec<&Task> = all

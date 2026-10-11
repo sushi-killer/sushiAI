@@ -3411,6 +3411,7 @@ mod tests {
             code,
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         };
         let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], None, "");
         assert!(failed.contains("`vacuous-cmd` already passed on the base, so it is not grounded"));
@@ -3431,6 +3432,7 @@ mod tests {
             code: Some(0),
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         };
         let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
         assert!(

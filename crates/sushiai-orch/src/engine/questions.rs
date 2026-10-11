@@ -37,7 +37,7 @@ pub(super) async fn wait_for_exhausted_answer(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
     let asked = task.question.clone();
     if let Some(text) = try_policy_answer(app, task, cancel).await {
@@ -167,7 +167,7 @@ pub(super) async fn wait_for_answer(
     task: &mut Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
@@ -191,7 +191,7 @@ async fn park_for_answer(
     task: &mut Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     // A task waiting for its owner holds no slot: parallel limits running
     // agents, not open questions.
@@ -616,7 +616,7 @@ pub(super) async fn wait_for_answer_with_triage(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
@@ -635,7 +635,7 @@ async fn wait_for_triaged_answer(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
     let question = task.question.clone().unwrap_or_else(|| {
         Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
@@ -767,7 +767,7 @@ pub(super) async fn ask_plan_question_with_triage(
     keep_text: bool,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     let asked = Question::new(
         question_text,

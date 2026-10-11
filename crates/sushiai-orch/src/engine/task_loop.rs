@@ -948,7 +948,7 @@ pub(super) async fn run_task_loop(
         // top of the winner's (added below with the attempt's own).
         task.cost_usd += best_of.cost;
         task.attempts[idx].candidates = best_of.candidates;
-        task.decisions.extend(best_of.decisions);
+        record_skips(&mut task, best_of.decisions);
         let b_won = best_of.winner.is_some();
         let route = match best_of.winner {
             Some(winner) => {
@@ -1678,6 +1678,7 @@ pub(super) async fn run_task_loop(
             app.finish_task_loop(&task_id);
             return;
         }
+        record_check_outcomes(&app, &mut task, &verify_results);
         task.attempts[idx].verify = verify_results.clone();
         let mut preflight_checked = false;
         while let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)).cloned() {
@@ -1685,7 +1686,7 @@ pub(super) async fn run_task_loop(
             // run here, or fails for an unrelated reason): its ruling comes
             // before the failure counts. A changed command runs again, so a
             // rewrite spends no counted attempt.
-            if !preflight_checked {
+            if !preflight_checked && !timed_out_under_load(&failed) {
                 preflight_checked = true;
                 let before = task.verify.clone();
                 if !settle_base_preflight(&app, &mut task, &cancel).await {
@@ -1714,6 +1715,7 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
+                    record_check_outcomes(&app, &mut task, &verify_results);
                     task.attempts[idx].verify = verify_results.clone();
                     continue;
                 }
@@ -1760,6 +1762,7 @@ pub(super) async fn run_task_loop(
                         }
                         BaseBreak::Dropped => {
                             verify_results.retain(|v| v.command != failed.command);
+                            record_check_outcomes(&app, &mut task, &verify_results);
                             task.attempts[idx].verify = verify_results.clone();
                             continue;
                         }
@@ -1809,6 +1812,7 @@ pub(super) async fn run_task_loop(
             if !gated.is_empty() {
                 let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
                 let results = run_verify_commands(
+                    CheckContext::new(&app, Some(&task.id)),
                     &worktree,
                     &run_dir.join("checks"),
                     &commands,
@@ -1817,6 +1821,7 @@ pub(super) async fn run_task_loop(
                     &cancel,
                 )
                 .await;
+                record_check_outcomes(&app, &mut task, &results);
                 if cancel.is_cancelled() {
                     interrupt_attempt(&app, &mut task, idx);
                     drop(permit);
@@ -1843,6 +1848,7 @@ pub(super) async fn run_task_loop(
             if failure.is_none() {
                 if let Some(held) = gated_held_out(&task) {
                     let (result, detail) = run_held_out(
+                        CheckContext::new(&app, Some(&task.id)),
                         &task,
                         &held,
                         &worktree,
@@ -1851,6 +1857,7 @@ pub(super) async fn run_task_loop(
                         &cancel,
                     )
                     .await;
+                    record_check_outcomes(&app, &mut task, std::slice::from_ref(&result));
                     if cancel.is_cancelled() {
                         interrupt_attempt(&app, &mut task, idx);
                         drop(permit);
@@ -1894,6 +1901,7 @@ pub(super) async fn run_task_loop(
         // The planner named the command that captures the images: orchd
         // runs it itself, so an attempt is never failed for a missing image.
         capture_screenshots(
+            &app,
             &mut task,
             idx,
             &worktree,
@@ -2587,7 +2595,7 @@ pub(super) async fn carry_after_base_moves(
     task: &mut Task,
     worktree: &Path,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> bool {
     if let Some(base_ref) = task.base_ref.clone() {
         let mut noted = false;
@@ -2701,7 +2709,13 @@ impl App {
 
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
-        if let Ok(Some(task)) = self.store.load_task(task_id) {
+        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
+            let before = task.decisions.len();
+            record_check_outcomes(self, &mut task, &[]);
+            if task.decisions.len() != before {
+                let _ = self.store.save_task(&task);
+                self.broadcast_task(&task);
+            }
             self.drop_settled_output(&task);
             self.advance_graph(&task.repo);
         }
@@ -2753,7 +2767,7 @@ pub(super) async fn finish_after_review(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Tail {
     // The gate: the base preflight is settled before finalVerify runs on
     // the worktree, so a ruling of the judge never comes after a landing.
@@ -2783,6 +2797,7 @@ pub(super) async fn finish_after_review(
                 .and_then(|r| r.ok())
         };
         let mut final_results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
             worktree,
             &run_dir.join("final"),
             &final_commands,
@@ -2791,6 +2806,7 @@ pub(super) async fn finish_after_review(
             cancel,
         )
         .await;
+        record_check_outcomes(app, task, &final_results);
         if cancel.is_cancelled() {
             interrupt_attempt(app, task, idx);
             *permit = None;
@@ -2802,7 +2818,7 @@ pub(super) async fn finish_after_review(
         // environment failure, and no implement session is spent on it.
         let timed_out: Vec<String> = final_results
             .iter()
-            .filter(|v| v.code.is_none())
+            .filter(|v| v.code.is_none() && !timed_out_under_load(v))
             .map(|v| v.command.clone())
             .collect();
         if !timed_out.is_empty() {
@@ -2811,6 +2827,7 @@ pub(super) async fn finish_after_review(
                 timed_out.join(", ")
             ));
             let rerun = run_verify_commands(
+                CheckContext::new(app, Some(&task.id)),
                 worktree,
                 &run_dir.join("final-rerun"),
                 &timed_out,
@@ -2825,6 +2842,7 @@ pub(super) async fn finish_after_review(
                 app.finish_task_loop(task_id);
                 return Tail::Return;
             }
+            record_check_outcomes(app, task, &rerun);
             for again in rerun {
                 if let Some(slot) = final_results
                     .iter_mut()
@@ -2852,6 +2870,10 @@ pub(super) async fn finish_after_review(
         let mut on_base: Vec<(VerifyOutcome, VerifyOutcome)> = Vec::new();
         let mut ordinary: Vec<VerifyOutcome> = Vec::new();
         for failed in failed_finals {
+            if timed_out_under_load(&failed) {
+                ordinary.push(failed);
+                continue;
+            }
             match failing_on_base(app, task, &failed, &base_dir, cancel).await {
                 Some(base_run) => on_base.push((failed, base_run)),
                 None => ordinary.push(failed),
@@ -3044,7 +3066,7 @@ pub(super) async fn finish_attempt(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Tail {
     let landing = if let Some(parent_id) = task.parent.clone() {
         Some(
@@ -3141,17 +3163,21 @@ pub(super) async fn finish_attempt(
             task.status = TaskStatus::Done;
             if let Some(cmd) = task.eval_check_cmd.clone() {
                 let sha = git::head_sha(worktree).unwrap_or_default();
-                task.eval_check = Some(
-                    run_eval_check(
-                        Path::new(&task.repo),
-                        run_dir,
-                        &sha,
-                        &cmd,
-                        settings.sandbox,
-                        cancel,
-                    )
-                    .await,
-                );
+                let check = run_eval_check(
+                    CheckContext::new(app, Some(task_id)),
+                    Path::new(&task.repo),
+                    run_dir,
+                    &sha,
+                    &cmd,
+                    settings.sandbox,
+                    cancel,
+                )
+                .await;
+                record_check_outcomes(app, task, std::slice::from_ref(&check));
+                task.eval_check = Some(EvalCheck {
+                    code: check.code,
+                    tail: check.tail,
+                });
             }
         }
         Ok(Err(e)) => {

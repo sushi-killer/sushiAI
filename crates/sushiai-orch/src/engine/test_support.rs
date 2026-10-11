@@ -84,11 +84,8 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
     }
 }
 
-/// Like `test_app`, but writes `parallel: 1` before `App::new` reads
-/// settings -- `parallel_limit`/`slots` are fixed at construction time
-/// (a live `settings.set` only takes effect on the next restart), so
-/// this is the only way to get a single-slot app for a "second task
-/// holds the only slot" test.
+/// Like `test_app`, with a single task-loop slot from construction.
+/// Later settings changes resize that limit live.
 pub(super) fn test_app_parallel_one() -> (Arc<App>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("data");

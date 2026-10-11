@@ -127,6 +127,9 @@ pub struct Settings {
     pub protected_paths: Vec<String>,
     pub max_attempts: u32,
     pub parallel: u32,
+    /// None = core-based automatic limit; 0 = unlimited. Applied live.
+    #[serde(default)]
+    pub heavy_checks: Option<u32>,
     /// Dollars a UTC day may spend across every repo and stage before orchd
     /// asks (a `daily_budget` question) instead of starting a plan run or
     /// implement attempt; 0 = off.
@@ -576,6 +579,20 @@ pub fn land_on_default_refusal(branch: &str, repo: &str) -> String {
     )
 }
 
+impl Settings {
+    pub fn auto_heavy_checks(cores: u32) -> u32 {
+        (cores / 5).max(2)
+    }
+
+    pub fn heavy_check_limit(&self) -> u32 {
+        self.heavy_checks.unwrap_or_else(|| {
+            Self::auto_heavy_checks(
+                std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+            )
+        })
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let mut tiers = HashMap::new();
@@ -625,6 +642,7 @@ impl Default for Settings {
             protected_paths: vec![],
             max_attempts: 4,
             parallel: 2,
+            heavy_checks: None,
             daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
             verify_timeout_secs: default_verify_timeout_secs(),
@@ -1722,13 +1740,23 @@ pub struct EvalCheck {
     pub tail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyOutcome {
     pub command: String,
     pub code: Option<i32>,
     pub tail: String,
     pub ms: u64,
+    #[serde(default)]
+    pub load: f64,
+    #[serde(default)]
+    pub cores: u32,
+    /// A high-load timeout occurred, even if its single retry exited non-zero.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub load_timeout: bool,
+    /// Returned to the task owner as well as published while the check waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<String>,
 }
 
 /// How much of an attempt a review looked at: everything, or only the open

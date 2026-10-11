@@ -120,6 +120,10 @@ export type Settings = {
   /** Route id of the cheap read-only check of a brief's goal and criteria;
    * "" turns the check off. Absent in older settings. */
   briefCheckRoute?: string;
+  /** Route id of the one read-only plan review, which must be another model
+   * family than the planner; "" turns it off. Absent in older settings (the
+   * daemon then uses "codex"). */
+  planReview?: string;
   /** Where new task worktrees go; relative to the repo root unless absolute. */
   worktreeRoot?: string;
   /** Seconds one verify command may run; absent on an orchd without the
@@ -250,10 +254,6 @@ export type Variant = {
   /** Non-blocking planner questions become assumptions instead of waiting
    * for the owner; blocking ones are asked together. Absent = off. */
   batchQuestions?: boolean;
-  /** The planner writes executable checks per criterion; the ones that fail
-   * on the base gate every attempt, and a held-out check is run after
-   * verify. */
-  groundedChecks?: boolean;
   /** 2 = the first implement attempt of a hard task runs twice at once, on
    * the tier route and on `bestOfRoute`, and the checks (then a reviewer)
    * pick. 0/1 or absent = off. */
@@ -452,12 +452,21 @@ export type Task = {
   /** The task waited for a lease; its worktree is carried onto the base head
    * before its first attempt. */
   waitedOnLease?: boolean;
-  /** The sibling subtask whose branch this one continues (a relay): it starts
-   * from that subtask's commit and only the chain's last link lands on the
-   * parent. */
-  relayOf?: string;
-  /** Where the relay's chain began (a commit); set once the link started. */
-  relayBase?: string;
+  /** The ordered parts of a merged task: each item's check runs after every
+   * attempt, before the full verify. */
+  checklist?: { text: string; check: string; passes: boolean }[];
+  /** Where the plan gate stands: the one replan, the one review and the
+   * findings the implementer is told about. */
+  planGate?: {
+    replanned?: boolean;
+    reviewed?: boolean;
+    findings?: {
+      id: string;
+      severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+      kind: string;
+      text: string;
+    }[];
+  };
   /** The task this one is a part of: it branches from and lands on that
    * task's branch. A task with children runs no attempt of its own. */
   parent?: string;

@@ -1,5 +1,5 @@
 //! Black-box integration tests (file queue): tasks on one base never hold the
-//! same path at once, subtasks with overlapping paths relay one branch, and
+//! same path at once, subtasks with overlapping paths merge into one task with a checklist, and
 //! a parent runs at most `childParallel` subtasks. Real daemon, real git.
 
 mod common;
@@ -320,29 +320,25 @@ fn hook_edit_denies_a_file_another_live_task_holds_and_allows_it_after_that_task
 }
 
 /// Plans a request as three parts on the same file (paths overlap), one
-/// appending a line each; a fourth part on its own file runs beside them.
-const RELAY_SCRIPT: &str = r#"#!/bin/sh
+/// appending a line each; a fourth part on its own file, with its own check,
+/// runs beside them. The three merge into one task with a checklist.
+const MERGE_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 out() {
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
-report1='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"HANDOFF_ONE_MARK\",\"decisions\":[],\"question\":\"\"}\n```"'
-report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"finished\",\"decisions\":[],\"question\":\"\"}\n```"'
+report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
   *sushi-plan*)
     case "$input" in
-      *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Part 1\",\"goal\":\"PART_ONE: add line 1\",\"verify\":[\"grep -q 1 shared.txt\"]}\n```"' ;;
-      *PART_TWO*) out '"```sushi-plan\n{\"title\":\"Part 2\",\"goal\":\"PART_TWO: add line 2\",\"verify\":[\"grep -q 1 shared.txt && grep -q 2 shared.txt\"]}\n```"' ;;
-      *PART_THREE*) out '"```sushi-plan\n{\"title\":\"Part 3\",\"goal\":\"PART_THREE: add line 3\",\"verify\":[\"grep -q 2 shared.txt && grep -q 3 shared.txt\"]}\n```"' ;;
       *PART_SIDE*) out '"```sushi-plan\n{\"title\":\"Side\",\"goal\":\"PART_SIDE: side.txt\",\"verify\":[\"test -f side.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"All parts\",\"goal\":\"Build all\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"one\",\"title\":\"Part 1\",\"request\":\"PART_ONE\",\"paths\":[\"shared.txt\"]},{\"key\":\"two\",\"title\":\"Part 2\",\"request\":\"PART_TWO\",\"paths\":[\"shared.txt\"]},{\"key\":\"three\",\"title\":\"Part 3\",\"request\":\"PART_THREE\",\"paths\":[\"shared.txt\"]},{\"key\":\"side\",\"title\":\"Side\",\"request\":\"PART_SIDE\",\"paths\":[\"side.txt\"]}]}\n```"' ;;
+      *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Lines\",\"goal\":\"PART_ONE: add lines 1, 2 and 3\",\"verify\":[\"grep -q 3 shared.txt\"]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"All parts\",\"goal\":\"Build all\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"one\",\"title\":\"Part 1\",\"request\":\"PART_ONE\",\"paths\":[\"shared.txt\"],\"check\":\"grep -qx 1 shared.txt\"},{\"key\":\"two\",\"title\":\"Part 2\",\"request\":\"PART_TWO\",\"paths\":[\"shared.txt\"],\"check\":\"grep -qx 2 shared.txt\"},{\"key\":\"three\",\"title\":\"Part 3\",\"request\":\"PART_THREE\",\"paths\":[\"shared.txt\"],\"check\":\"grep -qx 3 shared.txt\"},{\"key\":\"side\",\"title\":\"Side\",\"request\":\"PART_SIDE\",\"paths\":[\"side.txt\"],\"check\":\"test -f side.txt\"}]}\n```"' ;;
     esac
     ;;
-  *PART_ONE*) echo 1 >> shared.txt; out "$report1" ;;
-  *PART_TWO*) case "$input" in *HANDOFF_ONE_MARK*) echo 2 >> shared.txt ;; esac; out "$report" ;;
-  *PART_THREE*) echo 3 >> shared.txt; out "$report" ;;
   *PART_SIDE*) echo side > side.txt; out "$report" ;;
+  *PART_ONE*) printf '1\n2\n3\n' > shared.txt; out "$report" ;;
 esac
 "#;
 
@@ -360,9 +356,9 @@ fn children_by_title(daemon: &Daemon, parent: &serde_json::Value) -> Vec<serde_j
 }
 
 #[test]
-fn overlapping_subtasks_relay_one_branch_and_the_parent_lands_the_chain_once() {
+fn overlapping_subtasks_merge_into_one_child_with_a_checklist_and_the_side_part_stays_apart() {
     let scripts = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts.path(), "fake-claude.sh", RELAY_SCRIPT);
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", MERGE_SCRIPT);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
@@ -382,50 +378,31 @@ fn overlapping_subtasks_relay_one_branch_and_the_parent_lands_the_chain_once() {
     });
     assert_eq!(parent["status"], "done", "{parent}");
     let children = children_by_title(&daemon, &parent);
-    assert_eq!(children.len(), 4, "{children:?}");
-    let [one, two, three, side] = [&children[0], &children[1], &children[2], &children[3]];
+    assert_eq!(children.len(), 2, "{children:?}");
+    let [merged, side] = [&children[0], &children[1]];
     for c in &children {
         assert_eq!(c["status"], "done", "{c}");
     }
-    assert!(one["relayOf"].is_null(), "{one}");
-    assert_eq!(two["relayOf"], one["id"], "{two}");
-    assert_eq!(three["relayOf"], two["id"], "{three}");
-    assert!(side["relayOf"].is_null(), "{side}");
+    // The child is planned on its own, so its draft names it.
+    assert_eq!(merged["title"], "Lines", "{merged}");
+    let checklist = merged["checklist"].as_array().unwrap();
+    assert_eq!(checklist.len(), 3, "{merged}");
+    assert!(checklist.iter().all(|i| i["passes"] == true), "{merged}");
+    assert!(side["checklist"].is_null(), "{side}");
+    assert!(
+        decisions(&parent).contains("Plan gate: merged 3 subtasks into one task with a checklist"),
+        "{parent}"
+    );
 
-    // Each link starts from the previous one's commit.
+    // The parent's branch got the merged work and the side part.
     let root = repo.path();
-    let tip = |t: &serde_json::Value| git_out(root, &["rev-parse", t["branch"].as_str().unwrap()]);
-    let before = |t: &serde_json::Value| {
-        git_out(
-            root,
-            &["rev-parse", &format!("{}^", t["branch"].as_str().unwrap())],
-        )
-    };
-    assert_eq!(before(two), tip(one), "{two}");
-    // The last link's own branch is what landed on the parent, so it shows
-    // where it started only in its decision line.
-    assert!(
-        decisions(three).contains(&format!(
-            "Relay: continues \"Part 2\" on {}",
-            two["branch"].as_str().unwrap()
-        )),
-        "{three}"
-    );
-    assert!(decisions(one).contains("Land: committed"), "{one}");
-    assert!(!decisions(one).contains("landed on"), "{one}");
-    assert!(
-        decisions(three).contains("Land: lands the relay's chain"),
-        "{three}"
-    );
-
-    // The parent's branch got the chain as one commit, and the side part.
     let branch = parent["branch"].as_str().unwrap();
     let log: Vec<String> = git_out(root, &["log", "--format=%s", branch])
         .lines()
         .map(str::to_string)
         .collect();
     assert_eq!(log.len(), 3, "{log:?}");
-    assert!(log.contains(&"Part 3".to_string()) && log.contains(&"Side".to_string()));
+    assert!(log.contains(&"Lines".to_string()) && log.contains(&"Side".to_string()));
     assert_eq!(
         git_out(root, &["show", &format!("{branch}:shared.txt")]),
         "1\n2\n3"
@@ -449,7 +426,7 @@ case "$input" in
       *PART_B*) plan "Part B" PART_B b ;;
       *PART_C*) plan "Part C" PART_C c ;;
       *PART_D*) plan "Part D" PART_D d ;;
-      *) out '"```sushi-plan\n{\"title\":\"Parts\",\"goal\":\"Build all\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A\",\"paths\":[\"a\"]},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B\",\"paths\":[\"b\"],\"dependsOn\":[\"a\"]},{\"key\":\"c\",\"title\":\"Part C\",\"request\":\"PART_C\",\"paths\":[\"c\"]},{\"key\":\"d\",\"title\":\"Part D\",\"request\":\"PART_D\",\"paths\":[\"d\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Parts\",\"goal\":\"Build all\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A\",\"paths\":[\"a\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B\",\"paths\":[\"b\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"]},{\"key\":\"c\",\"title\":\"Part C\",\"request\":\"PART_C\",\"paths\":[\"c\"],\"check\":\"test -f c.txt\"},{\"key\":\"d\",\"title\":\"Part D\",\"request\":\"PART_D\",\"paths\":[\"d\"],\"check\":\"test -f d.txt\"}]}\n```"' ;;
     esac
     ;;
   *PART_*)

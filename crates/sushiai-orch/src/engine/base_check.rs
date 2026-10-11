@@ -442,7 +442,8 @@ pub(super) async fn failing_twice_on_base(
     second.into_iter().find(fails)
 }
 
-/// Baselines the checks that have none yet on the base commit (not in the
+/// Baselines the checks that have none yet on the base commit, or on the
+/// planner's tests commit when the task has one (not in the
 /// task's worktree, which may hold the implementer's changes). `false` when
 /// cancelled or the base could not be checked out; nothing is stored then.
 pub(super) async fn baseline_on_base(
@@ -456,7 +457,8 @@ pub(super) async fn baseline_on_base(
     }
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
-    match run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await {
+    let rev = task.work_base().to_string();
+    match run_on_base(app, &task.repo, &rev, &commands, &run_dir, cancel).await {
         Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
             record_baselines(task, &todo, &results)
         }
@@ -567,9 +569,9 @@ pub(super) async fn apply_pending_amendment(
         app.verify_cache.lock().unwrap().remove(&task.id);
     }
     amendment.apply(task);
-    if task.variant().grounded_checks {
-        baseline_on_base(app, task, cancel).await;
-    }
+
+    baseline_on_base(app, task, cancel).await;
+
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
 }

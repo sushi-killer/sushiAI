@@ -43,14 +43,13 @@ esac
 }
 
 fn run(verify: &str, best_of: u32) -> (Value, tempfile::TempDir, tempfile::TempDir, Daemon) {
-    run_with(verify, "", best_of, false)
+    run_with(verify, "", best_of)
 }
 
 fn run_with(
     verify: &str,
     checks: &str,
     best_of: u32,
-    grounded: bool,
 ) -> (Value, tempfile::TempDir, tempfile::TempDir, Daemon) {
     let scripts = tempfile::tempdir().unwrap();
     let path = fake_harness_script(scripts.path(), "fake-claude.sh", &fake_with(verify, checks));
@@ -68,7 +67,7 @@ fn run_with(
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "write a file two ways",
-            "variant": {"bestOf": best_of, "bestOfRoute": "claude-sonnet", "groundedChecks": grounded},
+            "variant": {"bestOf": best_of, "bestOfRoute": "claude-sonnet"},
             "start": true,
         }),
     );
@@ -176,7 +175,7 @@ fn the_only_candidate_that_passes_verify_wins_without_a_pick_run() {
 #[test]
 fn a_candidate_that_passes_verify_but_fails_a_check_records_verify_true() {
     let checks = r#"\"checks\":[{\"criterion\":0,\"run\":\"test -f b.txt\"}],"#;
-    let (done, repo, _log, daemon) = run_with("true", checks, 2, true);
+    let (done, repo, _log, daemon) = run_with("true", checks, 2);
     assert_eq!(done["status"], "done", "{done}");
     let attempts = implement(&done);
     assert_eq!(attempts.len(), 1, "{done}");

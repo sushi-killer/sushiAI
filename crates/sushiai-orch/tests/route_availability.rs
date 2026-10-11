@@ -141,6 +141,7 @@ fn a_task_routed_to_a_missing_codex_runs_on_claude_and_says_so() {
         // Standard work goes to codex; the brief check is on.
         settings["tiers"]["standard"] = json!("codex");
         settings["briefCheckRoute"] = json!("auto");
+        settings["planReview"] = serde_json::json!("");
     });
     let id = create(&s, &repo, json!({}));
     let task = settle(&s, &id);
@@ -165,6 +166,7 @@ fn a_deleted_codex_route_is_not_resurrected_by_the_brief_check() {
         routes.retain(|r| r["id"] != "codex");
         settings["tiers"]["mechanical"] = json!("claude-sonnet");
         settings["briefCheckRoute"] = json!("codex");
+        settings["planReview"] = serde_json::json!("");
     });
     let id = create(&s, &repo, json!({}));
     let task = settle(&s, &id);
@@ -251,6 +253,7 @@ fn verify_timeout_secs_bounds_a_verify_command_and_names_the_limit() {
     let (s, repo) = setup(Some(FAKE_CLAUDE), None, |settings| {
         settings["verifyTimeoutSecs"] = json!(1);
         settings["briefCheckRoute"] = json!("");
+        settings["planReview"] = serde_json::json!("");
         settings["maxAttempts"] = json!(1);
     });
     let id = create(&s, &repo, json!({"verify": ["sleep 30"]}));

@@ -88,6 +88,7 @@ fn setup(env: &[(&str, &str)], review: &str) -> Setup {
     let daemon = Daemon::spawn(&vars);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["planReview"] = serde_json::json!("");
     settings["review"] = json!(review);
     daemon.request("settings.set", json!({"settings": settings}));
     Setup {

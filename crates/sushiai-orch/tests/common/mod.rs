@@ -123,6 +123,9 @@ impl Daemon {
         {
             let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
             settings["briefCheckRoute"] = serde_json::json!("");
+            // The plan review would launch a real codex: off, so no test
+            // ever does. The plan gate's own tests name a claude route.
+            settings["planReview"] = serde_json::json!("");
             // The answer policy answers routine questions itself; the other
             // tests wait for them. Its own tests turn it back on.
             settings["answerPolicy"] = serde_json::json!(false);

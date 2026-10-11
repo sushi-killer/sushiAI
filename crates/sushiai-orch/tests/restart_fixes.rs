@@ -16,6 +16,7 @@ fn first_daemon(home: &std::path::Path, env: &[(&str, &str)]) -> (DaemonChild, s
     let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
     request_on(

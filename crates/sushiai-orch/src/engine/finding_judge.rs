@@ -250,6 +250,7 @@ pub(super) async fn judge_disputed_findings(
     idx: usize,
     attempt_n: u32,
     repeated: &[String],
+    fallback_rebuttal: Option<&str>,
     settings: &Settings,
     review_route: &Route,
     implementer: &Route,
@@ -258,8 +259,29 @@ pub(super) async fn judge_disputed_findings(
     cancel: &CancelToken,
 ) -> Vec<(String, String)> {
     let disputes = task.attempts[idx].disputes.clone();
+    let mut pairs: Vec<(String, Dispute)> = pair_disputes(repeated, &disputes)
+        .into_iter()
+        .map(|(finding, dispute)| (finding, dispute.clone()))
+        .collect();
+    if let Some(rebuttal) = fallback_rebuttal {
+        // A finding the attempt did not dispute is answered by the
+        // implementer's own report.
+        for finding in repeated {
+            if !pairs.iter().any(|(f, _)| f == finding) {
+                pairs.push((
+                    finding.clone(),
+                    Dispute {
+                        finding: finding.clone(),
+                        rebuttal: rebuttal.to_string(),
+                        evidence: Vec::new(),
+                    },
+                ));
+            }
+        }
+    }
     let mut dropped = Vec::new();
-    for (finding, dispute) in pair_disputes(repeated, &disputes) {
+    for (finding, dispute) in pairs {
+        let dispute = &dispute;
         let key = finding_key(&finding);
         if task.judged_findings.contains(&key) {
             continue;

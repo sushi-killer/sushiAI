@@ -171,6 +171,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket1,
@@ -390,6 +391,7 @@ fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket1,
@@ -466,6 +468,7 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket1,

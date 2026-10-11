@@ -38,7 +38,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt next to a.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;
@@ -191,13 +191,14 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
 }
 
 #[test]
-fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
+fn overlapping_subtask_paths_merge_into_one_task_with_a_checklist() {
     let script_text = GRAPH_SCRIPT
+        .replace(r#"\"paths\":[\"a.txt\"]"#, r#"\"paths\":[\"src/a\"]"#)
+        .replace(r#"\"paths\":[\"b.txt\"]"#, r#"\"paths\":[\"src/a/b.rs\"]"#)
         .replace(
-            r#"\"request\":\"PART_A create a.txt\""#,
-            r#"\"request\":\"PART_A create a.txt\",\"paths\":[\"src/a\"]"#,
-        )
-        .replace(r#"\"dependsOn\":[\"a\"]"#, r#"\"paths\":[\"src/a/b.rs\"]"#);
+            "*PART_A*) echo a > a.txt; out",
+            "*PART_A*) echo a > a.txt; echo b > b.txt; out",
+        );
     assert_ne!(script_text, GRAPH_SCRIPT);
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &script_text);
@@ -214,28 +215,30 @@ fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
     let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "done", "{parent}");
     let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
-    let children: Vec<&serde_json::Value> = tasks
+    let children = tasks
         .as_array()
         .unwrap()
         .iter()
         .filter(|t| t["parent"] == parent_id.as_str())
-        .collect();
-    let a = children.iter().find(|t| t["title"] == "Part A").unwrap();
-    let b = children.iter().find(|t| t["title"] == "Part B").unwrap();
-    assert_eq!(b["dependsOn"], serde_json::json!([a["id"]]), "{b}");
-    assert_eq!(b["paths"], serde_json::json!(["src/a/b.rs"]));
+        .count();
+    assert_eq!(children, 0, "{tasks}");
+    let checklist = parent["checklist"].as_array().unwrap();
+    assert_eq!(checklist.len(), 2, "{parent}");
+    assert!(checklist[0]["text"].as_str().unwrap().contains("PART_A"));
+    assert!(checklist[1]["text"].as_str().unwrap().contains("PART_B"));
+    assert!(checklist.iter().all(|i| i["passes"] == true), "{parent}");
     assert!(
         parent["decisions"]
             .to_string()
-            .contains("Serialised b after a: both touch src/a"),
+            .contains("Plan gate: merged 2 subtasks into one task with a checklist"),
         "{parent}"
     );
 
+    let worktree = parent["worktree"].clone();
     daemon.shutdown_and_wait();
-    for t in [&parent, *a, *b] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
-    }
+    let _ = std::fs::remove_dir_all(worktree.as_str().unwrap());
 }
 
 #[test]
@@ -778,6 +781,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
     let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["parallel"] = serde_json::json!(1);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
@@ -1171,7 +1175,7 @@ case "$input" in
     case "$input" in
       *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Part One\",\"goal\":\"PART_ONE: create one.txt\",\"verify\":[\"test -f one.txt\"]}\n```"' ;;
       *PART_TWO*) out '"```sushi-plan\n{\"title\":\"Part Two\",\"goal\":\"PART_TWO: create two.txt\",\"verify\":[\"test -f two.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Both parts\",\"verify\":[\"__PARENT_VERIFY__\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part One\",\"request\":\"PART_ONE create one.txt\"},{\"key\":\"b\",\"title\":\"Part Two\",\"request\":\"PART_TWO create two.txt\"}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Both parts\",\"verify\":[\"__PARENT_VERIFY__\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part One\",\"request\":\"PART_ONE create one.txt\",\"paths\":[\"one.txt\"],\"check\":\"test -f one.txt\"},{\"key\":\"b\",\"title\":\"Part Two\",\"request\":\"PART_TWO create two.txt\",\"paths\":[\"two.txt\"],\"check\":\"test -f two.txt\"}]}\n```"' ;;
     esac
     ;;
   *NEEDS-FIX*) echo fix > fix.txt; out "$report" ;;

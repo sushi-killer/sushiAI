@@ -217,7 +217,7 @@ parent's own verify and final checks run on its base (a failure is re-run
 once past the cache): one that still fails there parks the parent `waiting`
 with a keep / drop / stop question, and the children start only after the
 answer. When every child has landed, the parent runs its own verify and final
-checks on its branch (with `groundedChecks`, its checks were baselined before
+checks on its branch (its checks were baselined before
 the first child started and its gated and held-out checks run once here). With
 `land` on it then lands on its base branch like a single task: carried onto
 the base head, squashed to one commit titled with its title, checked again
@@ -232,6 +232,32 @@ live loop is applied right before its next check. Its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.
+
+### Plan gate
+
+`engine/plan_gate.rs` runs after the planner's draft is stored and before any
+plan question or split. Code checks produce findings with a severity: a
+criterion about the agent's report or process (CRITICAL `report-only`), a
+request item no criterion proves with a runnable check (CRITICAL `coverage`),
+a shared check named in the request but dropped from verify (CRITICAL
+`shared-check`), a check that names no command (HIGH `untestable`), a verify
+command whose script, test target or file does not exist (HIGH
+`verify-missing`), a whole-repo command in `verify` (MEDIUM `verify-cost`,
+moved to `finalVerify`) and overlapping subtask paths (LOW `overlap`). One
+read-only review by another model family (`planReview`, default `codex`;
+skipped with a decision line when its route is missing, never a fallback) adds
+findings once per task, and the brief check's contradiction counts as a
+critical finding. Any critical finding replans once: the planner runs again
+with a `## Plan gate findings` block and the request is never edited. A
+report-only criterion that survives is removed. Other findings are stored in
+`planGate.findings` and reach the implementer as `## Plan notes`.
+
+Subtasks that list no paths, have no `check`, or overlap another part are
+merged into one task whose `checklist` holds the parts in planner order
+(stable-topological by `dependsOn`). Parts with their own paths and `check`
+stay separate children. If only one task remains it is the parent itself.
+Before the full verify of every attempt, orchd runs each item's check and
+fails the attempt with the failing items by name.
 
 ### Self-healing briefs
 
@@ -269,13 +295,15 @@ flowchart LR
 ```mermaid
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
+  gate["Plan gate<br/>code checks, one plan review by another model family,<br/>brief check; a critical finding replans once"]
   split["Verify entries that are not shell commands<br/>become review criteria"]
-  baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
+  baseline["Baseline, before attempt 1<br/>planner's tests are committed first; planner's checks and held-out check run on that commit;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, before attempt 1<br/>finalVerify runs on the base (cached per sha + command);<br/>a failure is re-run once, failing twice asks the pre-existing question"]
   tier["Tier<br/>planner's tier, else standard"]
   impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
+  checklist["Checklist (a merged task)<br/>each item's check runs first; a failing item<br/>fails the attempt by name, before the full verify"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   gated["Gated checks<br/>baseline-fail checks must now pass"]
   heldout["Held-out check<br/>hidden from the implementer; failure kind heldout,<br/>command never in a brief or detail"]
@@ -293,7 +321,7 @@ flowchart TD
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
-  plan --> split --> baseline --> basecheck --> tier --> impl --> rebase --> verify
+  plan --> gate --> split --> baseline --> basecheck --> tier --> impl --> rebase --> checklist --> verify
   impl -.- stall
   stall -->|stalled| fail
   verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> review

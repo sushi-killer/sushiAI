@@ -147,6 +147,12 @@ pub struct Settings {
     /// attempt; `""` turns the check off.
     #[serde(default = "default_brief_check_route")]
     pub brief_check_route: String,
+    /// Route id of the plan review: one read-only run on another model
+    /// family that judges the planner's draft once per task; `""` turns it
+    /// off. A missing or unavailable route skips the review, with no
+    /// fallback.
+    #[serde(default = "default_plan_review")]
+    pub plan_review: String,
     /// Route the orchestrator agent runs on: its chat with the owner and,
     /// with `auto_answer`, its triage of stuck questions. `""` (or an id that
     /// matches no route) means the standard tier's route.
@@ -427,6 +433,10 @@ fn default_brief_check_route() -> String {
     "auto".to_string()
 }
 
+fn default_plan_review() -> String {
+    "codex".to_string()
+}
+
 /// A criterion the task's tools cannot meet: `tool_id` names the connected
 /// tool that would, when one is configured but off for this task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -446,9 +456,6 @@ pub struct BriefCheck {
     /// The check has run (or been skipped for good); it never runs twice.
     #[serde(default)]
     pub done: bool,
-    /// The planner already redrafted once because of a contradiction.
-    #[serde(default)]
-    pub redrafted: bool,
     /// The conflict the implement and review briefs must name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
@@ -480,6 +487,69 @@ pub struct BriefCheck {
     /// for the report.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_ups: Vec<String>,
+}
+
+/// How serious a plan finding is; only `Critical` triggers the replan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Severity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl Severity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Severity::Critical => "CRITICAL",
+            Severity::High => "HIGH",
+            Severity::Medium => "MEDIUM",
+            Severity::Low => "LOW",
+        }
+    }
+}
+
+/// One problem the plan gate found in a draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFinding {
+    pub id: String,
+    pub severity: Severity,
+    pub kind: String,
+    pub text: String,
+}
+
+/// State of a task's plan gate (`engine/plan_gate.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanGate {
+    /// The planner already ran again because of a critical finding.
+    #[serde(default)]
+    pub replanned: bool,
+    /// The cross-family plan review has run (or been skipped for good).
+    #[serde(default)]
+    pub reviewed: bool,
+    /// Findings left after the gate; the implementer's brief lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<PlanFinding>,
+}
+
+impl PlanGate {
+    pub fn is_default(&self) -> bool {
+        *self == PlanGate::default()
+    }
+}
+
+/// One part of a merged task: its command runs after every attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistItem {
+    pub text: String,
+    #[serde(default)]
+    pub check: String,
+    #[serde(default)]
+    pub passes: bool,
 }
 
 fn is_zero_usize(n: &usize) -> bool {
@@ -588,6 +658,7 @@ impl Default for Settings {
             verify_timeout_secs: default_verify_timeout_secs(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
+            plan_review: default_plan_review(),
             orchestrator: String::new(),
             auto_answer: false,
             digest_hour: None,
@@ -679,11 +750,6 @@ pub struct Variant {
     /// out of the JSON while off.
     #[serde(skip_serializing_if = "is_false")]
     pub batch_questions: bool,
-    /// The planner writes executable checks per criterion; the ones that
-    /// fail on the base gate every attempt, and one hidden held-out check
-    /// is run after verify without the implementer ever seeing it.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub grounded_checks: bool,
     /// 2 = on, 0/1 = off. On the hard tier the first implement attempt runs
     /// twice at once (the task's worktree and a sibling `-b` one, on the
     /// tier route and on `best_of_route`); each candidate runs verify and
@@ -872,7 +938,7 @@ impl Variant {
     /// Flags that won or lost and left the struct. An old `task.json` or
     /// `settings.json` naming one still loads (serde ignores it); a variant
     /// override naming one is rejected.
-    pub const RETIRED_KEYS: [&'static str; 7] = [
+    pub const RETIRED_KEYS: [&'static str; 8] = [
         "retryMode",
         "plannerTier",
         "contract",
@@ -880,17 +946,17 @@ impl Variant {
         "deferHeavyChecks",
         "leanOutput",
         "reviewBlind",
+        "groundedChecks",
     ];
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 9] = [
+    pub const OPTIONAL_KEYS: [&'static str; 8] = [
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
         "maxAttemptCostUsd",
         "batchQuestions",
-        "groundedChecks",
         "bestOf",
         "bestOfRoute",
         "land",
@@ -940,6 +1006,47 @@ impl Variant {
     /// `settings.planner` (`""` = planning off).
     pub fn plan_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
         self.planner_route.as_deref().unwrap_or(&settings.planner)
+    }
+}
+
+/// One test file the planner wants committed before the first attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedTest {
+    pub path: String,
+    pub content: String,
+}
+
+/// The planner's tests and the files the implementer may not change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerTests {
+    /// Files kept from the plan, written and committed before attempt 1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PlannedTest>,
+    /// The commit that holds them (`tests_sha`); the implementer's own work
+    /// is measured from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// path -> sha256 of every protected file at that commit; `None` until
+    /// computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl Task {
+    /// Where the implementer's own work is measured from: the commit that
+    /// holds the planner's tests when there is one, else the base.
+    pub fn work_base(&self) -> &str {
+        self.planner_tests
+            .commit
+            .as_deref()
+            .unwrap_or(&self.base_sha)
+    }
+}
+
+impl PlannerTests {
+    pub fn is_empty(&self) -> bool {
+        *self == PlannerTests::default()
     }
 }
 
@@ -1205,12 +1312,15 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub final_verify: Vec<String>,
     /// Executable checks, each tied to one criterion by index
-    /// (`variant.grounded_checks`).
+    /// (from the planner).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Check>,
     /// One extra check the implementer never sees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_out: Option<Check>,
+    /// The planner's test files and what orchd did with them.
+    #[serde(default, skip_serializing_if = "PlannerTests::is_empty")]
+    pub planner_tests: PlannerTests,
     /// The owner's raw one-sentence ask, set only by the `{repo, request}`
     /// form of `task.create`; the drafting stage fills `title`/`goal`/
     /// `criteria`/`verify` from it and leaves this as the original text.
@@ -1315,8 +1425,16 @@ pub struct Task {
     /// Where the brief consistency check stands for this task.
     #[serde(default, skip_serializing_if = "BriefCheck::is_default")]
     pub brief_check: BriefCheck,
-    /// Where the task stands in orchd's file queue: why it waits, and the
-    /// relay it belongs to. Flat in the JSON.
+    /// Where the plan gate stands: the one replan, the one review and the
+    /// findings the implementer is told about.
+    #[serde(default, skip_serializing_if = "PlanGate::is_default")]
+    pub plan_gate: PlanGate,
+    /// The ordered parts of a merged task: orchd runs each item's check
+    /// after every attempt, before the full verify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<ChecklistItem>,
+    /// Where the task stands in orchd's file queue: why it waits. Flat in
+    /// the JSON.
     #[serde(flatten)]
     pub queue: QueueState,
     #[serde(default)]
@@ -1331,6 +1449,10 @@ pub struct Task {
     /// is judged at most once per task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub judged_findings: Vec<String>,
+    /// Every review finding of the task by stable id, with whether the
+    /// latest review still reports it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<FindingRecord>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -1371,14 +1493,6 @@ pub struct QueueState {
     /// head before its first attempt.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub waited_on_lease: bool,
-    /// The sibling subtask whose branch this one continues (a relay): it
-    /// starts from that subtask's commit instead of the parent's head.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay_of: Option<String>,
-    /// Where the relay's chain began; the last link lands the whole chain
-    /// on the parent as one commit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay_base: Option<String>,
     /// The planning backlog the task sits in until `task.start` or the
     /// autopilot starts it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1461,6 +1575,56 @@ pub enum Verdict {
     Fail,
 }
 
+/// Whether the latest review still reports a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FindingStatus {
+    Open,
+    Resolved,
+}
+
+/// One review finding of a task, kept under its stable id (`F-` and six hex
+/// characters of the finding's key hash).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingRecord {
+    pub id: String,
+    pub text: String,
+    pub status: FindingStatus,
+    /// The attempt and review round that last saw it.
+    pub attempt: u32,
+    pub round: u32,
+    /// How many later attempts' reviews reported it again.
+    #[serde(default)]
+    pub repeats: u32,
+    /// The `scenario.run` commands reviewers gave for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<String>,
+    /// Its second repeat was turned into a check or sent to the judge.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub handled: bool,
+}
+
+/// How a reviewer shows a finding fails: a command and what it prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingScenario {
+    #[serde(default)]
+    pub run: String,
+    #[serde(default)]
+    pub fails: String,
+}
+
+/// The optional `kind` and `scenario` of one finding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<FindingScenario>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewResult {
@@ -1475,6 +1639,10 @@ pub struct ReviewResult {
     /// none; findings past the end (criterion rulings) have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub severities: Vec<Option<u8>>,
+    /// The `kind` and `scenario` of each of the reviewer's own findings by
+    /// position; criterion findings past them have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<FindingDetail>,
     /// The reviewer's ruling on each criterion it named, `met: true` too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria: Vec<CriterionRuling>,
@@ -1600,7 +1768,7 @@ pub enum FailureKind {
     /// Landing carried the work onto a moved base and files conflict: the
     /// next attempt only resolves them.
     Conflict,
-    /// The held-out check (`variant.grounded_checks`) failed after verify.
+    /// The held-out check failed after verify.
     Heldout,
     Review,
     /// A visual criterion, and the attempt saved no image under `artifacts/`.
@@ -1970,6 +2138,19 @@ mod tests {
         assert_eq!(settings.brief_check_route, "auto");
     }
 
+    #[test]
+    fn plan_review_defaults_to_codex_and_an_older_settings_file_gets_it() {
+        assert_eq!(Settings::default().plan_review, "codex");
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("planReview");
+        let loaded: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(loaded.plan_review, "codex");
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["planReview"] = serde_json::json!("");
+        let off: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(off.plan_review, "");
+    }
+
     fn minimal_task_json() -> serde_json::Value {
         serde_json::json!({
             "id": "t", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
@@ -2085,6 +2266,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: Some("fix the thing that's broken".into()),
             repo: "/repo".into(),
             project_id: None,
@@ -2117,6 +2299,7 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
             overseer_woken: false,
@@ -2129,6 +2312,8 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2330,6 +2515,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -2362,6 +2548,7 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
             overseer_woken: false,
@@ -2374,6 +2561,8 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2394,6 +2583,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -2437,7 +2627,10 @@ mod tests {
             eval_check: None,
             source: None,
             judged_findings: vec![],
+            findings: vec![],
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2484,6 +2677,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -2516,6 +2710,7 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: true,
             pr_url: None,
             overseer_woken: false,
@@ -2528,6 +2723,8 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2561,18 +2758,16 @@ mod grounded_checks_tests {
     }
 
     #[test]
-    fn grounded_checks_is_left_out_when_off_and_named_when_on() {
+    fn grounded_checks_flag_is_retired() {
+        assert!(Variant::RETIRED_KEYS.contains(&"groundedChecks"));
+        assert!(!Variant::OPTIONAL_KEYS.contains(&"groundedChecks"));
         assert!(!serde_json::to_string(&Variant::default())
             .unwrap()
             .contains("groundedChecks"));
-        let on = Variant {
-            grounded_checks: true,
-            ..Variant::default()
-        };
-        assert!(serde_json::to_string(&on)
-            .unwrap()
-            .contains(r#""groundedChecks":true"#));
-        assert!(Variant::OPTIONAL_KEYS.contains(&"groundedChecks"));
+        // An old task.json that names the flag still loads.
+        let mut json = serde_json::to_value(Variant::default()).unwrap();
+        json["groundedChecks"] = true.into();
+        assert!(serde_json::from_value::<Variant>(json).is_ok());
     }
 
     #[test]

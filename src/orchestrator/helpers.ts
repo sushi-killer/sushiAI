@@ -61,7 +61,6 @@ const VARIANT_KEYS: Exclude<
   | "maxCostUsd"
   | "maxAttemptCostUsd"
   | "batchQuestions"
-  | "groundedChecks"
   | "bestOf"
   | "bestOfRoute"
   | "land"
@@ -109,9 +108,6 @@ export function variantLabel(task: Task, experiments: Variant): string {
     (variant.batchQuestions ?? false) !== (experiments.batchQuestions ?? false)
   ) {
     diffs.push(`batchQuestions ${variant.batchQuestions ? "on" : "off"}`);
-  }
-  if (!!variant.groundedChecks !== !!experiments.groundedChecks) {
-    diffs.push(`groundedChecks ${variantFlagText(!!variant.groundedChecks)}`);
   }
   const bestOf = variant.bestOf ?? 0;
   if (bestOf >= 2 !== (experiments.bestOf ?? 0) >= 2) {

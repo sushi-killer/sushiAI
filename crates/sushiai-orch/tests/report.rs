@@ -22,7 +22,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"criteria\":[\"a.txt exists\",\"a.txt is documented\"],\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt and b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\"}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt and b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\"}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;

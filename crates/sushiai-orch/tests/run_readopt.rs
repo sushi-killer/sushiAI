@@ -45,6 +45,7 @@ fn start(home: &Path, fake_bins: &[(&str, &str)], verify: &str) -> Setup {
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket,
@@ -361,6 +362,7 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
     settings["review"] = serde_json::json!("claude-opus");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket,

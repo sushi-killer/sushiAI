@@ -919,6 +919,64 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
     Ok(())
 }
 
+/// Commits exactly `paths` (already written in `cwd`) with a `Task-Id`
+/// trailer and returns HEAD. Nothing else in the index or the tree goes into
+/// the commit; when no listed path differs from HEAD there is no commit and
+/// HEAD is returned as it is. Same hook rule as [`commit`].
+pub fn commit_paths(
+    cwd: &Path,
+    paths: &[String],
+    title: &str,
+    task_id: &str,
+) -> Result<String, GitError> {
+    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    run(cwd, &add)?;
+    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
+    diff.extend(paths.iter().map(String::as_str));
+    if run(cwd, &diff).is_err() {
+        let trailer = format!("Task-Id: {task_id}");
+        let mut commit = vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            title,
+            "--trailer",
+            &trailer,
+            "--",
+        ];
+        commit.extend(paths.iter().map(String::as_str));
+        run(cwd, &commit)?;
+    }
+    head_sha(cwd)
+}
+
+/// The content of `path` at `rev` when it is a file there.
+pub fn blob_at(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Puts `paths` back as they are at `rev`, in the tree and the index.
+pub fn restore_paths(cwd: &Path, rev: &str, paths: &[String]) -> Result<(), GitError> {
+    let mut args = vec!["checkout", "-q", rev, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
 // -- report facts -------------------------------------------------------------
 
 /// One `git diff --numstat` line: path, lines added, lines removed (`None`

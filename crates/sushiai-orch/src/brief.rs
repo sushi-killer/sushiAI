@@ -10,7 +10,7 @@ use crate::model::{
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 5;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 6;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -67,9 +67,10 @@ const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message wi
 
 const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run the verification commands yourself before finishing. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
 
-/// `variant.grounded_checks`: the checks that fail on the base are part of
-/// the contract.
+/// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
+
+const PROTECTED_BLOCK: &str = "## Protected files\n\nThese files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: an attempt that changes one fails and orchd puts it back.\n\n";
 
 const IMPOSSIBLE_BLOCK: &str = "## A criterion that cannot be met\n\nWhen a criterion cannot be met as written (its premise is wrong, or it contradicts another criterion), do not work around it: end your final message with a fenced block naming it by its `[N]` index and the evidence, and stop.\n\n```sushi-impossible\n{\"criterion\": <index>, \"evidence\": \"...\"}\n```\n";
 
@@ -164,13 +165,8 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     if task.criteria.is_empty() {
         out.push_str("(none specified)\n");
     } else {
-        let indexed = task.variant().grounded_checks;
         for (i, c) in task.criteria.iter().enumerate() {
-            if indexed {
-                out.push_str(&format!("- [{i}] "));
-            } else {
-                out.push_str("- ");
-            }
+            out.push_str(&format!("- [{i}] "));
             out.push_str(c);
             out.push('\n');
         }
@@ -189,20 +185,59 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     }
     out.push('\n');
 
-    if task.variant().grounded_checks {
-        let gated: Vec<&Check> = task
-            .checks
-            .iter()
-            .filter(|c| c.baseline == Some(Baseline::Fail))
-            .collect();
-        if !gated.is_empty() {
-            out.push_str(CHECKS_BLOCK);
-            for c in gated {
-                out.push_str(&format!("- criterion [{}]: `{}`\n", c.criterion, c.run));
-            }
-            out.push('\n');
+    let gated: Vec<&Check> = task
+        .checks
+        .iter()
+        .filter(|c| c.baseline == Some(Baseline::Fail))
+        .collect();
+    if !gated.is_empty() {
+        out.push_str(CHECKS_BLOCK);
+        for c in gated {
+            out.push_str(&format!("- criterion [{}]: `{}`\n", c.criterion, c.run));
         }
-        out.push_str(IMPOSSIBLE_BLOCK);
+        out.push('\n');
+    }
+    if let Some(files) = task
+        .planner_tests
+        .protected
+        .as_ref()
+        .filter(|m| !m.is_empty())
+    {
+        out.push_str(PROTECTED_BLOCK);
+        for path in files.keys() {
+            out.push_str(&format!("- `{path}`\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str(IMPOSSIBLE_BLOCK);
+    out.push('\n');
+
+    if !task.checklist.is_empty() {
+        out.push_str("## Checklist\n\nOrchd runs each item's check after every attempt, before the full verify. Work through the items in order.\n\n");
+        for item in &task.checklist {
+            let mark = if item.passes { "x" } else { " " };
+            if item.check.trim().is_empty() {
+                out.push_str(&format!("- [{mark}] {}\n", item.text));
+            } else {
+                out.push_str(&format!(
+                    "- [{mark}] {} -- check: `{}`\n",
+                    item.text, item.check
+                ));
+            }
+        }
+        out.push('\n');
+    }
+
+    if !task.plan_gate.findings.is_empty() {
+        out.push_str("## Plan notes\n\nThe plan gate raised these about the plan; keep them in mind, they do not change the criteria.\n\n");
+        for f in &task.plan_gate.findings {
+            out.push_str(&format!(
+                "- {} ({}): {}\n",
+                f.severity.label(),
+                f.kind,
+                f.text
+            ));
+        }
         out.push('\n');
     }
 
@@ -430,24 +465,6 @@ fn landed_entry(dep: &Task) -> String {
     out
 }
 
-/// The previous link of a relay: its branch is what this task continues, so
-/// its handoff comes first, whether or not it is marked done.
-pub fn relay_block(task: &Task, all: &[Task]) -> String {
-    let Some(prev) = task
-        .queue
-        .relay_of
-        .as_deref()
-        .and_then(|id| all.iter().find(|t| t.id == id))
-    else {
-        return String::new();
-    };
-    format!(
-        "## Relay: continue from {}\n\nThis task continues on the branch of the previous subtask; its commit is already in your worktree. Every dependency is already on your branch: do not merge, rebase or check out other branches. You start with a fresh context, so this is what it reported:\n\n{}",
-        prev.title,
-        landed_entry(prev)
-    )
-}
-
 /// What the dependencies of `task` that are done delivered: title, summary,
 /// decisions, handoff and changed files of each, so a dependent starts from
 /// its results instead of rediscovering them. With `landed_after`, only
@@ -461,7 +478,7 @@ pub fn landed_dependencies_block(task: &Task, all: &[Task], landed_after: Option
         let Some(dep) = all.iter().find(|t| &t.id == id) else {
             continue;
         };
-        if dep.status != TaskStatus::Done || task.queue.relay_of.as_deref() == Some(id.as_str()) {
+        if dep.status != TaskStatus::Done {
             continue;
         }
         let ended = dep.attempts.last().and_then(|a| a.ended_at);
@@ -480,12 +497,8 @@ pub fn landed_dependencies_block(task: &Task, all: &[Task], landed_after: Option
 
 /// Tells the implementer that a check found two of its requirements in
 /// conflict: report it rather than trade one for the other.
-pub fn conflict_block(conflict: &str, impossible: bool) -> String {
-    let report = if impossible {
-        "If the conflict cannot be resolved, end your final message with a `sushi-impossible` block (`{\"criterion\": <index>, \"evidence\": \"...\"}`) naming one of the conflicting criteria by its `[N]` index instead of satisfying one at the other's expense, and also mention it in your handoff and decisions."
-    } else {
-        "Report the conflict in your handoff and decisions, say which requirement you left alone and why, and if you cannot go on without an answer report outcome blocked with a question."
-    };
+pub fn conflict_block(conflict: &str) -> String {
+    let report = "If the conflict cannot be resolved, end your final message with a `sushi-impossible` block (`{\"criterion\": <index>, \"evidence\": \"...\"}`) naming one of the conflicting criteria by its `[N]` index instead of satisfying one at the other's expense, and also mention it in your handoff and decisions.";
     format!(
         "## Brief conflict\n\nA check of this brief found two requirements that contradict each other: {conflict}\n\nDo not satisfy one requirement at the other's expense. {report}\n\n"
     )
@@ -774,6 +787,35 @@ fn review_candidates(text: &str) -> Vec<String> {
     out
 }
 
+/// The fields of a finding object that are marks about the finding, not
+/// part of its text.
+const FINDING_META_KEYS: [&str; 4] = ["repeat", "scenario", "kind", "id"];
+
+/// The `kind` (lowercased) and `scenario` of a finding object; a scenario
+/// without a `run` counts as none.
+fn finding_detail(o: &serde_json::Map<String, serde_json::Value>) -> crate::model::FindingDetail {
+    let kind = o
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .map(|k| k.trim().to_ascii_lowercase())
+        .filter(|k| !k.is_empty());
+    let scenario = o.get("scenario").and_then(|s| s.as_object()).and_then(|s| {
+        let field = |key: &str| {
+            s.get(key)
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let run = field("run");
+        (!run.is_empty()).then(|| crate::model::FindingScenario {
+            run,
+            fails: field("fails"),
+        })
+    });
+    crate::model::FindingDetail { kind, scenario }
+}
+
 /// [`parse_review`] plus whether the reviewer's FAIL was recorded as PASS:
 /// it gave findings of its own, every one labelled P2/P3, and no criterion
 /// is unmet. All findings are kept.
@@ -788,6 +830,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .unwrap_or(crate::model::Verdict::Pass);
     let mut severities: Vec<Option<u8>> = Vec::new();
     let mut repeated: Vec<String> = Vec::new();
+    let mut details: Vec<crate::model::FindingDetail> = Vec::new();
     let findings: Vec<String> = v
         .get("findings")
         .and_then(|f| f.as_array())
@@ -805,12 +848,17 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
                     });
                 })
                 .map(|item| match item {
-                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::String(s) => {
+                        details.push(Default::default());
+                        s.clone()
+                    }
                     serde_json::Value::Object(o) => {
                         // Key order, not document order: another crate in the
                         // workspace turns on serde_json's `preserve_order`.
-                        let mut fields: Vec<_> =
-                            o.iter().filter(|(k, _)| k.as_str() != "repeat").collect();
+                        let mut fields: Vec<_> = o
+                            .iter()
+                            .filter(|(k, _)| !FINDING_META_KEYS.contains(&k.as_str()))
+                            .collect();
                         fields.sort_by(|a, b| a.0.cmp(b.0));
                         let text = fields
                             .into_iter()
@@ -824,9 +872,13 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
                         if o.get("repeat").is_some_and(truthy) {
                             repeated.push(text.clone());
                         }
+                        details.push(finding_detail(o));
                         text
                     }
-                    other => other.to_string(),
+                    other => {
+                        details.push(Default::default());
+                        other.to_string()
+                    }
                 })
                 .collect()
         })
@@ -838,6 +890,11 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         findings,
         repeated,
         severities: severities.clone(),
+        details: if details.iter().any(|d| *d != Default::default()) {
+            details
+        } else {
+            Vec::new()
+        },
         criteria: Vec::new(),
     };
     let mut any_unmet = false;
@@ -892,13 +949,15 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
 
 const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
-const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+
+const PLAN_COVERAGE: &str = "List in `coverage` every numbered or bulleted item of the request, as its `requirement` text and the 0-based indexes of the `criteria` that prove it; each such item needs at least one criterion with a runnable `-- check:`. A criterion is about the product's behaviour, never about what the agent writes in its report, handoff, summary or decisions.";
 
 const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
-const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits, and in its `check` the one targeted command that proves that part alone. Parts whose paths overlap, that list no paths or that have no `check` are merged into one task with an ordered checklist, so give each part that should run separately its own paths and its own `check`. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
 
 /// The drafting-stage brief for a top-level task: the owner's request
 /// verbatim, then the fixed planning instructions and report format (spec:
@@ -917,6 +976,7 @@ pub fn build_subtask_plan_brief(request: &str, variant: &Variant, past_work: &st
 fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
     let mut extra = String::new();
     extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
+    extra.push_str(&format!("\n\n{PLAN_COVERAGE}"));
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
         extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
@@ -930,18 +990,18 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
     extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
     format = format.replace("\"verify\":[],", "\"verify\":[],\"screenshot\":\"\",");
-    if variant.grounded_checks {
-        extra.push_str(&format!("\n\n{PLAN_CHECKS}"));
-        format = format.replace(
+
+    extra.push_str(&format!("\n\n{PLAN_CHECKS} {PLAN_TESTS}"));
+    format = format.replace(
             "\"verify\":[],",
-            "\"verify\":[],\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},",
+            "\"verify\":[],\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},\"tests\":[{\"path\":\"...\",\"content\":\"...\"}],",
         );
-    }
+
     if split {
         extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
         format = format.replace(
             "]}]}\n```",
-            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"]}]}\n```",
+            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"],\"check\":\"...\"}]}\n```",
         );
     }
     let past_work = if past_work.is_empty() {
@@ -979,8 +1039,10 @@ pub fn scoped_checks_block(scoped: &[ScopedCheck], repo: &str) -> String {
     )
 }
 
-/// `variant.grounded_checks`: what the planner's `checks` and `heldOut` are.
+/// What the planner's `checks`, `heldOut` and `tests` are.
 const PLAN_CHECKS: &str = "For each criterion that a command can prove, add an entry to `checks`: `criterion` is the criterion's 0-based index in `criteria` and `run` a shell command (run with `sh -c` from the repository root, in the task's verify environment). A check must exercise the new behaviour: it must fail on the current code and pass once its criterion is met, and a test that already passes today proves nothing. A check that compares against a branch name (`git diff main`) breaks once the branch moves; compare against the task's base commit with the `ORCHD_BASE_SHA` environment variable instead (`git diff $ORCHD_BASE_SHA`), which orchd sets for every check and verify command. A test-name filter that matches zero tests passes, so use exact test names or assert a count. Leave out a criterion that has no such command. `heldOut` is one optional extra check of the same shape, run after verify; the implementer never sees it, so it may probe what the visible checks do not.";
+
+const PLAN_TESTS: &str = "The planner session is read-only, so put failing test files in `tests` (`path` repo-relative, `content` the whole file): orchd writes and commits them before the first attempt, and the implementer cannot change them.";
 
 const PLAN_PATHS: &str = "List in `paths` the repo-relative files or directories the task will edit, as narrowly as you can. Tasks on the same branch never edit one file at once: a task whose paths overlap another running task's waits for it, then continues on top of its landed work. Leave `paths` empty only when you cannot tell.";
 
@@ -1061,12 +1123,16 @@ pub struct PlanDraft {
     /// for an ordinary plan.
     #[serde(default)]
     pub subtasks: Vec<PlanSubtask>,
-    /// `variant.grounded_checks`: unusable entries are dropped while
-    /// parsing, out-of-range ones by `valid_checks` when the plan is stored.
+    /// Unusable entries are dropped while parsing, out-of-range ones by `valid_checks` when the plan is stored.
     #[serde(default, deserialize_with = "lenient_checks")]
     pub checks: Vec<Check>,
     #[serde(default, rename = "heldOut", deserialize_with = "lenient_check")]
     pub held_out: Option<Check>,
+    /// Failing test files the planner wants committed before attempt 1;
+    /// unusable entries are dropped while parsing, unsafe or oversized ones
+    /// when the plan is stored.
+    #[serde(default, deserialize_with = "lenient_tests")]
+    pub tests: Vec<crate::model::PlannedTest>,
     /// Repo-relative files or directories the whole task edits; a task whose
     /// paths overlap another live task's waits for it.
     #[serde(default)]
@@ -1075,6 +1141,42 @@ pub struct PlanDraft {
     /// changes.
     #[serde(default)]
     pub screenshot: Option<String>,
+    /// Which criteria prove each item of the request; unusable entries are
+    /// dropped while parsing.
+    #[serde(default, deserialize_with = "lenient_coverage")]
+    pub coverage: Vec<Coverage>,
+}
+
+/// One request item and the criteria (0-based) that prove it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Coverage {
+    pub requirement: String,
+    #[serde(default)]
+    pub criteria: Vec<usize>,
+}
+
+fn lenient_coverage<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Coverage>, D::Error> {
+    let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
+    Ok(v.unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| {
+            let requirement = c.get("requirement")?.as_str()?.trim().to_string();
+            let criteria = c
+                .get("criteria")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_u64())
+                        .map(|n| n as usize)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (!requirement.is_empty()).then_some(Coverage {
+                requirement,
+                criteria,
+            })
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1091,6 +1193,9 @@ pub struct PlanSubtask {
     /// Repo-relative files or directories this part edits.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// The targeted command that proves this part alone.
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub check: String,
 }
 
 /// A handoff the agent wrote as null or as an object/array still reads:
@@ -1121,6 +1226,16 @@ pub(crate) fn lenient_criteria<'de, D: serde::Deserializer<'de>>(
 }
 
 fn lenient_checks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Check>, D::Error> {
+    let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
+    Ok(v.unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| serde_json::from_value(c).ok())
+        .collect())
+}
+
+fn lenient_tests<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::model::PlannedTest>, D::Error> {
     let v: Option<Vec<serde_json::Value>> = serde::Deserialize::deserialize(d).unwrap_or(None);
     Ok(v.unwrap_or_default()
         .into_iter()
@@ -1428,7 +1543,9 @@ pub fn agent_decision_lines(decisions: &[String]) -> Vec<String> {
         .collect()
 }
 
-const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[\"P2: path:line - issue\"],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}";
+const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"kind\":\"correctness|requirement|style|nit\",\"scenario\":{\"run\":\"<shell command or test>\",\"fails\":\"<the failure it shows>\"}}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}";
+
+const REVIEW_SCOPE_RULE: &str = "Report only correctness bugs and requirement gaps (an acceptance criterion the diff does not meet). Set `kind` on each finding: `correctness` or `requirement`; style, naming and nits are `style` or `nit` and never block. Where you can, give a `scenario`: the shell command or test (`run`) that fails because of the finding and the failure it shows (`fails`). A finding that comes back after it was fixed is kept only with a new failing scenario.\n";
 
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
@@ -1464,21 +1581,17 @@ pub fn build_review_brief(
         ));
     }
     out.push_str("\nA deliberate, explained deviation is judged on its merits.");
-    if variant.grounded_checks {
-        out.push_str(&grounded_checks_block(task, verify_results));
-    }
+    out.push_str(&grounded_checks_block(task, verify_results));
     if let Some(conflict) = &task.brief_check.conflict {
         out.push_str("\n\n");
         out.push_str(&review_conflict_block(conflict));
     }
     out.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n\n");
     out.push_str(REVIEW_VERDICT_RULE);
+    out.push_str(REVIEW_SCOPE_RULE);
     let evidence = variant.review_evidence;
     out.push_str("\n## Verify results\n\n");
-    for v in verify_results
-        .iter()
-        .filter(|v| !(variant.grounded_checks && is_held_out(v)))
-    {
+    for v in verify_results.iter().filter(|v| !is_held_out(v)) {
         out.push_str(&format!(
             "- `{}` -> exit {:?}\n```\n{}\n```\n",
             v.command,
@@ -1513,7 +1626,7 @@ pub fn build_review_brief(
     out.push_str(if previous.is_empty() {
         REVIEW_REPORT_EXAMPLE
     } else {
-        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}"
+        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true,\"kind\":\"correctness|requirement|style|nit\",\"scenario\":{\"run\":\"<shell command or test>\",\"fails\":\"<the failure it shows>\"}}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}"
     });
     out.push_str("\n```\n");
     out.push('\n');
@@ -1862,6 +1975,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -1894,6 +2008,7 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
             overseer_woken: false,
@@ -1906,6 +2021,8 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2256,6 +2373,7 @@ mod tests {
             findings: vec!["P1: a.rs:1 - null check missing".into()],
             repeated: Vec::new(),
             severities: Vec::new(),
+            details: Vec::new(),
             criteria: Vec::new(),
         });
         let mut second = first.clone();
@@ -2273,6 +2391,19 @@ mod tests {
             "{two}"
         );
         assert!(two.contains("\"repeat\":true"), "{two}");
+    }
+
+    #[test]
+    fn parse_review_keeps_kind_scenario_and_id_out_of_the_finding_text() {
+        let text = "```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a\",\"id\":\"F-123456\",\"kind\":\"Style\",\"scenario\":{\"run\":\"cargo test a\",\"fails\":\"red\"}},\"P1: plain\"]}\n```";
+        let r = parse_review(text).unwrap();
+        assert_eq!(
+            r.findings,
+            vec!["P1: a".to_string(), "P1: plain".to_string()]
+        );
+        assert_eq!(r.details[0].kind.as_deref(), Some("style"));
+        assert_eq!(r.details[0].scenario.as_ref().unwrap().run, "cargo test a");
+        assert_eq!(r.details[1], Default::default());
     }
 
     #[test]
@@ -2347,6 +2478,83 @@ mod tests {
         assert!(
             build_subtask_plan_retry_brief("r", &Variant::default(), "").contains("previous reply")
         );
+    }
+
+    #[test]
+    fn the_brief_lists_the_checklist_and_the_plan_notes() {
+        let mut task = dependent_of(&[]);
+        task.checklist = vec![
+            crate::model::ChecklistItem {
+                text: "first".into(),
+                check: "grep -q a f".into(),
+                passes: true,
+            },
+            crate::model::ChecklistItem {
+                text: "second".into(),
+                check: String::new(),
+                passes: false,
+            },
+        ];
+        task.plan_gate.findings = vec![crate::model::PlanFinding {
+            id: "review-0".into(),
+            severity: crate::model::Severity::Low,
+            kind: "wrong approach".into(),
+            text: "Prefer the hook".into(),
+        }];
+        let text = build_brief(&task, "", "");
+        assert!(text.contains("## Checklist"), "{text}");
+        assert!(
+            text.contains("- [x] first -- check: `grep -q a f`"),
+            "{text}"
+        );
+        assert!(text.contains("- [ ] second\n"), "{text}");
+        assert!(text.contains("## Plan notes"), "{text}");
+        assert!(
+            text.contains("- LOW (wrong approach): Prefer the hook"),
+            "{text}"
+        );
+        let plain = build_brief(&dependent_of(&[]), "", "");
+        assert!(!plain.contains("## Checklist") && !plain.contains("## Plan notes"));
+    }
+
+    #[test]
+    fn the_plan_format_asks_for_coverage_and_a_check_per_subtask() {
+        let top = build_plan_brief("r", &Variant::default(), "");
+        assert!(
+            top.contains("\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}]"),
+            "{top}"
+        );
+        assert!(
+            top.contains("\"paths\":[\"src/...\"],\"check\":\"...\""),
+            "{top}"
+        );
+        assert!(top.contains("merged into one task with an ordered checklist"));
+        let part = build_subtask_plan_brief("r", &Variant::default(), "");
+        assert!(part.contains("\"coverage\""));
+    }
+
+    #[test]
+    fn parse_plan_reads_coverage_and_a_part_check_leniently() {
+        let text = "```sushi-plan\n{\"title\":\"T\",\"coverage\":[{\"requirement\":\" item one \",\"criteria\":[0,\"x\",2]},{\"criteria\":[1]},{\"requirement\":\"\"},7,{\"requirement\":\"two\"}],\"subtasks\":[{\"key\":\"a\",\"request\":\"do a\",\"check\":\"cargo test\"},{\"key\":\"b\",\"request\":\"do b\",\"check\":null}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(
+            draft.coverage,
+            vec![
+                Coverage {
+                    requirement: "item one".into(),
+                    criteria: vec![0, 2]
+                },
+                Coverage {
+                    requirement: "two".into(),
+                    criteria: vec![]
+                },
+            ]
+        );
+        assert_eq!(draft.subtasks[0].check, "cargo test");
+        assert_eq!(draft.subtasks[1].check, "");
+        // Missing or malformed coverage is empty, never a parse failure.
+        let bad = "```sushi-plan\n{\"title\":\"T\",\"coverage\":\"nope\"}\n```";
+        assert!(parse_plan(bad).unwrap().coverage.is_empty());
     }
 
     #[test]
@@ -3018,30 +3226,8 @@ mod tests {
     }
 
     #[test]
-    fn plan_brief_without_grounded_checks_asks_for_none() {
+    fn every_plan_brief_asks_for_checks_held_out_and_tests() {
         let variant = Variant::default();
-        let plan = build_plan_brief("Fix it", &variant, "");
-        let subtask = build_subtask_plan_brief("Fix it", &variant, "");
-        for brief in [&plan, &subtask] {
-            assert!(brief.starts_with("## Request\n\nFix it\n\n## Instructions\n\n"));
-            assert!(!brief.contains("heldOut"));
-            assert!(!brief.contains("\"checks\""));
-            assert!(!brief.contains("\"recommended\""));
-            assert!(brief.contains("\"finalVerify\":[]"));
-        }
-        assert!(plan.contains("\"subtasks\""));
-        assert!(!subtask.contains("\"subtasks\""));
-        // The retry briefs only add their one-line reminder in front.
-        assert!(build_plan_retry_brief("Fix it", &variant, "")
-            .ends_with(&build_plan_brief("Fix it", &variant, "")));
-    }
-
-    #[test]
-    fn plan_brief_with_grounded_checks_asks_for_checks_and_a_held_out_check() {
-        let variant = Variant {
-            grounded_checks: true,
-            ..Variant::default()
-        };
         for brief in [
             build_plan_brief("Fix it", &variant, ""),
             build_subtask_plan_brief("Fix it", &variant, ""),
@@ -3049,7 +3235,7 @@ mod tests {
             build_subtask_plan_retry_brief("Fix it", &variant, ""),
         ] {
             assert!(
-                brief.contains("\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"}"),
+                brief.contains("\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},\"tests\":[{\"path\":\"...\",\"content\":\"...\"}]"),
                 "{brief}"
             );
             assert!(
@@ -3060,19 +3246,33 @@ mod tests {
             assert!(brief.contains("already passes today proves nothing"));
             assert!(brief.contains("from the repository root"));
             assert!(brief.contains("the implementer never sees it"));
-            // The format stays valid JSON-ish: checks sit before questions.
+            assert!(brief.contains("the implementer cannot change them"));
             assert!(brief.find("\"checks\"").unwrap() < brief.find("\"questions\"").unwrap());
+            assert!(!brief.contains("\"recommended\""));
         }
         assert!(build_plan_brief("Fix it", &variant, "").contains("\"subtasks\""));
         assert!(!build_subtask_plan_brief("Fix it", &variant, "").contains("\"subtasks\""));
+        assert!(build_plan_retry_brief("Fix it", &variant, "")
+            .ends_with(&build_plan_brief("Fix it", &variant, "")));
+    }
+
+    #[test]
+    fn a_plan_draft_parses_tests_leniently() {
+        let text = "```sushi-plan\n{\"title\":\"t\",\"tests\":[{\"path\":\"a_test.rs\",\"content\":\"x\"},{\"path\":3},\"junk\"]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(
+            draft.tests,
+            vec![crate::model::PlannedTest {
+                path: "a_test.rs".into(),
+                content: "x".into()
+            }]
+        );
+        let none = parse_plan("```sushi-plan\n{\"title\":\"t\",\"tests\":7}\n```").unwrap();
+        assert!(none.tests.is_empty());
     }
 
     fn grounded_task() -> Task {
         let mut task = sample_task();
-        task.variant = Some(Variant {
-            grounded_checks: true,
-            ..Variant::default()
-        });
         task.checks = vec![
             Check {
                 criterion: 0,
@@ -3107,15 +3307,6 @@ mod tests {
         assert!(!brief.contains("vacuous-cmd") && !brief.contains("env-cmd"));
         assert!(!brief.contains("SECRET-held-out-cmd"));
         assert!(brief.contains("```sushi-impossible"));
-        // Off: the brief is what it always was.
-        let mut off = grounded_task();
-        off.variant = None;
-        let off = build_brief(&off, "", "");
-        assert!(
-            off.contains("- Button visible\n")
-                && !off.contains("## Checks")
-                && !off.contains("sushi-impossible")
-        );
     }
 
     #[test]
@@ -3135,22 +3326,6 @@ mod tests {
         assert!(passed.contains("Held-out check for criterion 1 (Click saves settings): passed."));
         // The held-out outcome is not also listed as a verify result.
         assert!(!passed.contains("-> exit"));
-    }
-
-    #[test]
-    fn the_review_brief_keeps_a_held_out_named_result_when_the_flag_is_off() {
-        let mut task = grounded_task();
-        task.variant = None;
-        let ran = VerifyOutcome {
-            command: held_out_label(0),
-            code: Some(0),
-            tail: String::new(),
-            ms: 1,
-        };
-        let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
-        assert!(
-            text.contains("## Verify results\n\n- `held-out check (criterion 0)` -> exit Some(0)")
-        );
     }
 
     #[test]
@@ -3333,16 +3508,6 @@ mod tests {
         task.id = "child".into();
         task.depends_on = ids.iter().map(|s| s.to_string()).collect();
         task
-    }
-
-    #[test]
-    fn a_relay_brief_says_dependencies_are_on_the_branch_and_not_to_merge() {
-        let dep = done_dependency("d1", 10);
-        let mut task = dependent_of(&["d1"]);
-        task.queue.relay_of = Some("d1".into());
-        let block = relay_block(&task, &[dep]);
-        assert!(block.contains("already on your branch"), "{block}");
-        assert!(block.contains("do not merge, rebase"), "{block}");
     }
 
     #[test]

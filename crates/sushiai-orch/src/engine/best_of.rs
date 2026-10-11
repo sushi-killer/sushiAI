@@ -19,7 +19,6 @@ pub(super) fn prepare_run(
     route: &Route,
     settings: &Settings,
     worktree: &Path,
-    base_sha: &str,
     attempt_n: u32,
     run_dir: &Path,
     deny_read: &[String],
@@ -114,8 +113,17 @@ pub(super) fn prepare_run(
             }
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
+        // The planner's tests and the files the checks name: no edit tool
+        // may touch them (a Bash write is caught by the post-attempt guard).
+        if let Some(deny) = claude_settings["permissions"]["deny"].as_array_mut() {
+            for abs in protected_abs_paths(task, worktree) {
+                for tool in ["Edit", "Write"] {
+                    deny.push(json!(format!("{tool}(/{abs})")));
+                }
+            }
+        }
         let _ = store::write_json_private(&settings_path, &claude_settings);
-        let ctx = HookContext::new(task, attempt_n, worktree, base_sha);
+        let ctx = HookContext::new(task, attempt_n, worktree, task.work_base());
         app.register_hook(&token, &ctx, run_dir);
         registered = Some((token.clone(), ctx));
     }
@@ -196,13 +204,14 @@ async fn evaluate(
     task: &Task,
     worktree: &Path,
     base_sha: &str,
+    own_base: &str,
     dir: &Path,
     finished: bool,
     sandbox: SandboxMode,
     scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
-    let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
+    let (wt, base) = (worktree.to_path_buf(), own_base.to_string());
     let changed = tokio::task::spawn_blocking(move || {
         let _ = git::stage_all(&wt);
         git::changed_files(&wt, &base).unwrap_or_default()
@@ -231,27 +240,27 @@ async fn evaluate(
     )
     .await;
     let plain = verify.len();
-    if task.variant().grounded_checks {
-        let commands: Vec<String> = gated_checks(task).into_iter().map(|c| c.run).collect();
-        if !commands.is_empty() {
-            verify.extend(
-                run_verify_commands(
-                    worktree,
-                    &dir.join("checks"),
-                    &commands,
-                    sandbox,
-                    base_sha,
-                    cancel,
-                )
-                .await,
-            );
-        }
-        if let Some(held) = gated_held_out(task) {
-            let (result, _) =
-                run_held_out(task, &held, worktree, &dir.join("checks"), sandbox, cancel).await;
-            verify.push(result);
-        }
+
+    let commands: Vec<String> = gated_checks(task).into_iter().map(|c| c.run).collect();
+    if !commands.is_empty() {
+        verify.extend(
+            run_verify_commands(
+                worktree,
+                &dir.join("checks"),
+                &commands,
+                sandbox,
+                base_sha,
+                cancel,
+            )
+            .await,
+        );
     }
+    if let Some(held) = gated_held_out(task) {
+        let (result, _) =
+            run_held_out(task, &held, worktree, &dir.join("checks"), sandbox, cancel).await;
+        verify.push(result);
+    }
+
     let failed = |v: &[VerifyOutcome]| v.iter().filter(|o| o.code != Some(0)).count() as u32;
     let tally = CheckTally {
         passed: (verify.len() - plain) as u32 - failed(&verify[plain..]),
@@ -293,6 +302,9 @@ where
     F: std::future::Future<Output = Result<harness::RunOutcome, RunError>>,
 {
     let mut extra = BestOfExtra::default();
+    // The implementer's own work is measured from the tests commit when the
+    // task has one; `base_sha` stays what checks and the pick see as base.
+    let own_base = task.work_base().to_string();
     let repo = PathBuf::from(&task.repo);
     let wt_b = PathBuf::from(format!("{}-b", task.worktree));
     let branch_b = format!("{}-b", task.branch);
@@ -301,7 +313,7 @@ where
             repo.clone(),
             wt_b.clone(),
             branch_b.clone(),
-            base_sha.to_string(),
+            own_base.clone(),
         );
         tokio::task::spawn_blocking(move || {
             git::create_worktree(&r, &b, &p, &s)?;
@@ -325,8 +337,7 @@ where
     let _ = std::fs::create_dir_all(&run_dir_b);
     let tools_b = permissions::task_tools(app, settings, task, &wt_b);
     let prep = prepare_run(
-        app, task, task_id, b_route, settings, &wt_b, base_sha, attempt_n, &run_dir_b, deny_read,
-        &tools_b,
+        app, task, task_id, b_route, settings, &wt_b, attempt_n, &run_dir_b, deny_read, &tools_b,
     );
     let _ = std::fs::write(run_dir_b.join("brief.md"), brief_text);
     let events_a = run_dir.join("events.jsonl");
@@ -392,6 +403,7 @@ where
             task,
             worktree,
             base_sha,
+            &own_base,
             run_dir,
             run_finished(&a_res),
             sandbox,
@@ -402,6 +414,7 @@ where
             task,
             &wt_b,
             base_sha,
+            &own_base,
             &run_dir_b,
             run_finished(&b_res),
             sandbox,
@@ -417,7 +430,7 @@ where
         (true, true) => {
             match run_pick(
                 app, task, task_id, attempt_n, settings, a_route, b_route, worktree, &wt_b,
-                base_sha, run_dir, &eval_a, &eval_b, deny_read, cancel,
+                &own_base, run_dir, &eval_a, &eval_b, deny_read, cancel,
             )
             .await
             {
@@ -486,7 +499,7 @@ where
     if pick_b {
         // Carry the winner into the task's worktree; if that fails the task
         // worktree still holds candidate a, put back as it was.
-        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), base_sha.to_string());
+        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), own_base.clone());
         let carried = tokio::task::spawn_blocking(move || {
             let mine = git::patch_since(&wa, &base)?;
             let theirs = git::patch_since(&wb, &base)?;

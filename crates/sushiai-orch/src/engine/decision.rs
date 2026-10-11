@@ -301,7 +301,16 @@ pub(super) fn advance_after_failure(
         .as_ref()
         .map(|f| f.signature.clone())
         .unwrap_or_default();
-    let consecutive = consecutive_same_signature(&task.attempts, &signature);
+    let mut consecutive = consecutive_same_signature(&task.attempts, &signature);
+    // A finding that was turned into a check or sent to the judge gets
+    // another attempt within the budget, not the owner.
+    if task
+        .findings
+        .iter()
+        .any(|f| f.handled && f.status == FindingStatus::Open && f.attempt == last.n)
+    {
+        consecutive = consecutive.min(2);
+    }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]
             .failure

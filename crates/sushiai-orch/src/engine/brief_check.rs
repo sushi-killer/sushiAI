@@ -7,8 +7,9 @@ const MAX_CONFLICT_CHARS: usize = 400;
 /// What the caller does after a check.
 pub(super) enum BriefAction {
     Proceed,
-    /// The planner's draft contradicts itself: draft again, once.
-    Redraft,
+    /// The planner's draft contradicts itself and the plan gate may still
+    /// replan: the plan gate records the conflict and decides.
+    Conflict(String),
     /// The task was cancelled while the check ran.
     Cancelled,
 }
@@ -237,15 +238,16 @@ pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>, Option<St
     Some((route_id, cheapest, note))
 }
 
-/// Checks the stored task's goal and criteria once. `can_redraft` is true
-/// for a planner draft: a contradiction then asks the planner to draft again
-/// (at most once per task). Otherwise, and for an unusable reply, the task
-/// carries on; a conflict is kept for the implement and review briefs.
+/// Checks the stored task's goal and criteria once. `can_replan` is true
+/// for a planner draft the plan gate may still replan: a contradiction is
+/// then returned, with nothing recorded, and the check runs again on the new
+/// draft. Otherwise, and for an unusable reply, the task carries on; a
+/// conflict is kept for the implement and review briefs.
 pub(super) async fn check_brief(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
-    can_redraft: bool,
+    can_replan: bool,
     cancel: &CancelToken,
 ) -> BriefAction {
     let Ok(Some(task)) = app.store.load_task(task_id) else {
@@ -273,7 +275,6 @@ pub(super) async fn check_brief(
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return BriefAction::Proceed;
     };
-    let mut action = BriefAction::Proceed;
     if let Some(note) = fallback {
         task.decisions.push(format!("Brief check: {note}"));
     }
@@ -286,25 +287,18 @@ pub(super) async fn check_brief(
             truncate_chars(&why, 200)
         )),
         Verdict::Conflict(conflict) => {
-            if can_redraft && !task.brief_check.redrafted {
-                task.decisions
-                    .push(format!("Brief check: {conflict} (drafting again)"));
-                task.brief_check.redrafted = true;
-                let request = task.request.clone().unwrap_or_default();
-                task.request = Some(format!(
-                    "{request}\n\n(Brief check: the previous draft's requirements contradict each other: {conflict}. Draft again so that no two requirements conflict.)"
-                ));
-                task.status = TaskStatus::Drafting;
-                action = BriefAction::Redraft;
-            } else {
-                task.decisions.push(format!("Brief check: {conflict}"));
-                task.brief_check.conflict = Some(conflict);
+            if can_replan {
+                // Not settled: the plan gate replans and the check runs again.
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                return BriefAction::Conflict(conflict);
             }
+            task.decisions.push(format!("Brief check: {conflict}"));
+            task.brief_check.conflict = Some(conflict);
         }
     }
-    // A redraft is checked again; anything else is settled for good. A tool
-    // the task lacks is asked about before the first attempt, once.
-    if !matches!(action, BriefAction::Redraft) && !task.brief_check.missing_tool_asked {
+    // A tool the task lacks is asked about before the first attempt, once.
+    if !task.brief_check.missing_tool_asked {
         if let Some(missing) = missing {
             task.decisions.push(format!(
                 "Brief check: criterion {} needs {}, which the task will not have",
@@ -313,11 +307,11 @@ pub(super) async fn check_brief(
             task.brief_check.missing_tool = Some(missing);
         }
     }
-    task.brief_check.done = !matches!(action, BriefAction::Redraft);
+    task.brief_check.done = true;
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
-    action
+    BriefAction::Proceed
 }
 
 #[cfg(test)]

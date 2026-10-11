@@ -281,6 +281,7 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("claude-opus");
     settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
     request_on(&socket1, "settings.set", json!({"settings": settings}));

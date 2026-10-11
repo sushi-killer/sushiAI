@@ -56,161 +56,6 @@ pub(super) fn overlapping_path<'a>(a: &'a [String], b: &'a [String]) -> Option<&
     None
 }
 
-/// Whether `from` waits (directly or transitively) for `target`.
-fn waits_for(deps: &HashMap<String, Vec<String>>, from: &str, target: &str) -> bool {
-    let mut stack = vec![from.to_string()];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(node) = stack.pop() {
-        for d in deps.get(&node).into_iter().flatten() {
-            if d == target {
-                return true;
-            }
-            if seen.insert(d.clone()) {
-                stack.push(d.clone());
-            }
-        }
-    }
-    false
-}
-
-/// Siblings that touch the same paths would conflict at landing, so the later
-/// one in the list also waits for the earlier one unless they are already
-/// ordered. A part without paths overlaps every sibling. Edges only go from
-/// earlier to later positions, so no cycle can result. Returns the parts with
-/// the added `dependsOn` keys and one decision line per added edge.
-pub(super) fn serialise_overlapping(
-    parts: &[brief::PlanSubtask],
-) -> (Vec<brief::PlanSubtask>, Vec<String>) {
-    let mut out = parts.to_vec();
-    let mut deps: HashMap<String, Vec<String>> = out
-        .iter()
-        .map(|p| {
-            (
-                p.key.trim().to_string(),
-                p.depends_on.iter().map(|d| d.trim().to_string()).collect(),
-            )
-        })
-        .collect();
-    let mut decisions = Vec::new();
-    for j in 1..out.len() {
-        for i in 0..j {
-            let (a, b) = (out[i].key.trim().to_string(), out[j].key.trim().to_string());
-            if waits_for(&deps, &b, &a) || waits_for(&deps, &a, &b) {
-                continue;
-            }
-            let shared: Option<String> = if out[i].paths.is_empty() || out[j].paths.is_empty() {
-                Some("(no paths declared)".to_string())
-            } else {
-                overlapping_path(&out[i].paths, &out[j].paths).map(str::to_string)
-            };
-            let Some(shared) = shared else { continue };
-            deps.get_mut(&b).unwrap().push(a.clone());
-            out[j].depends_on.push(a.clone());
-            decisions.push(format!("Serialised {b} after {a}: both touch {shared}"));
-        }
-    }
-    (out, decisions)
-}
-
-/// Which earlier sibling each part continues as a relay, and one decision
-/// line per link. Parts whose declared paths overlap and were serialised
-/// run as one branch: a part continues the previous overlapping
-/// part's commit instead of branching from the parent, so it edits on top of
-/// that work and only the last part lands on the parent. A part only joins a
-/// chain when every earlier part it overlaps and every part it depends on is
-/// already in that chain and nothing continues the same predecessor;
-/// otherwise it stays an ordinary serialised sibling. `parts` gain the
-/// `dependsOn` a link needs, and a part that depends on a chain's middle
-/// link also waits for the chain's last one, which is what lands.
-pub(super) fn relay_links(parts: &mut [brief::PlanSubtask]) -> (Vec<Option<usize>>, Vec<String>) {
-    let keys: Vec<String> = parts.iter().map(|p| p.key.trim().to_string()).collect();
-    // Only parts that both declare paths can be linked: a part without paths
-    // is serialised, and its work lands on the parent like any sibling's.
-    let overlaps = |i: usize, j: usize| {
-        !parts[i].paths.is_empty()
-            && !parts[j].paths.is_empty()
-            && overlapping_path(&parts[i].paths, &parts[j].paths).is_some()
-    };
-    let mut link: Vec<Option<usize>> = vec![None; parts.len()];
-    let mut has_next = vec![false; parts.len()];
-    let chain_of = |link: &[Option<usize>], mut at: usize| {
-        let mut chain = vec![at];
-        while let Some(prev) = link[at] {
-            chain.push(prev);
-            at = prev;
-        }
-        chain
-    };
-    for j in 1..parts.len() {
-        let earlier: Vec<usize> = (0..j).filter(|&i| overlaps(i, j)).collect();
-        let Some(&p) = earlier.last() else { continue };
-        if has_next[p] {
-            continue;
-        }
-        let chain = chain_of(&link, p);
-        let deps_in_chain = parts[j].depends_on.iter().all(|d| {
-            keys.iter()
-                .position(|k| k == d.trim())
-                .is_some_and(|at| chain.contains(&at))
-        });
-        if earlier.iter().all(|i| chain.contains(i)) && deps_in_chain {
-            link[j] = Some(p);
-            has_next[p] = true;
-        }
-    }
-    let mut decisions = Vec::new();
-    for j in 0..parts.len() {
-        let Some(p) = link[j] else { continue };
-        if !parts[j].depends_on.iter().any(|d| d.trim() == keys[p]) {
-            parts[j].depends_on.push(keys[p].clone());
-        }
-        decisions.push(format!(
-            "Relay: {} continues on {}'s branch, one chain landed on the parent once",
-            keys[j], keys[p]
-        ));
-    }
-    // A part outside a chain that builds on one of its middle links needs
-    // the chain's last link: that is the one that lands the work.
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..parts.len() {
-        if link[i].is_some() {
-            continue;
-        }
-        let mut extra = Vec::new();
-        for d in parts[i].depends_on.clone() {
-            let Some(mut at) = keys.iter().position(|k| k == d.trim()) else {
-                continue;
-            };
-            let mut moved = false;
-            while let Some(next) = (0..parts.len()).find(|&n| link[n] == Some(at)) {
-                at = next;
-                moved = true;
-            }
-            if moved {
-                extra.push(keys[at].clone());
-            }
-        }
-        for key in extra {
-            if !parts[i].depends_on.iter().any(|d| d.trim() == key) {
-                parts[i].depends_on.push(key);
-            }
-        }
-    }
-    for part in parts.iter() {
-        edges.insert(
-            part.key.trim().to_string(),
-            part.depends_on
-                .iter()
-                .map(|d| d.trim().to_string())
-                .collect(),
-        );
-    }
-    if has_cycle(&edges) {
-        return (vec![None; parts.len()], Vec::new());
-    }
-    (link, decisions)
-}
-
 /// A subtask's request: the planner's text first (what its own planner
 /// drafts from), then the whole it belongs to and what was already decided
 /// for it.
@@ -632,6 +477,16 @@ pub(super) async fn run_plan_stage(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
             );
+            // The single replan carries the gate's findings in its brief; the
+            // request itself is never edited.
+            let brief_text = if task.plan_gate.replanned {
+                brief::with_block_before_report(
+                    &brief_text,
+                    &plan_gate::findings_block(&task.plan_gate.findings),
+                )
+            } else {
+                brief_text
+            };
             let tools = permissions::task_tools(
                 app,
                 &app.settings.read().unwrap().clone(),
@@ -826,11 +681,18 @@ pub(super) async fn run_plan_stage(
                 .map(|v| format!("Checked by review (not a shell command): {v}")),
         );
         task.verify = verify;
-        if task.variant().grounded_checks {
-            // Stored before any split, so a splitting parent keeps them.
-            task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
-            task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+
+        // Stored before any split, so a splitting parent keeps them.
+        task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
+        task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+        let (tests, dropped) = keep_planned_tests(&draft.tests);
+        task.planner_tests.files = tests;
+        for line in dropped {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
         }
+
         task.final_verify = draft
             .final_verify
             .iter()
@@ -849,12 +711,14 @@ pub(super) async fn run_plan_stage(
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
 
-        // Do the draft's own requirements contradict each other? One
-        // redraft, once per task; the check runs again on the new draft.
-        match check_brief(app, task_id, attempt_n, true, cancel).await {
-            BriefAction::Redraft => continue,
-            BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
-            BriefAction::Proceed => {}
+        // The plan gate: code checks, one plan review by another model
+        // family and the brief check. A critical finding replans once.
+        match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
+            plan_gate::GateAction::Replan => continue,
+            plan_gate::GateAction::Cancelled => {
+                return end_plan_stage(app, task_id, Some(idx)).await
+            }
+            plan_gate::GateAction::Proceed => {}
         }
         if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
             task = reloaded;
@@ -954,26 +818,40 @@ pub(super) async fn run_plan_stage(
         // The planner split the request: the task becomes a parent of one
         // child per part and never implements anything itself.
         if !draft.subtasks.is_empty() && task.parent.is_none() {
-            let split = match check_subtasks(&draft.subtasks) {
-                Ok(()) => split_into_subtasks(app, task_id, &draft.subtasks, auto_start_after_plan)
-                    .await
-                    .map_err(|e| format!("could not create the subtasks: {e}")),
-                Err(reason) => Err(format!("subtasks ignored: {reason}")),
-            };
-            match split {
-                Ok(()) => {
-                    return if auto_start_after_plan {
-                        PlanOutcome::Proceed
-                    } else {
-                        PlanOutcome::StoppedForReview
-                    };
+            let merge = plan_gate::merge_parts(&draft.subtasks);
+            let failed = match check_subtasks(&draft.subtasks) {
+                Err(reason) => Some(format!("subtasks ignored: {reason}")),
+                // One merged group and nothing else: no split, the task
+                // itself keeps its draft and gains the checklist.
+                Ok(()) if merge.separate.is_empty() => {
+                    merge_into_checklist(app, task_id, &draft.subtasks, &merge).err()
                 }
-                Err(why) => {
-                    app.append_decision(task_id, format!("Planner: {why}; running as one task"));
-                    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
-                        task = reloaded;
+                Ok(()) => {
+                    match split_into_subtasks(
+                        app,
+                        task_id,
+                        &draft.subtasks,
+                        &merge,
+                        auto_start_after_plan,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            return if auto_start_after_plan {
+                                PlanOutcome::Proceed
+                            } else {
+                                PlanOutcome::StoppedForReview
+                            };
+                        }
+                        Err(e) => Some(format!("could not create the subtasks: {e}")),
                     }
                 }
+            };
+            if let Some(why) = failed {
+                app.append_decision(task_id, format!("Planner: {why}; running as one task"));
+            }
+            if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                task = reloaded;
             }
         }
 
@@ -1022,7 +900,39 @@ pub(super) async fn run_plan_stage(
     }
 }
 
-/// Turns a drafted task into a parent: one child per part, each drafted by
+/// The whole plan is one merged group: the task keeps its draft and gains
+/// the ordered checklist. `Err("")` tells the caller to carry on as one task.
+fn merge_into_checklist(
+    app: &Arc<App>,
+    task_id: &str,
+    parts: &[brief::PlanSubtask],
+    merge: &plan_gate::MergePlan,
+) -> Result<(), String> {
+    let mut task = app
+        .store
+        .load_task(task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "task not found".to_string())?;
+    task.checklist = plan_gate::checklist_of(parts, &merge.merged);
+    task.decisions.push(format!(
+        "Plan gate: merged {} subtasks into one task with a checklist",
+        merge.merged.len()
+    ));
+    task.updated_at = now_ms();
+    app.store.save_task(&task).map_err(|e| e.to_string())?;
+    app.broadcast_task(&task);
+    Ok(())
+}
+
+/// One child of a split: the planner's parts that stand alone, and the one
+/// merged group (if any) with its ordered checklist.
+struct Unit {
+    /// Indexes into the parts, in group order.
+    members: Vec<usize>,
+    merged: bool,
+}
+
+/// Turns a drafted task into a parent: one child per unit, each drafted by
 /// its own planner, branching from the parent's branch, with `dependsOn`
 /// mapped from the parts' keys. The parent is left `running` (its loop then
 /// starts the children) or `stopped` for the owner to review first.
@@ -1030,42 +940,98 @@ async fn split_into_subtasks(
     app: &Arc<App>,
     parent_id: &str,
     parts: &[brief::PlanSubtask],
+    merge: &plan_gate::MergePlan,
     start: bool,
 ) -> Result<(), String> {
-    let (mut parts, mut serialised) = serialise_overlapping(parts);
-    let (links, relayed) = relay_links(&mut parts);
-    serialised.extend(relayed);
-    let parts = parts.as_slice();
     let mut parent = app
         .store
         .load_task(parent_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "task not found".to_string())?;
-    let ids: HashMap<&str, String> = parts
+    // Planner order, the merged group at its first member's place.
+    let mut units: Vec<Unit> = Vec::new();
+    for i in 0..parts.len() {
+        if merge.merged.contains(&i) {
+            if merge.merged.iter().min() == Some(&i) {
+                units.push(Unit {
+                    members: merge.merged.clone(),
+                    merged: true,
+                });
+            }
+        } else {
+            units.push(Unit {
+                members: vec![i],
+                merged: false,
+            });
+        }
+    }
+    let unit_ids: Vec<String> = units
         .iter()
-        .map(|p| (p.key.trim(), uuid::Uuid::new_v4().to_string()))
+        .map(|_| uuid::Uuid::new_v4().to_string())
         .collect();
+    let id_of_key: HashMap<&str, &String> = units
+        .iter()
+        .zip(&unit_ids)
+        .flat_map(|(u, id)| u.members.iter().map(move |&m| (parts[m].key.trim(), id)))
+        .collect();
+    let part_title = |p: &brief::PlanSubtask| {
+        if p.title.trim().is_empty() {
+            truncate_chars(p.request.trim(), 60)
+        } else {
+            p.title.trim().to_string()
+        }
+    };
+    let unit_title = |u: &Unit| {
+        let first = part_title(&parts[u.members[0]]);
+        if u.members.len() > 1 {
+            format!("{first} (+{} more)", u.members.len() - 1)
+        } else {
+            first
+        }
+    };
     let parent_mcp = std::fs::read_to_string(app.store.task_dir(parent_id).join("mcp.json")).ok();
-    let titles_by_key: HashMap<&str, String> = parts
-        .iter()
-        .map(|p| {
-            let title = if p.title.trim().is_empty() {
-                truncate_chars(p.request.trim(), 60)
-            } else {
-                p.title.trim().to_string()
-            };
-            (p.key.trim(), title)
-        })
-        .collect();
     let now = now_ms();
     let mut titles = Vec::new();
     let mut children: Vec<Task> = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        let title = titles_by_key[part.key.trim()].clone();
+    for (i, unit) in units.iter().enumerate() {
+        let title = unit_title(unit);
+        let mut depends_on: Vec<String> = Vec::new();
+        for &m in &unit.members {
+            for d in &parts[m].depends_on {
+                let id = id_of_key[d.trim()].clone();
+                if id != unit_ids[i] && !depends_on.contains(&id) {
+                    depends_on.push(id);
+                }
+            }
+        }
+        let (request, checklist, paths) = if unit.merged {
+            let text = unit
+                .members
+                .iter()
+                .map(|&m| parts[m].request.trim())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let mut paths: Vec<String> = Vec::new();
+            for &m in &unit.members {
+                for p in &parts[m].paths {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+            (text, plan_gate::checklist_of(parts, &unit.members), paths)
+        } else {
+            let part = &parts[unit.members[0]];
+            (
+                format!("{}\n\nCheck: {}", part.request.trim(), part.check.trim()),
+                vec![],
+                part.paths.clone(),
+            )
+        };
         let created = app
             .create_task_record(NewTask {
                 backlog: None,
-                id: ids[part.key.trim()].clone(),
+                id: unit_ids[i].clone(),
                 repo_root: PathBuf::from(&parent.repo),
                 project_id: parent.project_id.clone(),
                 title: title.clone(),
@@ -1075,18 +1041,14 @@ async fn split_into_subtasks(
                 final_verify: vec![],
                 checks: vec![],
                 held_out: None,
-                request: Some(subtask_request(&parent, &part.request)),
+                request: Some(subtask_request(&parent, &request)),
                 branch: None,
                 base: parent.branch.clone(),
                 variant: parent.variant(),
-                depends_on: part
-                    .depends_on
-                    .iter()
-                    .map(|k| ids[k.trim()].clone())
-                    .collect(),
+                depends_on: depends_on.clone(),
                 parent: Some(parent.id.clone()),
-                paths: part.paths.clone(),
-                relay_of: links[i].map(|p| ids[parts[p].key.trim()].clone()),
+                paths,
+                checklist,
                 // Eval reports count the parent, which carries the children's
                 // cost.
                 eval_set: None,
@@ -1109,22 +1071,27 @@ async fn split_into_subtasks(
         if let Some(mcp) = &parent_mcp {
             let _ = std::fs::write(app.store.task_dir(&child.id).join("mcp.json"), mcp);
         }
-        titles.push(if part.depends_on.is_empty() {
+        titles.push(if depends_on.is_empty() {
             title
         } else {
-            let after: Vec<&str> = part
-                .depends_on
+            let after: Vec<String> = depends_on
                 .iter()
-                .map(|k| titles_by_key[k.trim()].as_str())
+                .filter_map(|id| unit_ids.iter().position(|u| u == id))
+                .map(|at| unit_title(&units[at]))
                 .collect();
             format!("{title} (after {})", after.join(", "))
         });
         children.push(child);
     }
-    parent.decisions.extend(serialised);
+    if merge.merged.len() > 1 {
+        parent.decisions.push(format!(
+            "Plan gate: merged {} subtasks into one task with a checklist",
+            merge.merged.len()
+        ));
+    }
     parent.decisions.push(format!(
         "Planner: split into {} subtasks: {}",
-        parts.len(),
+        units.len(),
         titles.join("; ")
     ));
     parent.status = if start {

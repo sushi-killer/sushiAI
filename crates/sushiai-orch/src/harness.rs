@@ -322,7 +322,7 @@ pub fn shell_quote(value: &str) -> String {
 
 /// FNV-1a, 64 bit, hex: stable across Rust versions and platforms, which
 /// `DefaultHasher` is not, and short enough to print in a report row.
-fn short_hash(parts: &[&str]) -> String {
+pub(crate) fn short_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for part in parts {
         for byte in part.bytes().chain(std::iter::once(0xff)) {

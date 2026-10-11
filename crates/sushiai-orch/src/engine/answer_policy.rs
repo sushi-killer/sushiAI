@@ -102,7 +102,7 @@ fn segment_runs_ci(segment: &str) -> bool {
 }
 
 /// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
-fn runs_ci_entry(command: &str) -> bool {
+pub(super) fn runs_ci_entry(command: &str) -> bool {
     command
         .replace("&&", "\n")
         .replace("||", "\n")
@@ -355,6 +355,10 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
         ),
         _ => return None,
     };
+    // A review that may not run again offers no `retry`: nothing to answer.
+    if kind == QuestionKind::ReviewNoVerdict && !question.options.iter().any(|o| o == answer) {
+        return None;
+    }
     if answered_before(task, kind, once_per) {
         return None;
     }

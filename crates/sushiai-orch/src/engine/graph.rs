@@ -403,9 +403,9 @@ pub(super) async fn run_parent(
     }
     // Before the first child starts: the parent's checks judge the base, not
     // the children's work. Idempotent across relaunches.
-    if task.variant().grounded_checks && needs_baseline(&task) {
+    if needs_prepare(&task) {
         let wt = PathBuf::from(&task.worktree);
-        if !baseline_checks(app, task_id, &mut task, &wt, cancel).await {
+        if !prepare_tests(app, task_id, &mut task, &wt, cancel).await {
             mark_stopped_if_not_already(app, task_id).await;
             return ParentEnd::Finished;
         }
@@ -520,7 +520,7 @@ pub(super) async fn run_parent(
     // one. The line for a failure names its kind and criterion, and never the
     // held-out command.
     let mut grounded_failure: Option<String> = None;
-    if task.variant().grounded_checks && results.iter().all(|v| v.code == Some(0)) {
+    if results.iter().all(|v| v.code == Some(0)) {
         let dir = app.store.task_dir(task_id).join("runs").join("parent");
         let wt = Path::new(&task.worktree);
         let gated = gated_checks(&task);
@@ -646,62 +646,6 @@ pub(super) fn conflict_detail(
     )
 }
 
-/// A relay link's start: its worktree continues the previous link's branch
-/// (the earlier subtask's commit), so it edits on top of that work. When the
-/// previous link cannot be continued the subtask starts from the parent's
-/// head like any other.
-pub(super) async fn start_relay_link(app: &Arc<App>, task: &mut Task, prev_id: &str) {
-    let prev = app
-        .store
-        .load_task(prev_id)
-        .ok()
-        .flatten()
-        .filter(|p| p.status == TaskStatus::Done);
-    let Some(prev) = prev else {
-        task.queue.relay_of = None;
-        task.decisions.push(
-            "Relay: the previous subtask did not finish; starting from the parent's head instead"
-                .to_string(),
-        );
-        return;
-    };
-    let (wt, from, tid, branch) = (
-        PathBuf::from(&task.worktree),
-        task.base_sha.clone(),
-        task.id.clone(),
-        prev.branch.clone(),
-    );
-    let synced =
-        tokio::task::spawn_blocking(move || git::carry_onto_moved_base(&wt, &branch, &from, &tid))
-            .await;
-    let head = match synced {
-        Ok(Ok(git::Rebase::Moved { new_sha, .. })) => new_sha,
-        Ok(Ok(git::Rebase::Unchanged)) => task.base_sha.clone(),
-        _ => {
-            task.queue.relay_of = None;
-            task.decisions.push(format!(
-                "Relay: could not continue {}; starting from the parent's head instead",
-                prev.branch
-            ));
-            return;
-        }
-    };
-    task.decisions.push(format!(
-        "Relay: continues \"{}\" on {} at {}",
-        prev.title,
-        prev.branch,
-        short_sha(&head)
-    ));
-    task.queue.relay_base = Some(
-        prev.queue
-            .relay_base
-            .clone()
-            .unwrap_or_else(|| prev.base_sha.clone()),
-    );
-    task.base_sha = head;
-    task.base_ref = Some(prev.branch);
-}
-
 pub(super) enum Landing {
     /// Committed and fast-forwarded onto the parent's branch (or the parent
     /// already held the work).
@@ -736,33 +680,6 @@ pub(super) async fn land_on_parent(
     parent_id: &str,
     cancel: &CancelToken,
 ) -> Landing {
-    // A link of a relay that a later sibling continues commits on its own
-    // branch; the last link lands the whole chain on the parent.
-    let next = app
-        .repo_tasks(&task.repo)
-        .into_iter()
-        .find(|t| t.queue.relay_of.as_deref() == Some(task.id.as_str()) && !t.archived);
-    if let Some(next) = next {
-        let (wt, title, tid) = (worktree.to_path_buf(), task.title.clone(), task.id.clone());
-        let committed =
-            tokio::task::spawn_blocking(move || git::commit(&wt, &title, &tid, attempt_n))
-                .await
-                .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-        return match committed {
-            Ok(()) => {
-                task.decisions.push(format!(
-                    "Land: committed on {} for \"{}\" to continue from",
-                    task.branch, next.title
-                ));
-                record_landing(task).await;
-                Landing::Landed
-            }
-            Err(e) => Landing::Failed {
-                kind: FailureKind::Error,
-                detail: format!("Could not commit for the relay: {e}"),
-            },
-        };
-    }
     let lock = app.landing_lock(parent_id);
     let _landing = tokio::select! {
         _ = cancel.cancelled() => return Landing::Cancelled,
@@ -773,28 +690,6 @@ pub(super) async fn land_on_parent(
     };
     let branch = parent.branch.clone();
     let failed = |kind, detail| Landing::Failed { kind, detail };
-
-    // The last link of a relay: everything since the chain began is this
-    // task's work now, carried onto the parent like any other.
-    if let Some(chain_base) = task.queue.relay_base.clone() {
-        let (wt, base) = (worktree.to_path_buf(), chain_base.clone());
-        let reset = tokio::task::spawn_blocking(move || git::uncommit_to(&wt, &base))
-            .await
-            .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-        if let Err(e) = reset {
-            return failed(
-                FailureKind::Error,
-                format!("Could not gather the relay's work: {e}"),
-            );
-        }
-        task.decisions.push(format!(
-            "Land: lands the relay's chain from {} onto {branch}",
-            short_sha(&chain_base)
-        ));
-        task.base_sha = chain_base;
-        task.base_ref = Some(branch.clone());
-        task.queue.relay_base = None;
-    }
 
     match carry_and_check(
         app,

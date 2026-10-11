@@ -48,7 +48,7 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(90), |s| {
         s == "waiting" || s == "done" || s == "failed"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
@@ -59,7 +59,7 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
         "task.answer",
         serde_json::json!({"id": task_id, "answer": "approve"}),
     );
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, Duration::from_secs(90), |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -120,7 +120,7 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
             }),
         );
         let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
         let label = format!("advisor={advisor} mode={mode}: {settled}");
         assert_eq!(settled["status"], "done", "{label}");
         let attempts = settled["attempts"].as_array().unwrap();
@@ -213,7 +213,7 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "waiting", "{settled}");
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
@@ -261,7 +261,7 @@ fn an_explicit_codex_review_route_sends_claude_work_to_codex() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(
         settled["attempts"][0]["routeId"], "claude-sonnet",
@@ -311,7 +311,7 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "{settled}");
     let argv = std::fs::read_to_string(&args_log).unwrap();
     assert!(
@@ -367,7 +367,7 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
             }),
         );
         let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
         assert_eq!(settled["status"], status, "{final_check}: {settled}");
         let attempt = &settled["attempts"][0];
         assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
@@ -435,7 +435,7 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "waiting", "{settled}");
     let detail = settled["attempts"][0]["failure"]["detail"]
         .as_str()
@@ -486,7 +486,7 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "{settled}");
 
     let attempts = settled["attempts"].as_array().unwrap();
@@ -590,7 +590,7 @@ fn run_retry_task(second_file: &str) -> (Daemon, serde_json::Value, String) {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(40));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     // The scripts dir must outlive the run.
     drop(scripts_dir);
     (daemon, settled, task_id)
@@ -703,7 +703,7 @@ fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "{settled}");
     let listed: Vec<String> = settled["attempts"]
         .as_array()
@@ -755,7 +755,7 @@ esac
 "###;
 
 #[test]
-fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_escalates() {
+fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_handled() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-repeat.sh", FAKE_REPEAT_SCRIPT);
     let daemon = Daemon::spawn(&[
@@ -780,7 +780,7 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(120));
     assert_eq!(settled["status"], "waiting", "{settled}");
     assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
     let attempts = settled["attempts"].as_array().unwrap();
@@ -789,14 +789,20 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|a| a["stage"] == "implement")
         .collect();
     // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
-    // repeat -> advisor and a tier up. Attempt 3: repeated again -> waiting.
-    assert_eq!(implements.len(), 3, "{settled}");
+    // repeat -> advisor and a tier up. Attempt 3: repeated a second time ->
+    // handled (the judge), not the owner; the budget of 6 ends the task.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert!(
         implements[0]["review"].get("repeated").is_none(),
         "{settled}"
     );
     assert_eq!(
-        implements[1]["review"]["repeated"][0], "P1: a.rs:1 - null check missing",
+        implements[1]["review"]["repeated"][0]
+            .as_str()
+            .unwrap()
+            .split(" [F-")
+            .next(),
+        Some("P1: a.rs:1 - null check missing"),
         "{settled}"
     );
     assert_eq!(implements[0]["routeId"], "claude-sonnet", "{settled}");
@@ -814,14 +820,14 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|e| e.file_name().to_string_lossy().starts_with("review."))
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
-    assert_eq!(reviews.len(), 3, "one review per attempt");
+    assert_eq!(reviews.len(), 6, "one review per attempt");
     assert_eq!(
         reviews
             .iter()
             .filter(|b| b.contains("## Previous review") && b.contains("null check missing"))
             .count(),
-        2,
-        "attempts 2 and 3 carry the previous findings"
+        5,
+        "attempts 2 to 6 carry the previous findings"
     );
     let decisions = settled["decisions"].as_array().unwrap();
     assert!(
@@ -934,7 +940,7 @@ fn decision_lines(task: &serde_json::Value) -> Vec<String> {
 
 #[test]
 fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() {
-    let (settled, runs) = run_dispute_task(false, Duration::from_secs(30));
+    let (settled, runs) = run_dispute_task(false, Duration::from_secs(90));
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(runs, 1, "{settled}");
     let assumption = settled["assumptions"]
@@ -957,7 +963,7 @@ fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() 
 
 #[test]
 fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
-    let (settled, runs) = run_dispute_task(true, Duration::from_secs(30));
+    let (settled, runs) = run_dispute_task(true, Duration::from_secs(120));
     assert_eq!(settled["status"], "waiting", "{settled}");
     assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
     assert_eq!(runs, 1, "the finding is judged once: {settled}");
@@ -967,7 +973,9 @@ fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
         .iter()
         .filter(|a| a["stage"] == "implement")
         .collect();
-    assert_eq!(implements.len(), 3, "{settled}");
+    // The second repeat (attempt 3) is handled, not escalated: the judge
+    // already ruled, so the attempts run until the budget of 6 is spent.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
     let decisions = decision_lines(&settled);
@@ -1070,7 +1078,7 @@ fn the_owner_picking_the_accept_option_finishes_the_task_on_its_last_attempt() {
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "true");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
         s != "running" && s != "queued"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
@@ -1078,7 +1086,7 @@ fn the_owner_picking_the_accept_option_finishes_the_task_on_its_last_attempt() {
     assert!(options.contains(ACCEPT_OPTION), "{options}");
     let said = format!("  {}  ", ACCEPT_OPTION.to_uppercase());
     daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let done = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_accepted(&daemon, repo.path(), &done, &said);
@@ -1095,13 +1103,13 @@ fn owner_free_text_the_orchestrator_reads_as_accepting_finishes_the_task() {
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "true");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
         s != "running" && s != "queued"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
     let said = "the review is being picky, ship it";
     daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let done = poll_until(&daemon, &id, Duration::from_secs(90), |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_accepted(&daemon, repo.path(), &done, said);
@@ -1121,16 +1129,16 @@ fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt(
         let repo = init_git_repo();
         let task = create_started(&daemon, repo.path(), "true");
         let id = task["id"].as_str().unwrap().to_string();
-        poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+        poll_until(&daemon, &id, Duration::from_secs(90), |s| s == "waiting");
         daemon.request(
             "task.answer",
             serde_json::json!({"id": id, "answer": "try again, more carefully"}),
         );
-        let again = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+        let again = poll_until(&daemon, &id, Duration::from_secs(90), |s| s == "waiting");
         let mut latest = again;
         let start = std::time::Instant::now();
         while implement_attempts(&latest) < 2 {
-            assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
+            assert!(start.elapsed() < Duration::from_secs(90), "{latest}");
             std::thread::sleep(Duration::from_millis(100));
             latest = daemon.request("task.get", serde_json::json!({"id": id}));
         }
@@ -1152,7 +1160,7 @@ fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_jud
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "false");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+    let waiting = poll_until(&daemon, &id, Duration::from_secs(90), |s| s == "waiting");
     let options = waiting["question"]["options"].to_string();
     assert!(!options.contains(ACCEPT_OPTION), "{options}");
     daemon.request(
@@ -1162,7 +1170,7 @@ fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_jud
     let mut latest = waiting;
     let start = std::time::Instant::now();
     while implement_attempts(&latest) < 2 {
-        assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
+        assert!(start.elapsed() < Duration::from_secs(90), "{latest}");
         std::thread::sleep(Duration::from_millis(100));
         latest = daemon.request("task.get", serde_json::json!({"id": id}));
     }

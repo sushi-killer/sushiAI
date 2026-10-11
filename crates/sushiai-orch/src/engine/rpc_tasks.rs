@@ -23,8 +23,8 @@ pub(super) struct NewTask {
     pub(super) depends_on: Vec<String>,
     pub(super) parent: Option<String>,
     pub(super) paths: Vec<String>,
-    /// The sibling subtask whose branch this one continues.
-    pub(super) relay_of: Option<String>,
+    /// The ordered parts a merged task checks after every attempt.
+    pub(super) checklist: Vec<ChecklistItem>,
     pub(super) eval_set: Option<String>,
     pub(super) eval_name: Option<String>,
     pub(super) eval_check_cmd: Option<String>,
@@ -380,7 +380,7 @@ impl App {
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty())
                     .collect(),
-                relay_of: None,
+                checklist: vec![],
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
                 eval_check_cmd: p.eval_check.clone().filter(|s| !s.trim().is_empty()),
@@ -534,6 +534,7 @@ impl App {
             final_verify: new.final_verify,
             checks: new.checks,
             held_out: new.held_out,
+            planner_tests: Default::default(),
             status: if new.request.is_some() {
                 TaskStatus::Drafting
             } else {
@@ -570,6 +571,7 @@ impl App {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
             overseer_woken: false,
@@ -582,8 +584,9 @@ impl App {
             source: new.source,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            checklist: new.checklist,
             queue: QueueState {
-                relay_of: new.relay_of,
                 backlog: new.backlog,
                 ..Default::default()
             },
@@ -1253,9 +1256,9 @@ impl App {
             }
         }
         amendment.apply(&mut task);
-        if task.variant().grounded_checks {
-            baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
-        }
+
+        baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
+
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
         Ok(json!({"id": id, "amended": fields, "pending": false}))

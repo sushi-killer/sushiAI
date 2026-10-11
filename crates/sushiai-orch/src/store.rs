@@ -600,6 +600,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_saved_before_presets_load_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        let o = value.as_object_mut().unwrap();
+        assert!(o.remove("presets").is_some());
+        assert!(o.remove("repoPresets").is_some());
+        std::fs::write(store.settings_path(), value.to_string()).unwrap();
+        let loaded = store.load_settings().unwrap();
+        assert!(loaded.presets.is_empty());
+        assert!(loaded.repo_presets.is_empty());
+        assert!(loaded.check_presets().is_ok());
+    }
+
+    #[test]
     fn old_settings_naming_the_retired_haiku_route_load_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path()).unwrap();

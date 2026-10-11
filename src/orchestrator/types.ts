@@ -132,6 +132,59 @@ export type Settings = {
   afterLand?: { repo: string; run: string }[];
   /** Commands that only run when the task's diff touches their `paths`. */
   scopedChecks?: { repo?: string; command: string; paths: string[] }[];
+  /** Custom presets (built-ins are defined in orchd, never written here). */
+  presets?: Preset[];
+  /** Repo path -> id of the preset new tasks of that repo start with. */
+  repoPresets?: Record<string, string>;
+};
+
+/** What a preset changes in the pipeline; an absent value is left alone. */
+export type PresetValues = {
+  /** `false` turns the brief check off. */
+  briefCheck?: boolean;
+  advisor?: boolean;
+  /** The held-out check (`variant.groundedChecks`). */
+  heldOut?: boolean;
+  planner?: string;
+  briefCheckRoute?: string;
+  review?: string;
+  tierRoutes?: Partial<Record<Tier, string>>;
+  maxAttempts?: number;
+};
+
+export type Preset = {
+  id: string;
+  label: string;
+  builtin: boolean;
+  values: PresetValues;
+};
+
+export type PipelineStageState =
+  "pending" | "running" | "done" | "failed" | "skipped";
+
+/** One stage of `pipeline.describe`. */
+export type PipelineStage = {
+  id: string;
+  label: string;
+  kind: "main" | "side";
+  enabled: boolean;
+  optional: boolean;
+  ownerOnly: boolean;
+  routeId?: string;
+  model?: string;
+  maxAttempts?: number;
+  state?: PipelineStageState;
+  durationMs?: number;
+  costUsd?: number;
+};
+
+/** The `pipeline.describe` payload. */
+export type Pipeline = {
+  presetId: string | null;
+  presets: Preset[];
+  stages: PipelineStage[];
+  /** The open question: the stage that asked and who holds it. */
+  branch?: { from: string; to: "overseer" | "owner" };
 };
 
 export type EvolutionSettings = {
@@ -264,6 +317,13 @@ export type Variant = {
   /** A finished top-level task lands on its base branch by itself. Absent =
    * off. */
   land?: boolean;
+  /** Route id the review stage runs on instead of `settings.review`. */
+  reviewRoute?: string;
+  /** Route id of the brief check instead of `settings.briefCheckRoute`;
+   * "" turns it off. */
+  briefCheckRoute?: string;
+  /** Implement attempts instead of `settings.maxAttempts`. */
+  maxAttempts?: number;
 };
 
 export type LeadTouch = {
@@ -893,5 +953,6 @@ export type OrchestratorView =
   | { kind: "improvements" }
   | { kind: "analytics" }
   | { kind: "log" }
+  | { kind: "pipeline" }
   | { kind: "archive" }
   | { kind: "messages" };

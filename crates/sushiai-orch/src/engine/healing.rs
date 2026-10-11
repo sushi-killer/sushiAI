@@ -11,8 +11,8 @@ const MAX_FOLLOW_UPS: usize = 12;
 const MAX_REASON_CHARS: usize = 300;
 
 /// The route of the cheap judge runs; `None` when they are off.
-pub(super) fn judge_route(app: &App) -> Option<Route> {
-    check_route(app)?.1
+pub(super) fn judge_route(app: &App, variant: &Variant) -> Option<Route> {
+    check_route_for(app, variant)?.1
 }
 
 /// The outermost JSON object of a judge's reply, whatever surrounds it.
@@ -362,7 +362,7 @@ pub(super) async fn heal_feasibility(
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
     }
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         return true;
     };
     let mut commands: Vec<String> = Vec::new();
@@ -600,7 +600,7 @@ pub(super) async fn heal_repeated_unmet(
     let Some(rep) = repeated_unmet(task, idx, attempt_n, review) else {
         return Ok(false);
     };
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         return Ok(false);
     };
     let old = task.criteria[rep.criterion].clone();
@@ -940,7 +940,7 @@ pub(super) async fn heal_answers(
         task.brief_check.answers_seen = seen;
         return Ok(false);
     }
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         // Not looked at: a later run with the judge on still reads them.
         return Ok(false);
     };

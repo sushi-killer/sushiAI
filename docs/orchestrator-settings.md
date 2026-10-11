@@ -49,6 +49,8 @@ Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
 | `gateAt`                     | repo path to `"parent"` or `"every"`                                                 | `{}` (a repo not listed uses `"parent"`)                              | Where a subtask's whole-repo checks run. Under `"parent"`, a subtask leaves out the `finalVerify` commands its parent also runs, and the parent runs them once on the final tree. Under `"every"`, each subtask runs them too, and the parent skips a command that already passed on the same tree.                                                                                                                                                                                                                                         | Advanced JSON                                    |
 | `afterLand`                  | list of `{repo, run}`                                                                | `[]`                                                                  | Shell command `run` executed in the main checkout `repo` after a task lands there, for example to rebuild a binary.                                                                                                                                                                                                                                                                                                                                                                                                                         | Advanced JSON                                    |
 | `scopedChecks`               | list of `{repo?, command, paths}`                                                    | `[]`                                                                  | A command that runs only when the task's diff touches one of its `paths` globs; `command` is a glob over the whole command string. Without `repo` it applies to every repo.                                                                                                                                                                                                                                                                                                                                                                 | Advanced JSON                                    |
+| `presets`                    | list of `{id, label, values}`                                                        | `[]`                                                                  | Custom presets: a named bundle of pipeline switches and routes (see Presets below). An id may not be a built-in id (`fast`, `careful`, `docs`) and must be unique.                                                                                                                                                                                                                                                                                                                                                                          | Pipeline view, Advanced JSON                     |
+| `repoPresets`                | repo path to preset id                                                               | `{}`                                                                  | The preset a new task in that repo starts from. An unknown preset id is refused.                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Pipeline view, Advanced JSON                     |
 | `chatTools`                  | list of connected MCP tools                                                          | `[]`                                                                  | Servers the orchestrator chat may use, each toggled on or off. Servers are definitions or references, never secrets.                                                                                                                                                                                                                                                                                                                                                                                                                        | Connected tools                                  |
 
 The Orchestrator panel's Log view lists what the orchestrator agent did in that panel's project when `autoAnswer` or `digestHour` woke it (`<data>/overseer.jsonl`, last 2000 entries), with this project's spend today (UTC day) and, when `dailyBudgetUsd` is set, the total of all projects against it.
@@ -74,6 +76,53 @@ A new task worktree is a clean checkout: it has no installed dependencies and no
 **`.worktreeinclude`.** A file in the main checkout, in gitignore syntax, lists ignored files to copy into each worktree (for example `.env*`). Only regular files that the main checkout ignores and git does not track are copied; a symlink is skipped and a file the worktree already has is kept. Without this file, `.env`, `.env.local` and `.claude/settings.local.json` are copied when ignored.
 
 **sccache.** When `sccache` is on the extended `PATH` and `RUSTC_WRAPPER` is not set, setup, verify and agent processes get `RUSTC_WRAPPER=sccache`; the daemon starts the sccache server once, outside any sandbox. orchd never sets `CARGO_TARGET_DIR`.
+
+## Presets
+
+A preset is a named set of pipeline choices that a task can start from. The
+Pipeline view in the Orchestrator rail draws the pipeline and holds the preset
+picker; a task's detail shows the same diagram for that task.
+
+Three built-in presets are defined in code (`Preset::builtins` in
+`crates/sushiai-orch/src/model.rs`). They are read-only and are always listed
+before the custom ones.
+
+| Preset              | Brief check | Advisor | Held-out check | `maxAttempts` |
+| ------------------- | ----------- | ------- | -------------- | ------------- |
+| Fast (`fast`)       | off         | off     | off            | 2             |
+| Careful (`careful`) | on          | on      | on             | 4             |
+| Docs (`docs`)       | on          | off     | off            | 2             |
+
+A preset sets only the values it names. The values a preset can carry:
+
+| Value             | What it sets                                                                    |
+| ----------------- | ------------------------------------------------------------------------------- |
+| `briefCheck`      | `false` turns the brief check off; `true` uses the settings' `briefCheckRoute`. |
+| `advisor`         | The advisor after a failed attempt.                                             |
+| `heldOut`         | The held-out check (`groundedChecks`).                                          |
+| `planner`         | The route for the planning stage.                                               |
+| `briefCheckRoute` | A route id for the brief check; wins over `briefCheck`.                         |
+| `review`          | The review route: a route id, `"auto"` or `""`.                                 |
+| `tierRoutes`      | Route ids per tier (`mechanical`, `standard`, `hard`).                          |
+| `maxAttempts`     | Attempts before the task fails; at least 1.                                     |
+
+`presets` (custom presets) and `repoPresets` (`{repoPath: presetId}`) are
+saved through `settings.set`, which refuses a preset whose route is not
+configured, a duplicate or built-in id, `maxAttempts` of 0, and a
+`repoPresets` entry that names an unknown preset.
+
+- **Per task.** `task.create` takes an optional `preset`; without it the task
+  uses its repo's preset from `repoPresets`. The preset is written into the
+  task's variant, so a later settings change does not move a task that has
+  been created.
+- **Changing it.** `task.preset {id, preset}` sets a task's preset, but only
+  before its first implement attempt. After that it is refused, and so it is
+  while the task's loop is live.
+- **Editing in the Pipeline view.** A built-in preset is read-only: an edit
+  in the inspector makes an editable custom copy and selects it for the repo.
+  Edits to the repo's own custom preset are saved in place.
+- **Shared checks.** Shared checks (the repo's CI entry and base checks) are
+  owner-only. No preset and no inspector switch disables them.
 
 ## `experiments` flags
 

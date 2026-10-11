@@ -54,6 +54,7 @@ mod leases;
 mod lines;
 mod past_work;
 mod permissions;
+mod pipeline;
 mod plan;
 mod pr;
 mod questions;
@@ -762,6 +763,8 @@ impl App {
             "task.leadTouch" => self.handle_task_lead_touch(params).await,
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
+            "task.preset" => self.handle_task_preset(params).await,
+            "pipeline.describe" => self.handle_pipeline_describe(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "costs.summary" => self.handle_costs_summary(params).await,
             "overseer.log" => self.handle_overseer_log(params).await,

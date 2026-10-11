@@ -249,6 +249,10 @@ impl App {
             /// task only (an A/B arm).
             #[serde(default)]
             variant: Option<serde_json::Value>,
+            /// A preset id laid over `settings.experiments` before `variant`;
+            /// the repo's `repoPresets` entry when unset.
+            #[serde(default)]
+            preset: Option<String>,
             /// Land the finished task on its base branch by itself; the same
             /// as `variant.land`.
             #[serde(default)]
@@ -281,7 +285,19 @@ impl App {
             return Err("a subtask cannot be in the backlog".to_string());
         }
         let settings = self.settings.read().unwrap().clone();
-        let mut variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
+        let preset = match p.preset.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => Some(
+                settings
+                    .preset(id)
+                    .ok_or_else(|| format!("unknown preset \"{id}\""))?,
+            ),
+            None => settings.repo_preset(&p.repo),
+        };
+        let mut base_variant = settings.experiments.clone();
+        if let Some(preset) = &preset {
+            preset.values.apply(&mut base_variant);
+        }
+        let mut variant = resolve_variant(&base_variant, p.variant.as_ref())?;
         if let Some(land) = p.land {
             variant.land = land;
         }
@@ -1261,6 +1277,59 @@ impl App {
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
         Ok(json!({"id": id, "amended": fields, "pending": false}))
+    }
+
+    /// `task.preset {id, preset}`: writes a preset into the task's variant
+    /// before its first implement attempt.
+    pub(super) async fn handle_task_preset(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            preset: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let settings = self.settings.read().unwrap().clone();
+        let preset = settings
+            .preset(&p.preset)
+            .ok_or_else(|| format!("unknown preset \"{}\"", p.preset))?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.archived {
+            return Err("task is archived".to_string());
+        }
+        if implement_attempt_count(&task) > 0 {
+            return Err(
+                "the task has already run an implement attempt; a preset can only be set before it"
+                    .to_string(),
+            );
+        }
+        // A live loop keeps its own copy of the task and would overwrite
+        // this change with its next save.
+        if self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&p.id)
+            .is_some_and(|c| !c.cancel.is_cancelled())
+        {
+            return Err("the task is running: stop it before changing its preset".to_string());
+        }
+        let mut variant = task.variant();
+        preset.values.apply(&mut variant);
+        variant.check()?;
+        variant.check_routes(&settings.routes)?;
+        task.variant = Some(variant);
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
     /// Cancels the loop and waits for it to actually exit before touching

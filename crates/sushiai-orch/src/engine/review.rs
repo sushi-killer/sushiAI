@@ -106,20 +106,33 @@ pub(super) fn cheapest_route_at<'a>(
         .map(|(_, r)| (*r, false))
 }
 
-/// The review route and a one-line reason. An explicit `review` id is used
-/// as is. `"auto"` never picks the implementer's route nor any route with its
-/// harness and model: it takes the best route of known strength at
-/// `review_floor` or above (priced, on another harness, then cheapest), else
-/// the strongest remaining one. Only when no other route exists does it fall
-/// back to the implementer's own route, reason `self-review: no other route`.
-/// `""` -> no review (handled by the caller).
+/// The review route and a one-line reason for the global review setting.
+/// See `select_review_route_with`. Only the unit tests call it.
+#[cfg(test)]
 pub fn select_review_route<'a>(
     settings: &'a Settings,
     implementer: &Route,
     tier: Tier,
 ) -> Option<(&'a Route, String)> {
-    if settings.review != "auto" {
-        let route = settings.routes.iter().find(|r| r.id == settings.review)?;
+    select_review_route_with(settings, &settings.review, implementer, tier)
+}
+
+/// The review route and a one-line reason. `review_id` is the effective review
+/// id (`Variant::review_route_id`). An explicit id is used as is. `"auto"`
+/// never picks the implementer's route nor any route with its harness and
+/// model: it takes the best route of known strength at `review_floor` or
+/// above (priced, on another harness, then cheapest), else the strongest
+/// remaining one. Only when no other route exists does it fall back to the
+/// implementer's own route, reason `self-review: no other route`.
+/// `""` -> no review (handled by the caller).
+pub fn select_review_route_with<'a>(
+    settings: &'a Settings,
+    review_id: &str,
+    implementer: &Route,
+    tier: Tier,
+) -> Option<(&'a Route, String)> {
+    if review_id != "auto" {
+        let route = settings.routes.iter().find(|r| r.id == review_id)?;
         return Some((route, "explicit setting".to_string()));
     }
     let floor = review_floor(implementer, tier);

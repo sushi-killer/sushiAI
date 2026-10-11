@@ -1,0 +1,164 @@
+/* The pipeline blueprint: stages as nodes in a wrapping row. Tokens only. */
+
+.bp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  min-width: 0;
+}
+.bp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm) var(--gap-md);
+}
+.bp-preset {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+.bp-eyebrow {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+}
+.bp-note {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.bp-error {
+  margin: 0;
+  color: var(--tone-danger);
+  font-size: var(--text-sm);
+}
+.bp-select,
+.bp-number {
+  height: 28px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-control);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.bp-number {
+  width: 64px;
+}
+.bp-select:disabled {
+  color: var(--text-faint);
+}
+
+.bp-flow,
+.bp-branch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm);
+  min-width: 0;
+}
+.bp-branch {
+  padding-left: var(--gap-md);
+}
+.bp-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  min-width: 0;
+  max-width: 100%;
+}
+.bp-arrow {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.bp-node {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 84px;
+  max-width: 100%;
+  padding: var(--gap-sm) var(--gap-md);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.bp-node:disabled {
+  cursor: default;
+}
+.bp-node:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.bp-node.open {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+}
+.bp-node-label {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-fact {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-node.done {
+  border-color: var(--tone-ok);
+}
+.bp-node.current {
+  border-color: var(--tone-info);
+  background: var(--tone-info-bg);
+}
+.bp-node.failed {
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--tone-danger);
+}
+.bp-node.skipped,
+.bp-node.disabled {
+  border-style: dashed;
+  color: var(--text-faint);
+}
+.bp-node.skipped .bp-fact,
+.bp-node.disabled .bp-fact {
+  color: var(--text-faint);
+}
+.bp-node.branch {
+  border-color: var(--tone-warning);
+  background: var(--tone-warning-bg);
+}
+
+.bp-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-md);
+  border: 1px solid var(--line-pane);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+}
+.bp-inspector-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  font-size: var(--text-md);
+}
+.bp-row-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}

@@ -1595,7 +1595,7 @@ fn previous_review_findings(task: &Task) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn is_held_out(v: &VerifyOutcome) -> bool {
+pub fn is_held_out(v: &VerifyOutcome) -> bool {
     v.command.starts_with("held-out check (criterion ")
 }
 

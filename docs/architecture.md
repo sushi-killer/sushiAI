@@ -104,12 +104,13 @@ flowchart TB
     chat["chat.rs<br/>orchestrator chat"]
     audit["audit.rs<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
+    pipeline["engine/pipeline.rs<br/>pipeline.describe, task.preset"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
     evolveCli["sushiai orch evolve<br/>evolution.run / evolution.adopt"]
     costs["costs.rs<br/>costs.summary, sushiai orch costs"]
     harness["harness.rs<br/>claude -p / codex exec"]
     side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
-    store[("data dir<br/>tasks/, runs/, settings.json,<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
+    store[("data dir<br/>tasks/, runs/, settings.json<br/>(presets, repoPresets),<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["sushiai mcp<br/>task_* tools, stdio"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
@@ -119,7 +120,7 @@ flowchart TB
     engine -->|installs| skill
     chat --> chatTools
     chatTools -->|read at turn time| mcpConfig
-    proto --> engine & chat & audit & insights & evolution & costs
+    proto --> engine & chat & audit & insights & pipeline & evolution & costs
     engine --> side
     engine -->|task done or failed| evolution
     evolution -->|append signals| store

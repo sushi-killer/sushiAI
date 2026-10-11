@@ -806,7 +806,7 @@ pub(super) async fn run_plan_stage(
         task.goal = draft.goal.clone();
         task.planned_tier = draft.tier;
         // With review off nobody would check a moved entry: keep it as is.
-        let (verify, judged) = if settings.review.is_empty() {
+        let (verify, judged) = if variant.review_route_id(&settings).is_empty() {
             (draft.verify.clone(), Vec::new())
         } else {
             split_verify_commands(&worktree, &draft.verify)

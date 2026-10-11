@@ -15,6 +15,7 @@ pub(super) async fn run_task_loop(
     auto_start_after_plan: bool,
 ) {
     let mut attempt_budget = app.settings.read().unwrap().max_attempts;
+    let mut budget_loaded = false;
     // Set once a parent's finish failed after every subtask landed: the
     // failure its own implement attempt has to fix. While it is set (and once
     // the parent has an attempt) the parent never goes back to `run_parent`.
@@ -34,6 +35,12 @@ pub(super) async fn run_task_loop(
                 return;
             }
         };
+        if !budget_loaded {
+            budget_loaded = true;
+            if let Some(n) = task.variant().max_attempts {
+                attempt_budget = n;
+            }
+        }
 
         // A usage or rate limit pause that outlived the loop (a restart) is
         // served first, holding no slot; the mark is cleared when it ends.
@@ -1977,9 +1984,10 @@ pub(super) async fn run_task_loop(
             return;
         }
         let mut review_result: Option<ReviewResult> = None;
-        if !settings.review.is_empty() {
-            let selected =
-                select_review_route(&settings, &route, task.tier).and_then(|(r, why)| {
+        let review_id = task.variant().review_route_id(&settings).to_string();
+        if !review_id.is_empty() {
+            let selected = select_review_route_with(&settings, &review_id, &route, task.tier)
+                .and_then(|(r, why)| {
                     app.usable_route(&settings, r.clone())
                         .map(|(r, swap)| (r, why, swap))
                 });
@@ -2198,7 +2206,7 @@ pub(super) async fn run_task_loop(
             } else {
                 let note = format!(
                     "Orchestrator: review skipped, no route matches review \"{}\"",
-                    settings.review
+                    review_id
                 );
                 if !task.decisions.contains(&note) {
                     task.decisions.push(note);

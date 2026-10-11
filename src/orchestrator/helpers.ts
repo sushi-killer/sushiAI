@@ -65,6 +65,9 @@ const VARIANT_KEYS: Exclude<
   | "bestOf"
   | "bestOfRoute"
   | "land"
+  | "reviewRoute"
+  | "briefCheckRoute"
+  | "maxAttempts"
 >[] = ["stallTimeoutSecs", "reviewEvidence"];
 
 function variantFlagText(value: boolean | string | number): string {

@@ -566,11 +566,16 @@ async fn run_pick(
 ) -> Result<(Option<(bool, String)>, f64), RunError> {
     // The reviewer on the other family; without a review route, whichever
     // family candidate a was not.
-    let route = select_review_route(settings, a_route, task.tier)
-        .map(|(r, _)| r)
-        .filter(|r| r.harness != a_route.harness)
-        .unwrap_or(b_route)
-        .clone();
+    let route = select_review_route_with(
+        settings,
+        task.variant().review_route_id(settings),
+        a_route,
+        task.tier,
+    )
+    .map(|(r, _)| r)
+    .filter(|r| r.harness != a_route.harness)
+    .unwrap_or(b_route)
+    .clone();
     let (wa, wb, base) = (
         worktree.to_path_buf(),
         wt_b.to_path_buf(),

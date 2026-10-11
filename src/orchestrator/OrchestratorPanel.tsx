@@ -15,6 +15,7 @@ import {
   ListTodo,
   MessageSquare,
   Sparkles,
+  Workflow,
   X,
 } from "lucide-react";
 import "./orchestrator.css";
@@ -89,6 +90,7 @@ import { improvementsBadge } from "./improvementsModel";
 import { useRecurringFailures } from "./useRecurringFailures";
 import { AnalyticsView } from "./Analytics";
 import { OverseerLogView } from "./OverseerLog";
+import { PipelineView } from "./PipelineView";
 import { PlanView } from "./PlanView";
 
 type DaemonState = DaemonReach;
@@ -168,6 +170,7 @@ const VIEW_NAMES: Record<Exclude<View["kind"], "task">, string> = {
   analytics: "Analytics",
   log: "Log",
   archive: "Archive",
+  pipeline: "Pipeline",
 };
 
 function viewIcon(kind: View["kind"]) {
@@ -183,6 +186,8 @@ function viewIcon(kind: View["kind"]) {
       return <ChartColumn size={14} />;
     case "log":
       return <ScrollText size={14} />;
+    case "pipeline":
+      return <Workflow size={14} />;
     default:
       return <LayoutList size={14} />;
   }
@@ -748,7 +753,8 @@ function OrchestratorBody({
     chatKind ||
     current.kind === "improvements" ||
     current.kind === "analytics" ||
-    current.kind === "log"
+    current.kind === "log" ||
+    current.kind === "pipeline"
       ? null
       : current.kind === "task"
         ? "ask"
@@ -825,6 +831,14 @@ function OrchestratorBody({
             dailyBudgetUsd={settings?.dailyBudgetUsd ?? 0}
             onOpenChat={() => open({ kind: "chat" })}
             onOpenTask={(id) => open({ kind: "task", id })}
+          />
+        );
+      case "pipeline":
+        return (
+          <PipelineView
+            cwd={cwd}
+            settings={settings}
+            onSettings={updateSettings}
           />
         );
       case "plan":

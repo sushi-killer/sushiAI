@@ -66,6 +66,8 @@ const ALLOWED_METHODS = new Set([
   "task.openDeliverable",
   "task.report",
   "task.backlog",
+  "task.preset",
+  "pipeline.describe",
   "failures.catalogue",
   "costs.summary",
   "overseer.log",
@@ -110,6 +112,7 @@ const TASK_RESULT_METHODS = new Set([
   "task.overturn",
   "task.leadTouch",
   "task.backlog",
+  "task.preset",
 ]);
 
 function tagTasks(result, host) {

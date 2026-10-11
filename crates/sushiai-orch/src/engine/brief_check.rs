@@ -216,8 +216,17 @@ pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
 /// when the setting is empty, i.e. cheap checks are off. `"auto"` names no
 /// route: it is the cheapest configured route whose harness is available.
 pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>, Option<String>)> {
+    check_route_for(app, &Variant::default())
+}
+
+/// `check_route` for a task: its variant may switch the check off or name
+/// another route.
+pub(super) fn check_route_for(
+    app: &App,
+    variant: &Variant,
+) -> Option<(String, Option<Route>, Option<String>)> {
     let settings = app.settings.read().unwrap();
-    let route_id = settings.brief_check_route.clone();
+    let route_id = variant.brief_check_route_id(&settings).to_string();
     if route_id.is_empty() {
         return None;
     }
@@ -256,7 +265,7 @@ pub(super) async fn check_brief(
     if task.brief_check.done {
         return BriefAction::Proceed;
     }
-    let Some((route_id, route, fallback)) = check_route(app) else {
+    let Some((route_id, route, fallback)) = check_route_for(app, &task.variant()) else {
         return BriefAction::Proceed;
     };
     let (verdict, missing) = match &route {

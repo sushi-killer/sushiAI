@@ -32,7 +32,8 @@ pub struct Route {
     pub account_id: Option<String>,
     /// 1 (cheap, mechanical) to 3 (hard). Review routing never picks a route
     /// weaker than the implementer's; unset uses `route_strength`'s default
-    /// for the model.
+    /// for the model. A route with no model needs `strength` to meet a review
+    /// floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strength: Option<u32>,
 }
@@ -111,8 +112,10 @@ pub enum SandboxMode {
 pub struct Settings {
     pub routes: Vec<Route>,
     pub tiers: HashMap<Tier, String>,
-    /// Route id; "" = off, "auto" = first configured route whose harness
-    /// differs from the implement attempt's.
+    /// Route id; "" = off, "auto" = never the implementer's route nor one
+    /// with its harness and model: a priced route of known strength at the
+    /// floor on another harness first, else the strongest remaining route;
+    /// the implementer's own route only when no other route exists.
     pub review: String,
     pub sandbox: SandboxMode,
     pub allowed_domains: Vec<String>,
@@ -137,6 +140,10 @@ pub struct Settings {
     /// hook's budget derives from it, capped under Claude's 600 s hook limit.
     #[serde(default = "default_verify_timeout_secs")]
     pub verify_timeout_secs: u64,
+    /// Minutes an implement attempt may run before it is stopped and asked
+    /// for a short report (failure kind `time_budget`); `0` = no limit.
+    #[serde(default = "default_implement_budget_mins")]
+    pub implement_budget_mins: f64,
     /// Route id used for the drafting/plan stage of a `{repo, request}`
     /// `task.create`; `""` turns planning off (that create form is then
     /// rejected -- there is nothing to run it with).
@@ -196,8 +203,9 @@ pub struct Settings {
     #[serde(default)]
     pub evolution: EvolutionSettings,
     /// Where new task worktrees go; a relative value is resolved against the
-    /// repo root. Existing tasks keep the path they were created with.
-    #[serde(default = "default_worktree_root")]
+    /// repo root. Empty (the default) means `<home>/worktrees.noindex/<repo-id>`.
+    /// Existing tasks keep the path they were created with.
+    #[serde(default)]
     pub worktree_root: String,
     /// Land tasks may move the repo's default branch (origin/HEAD, else
     /// main/master). Off: such a landing is refused and the task stays done
@@ -208,6 +216,10 @@ pub struct Settings {
     /// allowed. `land_on_default` decides for repos not in the map.
     #[serde(default)]
     pub land_on_default_repos: std::collections::BTreeMap<String, bool>,
+    /// Per repo path: where the whole-repo checks a subtask shares with its
+    /// parent run. A repo not in the map uses `Parent`.
+    #[serde(default)]
+    pub gate_at: std::collections::BTreeMap<String, GateAt>,
     /// Commands run in the repo's main checkout after a task lands.
     #[serde(default)]
     pub after_land: Vec<AfterLand>,
@@ -221,6 +233,12 @@ pub struct Settings {
     /// MCP servers the orchestrator chat may use, each toggled in Settings.
     #[serde(default)]
     pub chat_tools: Vec<ChatToolConfig>,
+    /// Custom presets; the built-in ones live in code.
+    #[serde(default)]
+    pub presets: Vec<Preset>,
+    /// Repo path -> preset id a new task there starts from.
+    #[serde(default)]
+    pub repo_presets: std::collections::BTreeMap<String, String>,
 }
 
 /// One connected tool of the orchestrator chat. `server` is an MCP server
@@ -406,10 +424,6 @@ pub struct RepoNote {
     pub created_at: i64,
 }
 
-fn default_worktree_root() -> String {
-    ".sushiai/worktrees".to_string()
-}
-
 /// Tool-call inputs containing one of these count as process work (lesson
 /// files, changelogs, convention scripts) or as evidence work (screenshot
 /// helpers), on top of the generic rules in `ab.rs`. Empty by default: they
@@ -473,6 +487,10 @@ pub struct BriefCheck {
     /// Every check command was run on the base once (see `base_check`).
     #[serde(default)]
     pub feasibility_done: bool,
+    /// The refresh of a parent-drafted child after its dependencies landed
+    /// has run (or been skipped); it never runs twice.
+    #[serde(default)]
+    pub refreshed: bool,
     /// Commands that fail on the base for a reason unrelated to the task: kept
     /// out of the gates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -616,6 +634,10 @@ fn default_verify_timeout_secs() -> u64 {
     1200
 }
 
+fn default_implement_budget_mins() -> f64 {
+    45.0
+}
+
 fn default_planner() -> String {
     "claude-opus".to_string()
 }
@@ -631,7 +653,27 @@ pub fn same_repo_path(a: &str, b: &str) -> bool {
         )
 }
 
+/// Where a subtask's finalVerify commands that its parent also runs are run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateAt {
+    /// Once, at the parent, on the final tree.
+    Parent,
+    /// In every subtask as well.
+    Every,
+}
+
 impl Settings {
+    /// Whether the checks a subtask shares with its parent run at the parent:
+    /// the per-repo entry when there is one, else true.
+    pub fn gates_at_parent(&self, repo: &str) -> bool {
+        self.gate_at
+            .iter()
+            .find(|(k, _)| same_repo_path(k, repo))
+            .map(|(_, at)| *at == GateAt::Parent)
+            .unwrap_or(true)
+    }
+
     /// Whether a task may land on `repo`'s default branch: the per-repo entry
     /// when there is one, else the global switch.
     pub fn may_land_on_default(&self, repo: &str) -> bool {
@@ -702,6 +744,7 @@ impl Default for Settings {
             daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
             verify_timeout_secs: default_verify_timeout_secs(),
+            implement_budget_mins: default_implement_budget_mins(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
             plan_review: default_plan_review(),
@@ -715,13 +758,16 @@ impl Default for Settings {
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
             evolution: EvolutionSettings::default(),
-            worktree_root: default_worktree_root(),
+            worktree_root: String::new(),
             land_on_default: false,
             land_on_default_repos: Default::default(),
+            gate_at: Default::default(),
             after_land: vec![],
             scoped_checks: vec![],
             autopilot: false,
             chat_tools: vec![],
+            presets: vec![],
+            repo_presets: Default::default(),
         }
     }
 }
@@ -751,7 +797,7 @@ fn experiments_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vari
 /// keeps its own copy, so an A/B pair can run side by side and `orchd ab`
 /// groups results by it. A flag that wins becomes the plain behaviour and
 /// leaves this struct.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Variant {
     /// Kill an implement attempt whose harness prints nothing for this
@@ -765,6 +811,10 @@ pub struct Variant {
     /// After an implement attempt fails, one read-only call on the planner's
     /// route diagnoses it; the answer goes into the next attempt's brief.
     pub advisor: bool,
+    /// Run a supplied hidden check; regular checks always run. On unless
+    /// explicitly disabled, including on tasks saved before this switch.
+    #[serde(skip_serializing_if = "is_true")]
+    pub held_out: bool,
     /// Kill an implement attempt that repeats itself (the same tool call
     /// three times, three error results, or eight edits of one file with no
     /// command run between) and record failure kind `loop`. On in the settings defaults.
@@ -812,6 +862,215 @@ pub struct Variant {
     /// commit, re-runs the checks on that tree and moves the branch. On in the
     /// settings defaults, so off is always written to the JSON.
     pub land: bool,
+    /// Route id of the review stage instead of `settings.review`; `""` turns
+    /// review off, `"auto"` picks one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_route: Option<String>,
+    /// Route id of the brief check (and the cheap judges) instead of
+    /// `settings.briefCheckRoute`; `""` turns them off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_check_route: Option<String>,
+    /// Attempts the task may run instead of `settings.maxAttempts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+impl Default for Variant {
+    fn default() -> Self {
+        Self {
+            stall_timeout_secs: 0,
+            review_evidence: false,
+            advisor: false,
+            held_out: true,
+            loop_detect: false,
+            planner_route: None,
+            tier_routes: BTreeMap::new(),
+            max_cost_usd: 0.0,
+            max_attempt_cost_usd: 0.0,
+            batch_questions: false,
+            best_of: 0,
+            best_of_route: None,
+            land: false,
+            review_route: None,
+            brief_check_route: None,
+            max_attempts: None,
+        }
+    }
+}
+
+/// A named bundle of stage switches a repo or a task starts from. Every
+/// value is optional: a preset names only what it changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preset {
+    pub id: String,
+    pub label: String,
+    /// Defined in code; never written to settings.
+    #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
+    pub values: PresetValues,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PresetValues {
+    /// `false` turns the brief check off; `true` leaves the settings' route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_check: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisor: Option<bool>,
+    /// Switch only the hidden check; regular checks are always enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_out: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_check_route: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier_routes: Option<BTreeMap<Tier, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+impl PresetValues {
+    /// Lays these values over `variant`; the one place a preset is applied.
+    pub fn apply(&self, variant: &mut Variant) {
+        if let Some(on) = self.brief_check {
+            variant.brief_check_route = if on { None } else { Some(String::new()) };
+        }
+        if let Some(on) = self.advisor {
+            variant.advisor = on;
+        }
+        if let Some(on) = self.held_out {
+            variant.held_out = on;
+        }
+        if let Some(id) = &self.planner {
+            variant.planner_route = Some(id.clone());
+        }
+        if let Some(id) = &self.brief_check_route {
+            variant.brief_check_route = Some(id.clone());
+        }
+        if let Some(id) = &self.review {
+            variant.review_route = Some(id.clone());
+        }
+        if let Some(routes) = &self.tier_routes {
+            variant.tier_routes = routes.clone();
+        }
+        if let Some(n) = self.max_attempts {
+            variant.max_attempts = Some(n);
+        }
+    }
+}
+
+impl Preset {
+    /// Fast, Careful and Docs: switches and `maxAttempts` only, never a
+    /// route id.
+    pub fn builtins() -> Vec<Preset> {
+        let make = |id: &str, label: &str, check: bool, advisor: bool, held: bool, n: u32| Preset {
+            id: id.to_string(),
+            label: label.to_string(),
+            builtin: true,
+            values: PresetValues {
+                brief_check: Some(check),
+                advisor: Some(advisor),
+                held_out: Some(held),
+                max_attempts: Some(n),
+                ..PresetValues::default()
+            },
+        };
+        vec![
+            make("fast", "Fast", false, false, false, 2),
+            make("careful", "Careful", true, true, true, 4),
+            make("docs", "Docs", true, false, false, 2),
+        ]
+    }
+}
+
+impl Settings {
+    /// Built-in presets, then the custom ones.
+    pub fn all_presets(&self) -> Vec<Preset> {
+        let mut all = Preset::builtins();
+        all.extend(self.presets.iter().cloned());
+        all
+    }
+
+    pub fn preset(&self, id: &str) -> Option<Preset> {
+        self.all_presets().into_iter().find(|p| p.id == id)
+    }
+
+    /// The preset id `repoPresets` names for `repo`.
+    pub fn repo_preset_id(&self, repo: &str) -> Option<&str> {
+        self.repo_presets
+            .iter()
+            .find(|(k, _)| same_repo_path(k, repo))
+            .map(|(_, id)| id.as_str())
+    }
+
+    /// The preset a task created in `repo` starts from, when one is set.
+    pub fn repo_preset(&self, repo: &str) -> Option<Preset> {
+        self.preset(self.repo_preset_id(repo)?)
+    }
+
+    /// Custom preset ids are unique and not built-in, preset routes are
+    /// configured, and `repoPresets` names known presets.
+    pub fn check_presets(&self) -> Result<(), String> {
+        let builtin = Preset::builtins();
+        let mut seen = std::collections::HashSet::new();
+        let known = |id: &str| self.routes.iter().any(|r| r.id == id);
+        for p in &self.presets {
+            if p.id.trim().is_empty() {
+                return Err("a preset id must not be empty".to_string());
+            }
+            if builtin.iter().any(|b| b.id == p.id) {
+                return Err(format!("preset id \"{}\" is a built-in preset", p.id));
+            }
+            if !seen.insert(p.id.as_str()) {
+                return Err(format!("preset id \"{}\" is duplicated", p.id));
+            }
+            let v = &p.values;
+            if let Some(id) = v.planner.as_deref().filter(|id| !known(id)) {
+                return Err(format!(
+                    "preset {} planner \"{id}\" is not a configured route",
+                    p.id
+                ));
+            }
+            for (key, id) in [
+                ("review", &v.review),
+                ("briefCheckRoute", &v.brief_check_route),
+            ] {
+                if let Some(id) = id
+                    .as_deref()
+                    .filter(|id| !id.is_empty() && *id != "auto" && !known(id))
+                {
+                    return Err(format!(
+                        "preset {} {key} \"{id}\" is not a configured route",
+                        p.id
+                    ));
+                }
+            }
+            for (tier, id) in v.tier_routes.iter().flatten() {
+                if !known(id) {
+                    return Err(format!(
+                        "preset {} tierRoutes.{} \"{id}\" is not a configured route",
+                        p.id,
+                        tier.as_str()
+                    ));
+                }
+            }
+            if v.max_attempts == Some(0) {
+                return Err(format!("preset {} maxAttempts must be at least 1", p.id));
+            }
+        }
+        for (repo, id) in &self.repo_presets {
+            if self.preset(id).is_none() {
+                return Err(format!("repoPresets {repo}: unknown preset \"{id}\""));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -820,6 +1079,10 @@ fn is_zero_u32(v: &u32) -> bool {
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 #[cfg(test)]
@@ -997,7 +1260,8 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 8] = [
+    pub const OPTIONAL_KEYS: [&'static str; 12] = [
+        "heldOut",
         "plannerRoute",
         "tierRoutes",
         "maxCostUsd",
@@ -1006,6 +1270,9 @@ impl Variant {
         "bestOf",
         "bestOfRoute",
         "land",
+        "reviewRoute",
+        "briefCheckRoute",
+        "maxAttempts",
     ];
 
     /// Every route override names a route in `routes`.
@@ -1020,6 +1287,17 @@ impl Variant {
             return Err(format!(
                 "variant bestOfRoute \"{id}\" is not a configured route"
             ));
+        }
+        for (key, id) in [
+            ("reviewRoute", &self.review_route),
+            ("briefCheckRoute", &self.brief_check_route),
+        ] {
+            if let Some(id) = id
+                .as_deref()
+                .filter(|id| !id.is_empty() && *id != "auto" && !known(id))
+            {
+                return Err(format!("variant {key} \"{id}\" is not a configured route"));
+            }
         }
         for (tier, id) in &self.tier_routes {
             if !known(id) {
@@ -1052,6 +1330,25 @@ impl Variant {
     /// `settings.planner` (`""` = planning off).
     pub fn plan_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
         self.planner_route.as_deref().unwrap_or(&settings.planner)
+    }
+
+    /// The review stage's route id: this variant's override, else
+    /// `settings.review` (`""` = review off, `"auto"` = pick one).
+    pub fn review_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
+        self.review_route.as_deref().unwrap_or(&settings.review)
+    }
+
+    /// The brief check's (and the cheap judges') route id: this variant's
+    /// override, else `settings.briefCheckRoute` (`""` = off).
+    pub fn brief_check_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
+        self.brief_check_route
+            .as_deref()
+            .unwrap_or(&settings.brief_check_route)
+    }
+
+    /// The attempt budget: this variant's override, else `settings.maxAttempts`.
+    pub fn max_attempts(&self, settings: &Settings) -> u32 {
+        self.max_attempts.unwrap_or(settings.max_attempts)
     }
 }
 
@@ -1138,6 +1435,10 @@ pub struct Question {
     /// counts, so a hung overseer turn cannot hide a question for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_at: Option<i64>,
+    /// The check commands a base-check question is about, in listing order.
+    /// Empty for every other question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// How long a question stays held for the overseer.
@@ -1171,6 +1472,7 @@ impl Question {
             asked_at: Some(now_ms()),
             held_for_overseer: false,
             held_at: None,
+            commands: Vec::new(),
         }
     }
 }
@@ -1268,6 +1570,9 @@ pub struct Assumption {
     /// The attempt it was asked in (answer policy only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// The check commands a base-check answer covered (answer policy only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     pub overturned: bool,
     /// What the owner answered instead, once overturned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1439,6 +1744,10 @@ pub struct Task {
     /// The tier the planner chose; `None` when the task was not planned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_tier: Option<Tier>,
+    /// The parent planner drafted this task completely (title, goal, criteria
+    /// and verify), so it skips its own planner.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub planned_by_parent: bool,
     /// Set to `no planner tier` when the implement tier fell back to
     /// `Standard` because the planner chose none; cleared when the planner's
     /// tier is used, or a failure moves the task up a tier.
@@ -1543,6 +1852,14 @@ pub struct QueueState {
     /// head before its first attempt.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub waited_on_lease: bool,
+    /// The sibling subtask whose branch this one continues (a relay): it
+    /// starts from that subtask's commit instead of the parent's head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
+    /// Where the relay's chain began; the last link lands the whole chain
+    /// on the parent as one commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_base: Option<String>,
     /// The planning backlog the task sits in until `task.start` or the
     /// autopilot starts it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1616,6 +1933,15 @@ pub struct VerifyOutcome {
     pub code: Option<i32>,
     pub tail: String,
     pub ms: u64,
+}
+
+/// How much of an attempt a review looked at: everything, or only the open
+/// findings of the review before it and the task's changes since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewScope {
+    Full,
+    Narrow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1814,6 +2140,8 @@ pub enum FailureKind {
     Loop,
     /// The attempt's estimated cost passed `variant.max_attempt_cost_usd`.
     Budget,
+    /// The implement run was still going at `settings.implement_budget_mins`.
+    TimeBudget,
     Verify,
     /// Landing carried the work onto a moved base and files conflict: the
     /// next attempt only resolves them.
@@ -1835,6 +2163,7 @@ impl FailureKind {
             FailureKind::Stall => "stall",
             FailureKind::Loop => "loop",
             FailureKind::Budget => "budget",
+            FailureKind::TimeBudget => "time_budget",
             FailureKind::Verify => "verify",
             FailureKind::Conflict => "conflict",
             FailureKind::Heldout => "heldout",
@@ -1969,6 +2298,18 @@ pub struct Attempt {
     /// attempt can tell the task's own edits from carried-in base commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_base: Option<String>,
+    /// Git tree id of the worktree the last review run of this attempt that
+    /// gave a verdict saw; the next attempt's review is narrowed to what
+    /// changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_tree: Option<String>,
+    /// The task's base commit when `review_tree` was taken, so a later review
+    /// can leave out files only the base moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    /// Whether that review saw the full diff or only the narrow delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_scope: Option<ReviewScope>,
     /// The attempt whose `evidence` this attempt reused because it changed
     /// only `artifacts/` or test files since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2201,6 +2542,25 @@ mod tests {
         assert_eq!(off.plan_review, "");
     }
 
+    #[test]
+    fn gate_at_defaults_to_empty_and_an_unlisted_repo_gates_at_the_parent() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("gateAt");
+        let s: Settings = serde_json::from_value(v.clone()).unwrap();
+        assert!(s.gate_at.is_empty());
+        assert!(s.gates_at_parent("/some/repo"));
+        v["gateAt"] = serde_json::json!({"/a/b": "every", "/c/d": "parent"});
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert!(!s.gates_at_parent("/a/b"));
+        assert!(!s.gates_at_parent("/a/b/"));
+        assert!(s.gates_at_parent("/c/d"));
+        assert!(s.gates_at_parent("/e/f"));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["gateAt"]["/a/b"],
+            serde_json::json!("every")
+        );
+    }
+
     fn minimal_task_json() -> serde_json::Value {
         serde_json::json!({
             "id": "t", "title": "", "goal": "", "criteria": [], "verify": [], "repo": "",
@@ -2354,6 +2714,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2604,6 +2965,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2671,6 +3033,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2768,6 +3131,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2879,5 +3243,65 @@ mod grounded_checks_tests {
             r#""heldout""#
         );
         assert_eq!(FailureKind::Heldout.as_str(), "heldout");
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn a_preset_applies_to_a_variant_like_the_equivalent_fields() {
+        let mut v = Variant::default();
+        Preset::builtins()[0].values.apply(&mut v);
+        assert_eq!(v.brief_check_route.as_deref(), Some(""));
+        assert_eq!(v.max_attempts, Some(2));
+        assert!(!v.advisor && !v.held_out);
+        // Careful hands the brief check back to the settings' route.
+        Preset::builtins()[1].values.apply(&mut v);
+        assert_eq!(v.brief_check_route, None);
+        assert!(v.advisor && v.held_out);
+        let s = Settings::default();
+        assert_eq!(v.max_attempts(&s), 4);
+        assert_eq!(v.review_route_id(&s), "auto");
+        assert_eq!(v.brief_check_route_id(&s), "auto");
+    }
+
+    #[test]
+    fn presets_do_not_restore_the_retired_check_switch() {
+        for preset in Preset::builtins() {
+            let mut variant = Variant::default();
+            preset.values.apply(&mut variant);
+            let variant = serde_json::to_value(variant).unwrap();
+            assert!(variant.get("groundedChecks").is_none());
+        }
+    }
+
+    #[test]
+    fn held_out_defaults_on_and_only_explicit_off_is_written() {
+        assert!(Variant::default().held_out);
+        assert!(serde_json::from_str::<Variant>("{}").unwrap().held_out);
+        assert!(Settings::default().experiments.held_out);
+        assert!(Variant::OPTIONAL_KEYS.contains(&"heldOut"));
+        assert!(serde_json::to_value(Variant::default())
+            .unwrap()
+            .get("heldOut")
+            .is_none());
+        let disabled: Variant = serde_json::from_str(r#"{"heldOut":false}"#).unwrap();
+        assert!(!disabled.held_out);
+        assert_eq!(serde_json::to_value(disabled).unwrap()["heldOut"], false);
+    }
+
+    #[test]
+    fn variant_review_and_brief_check_routes_allow_empty_and_auto_only() {
+        let s = Settings::default();
+        let mut v = Variant {
+            review_route: Some(String::new()),
+            brief_check_route: Some("auto".to_string()),
+            ..Variant::default()
+        };
+        assert!(v.check_routes(&s.routes).is_ok());
+        v.review_route = Some("nope".to_string());
+        assert!(v.check_routes(&s.routes).is_err());
     }
 }

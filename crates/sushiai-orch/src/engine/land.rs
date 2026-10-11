@@ -55,7 +55,12 @@ pub(super) async fn land_on_base(
         guard = lock.lock_owned() => guard,
     };
 
-    let finals = task.final_verify.clone();
+    // The same split the final run used: a command deferred to a parent is
+    // not run at landing either.
+    let finals = {
+        let settings = app.settings.read().unwrap();
+        split_deferred(app, &settings, task).0
+    };
     // The branch can move between the carry (and its checks) and the move
     // itself: someone else committed to it meanwhile. That is not the
     // agent's failure, so carry onto the new head and try again in place,

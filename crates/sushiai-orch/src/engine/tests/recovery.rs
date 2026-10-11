@@ -231,16 +231,16 @@ async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
     let (app, dir) = test_app();
     let (mut task, run_dir) = running_implement_task(&app, dir.path());
     std::fs::write(run_dir.join("events.raw"), "").unwrap();
-    // Five seconds of stderr lines and no stdout, then a clean exit.
+    // Ten seconds of stderr lines and no stdout, then a clean exit.
     let pgid = spawn_group_running(
-        "for i in 1 2 3 4 5 6 7 8 9 10; do echo x >> \"${0%.exit}.stderr.log\"; sleep 0.5; done; echo 0 > \"$0\"",
+        "for i in $(seq 20); do echo x >> \"${0%.exit}.stderr.log\"; sleep 0.5; done; echo 0 > \"$0\"",
         &run_dir.join("events.exit"),
         false,
     );
     task.attempts[0].pgid = Some(pgid);
     app.store.save_task(&task).unwrap();
     let variant = Variant {
-        stall_timeout_secs: 2,
+        stall_timeout_secs: 4,
         ..Default::default()
     };
 

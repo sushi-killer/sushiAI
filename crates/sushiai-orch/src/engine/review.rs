@@ -37,46 +37,61 @@ pub(super) fn review_floor(implementer: &Route, tier: Tier) -> u32 {
     route_strength(implementer).max(tier_floor)
 }
 
-/// The cheapest route at `floor` or above, skipping `exclude`; with none, the
-/// strongest one (cheapest first) when `fallback` is set. Unpriced routes
-/// sort after priced ones. Ties go to a route on a harness other than
-/// `other_than`'s, then to `own_id`, then settings order. The bool is true
-/// when the route reaches the floor.
+/// The route's strength when it is known: an explicit `strength`, else the
+/// model's default; `None` for a route with no model and no `strength`.
+pub(super) fn known_strength(route: &Route) -> Option<u32> {
+    route
+        .strength
+        .or_else(|| route.model.as_ref().map(|_| route_strength(route)))
+}
+
+/// Whether `route` is one of `excluded`, or runs the same harness and model as
+/// one of them.
+fn is_excluded(route: &Route, excluded: &[&Route]) -> bool {
+    excluded
+        .iter()
+        .any(|e| e.id == route.id || (e.harness == route.harness && e.model == route.model))
+}
+
+/// The best route whose strength is known and at `floor` or above, skipping
+/// `exclude` (by id, or by harness and model). Order: a priced route first,
+/// then a harness other than `other_than`'s, then the lower price, then
+/// settings order. With none at the floor, and `fallback` set, the route with
+/// the highest known strength (same order on a tie); a route of unknown
+/// strength ranks below every known one. The bool is true when the route
+/// reaches the floor.
 pub(super) fn cheapest_route_at<'a>(
     settings: &'a Settings,
     floor: u32,
-    exclude: Option<&str>,
+    exclude: &[&Route],
     other_than: &Route,
-    own_id: Option<&str>,
     fallback: bool,
 ) -> Option<(&'a Route, bool)> {
     let pool: Vec<(usize, &Route)> = settings
         .routes
         .iter()
         .enumerate()
-        .filter(|(_, r)| Some(r.id.as_str()) != exclude)
+        .filter(|(_, r)| !is_excluded(r, exclude))
         .collect();
     let key = |(i, r): &(usize, &Route)| {
         let cost = route_cost(&settings.prices, r);
         (
             cost.is_none(),
-            cost.unwrap_or(0.0),
             r.harness == other_than.harness,
-            Some(r.id.as_str()) != own_id,
+            cost.unwrap_or(0.0),
             *i,
         )
     };
     let cmp = |a: &(usize, &Route), b: &(usize, &Route)| {
         let (ka, kb) = (key(a), key(b));
         ka.0.cmp(&kb.0)
-            .then(ka.1.total_cmp(&kb.1))
-            .then(ka.2.cmp(&kb.2))
+            .then(ka.1.cmp(&kb.1))
+            .then(ka.2.total_cmp(&kb.2))
             .then(ka.3.cmp(&kb.3))
-            .then(ka.4.cmp(&kb.4))
     };
     if let Some(found) = pool
         .iter()
-        .filter(|(_, r)| route_strength(r) >= floor)
+        .filter(|(_, r)| known_strength(r).is_some_and(|s| s >= floor))
         .min_by(|a, b| cmp(a, b))
     {
         return Some((found.1, true));
@@ -84,40 +99,68 @@ pub(super) fn cheapest_route_at<'a>(
     if !fallback {
         return None;
     }
-    let top = pool.iter().map(|(_, r)| route_strength(r)).max()?;
+    let top = pool.iter().map(|(_, r)| known_strength(r)).max()?;
     pool.iter()
-        .filter(|(_, r)| route_strength(r) == top)
+        .filter(|(_, r)| known_strength(r) == top)
         .min_by(|a, b| cmp(a, b))
         .map(|(_, r)| (*r, false))
 }
 
-/// The review route and a one-line reason. An explicit `review` id is used
-/// as is. `"auto"` picks the cheapest route no weaker than
-/// `review_floor` (ties: another harness, then the implementer's own route),
-/// else the strongest one. `""` -> no review (handled by the caller).
+/// The review route and a one-line reason for the global review setting.
+/// See `select_review_route_with`. Only the unit tests call it.
+#[cfg(test)]
 pub fn select_review_route<'a>(
     settings: &'a Settings,
     implementer: &Route,
     tier: Tier,
 ) -> Option<(&'a Route, String)> {
-    if settings.review != "auto" {
-        let route = settings.routes.iter().find(|r| r.id == settings.review)?;
+    select_review_route_with(settings, &settings.review, implementer, tier)
+}
+
+/// The review route and a one-line reason. `review_id` is the effective review
+/// id (`Variant::review_route_id`). An explicit id is used as is. `"auto"`
+/// never picks the implementer's route nor any route with its harness and
+/// model: it takes the best route of known strength at `review_floor` or
+/// above (priced, on another harness, then cheapest), else the strongest
+/// remaining one. Only when no other route exists does it fall back to the
+/// implementer's own route, reason `self-review: no other route`.
+/// `""` -> no review (handled by the caller).
+pub fn select_review_route_with<'a>(
+    settings: &'a Settings,
+    review_id: &str,
+    implementer: &Route,
+    tier: Tier,
+) -> Option<(&'a Route, String)> {
+    if review_id != "auto" {
+        let route = settings.routes.iter().find(|r| r.id == review_id)?;
         return Some((route, "explicit setting".to_string()));
     }
     let floor = review_floor(implementer, tier);
-    let (route, reached) = cheapest_route_at(
-        settings,
-        floor,
-        None,
-        implementer,
-        Some(&implementer.id),
-        true,
-    )?;
+    let Some((route, reached)) =
+        cheapest_route_at(settings, floor, &[implementer], implementer, true)
+    else {
+        let own = settings
+            .routes
+            .iter()
+            .find(|r| r.id == implementer.id)
+            .or_else(|| {
+                settings
+                    .routes
+                    .iter()
+                    .find(|r| r.harness == implementer.harness && r.model == implementer.model)
+            })?;
+        return Some((own, "self-review: no other route".to_string()));
+    };
     let reason = if reached {
         format!(
             "{} tier, strength {}",
             tier_name(tier),
             route_strength(route)
+        )
+    } else if known_strength(route).is_none() {
+        format!(
+            "no route at strength {floor}; {} has no model and no strength: set strength on it",
+            route.id
         )
     } else {
         format!("no route at strength {floor}; strongest available")
@@ -377,6 +420,7 @@ pub(super) fn review_request<'a>(
         codex_mcp: &[],
         images,
         repo_settings: true,
+        resume: None,
     }
 }
 
@@ -398,6 +442,33 @@ pub(super) fn head_chars(s: &str, max: usize) -> String {
     } else {
         head
     }
+}
+
+/// What a review run looked at: the scope it ran with and the worktree tree
+/// it saw (`None` when the snapshot failed).
+pub(super) struct ReviewSaw {
+    pub scope: ReviewScope,
+    pub tree: Option<String>,
+}
+
+/// The earlier implement attempt a retry review builds on: the latest one
+/// before `attempt_n` that has a review. `None` for a first attempt.
+fn latest_reviewed_before(task: &Task, attempt_n: u32) -> Option<&Attempt> {
+    task.attempts
+        .iter()
+        .rev()
+        .find(|a| a.stage == Stage::Implement && a.n < attempt_n && a.review.is_some())
+}
+
+/// The attempt a narrow review of attempt `attempt_n` is built on: the latest
+/// reviewed earlier attempt, when its review failed and recorded a tree.
+pub(super) fn narrow_basis(task: &Task, attempt_n: u32) -> Option<&Attempt> {
+    latest_reviewed_before(task, attempt_n).filter(|a| {
+        a.review_tree.is_some()
+            && a.review
+                .as_ref()
+                .is_some_and(|r| r.verdict == Verdict::Fail)
+    })
 }
 
 /// Review run `round` of an attempt (1 = the first). A re-run after a reply
@@ -423,13 +494,29 @@ pub(super) async fn run_review(
     round: u32,
     after_no_verdict: bool,
     dropped: &[(String, String)],
-) -> Result<(ReviewResult, bool), ReviewFailure> {
+    force_full: bool,
+) -> Result<(ReviewResult, bool, ReviewSaw), ReviewFailure> {
     let wt = worktree.to_path_buf();
-    let base = base_sha.to_string();
-    let diff =
+    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt).ok())
+        .await
+        .unwrap_or(None);
+    // A retry after a failed review looks only at that review's open
+    // findings and the task's own changes since; anything else (attempt 1, no
+    // recorded tree, a git error) reviews the whole change.
+    let narrow = match (force_full, &tree, narrow_basis(task, attempt_n)) {
+        (false, Some(now_tree), Some(basis)) => {
+            narrow_inputs(task, basis, now_tree, worktree, base_sha).await
+        }
+        _ => None,
+    };
+    let diff = if narrow.is_some() {
+        String::new()
+    } else {
+        let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
         tokio::task::spawn_blocking(move || git::diff_full(&wt, &base, 60_000).unwrap_or_default())
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
 
     let evidence = task.variant().review_evidence;
     let this_attempt = task
@@ -468,15 +555,31 @@ pub(super) async fn run_review(
             .map(|s| (s, Some(source_attempt)))
             .collect()
     };
-    let mut brief_text = brief::build_review_brief(
-        task,
-        implementer_note,
-        agent_decisions,
-        verify_results,
-        &shown,
-        evidence_from,
-        &diff,
-    );
+    let mut brief_text = match &narrow {
+        Some(n) => brief::build_narrow_review_brief(
+            task,
+            implementer_note,
+            agent_decisions,
+            verify_results,
+            &shown,
+            evidence_from,
+            &brief::NarrowReview {
+                open_findings: &n.open_findings,
+                open_criteria: &n.open_criteria,
+                settled_criteria: &n.settled,
+                delta: &n.delta,
+            },
+        ),
+        None => brief::build_review_brief(
+            task,
+            implementer_note,
+            agent_decisions,
+            verify_results,
+            &shown,
+            evidence_from,
+            &diff,
+        ),
+    };
     brief_text.push_str(&brief::dropped_findings_block(dropped));
     if after_no_verdict {
         brief_text.push('\n');
@@ -531,8 +634,15 @@ pub(super) async fn run_review(
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             *fingerprint = outcome.fingerprint.clone();
             let text = outcome.final_text.unwrap_or_default();
-            if let Some(result) = brief::parse_review_with_rule(&text) {
-                return Ok(result);
+            if let Some((mut result, recorded_as_pass)) = brief::parse_review_with_rule(&text) {
+                let scope = match &narrow {
+                    Some(n) => {
+                        carry_settled(task, n, &mut result);
+                        ReviewScope::Narrow
+                    }
+                    None => ReviewScope::Full,
+                };
+                return Ok((result, recorded_as_pass, ReviewSaw { scope, tree }));
             }
             Err(match outcome.error {
                 Some(error) => ReviewFailure::Harness(format!("review did not run ({error})")),
@@ -551,6 +661,95 @@ pub(super) async fn run_review(
             Err(ReviewFailure::Cancelled)
         }
         Err(RunError::Io(why) | RunError::NotFound(why)) => Err(ReviewFailure::Harness(why)),
+    }
+}
+
+/// What a narrow review is given.
+struct NarrowInputs {
+    open_findings: Vec<String>,
+    open_criteria: Vec<String>,
+    /// Criteria the basis review ruled met, and that attempt's number.
+    settled: Vec<String>,
+    settled_index: Vec<usize>,
+    settled_from: u32,
+    delta: String,
+}
+
+/// The narrow review's inputs from the basis attempt's failed review, or
+/// `None` when the delta cannot be computed (a git error): the review is then
+/// a full one.
+async fn narrow_inputs(
+    task: &Task,
+    basis: &Attempt,
+    now_tree: &str,
+    worktree: &Path,
+    base_sha: &str,
+) -> Option<NarrowInputs> {
+    let review = basis.review.as_ref()?;
+    let old_tree = basis.review_tree.clone()?;
+    let old_base = basis.review_base.clone();
+    let (wt, now, base) = (
+        worktree.to_path_buf(),
+        now_tree.to_string(),
+        base_sha.to_string(),
+    );
+    let delta = tokio::task::spawn_blocking(move || -> Option<String> {
+        let files = match &old_base {
+            Some(old_base) => git::own_changes_between(&wt, &old_tree, old_base, &now, &base),
+            None => git::diff_trees_name_only(&wt, &old_tree, &now),
+        }
+        .ok()?;
+        if files.is_empty() {
+            return Some("(no file changed since the last review)".to_string());
+        }
+        git::diff_trees(&wt, &old_tree, &now, &files, 60_000).ok()
+    })
+    .await
+    .ok()??;
+    let mut settled = Vec::new();
+    let mut settled_index = Vec::new();
+    let mut open_criteria = Vec::new();
+    for (i, criterion) in task.criteria.iter().enumerate() {
+        let met = review
+            .criteria
+            .iter()
+            .any(|r| r.met == Some(true) && criterion_index(task, &r.criterion) == Some(i));
+        if met {
+            settled.push(criterion.clone());
+            settled_index.push(i);
+        } else {
+            open_criteria.push(criterion.clone());
+        }
+    }
+    Some(NarrowInputs {
+        open_findings: review.findings.clone(),
+        open_criteria,
+        settled,
+        settled_index,
+        settled_from: basis.n,
+        delta,
+    })
+}
+
+/// Copies the settled rulings into a narrow review's result, so the criteria
+/// results and the verdict rule still see them as met. A ruling the reviewer
+/// gave now wins.
+fn carry_settled(task: &Task, narrow: &NarrowInputs, result: &mut ReviewResult) {
+    for (&i, criterion) in narrow.settled_index.iter().zip(&narrow.settled) {
+        let ruled_now = result
+            .criteria
+            .iter()
+            .any(|r| criterion_index(task, &r.criterion) == Some(i));
+        if !ruled_now {
+            result.criteria.push(CriterionRuling {
+                criterion: criterion.clone(),
+                met: Some(true),
+                evidence: Some(format!(
+                    "settled in the attempt {} review",
+                    narrow.settled_from
+                )),
+            });
+        }
     }
 }
 

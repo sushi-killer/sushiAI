@@ -16,7 +16,7 @@ pub(super) fn set_verify_timeout_secs(secs: u64) {
     VERIFY_TIMEOUT_SECS.store(secs.max(1), Ordering::SeqCst);
 }
 
-fn verify_timeout() -> Duration {
+pub(super) fn verify_timeout() -> Duration {
     Duration::from_secs(VERIFY_TIMEOUT_SECS.load(Ordering::SeqCst))
 }
 
@@ -25,7 +25,7 @@ fn verify_timeout() -> Duration {
 /// and cache locations a build/test command routinely touches. Network is
 /// deliberately left open (verify commands may need to hit a registry, run
 /// a dev server, etc.) -- only the filesystem is restricted.
-fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
+pub(super) fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let tmp_dir = std::env::var("TMPDIR").unwrap_or_default();
     let mut paths = vec![
@@ -66,7 +66,7 @@ fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
 /// `sandbox-exec`-wraps the command on macOS when `sandbox == Native`;
 /// plain `/bin/sh -c` for `Host`, and on non-macOS (`sandbox-exec` doesn't
 /// exist there -- a documented limitation, not a bug).
-fn build_verify_command(
+pub(super) fn build_verify_command(
     cwd: &Path,
     cmd: &str,
     sandbox: SandboxMode,
@@ -96,9 +96,13 @@ fn build_verify_command(
         command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(cmd);
     }
+    let path = augmented_path();
+    if let Some(wrapper) = crate::worktree_env::rustc_wrapper(&path) {
+        command.env("RUSTC_WRAPPER", wrapper);
+    }
     command
         .current_dir(cwd)
-        .env("PATH", augmented_path())
+        .env("PATH", path)
         .env("ORCHD_BASE_SHA", base_sha)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -190,6 +194,45 @@ pub(super) async fn scope_to_diff(
         Some(changed) => filter_scoped(&scoped, repo, commands, &changed),
         None => (commands.to_vec(), Vec::new()),
     }
+}
+
+/// Splits a subtask's `finalVerify` into the commands it runs and those its
+/// parent runs anyway (exact match after trim, against the parent's `verify`
+/// and `finalVerify`). Nothing is deferred for a top-level task, a parent that
+/// cannot be loaded, or a repo with `gateAt` "every". The stored list is
+/// never changed.
+pub(super) fn split_deferred(
+    app: &App,
+    settings: &Settings,
+    task: &Task,
+) -> (Vec<String>, Vec<String>) {
+    let all = || (task.final_verify.clone(), Vec::new());
+    let Some(parent_id) = task.parent.as_deref() else {
+        return all();
+    };
+    if !settings.gates_at_parent(&task.repo) {
+        return all();
+    }
+    let Ok(Some(parent)) = app.store.load_task(parent_id) else {
+        return all();
+    };
+    let at_parent: Vec<&str> = parent
+        .verify
+        .iter()
+        .chain(&parent.final_verify)
+        .map(|c| c.trim())
+        .collect();
+    let (deferred, run) = task
+        .final_verify
+        .iter()
+        .cloned()
+        .partition(|c| at_parent.contains(&c.trim()));
+    (run, deferred)
+}
+
+/// The decision line for a command deferred to the parent.
+pub(super) fn deferred_line(command: &str) -> String {
+    format!("Orchestrator: Deferred to parent: {command}")
 }
 
 /// Adds each skip line once.
@@ -291,6 +334,9 @@ pub(super) async fn run_eval_check(
         Ok(Err(e)) => return failed(format!("could not check out {sha}: {e}")),
         Err(e) => return failed(format!("check checkout panicked: {e}")),
     }
+    if let Err(e) = super::worktrees::setup_worktree(repo, &path, sandbox, cancel).await {
+        return failed(e);
+    }
     let allow_write = verify_allow_write_paths(&path, run_dir);
     let out = run_one_verify_command(
         &path,
@@ -382,21 +428,6 @@ pub(super) fn diff_hash(worktree: &Path, base: &str) -> String {
     simple_hash(&input)
 }
 
-/// Shared by verify commands and the harness: SIGTERM the process group,
-/// give it 5s, then SIGKILL, then reap it.
-pub(super) async fn kill_group(pgid: Option<i32>, child: &mut tokio::process::Child) {
-    if let Some(pgid) = pgid {
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.wait().await;
-}
-
 /// Concurrently drain a child's stdout/stderr and wait for it to exit,
 /// without moving `child` -- so the caller still owns it (and can kill its
 /// process group) if this gets dropped by an outer timeout/cancellation.
@@ -450,6 +481,85 @@ pub(super) fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<Str
             }
             _ => true,
         }
+    })
+}
+
+/// Whether `command` runs a whole repository's suite: `npm run ci`, `cargo
+/// test --workspace`, `make test`, a bare `pytest`, `go test ./...`, or an
+/// `npm|pnpm|yarn run <script>` whose `<cwd>/package.json` script body is one
+/// of these (one level, no further script expansion). Such a check is
+/// finalVerify's job, not a per-attempt verify command. The command is split
+/// on `&&`, `||` and `;`; one such segment is enough.
+pub(super) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
+    let segments = |text: &str| -> Vec<String> {
+        text.replace("&&", ";")
+            .replace("||", ";")
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let words_of = |segment: &str| -> Vec<String> {
+        segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .map(String::from)
+            .collect()
+    };
+    let direct = |words: &[String]| -> bool {
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let is_suite_word = |x: &str| matches!(x, "ci" | "test" | "check");
+        match w.as_slice() {
+            ["npm", "test"] => true,
+            ["npm", "run", x] => is_suite_word(x),
+            ["pnpm" | "yarn", x] => is_suite_word(x),
+            ["pnpm" | "yarn", "run", x] => is_suite_word(x),
+            ["make", x] => is_suite_word(x),
+            ["pytest"] => true,
+            ["go", "test", rest @ ..] => {
+                rest.contains(&"./...")
+                    && rest.iter().all(|a| *a == "./..." || a.starts_with('-'))
+                    && !rest.contains(&"-run")
+            }
+            ["cargo", "test", rest @ ..] => {
+                if rest.contains(&"--workspace") {
+                    return true;
+                }
+                let before_args = rest.iter().take_while(|a| **a != "--");
+                let mut scoped_or_filtered = false;
+                for a in before_args {
+                    let flag = a.split('=').next().unwrap_or(a);
+                    if matches!(flag, "-p" | "--package" | "--test" | "--lib" | "--bin")
+                        || !a.starts_with('-')
+                    {
+                        scoped_or_filtered = true;
+                    }
+                }
+                !scoped_or_filtered
+            }
+            _ => false,
+        }
+    };
+    segments(command).iter().any(|segment| {
+        let words = words_of(segment);
+        if direct(&words) {
+            return true;
+        }
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let script = match w.as_slice() {
+            ["npm" | "pnpm" | "yarn", "run", name] => *name,
+            _ => return false,
+        };
+        let Ok(text) = std::fs::read_to_string(cwd.join("package.json")) else {
+            return false;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        json.get("scripts")
+            .and_then(|s| s.get(script))
+            .and_then(|b| b.as_str())
+            .is_some_and(|body| segments(body).iter().any(|s| direct(&words_of(s))))
     })
 }
 
@@ -625,7 +735,11 @@ pub(super) fn baseline_todo(task: &Task) -> Vec<(Option<usize>, usize, String)> 
             todo.push((Some(i), c.criterion, c.run.clone()));
         }
     }
-    if let Some(h) = task.held_out.as_ref().filter(|h| h.baseline.is_none()) {
+    if let Some(h) = task
+        .held_out
+        .as_ref()
+        .filter(|h| task.variant().held_out && h.baseline.is_none())
+    {
         todo.push((None, h.criterion, h.run.clone()));
     }
     todo
@@ -678,7 +792,7 @@ pub(super) fn record_baselines(
 /// Some check (or the held-out one) has not run on the base yet.
 pub(super) fn needs_baseline(task: &Task) -> bool {
     task.checks.iter().any(|c| c.baseline.is_none())
-        || task.held_out.as_ref().is_some_and(|h| h.baseline.is_none())
+        || (task.variant().held_out && task.held_out.as_ref().is_some_and(|h| h.baseline.is_none()))
 }
 
 /// The gated checks of `task`: visible ones that fail on the base, then the
@@ -694,7 +808,7 @@ pub(super) fn gated_checks(task: &Task) -> Vec<Check> {
 pub(super) fn gated_held_out(task: &Task) -> Option<Check> {
     task.held_out
         .clone()
-        .filter(|h| h.baseline == Some(Baseline::Fail))
+        .filter(|h| task.variant().held_out && h.baseline == Some(Baseline::Fail))
 }
 
 /// Runs the held-out check and returns its outcome with the command scrubbed
@@ -740,8 +854,9 @@ pub(super) async fn run_held_out(
 }
 
 /// Run one verify command in its own process group (`setsid`, like the
-/// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
-/// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
+/// harness). After every outcome the group is stopped (SIGTERM, SIGKILL 5s
+/// later); on timeout *or* cancellation processes that left the group but
+/// run from `cwd` are stopped too -- a bare `tokio::time::timeout` around `Command::output()`
 /// only stops *waiting*, it never touches the still-running process (or any
 /// children it spawned), which is the bug this replaces.
 pub(super) async fn run_one_verify_command(
@@ -778,6 +893,13 @@ pub(super) async fn run_one_verify_command(
         _ = tokio::time::sleep(timeout) => Outcome::TimedOut,
         _ = cancel.cancelled() => Outcome::Cancelled,
     };
+    // Whatever the outcome, nothing the command left in its group outlives it.
+    crate::procs::kill_group(pgid, &mut child).await;
+    if matches!(outcome, Outcome::TimedOut | Outcome::Cancelled) {
+        // Processes that left the group (`setsid`) but run from this directory.
+        let dir = cwd.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
+    }
     match outcome {
         Outcome::Done(Ok((status, out_buf, err_buf))) => VerifyOutcome {
             command: cmd.to_string(),
@@ -791,24 +913,18 @@ pub(super) async fn run_one_verify_command(
             tail: format!("{INTERNAL_ERROR_PREFIX}{e}"),
             ms: start.elapsed().as_millis() as u64,
         },
-        Outcome::TimedOut => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: timed_out_tail(timeout),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
-        Outcome::Cancelled => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: CANCELLED_TAIL.to_string(),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
+        Outcome::TimedOut => VerifyOutcome {
+            command: cmd.to_string(),
+            code: None,
+            tail: timed_out_tail(timeout),
+            ms: start.elapsed().as_millis() as u64,
+        },
+        Outcome::Cancelled => VerifyOutcome {
+            command: cmd.to_string(),
+            code: None,
+            tail: CANCELLED_TAIL.to_string(),
+            ms: start.elapsed().as_millis() as u64,
+        },
     }
 }
 
@@ -878,6 +994,36 @@ pub(super) fn verify_options(worktree: &Path) -> Vec<String> {
 #[cfg(test)]
 mod grounded_checks_tests {
     use super::*;
+
+    #[test]
+    fn disabling_held_out_keeps_regular_baselines_and_gated_checks() {
+        let mut task = task_with_status(TaskStatus::Running);
+        let check = |run: &str| Check {
+            criterion: 0,
+            run: run.into(),
+            baseline: None,
+        };
+        task.checks = vec![check("regular")];
+        task.held_out = Some(check("hidden"));
+        assert!(task.variant().held_out);
+        assert_eq!(
+            baseline_todo(&task),
+            vec![(Some(0), 0, "regular".into()), (None, 0, "hidden".into())]
+        );
+        task.variant = Some(Variant {
+            held_out: false,
+            ..Variant::default()
+        });
+        assert!(needs_baseline(&task));
+        assert_eq!(baseline_todo(&task), vec![(Some(0), 0, "regular".into())]);
+        task.checks[0].baseline = Some(Baseline::Fail);
+        assert!(!needs_baseline(&task));
+        assert_eq!(gated_checks(&task), task.checks);
+        task.held_out.as_mut().unwrap().baseline = Some(Baseline::Fail);
+        assert!(gated_held_out(&task).is_none());
+        task.variant.as_mut().unwrap().held_out = true;
+        assert_eq!(gated_held_out(&task), task.held_out);
+    }
 
     fn outcome(code: Option<i32>, tail: &str) -> VerifyOutcome {
         VerifyOutcome {

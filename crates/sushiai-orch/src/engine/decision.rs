@@ -413,6 +413,7 @@ pub(super) fn record_owner_accept(
         by: "owner".to_string(),
         kind: Some(QuestionKind::AttemptsFailing),
         attempt: Some(attempt_n),
+        commands: Vec::new(),
         overturned: false,
         owner_answer: None,
     });

@@ -14,6 +14,7 @@ import type {
   Message,
   Note,
   OverseerEntry,
+  Pipeline,
   Proposal,
   Settings,
   SpendGroup,
@@ -115,6 +116,14 @@ export function orchestratorClientFor(host: string = LOCAL) {
         ...(title ? { title } : {}),
         ...(branch ? { branch } : {}),
       }),
+    /** The pipeline's stages with the routes and switches in force; for one
+     * task also where each stage stands. */
+    pipelineDescribe: (params: { repo?: string; taskId?: string }) =>
+      call<Pipeline>("pipeline.describe", params),
+    /** Fixes the task's pipeline to `preset`; refused once the task has an
+     * implement attempt or its loop is live. */
+    taskPreset: (id: string, preset: string) =>
+      call<Task>("task.preset", { id, preset }),
     taskStop: (id: string) => call<Task>("task.stop", { id }),
     taskAnswer: (id: string, answer: string) =>
       call<Task>("task.answer", { id, answer }),

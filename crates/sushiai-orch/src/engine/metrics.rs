@@ -92,6 +92,7 @@ fn cause_of_failure(failure: &Failure) -> FailureCause {
         | FailureKind::Heldout
         | FailureKind::Loop
         | FailureKind::Stall
+        | FailureKind::TimeBudget
         | FailureKind::Protected
         | FailureKind::NoDeliverable
         | FailureKind::Evidence
@@ -319,6 +320,7 @@ mod tests {
             (K::Heldout, Impl),
             (K::Loop, Impl),
             (K::Stall, Impl),
+            (K::TimeBudget, Impl),
             (K::Protected, Impl),
             (K::NoDeliverable, Impl),
             (K::Evidence, Impl),

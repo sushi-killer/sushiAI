@@ -109,6 +109,7 @@ impl App {
             }
         }
         p.settings.experiments.check_routes(&p.settings.routes)?;
+        p.settings.check_presets()?;
         self.store
             .save_settings(&p.settings)
             .map_err(|e| e.to_string())?;

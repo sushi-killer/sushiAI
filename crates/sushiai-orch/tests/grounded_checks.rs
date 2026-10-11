@@ -450,6 +450,49 @@ emit "$REPORT""#,
     cleanup(s, &[&done]);
 }
 
+#[test]
+fn disabling_the_hidden_check_keeps_regular_planner_checks_and_their_brief() {
+    let s = setup("echo ok > x.txt\nemit \"$REPORT\"", false, &[]);
+    let hidden = "false && echo HIDDEN_CHECK_MUST_STAY_OFF";
+    let plan = format!(
+        "```sushi-plan\n{}\n```",
+        json!({
+            "title": "Planned",
+            "goal": "make x",
+            "tier": "standard",
+            "criteria": ["x exists"],
+            "verify": ["true"],
+            "checks": [{"criterion": 0, "run": "test -f x.txt"}],
+            "heldOut": {"criterion": 0, "run": hidden},
+        })
+    );
+    let event = json!({"type": "result", "result": plan}).to_string();
+    std::fs::write(s.log.path().join("plan.json"), format!("{event}\n")).unwrap();
+    let repo = repo_with(&[]);
+    let task = s.daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "make x",
+            "variant": {"heldOut": false},
+        }),
+    );
+    let id = task["id"].as_str().unwrap();
+    let done = settle(&s.daemon, id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["variant"]["heldOut"], false);
+    assert_eq!(
+        done["checks"],
+        json!([{"criterion": 0, "run": "test -f x.txt", "baseline": "fail"}])
+    );
+    assert!(done["heldOut"].get("baseline").is_none(), "{done}");
+    assert_eq!(implement_attempts(&done).len(), 1, "{done}");
+    let brief = run_file(&s.daemon, id, "brief.md");
+    assert!(brief.contains("## Checks") && brief.contains("test -f x.txt"));
+    assert!(!brief.contains(hidden));
+    cleanup(s, &[&done]);
+}
+
 /// The parent's plan is `$PLAN_KIND`: its checks log a line only once
 /// `b.txt` exists, so a line in the log means the check ran after the
 /// children landed.
@@ -487,8 +530,9 @@ fn parent_run(with_held: bool) -> (Setup, Value, tempfile::TempDir) {
             &[]
         },
     );
-    // The parent's verify fails on the empty base by design; the policy
-    // answers "keep this check" so the children start.
+    // The parent's verify fails on the empty base by design; its targets
+    // are absent there and the plan creates them, so the children start
+    // without a question.
     let mut settings = s.daemon.request("settings.get", json!({}));
     settings["answerPolicy"] = json!(true);
     s.daemon

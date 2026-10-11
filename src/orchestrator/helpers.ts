@@ -64,6 +64,10 @@ const VARIANT_KEYS: Exclude<
   | "bestOf"
   | "bestOfRoute"
   | "land"
+  | "reviewRoute"
+  | "briefCheckRoute"
+  | "maxAttempts"
+  | "heldOut"
 >[] = ["stallTimeoutSecs", "reviewEvidence"];
 
 function variantFlagText(value: boolean | string | number): string {
@@ -87,6 +91,9 @@ export function variantLabel(task: Task, experiments: Variant): string {
   const diffs = VARIANT_KEYS.filter(
     (key) => variant[key] !== experiments[key],
   ).map((key) => `${key} ${variantFlagText(variant[key])}`);
+  if ((variant.heldOut ?? true) !== (experiments.heldOut ?? true)) {
+    diffs.push(`heldOut ${variantFlagText(variant.heldOut ?? true)}`);
+  }
   if (variant.plannerRoute !== experiments.plannerRoute) {
     diffs.push(`plannerRoute ${variant.plannerRoute ?? "settings"}`);
   }
@@ -612,6 +619,7 @@ const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
   stall: "stalled",
   loop: "looped",
   budget: "over budget",
+  time_budget: "out of time",
   verify: "verify failed",
   conflict: "conflict",
   heldout: "held-out check failed",

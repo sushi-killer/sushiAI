@@ -11,8 +11,8 @@ const MAX_FOLLOW_UPS: usize = 12;
 const MAX_REASON_CHARS: usize = 300;
 
 /// The route of the cheap judge runs; `None` when they are off.
-pub(super) fn judge_route(app: &App) -> Option<Route> {
-    check_route(app)?.1
+pub(super) fn judge_route(app: &App, variant: &Variant) -> Option<Route> {
+    check_route_for(app, variant)?.1
 }
 
 /// The outermost JSON object of a judge's reply, whatever surrounds it.
@@ -53,6 +53,7 @@ fn overturnable(task: &mut Task, question: String, answer: String, evidence: Str
         by: "orchd".to_string(),
         kind: None,
         attempt: None,
+        commands: Vec::new(),
         overturned: false,
         owner_answer: None,
     });
@@ -93,6 +94,7 @@ pub(super) fn amend_criterion_for_test(
 
 const FEASIBILITY_PROMPT: &str = "You judge whether a check command of a coding task can work in this repository. The command was run on the repository as it is before any work and exited non-zero. You may read files in the working directory but change nothing.\n\nAnswer with one verdict:\n- `feasible`: it fails as it should, because the task is meant to make it pass (for example a test for the new behaviour).\n- `rewrite`: the repository cannot run this kind of check (the test runner, harness, script or tool it needs does not exist here). Give `command`, the nearest check this repository can really run and that exits 0 only when the criterion holds, and `criterionText` when the criterion's own `-- check:` wording must change with it.\n- `unrelated`: it fails for a reason that has nothing to do with the task (a broken environment, a flaky or already broken test, a missing credential).\n\nReply with only JSON: {\"verdict\": \"feasible|rewrite|unrelated\", \"command\": \"\", \"criterion\": <index or null>, \"criterionText\": \"\", \"reason\": \"<one sentence>\"}";
 
+#[derive(Clone)]
 pub(super) enum Feasibility {
     /// Fails as it should.
     AsWritten,
@@ -338,65 +340,144 @@ pub(super) fn apply_feasibility(
     }
 }
 
-/// Runs every check command of the task on its base once (`base_check`);
-/// each one that fails there goes to the judge, which leaves it (the task is
-/// meant to make it pass), rewrites it to a check the repository can run, or
-/// marks it non-gating. Settles for good, once per task. `false`: cancelled.
-pub(super) async fn heal_feasibility(
+/// What the background base preflight found; the loop applies it to its own
+/// task (`apply_base_preflight`), the job itself writes no task state.
+#[derive(Clone, Default)]
+pub(super) struct BasePreflight {
+    /// The base could be checked out and the judge ran over every failure:
+    /// feasibility is settled for good.
+    settled: bool,
+    rulings: Vec<(VerifyOutcome, Feasibility)>,
+    /// Decision lines the plan-kept rule wrote (`keep_planned_checks`).
+    decisions: Vec<String>,
+    cost: f64,
+}
+
+/// One task's base preflight: its result arrives on `result`; the channel
+/// closes without a value when the job was cancelled.
+pub(super) struct PreflightJob {
+    result: tokio::sync::watch::Receiver<Option<Arc<BasePreflight>>>,
+    applied: std::sync::atomic::AtomicBool,
+}
+
+impl PreflightJob {
+    /// The result, waiting for the job when it still runs; `None` when it
+    /// was cancelled.
+    async fn wait(&self) -> Option<Arc<BasePreflight>> {
+        let mut rx = self.result.clone();
+        let seen = rx.wait_for(|v| v.is_some()).await.ok()?;
+        seen.clone()
+    }
+
+    fn running(&self) -> bool {
+        self.result.borrow().is_none() && self.result.has_changed().is_ok()
+    }
+
+    fn finished(&self) -> bool {
+        self.result.borrow().is_some()
+    }
+}
+
+/// Starts the base preflight of `task` in the background, holding no slot:
+/// every `verify` and `checks` command runs on the base once (`run_on_base`)
+/// and each failure goes to the feasibility judge. The result only goes into
+/// the app's map; nothing is saved here. A no-op while a job of this task is
+/// running or finished. `loop_cancel` stops the job.
+pub(super) fn spawn_base_preflight(
     app: &Arc<App>,
-    task_id: &str,
+    task: &Task,
+    attempt_n: u32,
+    loop_cancel: &CancelToken,
+) {
+    let mut jobs = app.base_preflights.lock().unwrap();
+    if jobs
+        .get(&task.id)
+        .is_some_and(|j| j.running() || j.finished())
+    {
+        return;
+    }
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    jobs.insert(
+        task.id.clone(),
+        Arc::new(PreflightJob {
+            result: rx,
+            applied: std::sync::atomic::AtomicBool::new(false),
+        }),
+    );
+    drop(jobs);
+    let (app, task, loop_cancel) = (app.clone(), task.clone(), loop_cancel.clone());
+    tokio::spawn(async move {
+        // The loop's cancel reaches the job through the job's own token,
+        // which the base runs watch, so their scratch checkout is cleaned up.
+        let cancel = CancelToken::new();
+        let watcher = {
+            let job_cancel = cancel.clone();
+            tokio::spawn(async move {
+                loop_cancel.cancelled().await;
+                job_cancel.cancel();
+            })
+        };
+        let result = run_base_preflight(&app, &task, attempt_n, &cancel).await;
+        watcher.abort();
+        if let Some(result) = result {
+            let _ = tx.send(Some(Arc::new(result)));
+        }
+    });
+}
+
+/// The job body. `None`: cancelled.
+async fn run_base_preflight(
+    app: &Arc<App>,
+    task: &Task,
     attempt_n: u32,
     cancel: &CancelToken,
-) -> bool {
-    let Ok(Some(task)) = app.store.load_task(task_id) else {
-        return true;
+) -> Option<BasePreflight> {
+    let mut out = BasePreflight::default();
+    // No judge: nothing is ruled and nothing is settled.
+    let Some(route) = judge_route(app, &task.variant()) else {
+        return Some(out);
     };
-    if task.brief_check.feasibility_done {
-        return true;
-    }
-    let mut task = task;
-    if heal_grep_dashes(&mut task) {
-        app.verify_cache.lock().unwrap().remove(task_id);
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
-    }
-    let Some(route) = judge_route(app) else {
-        return true;
-    };
+    // `finalVerify` is not judged here: its base runs are the background
+    // jobs of `start_final_base_jobs` and the finals gate after review. A
+    // command that is in `verify` as well is still judged.
     let mut commands: Vec<String> = Vec::new();
-    for c in task
-        .verify
-        .iter()
-        .chain(task.final_verify.iter())
-        .chain(task.checks.iter().map(|c| &c.run))
-    {
+    for c in task.verify.iter().chain(task.checks.iter().map(|c| &c.run)) {
         if !c.trim().is_empty() && !commands.contains(c) {
             commands.push(c.clone());
         }
     }
     let run_dir = app
         .store
-        .run_dir(task_id, attempt_n)
+        .run_dir(&task.id, attempt_n)
         .join("feasibility-base");
     let ran = run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await;
     if cancel.is_cancelled() {
-        return false;
+        return None;
     }
-    // A base that could not be checked out says nothing: try again later.
+    // A base that could not be checked out says nothing: not settled.
     let Ok(results) = ran else {
-        return true;
+        return Some(out);
     };
-    let mut rulings: Vec<(VerifyOutcome, Feasibility)> = Vec::new();
-    for (i, failed) in results.iter().filter(|r| r.code != Some(0)).enumerate() {
-        let Ok(Some(current)) = app.store.load_task(task_id) else {
-            return true;
-        };
-        let prompt = feasibility_prompt(&current, failed);
+    // A check that names files the plan creates is feasible by rule: no
+    // judge run, only the kept decision.
+    let failing: Vec<String> = results
+        .iter()
+        .filter(|r| r.code != Some(0))
+        .map(|r| r.command.clone())
+        .collect();
+    let mut scratch = task.clone();
+    let kept = keep_planned_checks(app, &mut scratch, &failing);
+    out.decisions = scratch.decisions[task.decisions.len()..].to_vec();
+    for (i, failed) in results
+        .iter()
+        .filter(|r| r.code != Some(0) && !kept.contains(&r.command))
+        .enumerate()
+    {
+        let prompt = feasibility_prompt(task, failed);
         let name = format!("feasibility-{i}");
         let reply = run_judge(
             app,
-            &current,
+            task,
             &route,
             attempt_n,
             "brief_check",
@@ -406,24 +487,73 @@ pub(super) async fn heal_feasibility(
         )
         .await;
         match reply {
-            Err(RunError::Cancelled) => return false,
+            Err(RunError::Cancelled) => return None,
             Ok((reply, cost)) => {
-                add_task_cost(app, task_id, cost);
+                out.cost += cost;
                 if let Some(r) = reply
                     .ok()
-                    .and_then(|text| parse_feasibility(&text, current.criteria.len()))
+                    .and_then(|text| parse_feasibility(&text, task.criteria.len()))
                 {
-                    rulings.push((failed.clone(), r));
+                    out.rulings.push((failed.clone(), r));
                 }
             }
             Err(RunError::Io(_) | RunError::NotFound(_)) => {}
         }
     }
-    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+    out.settled = true;
+    Some(out)
+}
+
+/// Waits for the task's base preflight (a running one is awaited and the wait
+/// is a decision line) and applies it to the loop's own `task`: the judge's
+/// cost, the rulings (`apply_feasibility`'s exceptions hold: exit 127 keeps
+/// gating, a shared check is never switched off) and, when the judge settled,
+/// `feasibility_done`. Saves and broadcasts. A no-op without a job or after
+/// it was applied. `false`: cancelled while waiting.
+pub(super) async fn settle_base_preflight(
+    app: &Arc<App>,
+    task: &mut Task,
+    cancel: &CancelToken,
+) -> bool {
+    let Some(job) = app.base_preflights.lock().unwrap().get(&task.id).cloned() else {
         return true;
     };
+    if job.applied.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let waited = job.running();
+    let result = tokio::select! {
+        r = job.wait() => r,
+        _ = cancel.cancelled() => return false,
+    };
+    if job.applied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let Some(result) = result else {
+        // A cancelled job: forget it, a later start may spawn a new one.
+        app.base_preflights.lock().unwrap().remove(&task.id);
+        return true;
+    };
+    if waited {
+        task.decisions.push(
+            "Orchestrator: waited for the base preflight before the final checks".to_string(),
+        );
+    }
+    apply_base_preflight(app, task, &result);
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+    true
+}
+
+fn apply_base_preflight(app: &Arc<App>, task: &mut Task, result: &BasePreflight) {
+    task.cost_usd += result.cost;
+    for line in &result.decisions {
+        if !task.decisions.contains(line) {
+            task.decisions.push(line.clone());
+        }
+    }
     let mut changed = false;
-    for (failed, ruling) in rulings {
+    for (failed, ruling) in &result.rulings {
         // 127: the shell could not find a program. A rewrite to a check the
         // repo can run is fine, but "unrelated" would be this host's PATH or
         // toolchain quietly switching the check off: it keeps gating.
@@ -436,16 +566,15 @@ pub(super) async fn heal_feasibility(
             continue;
         }
         let settings = app.settings.read().unwrap().clone();
-        changed |= apply_feasibility(&settings, &mut task, &failed.command, ruling);
+        changed |= apply_feasibility(&settings, task, &failed.command, ruling.clone());
     }
     if changed {
-        app.verify_cache.lock().unwrap().remove(task_id);
+        app.verify_cache.lock().unwrap().remove(&task.id);
     }
-    task.brief_check.feasibility_done = true;
+    if result.settled {
+        task.brief_check.feasibility_done = true;
+    }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +705,7 @@ pub(super) async fn heal_repeated_unmet(
     let Some(rep) = repeated_unmet(task, idx, attempt_n, review) else {
         return Ok(false);
     };
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         return Ok(false);
     };
     let old = task.criteria[rep.criterion].clone();
@@ -916,7 +1045,7 @@ pub(super) async fn heal_answers(
         task.brief_check.answers_seen = seen;
         return Ok(false);
     }
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         // Not looked at: a later run with the judge on still reads them.
         return Ok(false);
     };

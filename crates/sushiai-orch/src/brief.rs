@@ -10,7 +10,7 @@ use crate::model::{
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 6;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 9;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -65,7 +65,7 @@ const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run the verification commands yourself before finishing. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
 
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
@@ -359,7 +359,9 @@ pub fn advisor_block(advice: &str) -> String {
 /// What the advisor is asked: diagnose the failed attempt and name one next
 /// step, in at most 1500 characters. Read-only.
 pub fn build_advisor_brief(task: &Task, diff: &str, failure_detail: &str) -> String {
-    let mut out = String::from("## Advisor\n\nAn implement attempt at this task failed. Read-only: do not edit files. Reply with a short diagnosis of why it failed and one concrete next step, at most 1500 characters, and nothing else.\n\n## Task\n\n");
+    let mut out = String::from(
+        "## Advisor\n\nAn implement attempt at this task failed. Read-only: do not edit files. Reply with a short diagnosis of why it failed and one concrete next step, at most 1500 characters, and nothing else.\n\n## Task\n\n",
+    );
     out.push_str(&task.title);
     out.push_str("\n\n");
     out.push_str(&task.goal);
@@ -504,10 +506,18 @@ pub fn conflict_block(conflict: &str) -> String {
     )
 }
 
+/// The one-turn prompt for an attempt that ran out of time: report, do no
+/// more work.
+pub fn time_budget_report_prompt() -> String {
+    format!(
+        "The time budget is spent: stop working and reply with the sushi-report only.\n\n{REPORT_FORMAT_BLOCK}"
+    )
+}
+
 /// Tells the implementer that the work was finished and checked, and only a
 /// landing conflict is left: resolve the markers, nothing else.
 pub fn conflict_only_block() -> String {
-    "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run the verification commands, then finish.\n\n".to_string()
+    "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run only a targeted test for the files you touched (one test file or one test name, not the listed verification commands or a whole-repo suite: the orchestrator runs those after you finish and gives any failure back to you), then finish.\n\n".to_string()
 }
 
 /// Tells the implementer of a parent task why finishing the parent failed
@@ -787,6 +797,24 @@ fn review_candidates(text: &str) -> Vec<String> {
     out
 }
 
+/// The previous link of a relay: its branch is what this task continues, so
+/// its handoff comes first, whether or not it is marked done.
+pub fn relay_block(task: &Task, all: &[Task]) -> String {
+    let Some(prev) = task
+        .queue
+        .relay_of
+        .as_deref()
+        .and_then(|id| all.iter().find(|t| t.id == id))
+    else {
+        return String::new();
+    };
+    format!(
+        "## Relay: continue from {}\n\nThis task continues on the branch of the previous subtask; its commit is already in your worktree. Every dependency is already on your branch: do not merge, rebase or check out other branches. You start with a fresh context, so this is what it reported:\n\n{}",
+        prev.title,
+        landed_entry(prev)
+    )
+}
+
 /// The fields of a finding object that are marks about the finding, not
 /// part of its text.
 const FINDING_META_KEYS: [&str; 4] = ["repeat", "scenario", "kind", "id"];
@@ -957,7 +985,9 @@ const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
-const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits, and in its `check` the one targeted command that proves that part alone. Parts whose paths overlap, that list no paths or that have no `check` are merged into one task with an ordered checklist, so give each part that should run separately its own paths and its own `check`. Each part's `request` is what its own planner will draft from, so make it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. When the request fits one session, leave `subtasks` out.";
+/// Grounded checks use each part's own criterion indexes.
+const PLAN_SUBTASK_CHECKS: &str = "Draft `checks` and `heldOut` for each part as well, under the same rules as above; their `criterion` indices count that part's own `criteria`, from 0.";
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; list in `check` the one targeted command that proves that part alone (or put it first in `verify`). Incomplete parts whose paths overlap, parts that list no paths or parts that have no targeted check are merged into one task with an ordered checklist. Complete drafts with their own criteria and targeted verification may share paths: orchd serialises them and runs compatible overlaps as a relay on one branch, landed once. Draft every part completely, as you would a task of its own: `key`, `title`, `goal`, `criteria` (strings or `{\"text\": \"...\", \"visual\": true}`, as above), `verify`, `finalVerify`, `paths`, `check`, `screenshot` (the repo command that captures the screenshot evidence when the part changes a screen, else empty), `tier` and `dependsOn`. A part with a title, goal, criteria and verify runs as drafted and is not planned again. Each part's `request` is what its own planner drafts from when the draft is incomplete, so keep it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. The top-level verify and finalVerify carry the whole-repo checks (the full CI script): they run once on the combined result, so a part's own finalVerify lists only checks for its own part. When the request fits one session, leave `subtasks` out.";
 
 /// The drafting-stage brief for a top-level task: the owner's request
 /// verbatim, then the fixed planning instructions and report format (spec:
@@ -973,37 +1003,51 @@ pub fn build_subtask_plan_brief(request: &str, variant: &Variant, past_work: &st
     plan_brief(request, variant, past_work, false)
 }
 
-fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
-    let mut extra = String::new();
-    extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
-    extra.push_str(&format!("\n\n{PLAN_COVERAGE}"));
+/// The `sushi-plan` report format the variant and the split choice ask for;
+/// a fresh draft and a correction turn end with the same one.
+fn plan_report_format(variant: &Variant, split: bool) -> String {
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
-        extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
         format = format.replace(
             "\"options\":[\"...\",\"...\"]}",
             "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
-    extra.push_str(&format!("\n\n{PLAN_PATHS}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
-    extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
     format = format.replace("\"verify\":[],", "\"verify\":[],\"screenshot\":\"\",");
-
-    extra.push_str(&format!("\n\n{PLAN_CHECKS} {PLAN_TESTS}"));
     format = format.replace(
             "\"verify\":[],",
             "\"verify\":[],\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},\"tests\":[{\"path\":\"...\",\"content\":\"...\"}],",
         );
 
     if split {
-        extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
+        let part_checks = "\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},";
         format = format.replace(
-            "]}]}\n```",
-            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"request\":\"...\",\"dependsOn\":[],\"paths\":[\"src/...\"],\"check\":\"...\"}]}\n```",
+            "}\n```",
+            &format!(",\"subtasks\":[{{\"key\":\"a\",\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],{part_checks}\"finalVerify\":[],\"paths\":[\"src/...\"],\"check\":\"...\",\"tests\":[{{\"path\":\"...\",\"content\":\"...\"}}],\"screenshot\":\"\",\"tier\":\"mechanical|standard|hard\",\"dependsOn\":[],\"request\":\"...\"}}]}}\n```"),
         );
     }
+    format
+}
+
+fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
+    let mut extra = String::new();
+    extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
+    extra.push_str(&format!("\n\n{PLAN_COVERAGE}"));
+    if variant.batch_questions {
+        extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
+    }
+    extra.push_str(&format!("\n\n{PLAN_PATHS}"));
+    extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
+    extra.push_str(&format!("\n\n{PLAN_CHECKS} {PLAN_TESTS}"));
+    if split {
+        extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
+        extra.push_str(&format!(" {PLAN_SUBTASK_CHECKS}"));
+    } else {
+        extra.push_str(&format!("\n\n{PLAN_SUBTASK_GATE}"));
+    }
+    let format = plan_report_format(variant, split);
     let past_work = if past_work.is_empty() {
         String::new()
     } else {
@@ -1013,6 +1057,18 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
         "## Request\n\n{}\n\n{past_work}## Instructions\n\n{}{extra}\n\n{format}",
         request.trim(),
         PLAN_INSTRUCTIONS,
+    )
+}
+
+/// Sent into the planner's own session (resumed) when the brief check found
+/// two requirements of its draft contradicting each other: only the
+/// conflict, the instruction to change nothing else, and the report format.
+/// The session already holds the request, the repo and the previous plan.
+pub fn build_plan_correction_brief(conflict: &str, variant: &Variant, split: bool) -> String {
+    format!(
+        "Your plan has a contradiction: {}\n\nFix only this contradiction and keep every other part of your previous plan unchanged. Reply with the full corrected plan.\n\n{}",
+        conflict.trim(),
+        plan_report_format(variant, split),
     )
 }
 
@@ -1046,15 +1102,19 @@ const PLAN_TESTS: &str = "The planner session is read-only, so put failing test 
 
 const PLAN_PATHS: &str = "List in `paths` the repo-relative files or directories the task will edit, as narrowly as you can. Tasks on the same branch never edit one file at once: a task whose paths overlap another running task's waits for it, then continues on top of its landed work. Leave `paths` empty only when you cannot tell.";
 
-const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit.";
+/// Added to a subtask's plan brief only: its parent runs the whole-repo checks.
+const PLAN_SUBTASK_GATE: &str = "This request is one part of a larger task. Whole-repo checks it shares with its parent (the full CI script) run once at the parent, on the combined result, so this part's `finalVerify` lists only checks for its own part.";
+
+const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.";
 
 /// Asks the reviewer for a ruling on every criterion.
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
 
 /// Sent instead of [`build_plan_brief`] on the one retry after an
-/// unparseable draft -- a fresh read-only session (planning never resumes,
-/// same as review), so it still needs the full request, just with an
-/// explicit reminder in front of it.
+/// unparseable draft -- a fresh read-only session (an unparseable reply has
+/// no plan to correct; only a brief-check contradiction resumes the planner,
+/// see [`build_plan_correction_brief`]), so it still needs the full request,
+/// just with an explicit reminder in front of it.
 pub fn build_plan_retry_brief(request: &str, variant: &Variant, past_work: &str) -> String {
     plan_retry(&build_plan_brief(request, variant, past_work))
 }
@@ -1179,7 +1239,7 @@ fn lenient_coverage<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Covera
         .collect())
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PlanSubtask {
     #[serde(default)]
     pub key: String,
@@ -1187,6 +1247,22 @@ pub struct PlanSubtask {
     pub title: String,
     #[serde(default)]
     pub request: String,
+    /// What the part achieves; with `criteria` and `verify` it makes a
+    /// complete draft the child runs from without its own planner.
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default, deserialize_with = "lenient_criteria")]
+    pub criteria: Vec<String>,
+    /// Criteria written as `{text, visual: true}`; filled by [`parse_plan`].
+    #[serde(skip)]
+    pub visual_criteria: Vec<String>,
+    #[serde(default)]
+    pub verify: Vec<String>,
+    #[serde(default, rename = "finalVerify")]
+    pub final_verify: Vec<String>,
+    /// Unknown or missing -> `None`.
+    #[serde(default, deserialize_with = "lenient_tier")]
+    pub tier: Option<Tier>,
     /// Keys of the parts this one builds on.
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Vec<String>,
@@ -1196,6 +1272,39 @@ pub struct PlanSubtask {
     /// The targeted command that proves this part alone.
     #[serde(default, deserialize_with = "lenient_text")]
     pub check: String,
+    /// Indices count this part's own `criteria`.
+    #[serde(default, deserialize_with = "lenient_checks")]
+    pub checks: Vec<Check>,
+    #[serde(default, rename = "heldOut", deserialize_with = "lenient_check")]
+    pub held_out: Option<Check>,
+    /// The repo command that captures this part's screenshot evidence.
+    #[serde(default)]
+    pub screenshot: Option<String>,
+    #[serde(default, deserialize_with = "lenient_tests")]
+    pub tests: Vec<crate::model::PlannedTest>,
+}
+
+impl PlanSubtask {
+    /// A parent supplied every field needed to implement without replanning.
+    pub fn is_complete(&self) -> bool {
+        !self.title.trim().is_empty()
+            && !self.goal.trim().is_empty()
+            && self.criteria.iter().any(|c| !c.trim().is_empty())
+            && self.verify.iter().any(|c| !c.trim().is_empty())
+    }
+
+    /// The targeted proof of one part, including a complete parent draft.
+    pub fn check_command(&self) -> &str {
+        if !self.check.trim().is_empty() {
+            self.check.trim()
+        } else {
+            self.verify
+                .iter()
+                .find(|c| !c.trim().is_empty())
+                .map(|c| c.trim())
+                .unwrap_or("")
+        }
+    }
 }
 
 /// A handoff the agent wrote as null or as an object/array still reads:
@@ -1260,15 +1369,26 @@ pub(crate) fn lenient_tier<'de, D: serde::Deserializer<'de>>(
 pub fn parse_plan(text: &str) -> Option<PlanDraft> {
     let body = last_fenced_block(text, "sushi-plan")?;
     let mut draft: PlanDraft = serde_json::from_str(&body).ok()?;
-    if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("criteria").and_then(|c| c.as_array().cloned()))
-    {
-        draft.visual_criteria = items
-            .iter()
-            .filter(|c| c.get("visual").and_then(|v| v.as_bool()) == Some(true))
-            .filter_map(|c| c.get("text")?.as_str().map(str::to_string))
-            .collect();
+    let value: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+    let visual_of = |v: &serde_json::Value| -> Vec<String> {
+        v.get("criteria")
+            .and_then(|c| c.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|c| c.get("visual").and_then(|v| v.as_bool()) == Some(true))
+                    .filter_map(|c| c.get("text")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if let Some(v) = &value {
+        draft.visual_criteria = visual_of(v);
+        if let Some(parts) = v.get("subtasks").and_then(|s| s.as_array()) {
+            for (part, raw) in draft.subtasks.iter_mut().zip(parts) {
+                part.visual_criteria = visual_of(raw);
+            }
+        }
     }
     Some(draft)
 }
@@ -1520,7 +1640,9 @@ pub fn dropped_findings_block(dropped: &[(String, String)]) -> String {
     if dropped.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n## Findings dropped by a tie-break judge\n\nThe implementer disputed these findings and a judge on another harness ruled them invalid. Do not report them again and do not fail a criterion on them.\n\n");
+    let mut out = String::from(
+        "\n## Findings dropped by a tie-break judge\n\nThe implementer disputed these findings and a judge on another harness ruled them invalid. Do not report them again and do not fail a criterion on them.\n\n",
+    );
     for (finding, why) in dropped {
         out.push_str(&format!("- {finding} (judge: {why})\n"));
     }
@@ -1561,14 +1683,127 @@ pub fn build_review_brief(
     evidence_from: Option<u32>,
     diff: &str,
 ) -> String {
+    review_brief(
+        task,
+        implementer_note,
+        agent_decisions,
+        verify_results,
+        screenshots,
+        evidence_from,
+        ReviewBody::Full(diff),
+    )
+}
+
+/// What a retry review is asked to look at instead of the whole change.
+pub struct NarrowReview<'a> {
+    /// The findings of the review before it that are still open.
+    pub open_findings: &'a [String],
+    /// Criteria that review did not rule met: ruled on now.
+    pub open_criteria: &'a [String],
+    /// Criteria that review ruled met: not checked again.
+    pub settled_criteria: &'a [String],
+    /// The task's own changes since the reviewed tree.
+    pub delta: &'a str,
+}
+
+enum ReviewBody<'a> {
+    Full(&'a str),
+    Narrow(&'a NarrowReview<'a>),
+}
+
+/// The brief of a review after a failed review: the open findings, the
+/// criteria still to rule on and the task's own changes since the reviewed
+/// tree, instead of every criterion and the full diff. Everything else is the
+/// full review's brief.
+pub fn build_narrow_review_brief(
+    task: &Task,
+    implementer_note: &str,
+    agent_decisions: &[String],
+    verify_results: &[VerifyOutcome],
+    screenshots: &[(String, Option<u32>)],
+    evidence_from: Option<u32>,
+    narrow: &NarrowReview,
+) -> String {
+    review_brief(
+        task,
+        implementer_note,
+        agent_decisions,
+        verify_results,
+        screenshots,
+        evidence_from,
+        ReviewBody::Narrow(narrow),
+    )
+}
+
+/// The `path` of every `path:line` token in the findings: backticks, quotes
+/// and a leading `./` trimmed, exact match. A token with no `:<digits>` tail
+/// names no path.
+pub fn finding_paths(findings: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for finding in findings {
+        for token in finding.split_whitespace() {
+            let token =
+                token.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ';'));
+            let token = token.trim_end_matches([':', '.']);
+            let Some((path, line)) = token.rsplit_once(':') else {
+                continue;
+            };
+            let line = line.split(['-', ',']).next().unwrap_or("");
+            if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let path = path
+                .trim_matches(|c: char| matches!(c, '`' | '"' | '\''))
+                .trim_start_matches("./");
+            if !path.chars().any(char::is_alphabetic) || out.iter().any(|p| p == path) {
+                continue;
+            }
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+fn review_brief(
+    task: &Task,
+    implementer_note: &str,
+    agent_decisions: &[String],
+    verify_results: &[VerifyOutcome],
+    screenshots: &[(String, Option<u32>)],
+    evidence_from: Option<u32>,
+    body: ReviewBody,
+) -> String {
     let mut out = String::new();
     out.push_str("## Review\n\n");
     out.push_str(&task.goal);
-    out.push_str("\n\n## Acceptance criteria\n\n");
-    for c in &task.criteria {
-        out.push_str("- ");
-        out.push_str(c);
-        out.push('\n');
+    match &body {
+        ReviewBody::Full(_) => {
+            out.push_str("\n\n## Acceptance criteria\n\n");
+            for c in &task.criteria {
+                out.push_str("- ");
+                out.push_str(c);
+                out.push('\n');
+            }
+        }
+        ReviewBody::Narrow(narrow) => {
+            out.push_str("\n\n## Criteria to rule on now\n\n");
+            if narrow.open_criteria.is_empty() {
+                out.push_str("(none: the last review ruled every criterion met)\n");
+            }
+            for c in narrow.open_criteria {
+                out.push_str("- ");
+                out.push_str(c);
+                out.push('\n');
+            }
+            if !narrow.settled_criteria.is_empty() {
+                out.push_str("\n## Settled criteria\n\nThe last review ruled these met. They are settled: do not check them again and do not rule on them.\n\n");
+                for c in narrow.settled_criteria {
+                    out.push_str("- ");
+                    out.push_str(c);
+                    out.push('\n');
+                }
+            }
+        }
     }
     let variant = task.variant();
     out.push_str("\n## Implementer\n\n");
@@ -1611,17 +1846,31 @@ pub fn build_review_brief(
             }
         }
     }
-    let previous = previous_review_findings(task);
+    let previous = match &body {
+        ReviewBody::Full(_) => previous_review_findings(task),
+        ReviewBody::Narrow(narrow) => narrow.open_findings.to_vec(),
+    };
     if !previous.is_empty() {
         out.push_str("\n## Previous review\n\n");
         out.push_str(&untrusted_block(
-            "The findings the previous attempt's review reported",
+            match &body {
+                ReviewBody::Full(_) => "The findings the previous attempt's review reported",
+                ReviewBody::Narrow(_) => "The open findings of the last review",
+            },
             &previous.join("\n"),
         ));
         out.push_str("\nThe implementer has tried to fix them. Mark each finding you report now with `repeat`: true when it is the same problem still present, false when it is new.\n");
     }
-    out.push_str("\n## Diff\n\n```diff\n");
-    out.push_str(diff);
+    match &body {
+        ReviewBody::Full(diff) => {
+            out.push_str("\n## Diff\n\n```diff\n");
+            out.push_str(diff);
+        }
+        ReviewBody::Narrow(narrow) => {
+            out.push_str("\n## Changes since the last review\n\nThis is a narrow review. Rule only on the open findings above, the criteria to rule on now, and anything new in these changes. Files the task did not change since the last review are not shown and were reviewed before.\n\n```diff\n");
+            out.push_str(narrow.delta);
+        }
+    }
     out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n");
     out.push_str(if previous.is_empty() {
         REVIEW_REPORT_EXAMPLE
@@ -1658,7 +1907,7 @@ fn previous_review_findings(task: &Task) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn is_held_out(v: &VerifyOutcome) -> bool {
+pub fn is_held_out(v: &VerifyOutcome) -> bool {
     v.command.starts_with("held-out check (criterion ")
 }
 
@@ -2013,6 +2262,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2076,6 +2326,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -2171,6 +2424,17 @@ mod tests {
         let brief = build_plan_brief("r", &Variant::default(), "");
         assert!(brief.contains("-- check:"));
         assert!(brief.contains("\"finalVerify\":[]"));
+    }
+
+    #[test]
+    fn only_a_subtask_plan_brief_says_whole_repo_checks_run_at_the_parent() {
+        let sentence = "run once at the parent, on the combined result";
+        let sub = build_subtask_plan_brief("r", &Variant::default(), "");
+        assert!(sub.contains(sentence));
+        let top = build_plan_brief("r", &Variant::default(), "");
+        assert!(!top.contains(sentence));
+        assert!(top.contains("run once on the combined result"));
+        assert!(top.contains("run at its parent"));
     }
 
     #[test]
@@ -2286,6 +2550,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -2571,11 +2838,44 @@ mod tests {
     }
 
     #[test]
+    fn the_correction_brief_is_short_and_ends_with_the_plan_format() {
+        let variant = Variant {
+            batch_questions: true,
+            ..Variant::default()
+        };
+        let fresh = build_plan_brief("Fix it", &variant, "");
+        let fix = build_plan_correction_brief(" A vs B ", &variant, true);
+        assert!(fix.starts_with("Your plan has a contradiction: A vs B"));
+        assert!(fix.contains("keep every other part of your previous plan unchanged"));
+        assert!(!fix.contains("Fix it") && !fix.contains("AGENTS.md"));
+        let format = &fresh[fresh.find("## Report format").unwrap()..];
+        assert!(fix.ends_with(format));
+        assert!(fix.len() < fresh.len() / 2);
+        let part = build_plan_correction_brief("x", &Variant::default(), false);
+        assert!(!part.contains("subtasks") && part.contains("\"finalVerify\":[]"));
+    }
+
+    #[test]
     fn plan_retry_brief_still_carries_the_original_request() {
         let retry = build_plan_retry_brief("add dark mode", &Variant::default(), "");
         assert!(retry.contains("add dark mode"));
         assert!(retry.contains("sushi-plan"));
         assert!(retry.to_lowercase().contains("previous reply"));
+    }
+
+    #[test]
+    fn parse_plan_reads_a_complete_part_draft_and_its_visual_criteria() {
+        let text = "```sushi-plan\n{\"title\":\"T\",\"subtasks\":[{\"key\":\"a\",\"title\":\"A\",\"goal\":\"G\",\"criteria\":[\"c1\",{\"text\":\"c2\",\"visual\":true}],\"verify\":[\"true\"],\"finalVerify\":[\"x\"],\"tier\":\"hard\",\"request\":\"r\"},{\"key\":\"b\",\"request\":\"r\"}]}\n```";
+        let plan = parse_plan(text).unwrap();
+        let a = &plan.subtasks[0];
+        assert_eq!(a.goal, "G");
+        assert_eq!(a.criteria, vec!["c1", "c2"]);
+        assert_eq!(a.visual_criteria, vec!["c2"]);
+        assert_eq!(a.verify, vec!["true"]);
+        assert_eq!(a.final_verify, vec!["x"]);
+        assert_eq!(a.tier, Some(Tier::Hard));
+        let b = &plan.subtasks[1];
+        assert!(b.goal.is_empty() && b.criteria.is_empty() && b.tier.is_none());
     }
 
     #[test]
@@ -2670,6 +2970,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -3227,6 +3530,27 @@ mod tests {
     }
 
     #[test]
+    fn default_plan_briefs_keep_the_plain_contract_and_split_boundary() {
+        let variant = Variant::default();
+        let plan = build_plan_brief("Fix it", &variant, "");
+        let subtask = build_subtask_plan_brief("Fix it", &variant, "");
+        for brief in [&plan, &subtask] {
+            assert!(brief.starts_with("## Request\n\nFix it\n\n## Instructions\n\n"));
+            assert!(!brief.contains("\"recommended\""));
+            let report = parse_plan(brief).unwrap();
+            assert!(report.final_verify.is_empty());
+            assert_eq!(report.checks.len(), 1);
+            assert_eq!(report.checks[0].criterion, 0);
+            assert_eq!(report.held_out.as_ref().unwrap().criterion, 0);
+            assert_eq!(report.tests.len(), 1);
+        }
+        assert_eq!(parse_plan(&plan).unwrap().subtasks.len(), 1);
+        assert!(parse_plan(&subtask).unwrap().subtasks.is_empty());
+        assert!(build_plan_retry_brief("Fix it", &variant, "").ends_with(&plan));
+        assert!(build_subtask_plan_retry_brief("Fix it", &variant, "").ends_with(&subtask));
+    }
+
+    #[test]
     fn every_plan_brief_asks_for_checks_held_out_and_tests() {
         let variant = Variant::default();
         for brief in [
@@ -3255,6 +3579,40 @@ mod tests {
         assert!(!build_subtask_plan_brief("Fix it", &variant, "").contains("\"subtasks\""));
         assert!(build_plan_retry_brief("Fix it", &variant, "")
             .ends_with(&build_plan_brief("Fix it", &variant, "")));
+    }
+
+    #[test]
+    fn plan_brief_with_grounded_checks_asks_for_part_checks() {
+        for variant in [
+            Variant::default(),
+            Variant {
+                batch_questions: true,
+                ..Variant::default()
+            },
+        ] {
+            let brief = build_plan_brief("Fix it", &variant, "");
+            let subtasks = &brief[brief.find("\"subtasks\":[{").unwrap()..];
+            assert!(subtasks.contains("\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},\"finalVerify\":[]"), "{subtasks}");
+            assert!(
+                subtasks.contains("\"tests\":[{\"path\":\"...\",\"content\":\"...\"}]"),
+                "{subtasks}"
+            );
+            assert!(subtasks.contains("\"screenshot\":\"\""), "{subtasks}");
+            assert!(brief.contains("Draft `checks` and `heldOut` for each part"));
+        }
+    }
+
+    #[test]
+    fn plan_brief_with_grounded_checks_asks_for_checks_and_a_held_out_check() {
+        let variant = Variant::default();
+        for brief in [
+            build_plan_brief("Fix it", &variant, ""),
+            build_subtask_plan_brief("Fix it", &variant, ""),
+        ] {
+            assert!(brief.contains("\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"}"), "{brief}");
+            assert!(brief.contains("ORCHD_BASE_SHA"));
+            assert!(brief.contains("the implementer never sees it"));
+        }
     }
 
     #[test]
@@ -3327,6 +3685,26 @@ mod tests {
         assert!(passed.contains("Held-out check for criterion 1 (Click saves settings): passed."));
         // The held-out outcome is not also listed as a verify result.
         assert!(!passed.contains("-> exit"));
+    }
+
+    #[test]
+    fn the_review_brief_keeps_a_held_out_named_result_without_a_variant() {
+        let mut task = grounded_task();
+        task.variant = None;
+        for (code, outcome) in [(Some(0), "passed"), (Some(1), "failed")] {
+            let ran = VerifyOutcome {
+                command: held_out_label(1),
+                code,
+                tail: String::new(),
+                ms: 1,
+            };
+            let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
+            let result =
+                format!("Held-out check for criterion 1 (Click saves settings): {outcome}.");
+            assert_eq!(text.matches(&result).count(), 1, "{text}");
+            assert!(!text.contains("SECRET-held-out-cmd"));
+            assert!(!text.contains("-> exit"));
+        }
     }
 
     #[test]
@@ -3488,6 +3866,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -3509,6 +3890,16 @@ mod tests {
         task.id = "child".into();
         task.depends_on = ids.iter().map(|s| s.to_string()).collect();
         task
+    }
+
+    #[test]
+    fn a_relay_brief_says_dependencies_are_on_the_branch_and_not_to_merge() {
+        let dep = done_dependency("d1", 10);
+        let mut task = dependent_of(&["d1"]);
+        task.queue.relay_of = Some("d1".into());
+        let block = relay_block(&task, &[dep]);
+        assert!(block.contains("already on your branch"), "{block}");
+        assert!(block.contains("do not merge, rebase"), "{block}");
     }
 
     #[test]
@@ -3684,5 +4075,31 @@ mod pick_tests {
         );
         assert_eq!(parse_pick("```sushi-pick\n{\"pick\":\"c\"}\n```"), None);
         assert_eq!(parse_pick("no block"), None);
+    }
+}
+
+#[cfg(test)]
+mod narrow_review_tests {
+    use super::*;
+
+    #[test]
+    fn finding_paths_reads_path_line_tokens() {
+        let findings = vec![
+            "P1: src/a.rs:12 - missing check".to_string(),
+            "P2: `./src/b.rs:3-9` - odd".to_string(),
+            "P1: \"web/c.ts:7\", and src/a.rs:40:".to_string(),
+            "P2: no path here, v1.2 and 10:30 are not paths".to_string(),
+            "Unmet criterion: Beta is done (missing)".to_string(),
+        ];
+        assert_eq!(
+            finding_paths(&findings),
+            vec!["src/a.rs", "src/b.rs", "web/c.ts"]
+        );
+    }
+
+    #[test]
+    fn finding_paths_needs_an_exact_path() {
+        assert!(finding_paths(&["P1: a.rs - no line".to_string()]).is_empty());
+        assert!(finding_paths(&["P1: :12 - nothing".to_string()]).is_empty());
     }
 }

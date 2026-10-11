@@ -129,6 +129,10 @@ export type Settings = {
   /** Seconds one verify command may run; absent on an orchd without the
    * setting (the daemon then uses its own default, 1200). */
   verifyTimeoutSecs?: number;
+  /** Minutes an implement attempt may run before it is stopped and asked
+   * for a short report (failure kind "time_budget"). 0 = no limit; the
+   * daemon default is 45. Advanced JSON only, no Settings field. */
+  implementBudgetMins: number;
   /** Tasks may land on the repo's default branch (per-repo overrides in
    * `landOnDefaultRepos`). */
   landOnDefault?: boolean;
@@ -136,6 +140,59 @@ export type Settings = {
   afterLand?: { repo: string; run: string }[];
   /** Commands that only run when the task's diff touches their `paths`. */
   scopedChecks?: { repo?: string; command: string; paths: string[] }[];
+  /** Custom presets (built-ins are defined in orchd, never written here). */
+  presets?: Preset[];
+  /** Repo path -> id of the preset new tasks of that repo start with. */
+  repoPresets?: Record<string, string>;
+};
+
+/** What a preset changes in the pipeline; an absent value is left alone. */
+export type PresetValues = {
+  /** `false` turns the brief check off. */
+  briefCheck?: boolean;
+  advisor?: boolean;
+  /** Switch only the hidden check; regular checks always run. */
+  heldOut?: boolean;
+  planner?: string;
+  briefCheckRoute?: string;
+  review?: string;
+  tierRoutes?: Partial<Record<Tier, string>>;
+  maxAttempts?: number;
+};
+
+export type Preset = {
+  id: string;
+  label: string;
+  builtin: boolean;
+  values: PresetValues;
+};
+
+export type PipelineStageState =
+  "pending" | "running" | "done" | "failed" | "skipped";
+
+/** One stage of `pipeline.describe`. */
+export type PipelineStage = {
+  id: string;
+  label: string;
+  kind: "main" | "side";
+  enabled: boolean;
+  optional: boolean;
+  ownerOnly: boolean;
+  routeId?: string;
+  model?: string;
+  maxAttempts?: number;
+  state?: PipelineStageState;
+  durationMs?: number;
+  costUsd?: number;
+};
+
+/** The `pipeline.describe` payload. */
+export type Pipeline = {
+  presetId: string | null;
+  presets: Preset[];
+  stages: PipelineStage[];
+  /** The open question: the stage that asked and who holds it. */
+  branch?: { from: string; to: "overseer" | "owner" };
 };
 
 export type EvolutionSettings = {
@@ -239,6 +296,8 @@ export type Variant = {
   stallTimeoutSecs: number;
   reviewEvidence: boolean;
   advisor: boolean;
+  /** Run a supplied hidden check. Absent = on; regular checks always run. */
+  heldOut?: boolean;
   loopDetect: boolean;
   /** Route id the plan stage runs on instead of `settings.planner`. */
   plannerRoute?: string;
@@ -264,6 +323,13 @@ export type Variant = {
   /** A finished top-level task lands on its base branch by itself. Absent =
    * off. */
   land?: boolean;
+  /** Route id the review stage runs on instead of `settings.review`. */
+  reviewRoute?: string;
+  /** Route id of the brief check instead of `settings.briefCheckRoute`;
+   * "" turns it off. */
+  briefCheckRoute?: string;
+  /** Implement attempts instead of `settings.maxAttempts`. */
+  maxAttempts?: number;
 };
 
 export type LeadTouch = {
@@ -304,6 +370,7 @@ export type FailureKind =
   | "stall"
   | "loop"
   | "budget"
+  | "time_budget"
   | "verify"
   | "conflict"
   | "heldout"
@@ -452,6 +519,8 @@ export type Task = {
   /** The task waited for a lease; its worktree is carried onto the base head
    * before its first attempt. */
   waitedOnLease?: boolean;
+  relayOf?: string;
+  relayBase?: string;
   /** The ordered parts of a merged task: each item's check runs after every
    * attempt, before the full verify. */
   checklist?: { text: string; check: string; passes: boolean }[];
@@ -902,5 +971,6 @@ export type OrchestratorView =
   | { kind: "improvements" }
   | { kind: "analytics" }
   | { kind: "log" }
+  | { kind: "pipeline" }
   | { kind: "archive" }
   | { kind: "messages" };

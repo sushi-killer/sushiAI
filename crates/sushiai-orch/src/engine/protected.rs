@@ -83,7 +83,11 @@ fn command_words(command: &str) -> Vec<String> {
 /// Everything the tests commit makes unchangeable: the planner's files and
 /// every file in the repository a visible check command names. The
 /// held-out command is not read, so its files stay unnamed.
-fn protected_hashes(worktree: &Path, rev: &str, task: &Task) -> BTreeMap<String, String> {
+pub(super) fn protected_hashes(
+    worktree: &Path,
+    rev: &str,
+    task: &Task,
+) -> BTreeMap<String, String> {
     let mut paths: Vec<String> = task
         .planner_tests
         .files
@@ -104,6 +108,45 @@ fn protected_hashes(worktree: &Path, rev: &str, task: &Task) -> BTreeMap<String,
             })
         })
         .collect()
+}
+
+/// Carries the task's work and its trusted test commit together, refreshing
+/// the test anchor after the carry while keeping implementation uncommitted.
+pub(super) fn carry_with_planner_tests(
+    task: &mut Task,
+    worktree: &Path,
+    base_ref: &str,
+) -> Result<git::Rebase, git::GitError> {
+    let Some(commit) = task
+        .planner_tests
+        .commit
+        .as_deref()
+        .filter(|commit| *commit != task.base_sha)
+    else {
+        return git::carry_onto_moved_base(worktree, base_ref, &task.base_sha, &task.id);
+    };
+    let paths: Vec<String> = task
+        .planner_tests
+        .files
+        .iter()
+        .map(|t| t.path.clone())
+        .collect();
+    let (carried, new_commit) = git::carry_onto_moved_base_with_commit(
+        worktree,
+        base_ref,
+        &task.base_sha,
+        &task.id,
+        commit,
+        &paths,
+    )?;
+    if matches!(
+        carried,
+        git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. }
+    ) {
+        task.planner_tests.protected = Some(protected_hashes(worktree, &new_commit, task));
+        task.planner_tests.commit = Some(new_commit);
+    }
+    Ok(carried)
 }
 
 /// The protected files in absolute form, for the deny rules of a run's
@@ -302,5 +345,85 @@ mod tests {
                 "in/c.txt"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_landing_check_keeps_the_carried_test_anchor_for_retry() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
+        let wt = dir.path().join("task");
+        let created = git::create_worktree(&repo, "task/landing", &wt, "HEAD").unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.base_ref = Some(base_ref.clone());
+        task.planner_tests.files = vec![test("tests/planner.sh", "true\n")];
+        let id = task.id.clone();
+        let cancel = CancelToken::new();
+        assert!(prepare_tests(&app, &id, &mut task, &wt, &cancel).await);
+        let old_tests = task.work_base().to_string();
+        let old_hashes = task.planner_tests.protected.clone();
+        std::fs::write(wt.join("implementation.txt"), "implementation\n").unwrap();
+        std::fs::write(repo.join("FIXED.txt"), "fixed\n").unwrap();
+        let new_base =
+            git::commit_paths(&repo, &["FIXED.txt".to_string()], "fix: base", "base").unwrap();
+        task.verify = vec!["false".to_string()];
+        let run_dir = dir.path().join("runs");
+        let result = carry_and_check(
+            &app,
+            &mut task,
+            None,
+            &wt,
+            &run_dir,
+            &base_ref,
+            "Another task",
+            &[],
+            &cancel,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(Landing::Failed {
+                kind: FailureKind::Verify,
+                ..
+            })
+        ));
+        assert_eq!(task.base_sha, new_base);
+        assert_ne!(task.work_base(), old_tests);
+        assert_eq!(git::head_sha(&wt).unwrap(), task.work_base());
+        assert_eq!(
+            git_in(&wt, &["rev-parse", &format!("{}^", task.work_base())]),
+            new_base
+        );
+        assert_eq!(task.planner_tests.protected, old_hashes);
+        let changed = git::changed_files(&wt, task.work_base()).unwrap();
+        assert!(guard_protected(&task, &wt, &changed).await.is_none());
+        assert!(wt.join("FIXED.txt").exists() && wt.join("implementation.txt").exists());
+
+        task.verify.clear();
+        assert!(matches!(
+            carry_and_check(
+                &app,
+                &mut task,
+                None,
+                &wt,
+                &run_dir,
+                &base_ref,
+                "Another task",
+                &[],
+                &cancel,
+            )
+            .await,
+            Ok(false)
+        ));
+        assert_eq!(git::head_sha(&wt).unwrap(), new_base);
+        let pending = git::changed_files(&wt, &new_base).unwrap();
+        assert!(pending.contains(&"tests/planner.sh".to_string()));
+        assert!(pending.contains(&"implementation.txt".to_string()));
     }
 }

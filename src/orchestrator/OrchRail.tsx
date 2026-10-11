@@ -7,6 +7,7 @@ import {
   LayoutList,
   ListTodo,
   MessageSquare,
+  Workflow,
   ScrollText,
   Sparkles,
 } from "lucide-react";
@@ -215,6 +216,12 @@ export function OrchRail({
           label="Analytics"
           selected={is("analytics")}
           onClick={() => onOpen({ kind: "analytics" })}
+        />
+        <NavRow
+          icon={<Workflow size={14} />}
+          label="Pipeline"
+          selected={is("pipeline")}
+          onClick={() => onOpen({ kind: "pipeline" })}
         />
         <NavRow
           icon={<ScrollText size={14} />}

@@ -35,6 +35,9 @@ pub struct RunRequest<'a> {
     /// orchd does not own (an audited repo): those settings carry hooks,
     /// shell commands that run outside the sandbox.
     pub repo_settings: bool,
+    /// Continue this earlier session instead of starting one: Claude gets
+    /// `--resume <id>`, Codex `exec resume <id>`.
+    pub resume: Option<&'a str>,
 }
 
 /// The tools an orchd agent never needs: it implements one bounded task and
@@ -139,6 +142,10 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         argv.push("--max-budget-usd".to_string());
         argv.push(cap.to_string());
     }
+    if let Some(session) = req.resume {
+        argv.push("--resume".to_string());
+        argv.push(session.to_string());
+    }
     argv
 }
 
@@ -149,6 +156,10 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
 /// drops the network flag (nothing to write, nothing to reach).
 pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     let mut argv = vec!["exec".to_string()];
+    if let Some(session) = req.resume {
+        argv.push("resume".to_string());
+        argv.push(session.to_string());
+    }
     // `--image=` right after `exec`: the flag takes several values, so it
     // must not sit where it could swallow the trailing `-`.
     for image in req.images {
@@ -156,14 +167,23 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     }
     argv.push("--json".to_string());
     argv.push("--skip-git-repo-check".to_string());
-    argv.push("-C".to_string());
-    argv.push(req.worktree.to_string_lossy().to_string());
-    if req.review {
-        argv.push("--sandbox".to_string());
-        argv.push("read-only".to_string());
+    let mode = if req.review {
+        "read-only"
     } else {
+        "workspace-write"
+    };
+    if req.resume.is_some() {
+        // `resume` takes neither `-C` nor `--sandbox`; the cwd is set on the
+        // process and the sandbox through config.
+        argv.push("-c".to_string());
+        argv.push(format!("sandbox_mode=\"{mode}\""));
+    } else {
+        argv.push("-C".to_string());
+        argv.push(req.worktree.to_string_lossy().to_string());
         argv.push("--sandbox".to_string());
-        argv.push("workspace-write".to_string());
+        argv.push(mode.to_string());
+    }
+    if !req.review {
         argv.push("-c".to_string());
         argv.push(format!(
             "sandbox_workspace_write.network_access={}",
@@ -426,6 +446,9 @@ pub struct RunOutcome {
     /// The run's estimated cost passed `RunRequest::max_budget_usd` and it
     /// was stopped (or the CLI reported `error_max_budget_usd`).
     pub over_budget: bool,
+    /// The run was still going at the attempt's wall-clock budget and was
+    /// stopped.
+    pub time_budget: bool,
     /// Claude only: input + cache creation + cache read tokens of the first
     /// `assistant` event, i.e. the whole prompt the first turn was sent,
     /// whether or not an earlier run left it in the prompt cache.
@@ -802,7 +825,40 @@ mod tests {
             codex_mcp: &[],
             images: &[],
             repo_settings: true,
+            resume: None,
         }
+    }
+
+    #[test]
+    fn a_resumed_run_carries_the_session_and_keeps_its_prompt_hash() {
+        let wt = PathBuf::from("/repo-task");
+        let claude = base_req(Harness::Claude, &wt);
+        let mut resumed = base_req(Harness::Claude, &wt);
+        resumed.resume = Some("sess-1");
+        let argv = claude_argv(&resumed);
+        let at = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[at + 1], "sess-1");
+        assert_eq!(
+            prompt_hash(&argv, None),
+            prompt_hash(&claude_argv(&claude), None)
+        );
+
+        let mut codex = base_req(Harness::Codex, &wt);
+        codex.review = true;
+        codex.resume = Some("sess-1");
+        let argv = codex_argv(&codex);
+        assert_eq!(&argv[..3], ["exec", "resume", "sess-1"]);
+        assert!(
+            !argv.iter().any(|a| a == "-C" || a == "--sandbox"),
+            "{argv:?}"
+        );
+        assert!(argv.contains(&"sandbox_mode=\"read-only\"".to_string()));
+        assert_eq!(argv.last().map(String::as_str), Some("-"));
+        codex.resume = Some("sess-2");
+        assert_eq!(
+            prompt_hash(&argv, None),
+            prompt_hash(&codex_argv(&codex), None)
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ fn main() -> Result<()> {
     match command.as_deref() {
         Some("hooks") => hooks_file::run(args.next().as_deref())?,
         Some("daemon") => {
+            leave_background_priority();
             let home = sushiai_daemon::Home::from_env();
             let modules = orch_module::slots(&home);
             sushiai_daemon::run_blocking(home, modules)?;
@@ -63,6 +64,20 @@ fn main() -> Result<()> {
         _ => bail!(USAGE),
     }
     Ok(())
+}
+
+/// A daemon started by a background launchd job (the link) inherits macOS
+/// background priority, and so does every agent and check it runs: they get
+/// only the efficiency cores and run several times slower under load.
+fn leave_background_priority() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: setpriority(2) on the calling process touches no memory.
+    if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0) } != 0 {
+        eprintln!(
+            "cannot leave background priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 fn hold_config(mut args: impl Iterator<Item = String>) -> Result<sushiai_hold::Config> {

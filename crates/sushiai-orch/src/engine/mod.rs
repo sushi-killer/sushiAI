@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
+use tokio::sync::{broadcast, oneshot, watch, Notify, Semaphore};
 
 #[path = "../audit.rs"]
 mod audit;
@@ -55,6 +55,7 @@ mod lines;
 mod metrics;
 mod past_work;
 mod permissions;
+mod pipeline;
 mod plan;
 mod plan_gate;
 mod pr;
@@ -72,6 +73,7 @@ mod rpc_tasks;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
+mod time_budget;
 mod verify;
 mod wait_sla;
 mod worktrees;
@@ -358,8 +360,27 @@ pub struct App {
     /// post-session gate so an unchanged diff never re-runs verify twice.
     verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
     /// Keyed by (base sha, command): what a command did on that commit, so an
-    /// unchanged base is never checked twice for the same command.
+    /// unchanged base is never checked twice for the same command. Kept on
+    /// disk (`base-results.json`), so a restart does not run them again; a
+    /// run that ended without an exit code (a timeout) is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// (tree hash, base sha, command) triples that passed (exit 0) in a
+    /// subtask's final run: a parent on the same tree and the same base does
+    /// not run that command again. The base is part of the key because every
+    /// command sees it as `ORCHD_BASE_SHA`.
+    gate_passes: StdMutex<std::collections::HashSet<(String, String, String)>>,
+    /// Keyed by (base sha, command): background base runs in flight. The
+    /// receiver flips to `true` when the job is over; its result, if any, is
+    /// then in `base_runs`. One pair runs on base at most once per daemon.
+    base_jobs: StdMutex<HashMap<(String, String), watch::Receiver<bool>>>,
+    /// Pairs whose first base run failed and whose rerun passed (load-flaky).
+    base_flaky: StdMutex<std::collections::HashSet<(String, String)>>,
+    /// Cancelled by `shutdown_for` only: a task stop must not end a job
+    /// another task may be waiting on.
+    base_cancel: CancelToken,
+    /// Keyed by task id: the task's base preflight, a background job that
+    /// holds no slot (`healing.rs`). The loop applies its result.
+    base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
     /// Concurrency limit (`settings.parallel` at startup -- a live
@@ -527,6 +548,7 @@ impl App {
         let slots = Arc::new(Semaphore::new(parallel_limit as usize));
 
         let messages = messages::load(&data_dir);
+        let base_runs_dir = data_dir.clone();
         let app = Arc::new(App {
             store,
             data_dir,
@@ -548,7 +570,12 @@ impl App {
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
-            base_runs: std::sync::Mutex::new(HashMap::new()),
+            base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
+            gate_passes: StdMutex::new(Default::default()),
+            base_jobs: StdMutex::new(HashMap::new()),
+            base_flaky: StdMutex::new(Default::default()),
+            base_cancel: CancelToken::new(),
+            base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
             parallel_limit,
@@ -630,6 +657,7 @@ impl App {
         for cancel in self.proposals.lock().unwrap().values() {
             cancel.cancel();
         }
+        self.base_cancel.cancel();
     }
 
     /// The status a task takes when its loop is cancelled: `stopped` for an
@@ -703,6 +731,12 @@ impl App {
         !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
     }
 
+    /// Same again for background base runs: a key leaves `base_jobs` only
+    /// after its run returned and its scratch worktree is gone.
+    pub fn any_base_job_running(&self) -> bool {
+        !self.base_jobs.lock().unwrap().is_empty()
+    }
+
     /// Appends a line to a task's `decisions` and persists it right away --
     /// for call sites that don't otherwise hold the task in memory. Call sites that
     /// already hold `&mut Task` push the line onto their own copy instead, so
@@ -743,6 +777,8 @@ impl App {
             "task.leadTouch" => self.handle_task_lead_touch(params).await,
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
+            "task.preset" => self.handle_task_preset(params).await,
+            "pipeline.describe" => self.handle_pipeline_describe(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "costs.summary" => self.handle_costs_summary(params).await,
             "overseer.log" => self.handle_overseer_log(params).await,

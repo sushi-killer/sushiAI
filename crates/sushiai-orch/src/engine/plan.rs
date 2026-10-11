@@ -56,6 +56,161 @@ pub(super) fn overlapping_path<'a>(a: &'a [String], b: &'a [String]) -> Option<&
     None
 }
 
+/// Whether `from` waits (directly or transitively) for `target`.
+fn waits_for(deps: &HashMap<String, Vec<String>>, from: &str, target: &str) -> bool {
+    let mut stack = vec![from.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        for d in deps.get(&node).into_iter().flatten() {
+            if d == target {
+                return true;
+            }
+            if seen.insert(d.clone()) {
+                stack.push(d.clone());
+            }
+        }
+    }
+    false
+}
+
+/// Siblings that touch the same paths would conflict at landing, so the later
+/// one in the list also waits for the earlier one unless they are already
+/// ordered. A part without paths overlaps every sibling. Edges only go from
+/// earlier to later positions, so no cycle can result. Returns the parts with
+/// the added `dependsOn` keys and one decision line per added edge.
+pub(super) fn serialise_overlapping(
+    parts: &[brief::PlanSubtask],
+) -> (Vec<brief::PlanSubtask>, Vec<String>) {
+    let mut out = parts.to_vec();
+    let mut deps: HashMap<String, Vec<String>> = out
+        .iter()
+        .map(|p| {
+            (
+                p.key.trim().to_string(),
+                p.depends_on.iter().map(|d| d.trim().to_string()).collect(),
+            )
+        })
+        .collect();
+    let mut decisions = Vec::new();
+    for j in 1..out.len() {
+        for i in 0..j {
+            let (a, b) = (out[i].key.trim().to_string(), out[j].key.trim().to_string());
+            if waits_for(&deps, &b, &a) || waits_for(&deps, &a, &b) {
+                continue;
+            }
+            let shared: Option<String> = if out[i].paths.is_empty() || out[j].paths.is_empty() {
+                Some("(no paths declared)".to_string())
+            } else {
+                overlapping_path(&out[i].paths, &out[j].paths).map(str::to_string)
+            };
+            let Some(shared) = shared else { continue };
+            deps.get_mut(&b).unwrap().push(a.clone());
+            out[j].depends_on.push(a.clone());
+            decisions.push(format!("Serialised {b} after {a}: both touch {shared}"));
+        }
+    }
+    (out, decisions)
+}
+
+/// Which earlier sibling each part continues as a relay, and one decision
+/// line per link. Parts whose declared paths overlap and were serialised
+/// run as one branch: a part continues the previous overlapping
+/// part's commit instead of branching from the parent, so it edits on top of
+/// that work and only the last part lands on the parent. A part only joins a
+/// chain when every earlier part it overlaps and every part it depends on is
+/// already in that chain and nothing continues the same predecessor;
+/// otherwise it stays an ordinary serialised sibling. `parts` gain the
+/// `dependsOn` a link needs, and a part that depends on a chain's middle
+/// link also waits for the chain's last one, which is what lands.
+pub(super) fn relay_links(parts: &mut [brief::PlanSubtask]) -> (Vec<Option<usize>>, Vec<String>) {
+    let keys: Vec<String> = parts.iter().map(|p| p.key.trim().to_string()).collect();
+    // Only parts that both declare paths can be linked: a part without paths
+    // is serialised, and its work lands on the parent like any sibling's.
+    let overlaps = |i: usize, j: usize| {
+        !parts[i].paths.is_empty()
+            && !parts[j].paths.is_empty()
+            && overlapping_path(&parts[i].paths, &parts[j].paths).is_some()
+    };
+    let mut link: Vec<Option<usize>> = vec![None; parts.len()];
+    let mut has_next = vec![false; parts.len()];
+    let chain_of = |link: &[Option<usize>], mut at: usize| {
+        let mut chain = vec![at];
+        while let Some(prev) = link[at] {
+            chain.push(prev);
+            at = prev;
+        }
+        chain
+    };
+    for j in 1..parts.len() {
+        let earlier: Vec<usize> = (0..j).filter(|&i| overlaps(i, j)).collect();
+        let Some(&p) = earlier.last() else { continue };
+        if has_next[p] {
+            continue;
+        }
+        let chain = chain_of(&link, p);
+        let deps_in_chain = parts[j].depends_on.iter().all(|d| {
+            keys.iter()
+                .position(|k| k == d.trim())
+                .is_some_and(|at| chain.contains(&at))
+        });
+        if earlier.iter().all(|i| chain.contains(i)) && deps_in_chain {
+            link[j] = Some(p);
+            has_next[p] = true;
+        }
+    }
+    let mut decisions = Vec::new();
+    for j in 0..parts.len() {
+        let Some(p) = link[j] else { continue };
+        if !parts[j].depends_on.iter().any(|d| d.trim() == keys[p]) {
+            parts[j].depends_on.push(keys[p].clone());
+        }
+        decisions.push(format!(
+            "Relay: {} continues on {}'s branch, one chain landed on the parent once",
+            keys[j], keys[p]
+        ));
+    }
+    // A part outside a chain that builds on one of its middle links needs
+    // the chain's last link: that is the one that lands the work.
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for i in 0..parts.len() {
+        if link[i].is_some() {
+            continue;
+        }
+        let mut extra = Vec::new();
+        for d in parts[i].depends_on.clone() {
+            let Some(mut at) = keys.iter().position(|k| k == d.trim()) else {
+                continue;
+            };
+            let mut moved = false;
+            while let Some(next) = (0..parts.len()).find(|&n| link[n] == Some(at)) {
+                at = next;
+                moved = true;
+            }
+            if moved {
+                extra.push(keys[at].clone());
+            }
+        }
+        for key in extra {
+            if !parts[i].depends_on.iter().any(|d| d.trim() == key) {
+                parts[i].depends_on.push(key);
+            }
+        }
+    }
+    for part in parts.iter() {
+        edges.insert(
+            part.key.trim().to_string(),
+            part.depends_on
+                .iter()
+                .map(|d| d.trim().to_string())
+                .collect(),
+        );
+    }
+    if has_cycle(&edges) {
+        return (vec![None; parts.len()], Vec::new());
+    }
+    (link, decisions)
+}
+
 /// A subtask's request: the planner's text first (what its own planner
 /// drafts from), then the whole it belongs to and what was already decided
 /// for it.
@@ -208,9 +363,12 @@ pub enum PlanOutcome {
 /// `stopped`/`failed` mid-draft, all correctly go back through planning
 /// instead of quietly falling through to implement with blank fields. Once
 /// one plan attempt has *passed*, this is permanently `false` for the rest
-/// of the task's life -- planning runs at most once, ever.
+/// of the task's life -- planning runs at most once, ever. A task its parent
+/// planner drafted completely (`planned_by_parent`) never runs it: the
+/// parent's draft is its plan.
 pub(super) fn needs_planning(task: &Task) -> bool {
     task.request.is_some()
+        && !task.planned_by_parent
         && !task
             .attempts
             .iter()
@@ -241,6 +399,281 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
     }
     mark_stopped_if_not_already(app, task_id).await;
     PlanOutcome::Ended
+}
+
+/// A running plan attempt on `route`.
+fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
+    Attempt {
+        n,
+        stage: Stage::Plan,
+        route_id: route.id.clone(),
+        harness: route.harness,
+        model: route.model.clone().unwrap_or_default(),
+        reason: reason.to_string(),
+        session_id: None,
+        pgid: None,
+        started_at: now_ms(),
+        ended_at: None,
+        status: AttemptStatus::Running,
+        summary: None,
+        handoff: None,
+        disputes: vec![],
+        changed_files: vec![],
+        verify: vec![],
+        gate_blocks: 0,
+        prefix_tokens: None,
+        review: None,
+        failure: None,
+        usage: None,
+        cost_usd: None,
+        cost_estimated: false,
+        review_cost_usd: None,
+        evidence: vec![],
+        evidence_tree: None,
+        review_tree: None,
+        review_base: None,
+        review_scope: None,
+        evidence_base: None,
+        evidence_from: None,
+        advice: None,
+        advisor_cost_usd: None,
+        fingerprint: None,
+        review_fingerprint: None,
+        advisor_fingerprint: None,
+        candidates: vec![],
+        criteria_results: vec![],
+        diff_stat: None,
+    }
+}
+
+/// The run files of a read-only planner session: an empty MCP config and,
+/// for Claude, read-only settings with the route's profile. The caller
+/// deletes the key file when the run ends.
+fn write_planner_run_files(
+    app: &Arc<App>,
+    route: &Route,
+    settings: &Settings,
+    run_dir: &Path,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let settings_path = run_dir.join("settings.json");
+    let key_path = run_dir.join("key");
+    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+    if matches!(route.harness, Harness::Claude) {
+        // Same lean shape as review (read-only, no Stop hook -- no
+        // token is ever registered for a drafting session), but the
+        // planner route can still carry a profile (env/API key) the
+        // same way an implement route can.
+        write_readonly_claude_settings_with_profile(
+            route,
+            app,
+            &key_path,
+            settings,
+            &deny_read,
+            &settings_path,
+        );
+    }
+    (mcp_path, settings_path, key_path)
+}
+
+/// Writes a parsed draft into the task and ends the plan attempt `idx` as
+/// passed; the first draft and a corrected one go through the same code.
+pub(super) fn store_draft(
+    app: &Arc<App>,
+    task: &mut Task,
+    idx: usize,
+    draft: &brief::PlanDraft,
+    settings: &Settings,
+    worktree: &Path,
+) {
+    task.title = draft.title.clone();
+    task.goal = draft.goal.clone();
+    task.planned_tier = draft.tier;
+    // A whole-repo suite is no per-attempt check: it runs once, as a
+    // finalVerify, on the final tree. Before the split, so it also applies
+    // when review is off.
+    let (suites, kept): (Vec<String>, Vec<String>) = draft
+        .verify
+        .iter()
+        .cloned()
+        .partition(|c| whole_repo_suite(worktree, c));
+    // With review off nobody would check a moved entry: keep it as is.
+    let (verify, judged) = if task.variant().review_route_id(settings).is_empty() {
+        (kept, Vec::new())
+    } else {
+        split_verify_commands(worktree, &kept)
+    };
+    // What the planner says the task edits: the queue holds it back while
+    // another live task on the same base holds any of these paths.
+    if task.paths.is_empty() {
+        task.paths = draft
+            .paths
+            .iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+    }
+    task.criteria = draft.criteria.clone();
+    task.visual_criteria = draft.visual_criteria.clone();
+    task.criteria.extend(
+        judged
+            .into_iter()
+            .map(|v| format!("Checked by review (not a shell command): {v}")),
+    );
+    task.verify = verify;
+    // Stored before any split, so a splitting parent keeps them.
+    task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
+    task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+    let (tests, dropped) = keep_planned_tests(&draft.tests);
+    task.planner_tests.files = tests;
+    for line in dropped {
+        if !task.decisions.contains(&line) {
+            task.decisions.push(line);
+        }
+    }
+    task.final_verify = draft
+        .final_verify
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .cloned()
+        .collect();
+    for suite in suites {
+        if !task.final_verify.contains(&suite) {
+            task.final_verify.push(suite.clone());
+        }
+        task.decisions.push(format!(
+            "Orchestrator: verify entry {suite} is a whole-repo suite; moved to finalVerify"
+        ));
+    }
+    task.brief_check.screenshot = draft
+        .screenshot
+        .clone()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    task.attempts[idx].status = AttemptStatus::Passed;
+    task.attempts[idx].ended_at = Some(now_ms());
+    task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+}
+
+/// Why a brief-check correction produced no draft.
+enum Uncorrected {
+    /// Draft from scratch instead; the reason is for the decision line.
+    Fresh(String),
+    /// The task was cancelled; the plan attempt at this index is open.
+    Cancelled(usize),
+}
+
+/// A brief-check contradiction in plan attempt `idx`'s draft: resumes that
+/// attempt's planner session with a short correction turn and stores the
+/// corrected draft. Never fails the task: no session, a failed run or an
+/// unparseable reply is `Fresh`.
+async fn correct_draft(
+    app: &Arc<App>,
+    task_id: &str,
+    idx: usize,
+    route: &Route,
+    conflict: &str,
+    cancel: &CancelToken,
+) -> Result<brief::PlanDraft, Uncorrected> {
+    let fresh = |why: &str| Uncorrected::Fresh(why.to_string());
+    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+        return Err(fresh("the task could not be read"));
+    };
+    let Some(session) = task.attempts.get(idx).and_then(|a| a.session_id.clone()) else {
+        return Err(fresh("the planner attempt has no session id"));
+    };
+    if task.cost_budget().is_some_and(|b| task.cost_usd >= b) {
+        return Err(fresh("the cost budget is reached"));
+    }
+    let settings = app.settings.read().unwrap().clone();
+    let attempt_n = task.attempts.len() as u32 + 1;
+    task.attempts
+        .push(new_plan_attempt(attempt_n, route, "brief correction"));
+    let at = task.attempts.len() - 1;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(&task);
+    app.broadcast_task(&task);
+
+    let worktree = PathBuf::from(&task.worktree);
+    let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let (mcp_path, settings_path, key_path) =
+        write_planner_run_files(app, route, &settings, &run_dir);
+    let req = harness::RunRequest {
+        resume: Some(&session),
+        ..review_request(route, &worktree, &mcp_path, &settings_path, &[])
+    };
+    let brief_text =
+        brief::build_plan_correction_brief(conflict, &task.variant(), task.parent.is_none());
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let result = run_harness(
+        app,
+        task_id,
+        attempt_n,
+        RunTrack::Attempt,
+        &worktree,
+        &req,
+        CostTag::task("plan", &route.id),
+        &brief_text,
+        &run_dir.join("events.jsonl"),
+        cancel,
+        Guard::off(),
+    )
+    .await;
+    let _ = std::fs::remove_file(&key_path);
+    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+        task = reloaded;
+    }
+    let fail = |task: &mut Task, kind: FailureKind, why: String| {
+        record_failure(task, at, kind, why.clone());
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        Err(Uncorrected::Fresh(why))
+    };
+    let o = match result {
+        Ok(o) => o,
+        Err(RunError::Cancelled) => return Err(Uncorrected::Cancelled(at)),
+        Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
+            return fail(
+                &mut task,
+                FailureKind::Error,
+                format!("the resumed run could not start: {msg}"),
+            );
+        }
+    };
+    // A resumed Claude session's own total also covers the run before it.
+    let own = match route.harness {
+        Harness::Claude => o.streamed_cost(&settings.prices),
+        Harness::Codex => None,
+    };
+    if let Some(cost) = own.or(o.cost_usd) {
+        let a = &mut task.attempts[at];
+        a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + cost);
+        a.cost_estimated |= o.cost_estimated;
+        task.cost_usd += cost;
+    }
+    task.attempts[at].fingerprint = o.fingerprint.clone();
+    if let Some(err) = o.error {
+        return fail(
+            &mut task,
+            FailureKind::Error,
+            format!("the resumed run failed ({err})"),
+        );
+    }
+    let Some(draft) = brief::parse_plan(&o.final_text.unwrap_or_default()) else {
+        return fail(
+            &mut task,
+            FailureKind::NoDeliverable,
+            "the resumed reply had no valid sushi-plan block".to_string(),
+        );
+    };
+    store_draft(app, &mut task, at, &draft, &settings, &worktree);
+    Ok(draft)
 }
 
 /// Runs the drafting stage (spec "Plan stage" steps 1-6) for a task created
@@ -348,83 +781,16 @@ pub(super) async fn run_plan_stage(
         let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
         let _ = std::fs::create_dir_all(&run_dir);
 
-        let attempt = Attempt {
-            n: attempt_n,
-            stage: Stage::Plan,
-            route_id: route.id.clone(),
-            harness: route.harness,
-            model: route.model.clone().unwrap_or_default(),
-            reason: "drafting".to_string(),
-            session_id: None,
-            pgid: None,
-            started_at: now_ms(),
-            ended_at: None,
-            status: AttemptStatus::Running,
-            summary: None,
-            handoff: None,
-            disputes: vec![],
-            changed_files: vec![],
-            verify: vec![],
-            gate_blocks: 0,
-            prefix_tokens: None,
-            review: None,
-            failure: None,
-            usage: None,
-            cost_usd: None,
-            cost_estimated: false,
-            review_cost_usd: None,
-            evidence: vec![],
-            evidence_tree: None,
-            evidence_base: None,
-            evidence_from: None,
-            advice: None,
-            advisor_cost_usd: None,
-            fingerprint: None,
-            review_fingerprint: None,
-            advisor_fingerprint: None,
-            candidates: vec![],
-            criteria_results: vec![],
-            diff_stat: None,
-        };
+        let attempt = new_plan_attempt(attempt_n, &route, "drafting");
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
 
-        let mcp_path = run_dir.join("mcp.json");
-        let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-        let settings_path = run_dir.join("settings.json");
-        let key_path = run_dir.join("key");
-        let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-        if matches!(route.harness, Harness::Claude) {
-            // Same lean shape as review (read-only, no Stop hook -- no
-            // token is ever registered for a drafting session), but the
-            // planner route can still carry a profile (env/API key) the
-            // same way an implement route can.
-            write_readonly_claude_settings_with_profile(
-                &route,
-                app,
-                &key_path,
-                &settings,
-                &deny_read,
-                &settings_path,
-            );
-        }
-        let req = harness::RunRequest {
-            harness: route.harness,
-            worktree: &worktree,
-            model: route.model.as_deref(),
-            effort: route.effort.as_deref(),
-            max_budget_usd: None,
-            review: true,
-            mcp_config: Some(&mcp_path),
-            settings_path: Some(&settings_path),
-            network_allowed: false,
-            codex_mcp: &[],
-            images: &[],
-            repo_settings: true,
-        };
+        let (mcp_path, settings_path, key_path) =
+            write_planner_run_files(app, &route, &settings, &run_dir);
+        let req = review_request(&route, &worktree, &mcp_path, &settings_path, &[]);
 
         // Once per round: the retry brief carries the same section.
         let past_work = {
@@ -654,69 +1020,55 @@ pub(super) async fn run_plan_stage(
             }
         };
 
-        task.title = draft.title.clone();
-        task.goal = draft.goal.clone();
-        task.planned_tier = draft.tier;
-        // With review off nobody would check a moved entry: keep it as is.
-        let (verify, judged) = if settings.review.is_empty() {
-            (draft.verify.clone(), Vec::new())
-        } else {
-            split_verify_commands(&worktree, &draft.verify)
-        };
-        // What the planner says the task edits: the queue holds it back while
-        // another live task on the same base holds any of these paths.
-        if task.paths.is_empty() {
-            task.paths = draft
-                .paths
-                .iter()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-        }
-        task.criteria = draft.criteria.clone();
-        task.visual_criteria = draft.visual_criteria.clone();
-        task.criteria.extend(
-            judged
-                .into_iter()
-                .map(|v| format!("Checked by review (not a shell command): {v}")),
-        );
-        task.verify = verify;
+        store_draft(app, &mut task, idx, &draft, &settings, &worktree);
 
-        // Stored before any split, so a splitting parent keeps them.
-        task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
-        task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
-        let (tests, dropped) = keep_planned_tests(&draft.tests);
-        task.planner_tests.files = tests;
-        for line in dropped {
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
+        // Do the draft's own requirements contradict each other? One
+        // redraft, once per task; the check runs again on the new draft.
+        let mut draft = draft;
+        match check_brief(app, task_id, attempt_n, true, cancel).await {
+            BriefAction::Redraft(conflict) => {
+                // The planner's own session fixes the contradiction when it
+                // can; otherwise a fresh draft reads the request again.
+                match correct_draft(app, task_id, idx, &route, &conflict, cancel).await {
+                    Ok(corrected) => {
+                        draft = corrected;
+                        // The task has had its one redraft: a second
+                        // conflict is kept for the implement brief.
+                        if let BriefAction::Cancelled =
+                            check_brief(app, task_id, attempt_n, true, cancel).await
+                        {
+                            return end_plan_stage(app, task_id, Some(idx)).await;
+                        }
+                    }
+                    Err(Uncorrected::Cancelled(at)) => {
+                        return end_plan_stage(app, task_id, Some(at)).await;
+                    }
+                    Err(Uncorrected::Fresh(why)) => {
+                        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                            let request = t.request.clone().unwrap_or_default();
+                            t.request =
+                                Some(format!("{request}\n\n{}", redraft_request_note(&conflict)));
+                            t.decisions.push(format!(
+                                "Brief check: the planner session was not resumed ({why}); drafting from scratch"
+                            ));
+                            t.updated_at = now_ms();
+                            let _ = app.store.save_task(&t);
+                            app.broadcast_task(&t);
+                        }
+                        continue;
+                    }
+                }
             }
+            BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
+            BriefAction::Proceed => {}
         }
 
-        task.final_verify = draft
-            .final_verify
-            .iter()
-            .filter(|c| !c.trim().is_empty())
-            .cloned()
-            .collect();
-        task.brief_check.screenshot = draft
-            .screenshot
-            .clone()
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty());
-        task.attempts[idx].status = AttemptStatus::Passed;
-        task.attempts[idx].ended_at = Some(now_ms());
-        task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
-
-        // The plan gate: code checks, one plan review by another model
-        // family and the brief check. A critical finding replans once.
+        // The plan gate: code checks and one plan review by another model
+        // family. A critical finding replans once.
         match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
             plan_gate::GateAction::Replan => continue,
             plan_gate::GateAction::Cancelled => {
-                return end_plan_stage(app, task_id, Some(idx)).await
+                return end_plan_stage(app, task_id, Some(idx)).await;
             }
             plan_gate::GateAction::Proceed => {}
         }
@@ -753,6 +1105,7 @@ pub(super) async fn run_plan_stage(
                     by: "planner".to_string(),
                     kind: None,
                     attempt: None,
+                    commands: Vec::new(),
                     overturned: false,
                     owner_answer: None,
                 });
@@ -818,32 +1171,26 @@ pub(super) async fn run_plan_stage(
         // The planner split the request: the task becomes a parent of one
         // child per part and never implements anything itself.
         if !draft.subtasks.is_empty() && task.parent.is_none() {
-            let merge = plan_gate::merge_parts(&draft.subtasks);
             let failed = match check_subtasks(&draft.subtasks) {
                 Err(reason) => Some(format!("subtasks ignored: {reason}")),
-                // One merged group and nothing else: no split, the task
-                // itself keeps its draft and gains the checklist.
-                Ok(()) if merge.separate.is_empty() => {
-                    merge_into_checklist(app, task_id, &draft.subtasks, &merge).err()
-                }
                 Ok(()) => {
-                    match split_into_subtasks(
-                        app,
-                        task_id,
-                        &draft.subtasks,
-                        &merge,
-                        auto_start_after_plan,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            return if auto_start_after_plan {
-                                PlanOutcome::Proceed
-                            } else {
-                                PlanOutcome::StoppedForReview
-                            };
+                    let plan = prepare_subtasks(&draft.subtasks);
+                    // One merged group and nothing else: the task itself
+                    // keeps its draft and gains the ordered checklist.
+                    if plan.merge.separate.is_empty() {
+                        merge_into_checklist(app, task_id, &plan).err()
+                    } else {
+                        match split_into_subtasks(app, task_id, &plan, auto_start_after_plan).await
+                        {
+                            Ok(()) => {
+                                return if auto_start_after_plan {
+                                    PlanOutcome::Proceed
+                                } else {
+                                    PlanOutcome::StoppedForReview
+                                };
+                            }
+                            Err(e) => Some(format!("could not create the subtasks: {e}")),
                         }
-                        Err(e) => Some(format!("could not create the subtasks: {e}")),
                     }
                 }
             };
@@ -900,28 +1247,58 @@ pub(super) async fn run_plan_stage(
     }
 }
 
+pub(super) struct SubtaskPlan {
+    pub(super) parts: Vec<brief::PlanSubtask>,
+    pub(super) links: Vec<Option<usize>>,
+    decisions: Vec<String>,
+    pub(super) merge: plan_gate::MergePlan,
+}
+
+/// All dependency edges are present before grouping can contract the graph.
+pub(super) fn prepare_subtasks(parts: &[brief::PlanSubtask]) -> SubtaskPlan {
+    let (mut parts, mut decisions) = serialise_overlapping(parts);
+    let (links, relayed) = relay_links(&mut parts);
+    decisions.extend(relayed);
+    let merge = plan_gate::merge_parts(&parts);
+    SubtaskPlan {
+        parts,
+        links,
+        decisions,
+        merge,
+    }
+}
+
 /// The whole plan is one merged group: the task keeps its draft and gains
 /// the ordered checklist. `Err("")` tells the caller to carry on as one task.
-fn merge_into_checklist(
-    app: &Arc<App>,
-    task_id: &str,
-    parts: &[brief::PlanSubtask],
-    merge: &plan_gate::MergePlan,
-) -> Result<(), String> {
+fn merge_into_checklist(app: &Arc<App>, task_id: &str, plan: &SubtaskPlan) -> Result<(), String> {
     let mut task = app
         .store
         .load_task(task_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "task not found".to_string())?;
-    task.checklist = plan_gate::checklist_of(parts, &merge.merged);
+    task.checklist = plan_gate::checklist_of(&plan.parts, &plan.merge.merged);
+    task.decisions.extend(plan.decisions.iter().cloned());
     task.decisions.push(format!(
         "Plan gate: merged {} subtasks into one task with a checklist",
-        merge.merged.len()
+        plan.merge.merged.len()
     ));
     task.updated_at = now_ms();
     app.store.save_task(&task).map_err(|e| e.to_string())?;
     app.broadcast_task(&task);
     Ok(())
+}
+
+/// What a standalone part brings to its child: its own draft.
+#[derive(Default)]
+struct Draft<'a> {
+    goal: String,
+    criteria: Vec<String>,
+    verify: Vec<String>,
+    final_verify: Vec<String>,
+    checks: Vec<Check>,
+    held_out: Option<Check>,
+    complete: bool,
+    part: Option<&'a brief::PlanSubtask>,
 }
 
 /// One child of a split: the planner's parts that stand alone, and the one
@@ -932,17 +1309,21 @@ struct Unit {
     merged: bool,
 }
 
-/// Turns a drafted task into a parent: one child per unit, each drafted by
-/// its own planner, branching from the parent's branch, with `dependsOn`
-/// mapped from the parts' keys. The parent is left `running` (its loop then
+/// Turns a drafted task into a parent: one child per unit, branching from
+/// the parent's branch, with `dependsOn` mapped from the parts' keys. A
+/// standalone part the planner drafted completely (title, goal, criteria and
+/// verify) runs as drafted; an incomplete one, and the merged group, is
+/// drafted by its own planner from its request. The parent is left `running` (its loop then
 /// starts the children) or `stopped` for the owner to review first.
 async fn split_into_subtasks(
     app: &Arc<App>,
     parent_id: &str,
-    parts: &[brief::PlanSubtask],
-    merge: &plan_gate::MergePlan,
+    plan: &SubtaskPlan,
     start: bool,
 ) -> Result<(), String> {
+    let parts = plan.parts.as_slice();
+    let merge = &plan.merge;
+    let links = &plan.links;
     let mut parent = app
         .store
         .load_task(parent_id)
@@ -991,6 +1372,8 @@ async fn split_into_subtasks(
     };
     let parent_mcp = std::fs::read_to_string(app.store.task_dir(parent_id).join("mcp.json")).ok();
     let now = now_ms();
+    let review_on = !app.settings.read().unwrap().review.is_empty();
+    let parent_worktree = PathBuf::from(&parent.worktree);
     let mut titles = Vec::new();
     let mut children: Vec<Task> = Vec::new();
     for (i, unit) in units.iter().enumerate() {
@@ -1004,6 +1387,15 @@ async fn split_into_subtasks(
                 }
             }
         }
+        let non_empty = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .filter(|c| !c.trim().is_empty())
+                .cloned()
+                .collect()
+        };
+        // A merged group is drafted by its own planner; a standalone part
+        // carries the draft it came with.
+        let mut drafted = Draft::default();
         let (request, checklist, paths) = if unit.merged {
             let text = unit
                 .members
@@ -1022,12 +1414,39 @@ async fn split_into_subtasks(
             (text, plan_gate::checklist_of(parts, &unit.members), paths)
         } else {
             let part = &parts[unit.members[0]];
-            (
-                format!("{}\n\nCheck: {}", part.request.trim(), part.check.trim()),
-                vec![],
-                part.paths.clone(),
-            )
+            let drafted_verify = non_empty(&part.verify);
+            let (verify, judged) = if review_on {
+                split_verify_commands(&parent_worktree, &drafted_verify)
+            } else {
+                (drafted_verify, Vec::new())
+            };
+            let mut criteria = non_empty(&part.criteria);
+            // Indices count the part's own criteria, before the review entries.
+            let own_criteria = criteria.len();
+            drafted.checks = valid_checks(part.checks.clone(), own_criteria);
+            drafted.held_out = valid_check(part.held_out.clone(), own_criteria);
+            criteria.extend(
+                judged
+                    .into_iter()
+                    .map(|v| format!("Checked by review (not a shell command): {v}")),
+            );
+            drafted.goal = part.goal.trim().to_string();
+            drafted.complete = part.is_complete() && !verify.is_empty();
+            drafted.criteria = criteria;
+            drafted.verify = verify;
+            drafted.final_verify = non_empty(&part.final_verify);
+            drafted.part = Some(part);
+            let request = if part.check.trim().is_empty() {
+                part.request.trim().to_string()
+            } else {
+                format!("{}\n\nCheck: {}", part.request.trim(), part.check_command())
+            };
+            (request, vec![], part.paths.clone())
         };
+        let relay_of = links[unit.members[0]].and_then(|at| {
+            let id = id_of_key[parts[at].key.trim()];
+            (id != &unit_ids[i]).then(|| id.clone())
+        });
         let created = app
             .create_task_record(NewTask {
                 backlog: None,
@@ -1035,12 +1454,12 @@ async fn split_into_subtasks(
                 repo_root: PathBuf::from(&parent.repo),
                 project_id: parent.project_id.clone(),
                 title: title.clone(),
-                goal: String::new(),
-                criteria: vec![],
-                verify: vec![],
-                final_verify: vec![],
-                checks: vec![],
-                held_out: None,
+                goal: drafted.goal,
+                criteria: drafted.criteria,
+                verify: drafted.verify,
+                final_verify: drafted.final_verify,
+                checks: drafted.checks,
+                held_out: drafted.held_out,
                 request: Some(subtask_request(&parent, &request)),
                 branch: None,
                 base: parent.branch.clone(),
@@ -1049,6 +1468,7 @@ async fn split_into_subtasks(
                 parent: Some(parent.id.clone()),
                 paths,
                 checklist,
+                relay_of,
                 // Eval reports count the parent, which carries the children's
                 // cost.
                 eval_set: None,
@@ -1059,7 +1479,7 @@ async fn split_into_subtasks(
                 created_at: now + i as i64,
             })
             .await;
-        let child = match created {
+        let mut child = match created {
             Ok(child) => child,
             Err(e) => {
                 // All parts or none: a partial split would leave the parent
@@ -1068,6 +1488,27 @@ async fn split_into_subtasks(
                 return Err(e);
             }
         };
+        if let Some(part) = drafted.part {
+            if !unit.merged {
+                let (tests, dropped) = keep_planned_tests(&part.tests);
+                child.planner_tests.files = tests;
+                child.decisions.extend(dropped);
+            }
+            child.planned_tier = part.tier;
+            child.visual_criteria = part.visual_criteria.clone();
+            child.brief_check.screenshot = part
+                .screenshot
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            child.planned_by_parent = drafted.complete;
+        }
+        if let Err(e) = app.store.save_task(&child) {
+            children.push(child);
+            discard_children(app, children).await;
+            return Err(e.to_string());
+        }
         if let Some(mcp) = &parent_mcp {
             let _ = std::fs::write(app.store.task_dir(&child.id).join("mcp.json"), mcp);
         }
@@ -1083,6 +1524,7 @@ async fn split_into_subtasks(
         });
         children.push(child);
     }
+    parent.decisions.extend(plan.decisions.iter().cloned());
     if merge.merged.len() > 1 {
         parent.decisions.push(format!(
             "Plan gate: merged {} subtasks into one task with a checklist",

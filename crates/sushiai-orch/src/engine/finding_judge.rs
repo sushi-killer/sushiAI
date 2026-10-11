@@ -44,9 +44,10 @@ pub(super) fn pair_disputes<'a>(
         .collect()
 }
 
-/// The cheapest route no weaker than the implementer's floor (see
-/// `review_floor`), never the reviewer's own; on a tie, one on another
-/// harness than the reviewer's.
+/// The best route of known strength no weaker than the implementer's floor
+/// (see `review_floor`), never the reviewer nor the implementer (by id or by
+/// harness and model); a priced route on another harness than the reviewer's
+/// first, then the cheapest. There is no fallback: `None` when none qualifies.
 pub(super) fn judge_route<'a>(
     settings: &'a Settings,
     reviewer: &Route,
@@ -54,7 +55,7 @@ pub(super) fn judge_route<'a>(
     tier: Tier,
 ) -> Option<&'a Route> {
     let floor = review_floor(implementer, tier);
-    cheapest_route_at(settings, floor, Some(&reviewer.id), reviewer, None, false)
+    cheapest_route_at(settings, floor, &[reviewer, implementer], reviewer, false)
         .map(|(route, _)| route)
 }
 
@@ -211,6 +212,7 @@ pub(super) async fn judge_finding(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &images)
     };
     let result = run_harness(
@@ -317,6 +319,7 @@ pub(super) async fn judge_disputed_findings(
                     by: "review-judge".to_string(),
                     kind: Some(QuestionKind::ReviewDispute),
                     attempt: Some(attempt_n),
+                    commands: Vec::new(),
                     overturned: false,
                     owner_answer: None,
                 });
@@ -417,8 +420,8 @@ mod tests {
         let settings = Settings::default();
         let by_id = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap().clone();
         let (sonnet, opus, codex) = (by_id("claude-sonnet"), by_id("claude-opus"), by_id("codex"));
-        // Standard work: the cheapest other route at strength 2 (codex is
-        // unpriced, so it sorts after priced opus).
+        // Standard work: the cheapest other route at strength 2 (codex has no
+        // model, so its strength is unknown and it never qualifies).
         let judge = |reviewer: &Route, tier| judge_route(&settings, reviewer, &sonnet, tier);
         assert_eq!(judge(&sonnet, Tier::Standard).unwrap().id, "claude-opus");
         // Hard work: only opus reaches 3, and it is not the judge when it reviews.
@@ -427,6 +430,35 @@ mod tests {
         // A strong implementer raises the floor above the tier's.
         assert!(judge_route(&settings, &opus, &opus, Tier::Standard).is_none());
         assert_ne!(judge(&codex, Tier::Standard).unwrap().id, "codex");
+    }
+
+    #[test]
+    fn finding_judge_never_returns_the_implementer_or_the_reviewer() {
+        let with_model = |id: &str, harness, model: &str| Route {
+            model: Some(model.into()),
+            strength: Some(2),
+            ..route(id, harness)
+        };
+        let implementer = with_model("impl", Harness::Claude, "m-impl");
+        let twin = with_model("impl-copy", Harness::Claude, "m-impl");
+        let reviewer = with_model("rev", Harness::Codex, "m-rev");
+        let other = with_model("other", Harness::Claude, "m-other");
+        let settings = Settings {
+            routes: vec![
+                implementer.clone(),
+                twin.clone(),
+                reviewer.clone(),
+                other.clone(),
+            ],
+            ..Default::default()
+        };
+        let judge = judge_route(&settings, &reviewer, &implementer, Tier::Standard);
+        assert_eq!(judge.unwrap().id, "other");
+        let settings = Settings {
+            routes: vec![implementer.clone(), twin, reviewer.clone()],
+            ..Default::default()
+        };
+        assert!(judge_route(&settings, &reviewer, &implementer, Tier::Standard).is_none());
     }
 
     #[test]

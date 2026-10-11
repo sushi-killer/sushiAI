@@ -56,6 +56,45 @@ panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail,home}.png` (`home` is the Home view before a task is picked; `detail` crops the task view `.td`), plus `artifacts/orchestrator-proposals.png` (a crop of the first proposal card on the Improvements view, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-improvements.png` (the whole Improvements view, when proposals or notes were seeded) and `artifacts/orchestrator-repo-notes.png` (a crop of the notes list on that view, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and
 exits non-zero with `error` set on any failure, including an unmatched title.
 
+## Orchestrator blueprint
+
+To photograph the orchestrator's pipeline diagram (a running task, a failed
+task and the rail's Pipeline view with one stage's inspector open), at a narrow
+and a wide panel, run
+`npm run build && cargo build -p sushiai && node .agents/skills/ui-evidence/scripts/orchestrator-blueprint.mjs`
+(no arguments). It uses a throwaway profile (`HOME`, `CODEX_HOME`,
+`SUSHIAI_HOME=<profile>/sushiai`, `SUSHIAI_TEST_WINDOW=hidden`) with the
+Orchestrator extension enabled, and seeds two tasks into
+`<profile>/sushiai/orchestrator/tasks/<id>/task.json` with `repo` = the current
+directory (`task.list` filters on equality):
+
+- a failed task whose implement attempt failed `verify` (with the failing
+  command's outcome, a cost and timing), so the Checks stage is danger;
+- a queued task with a `backlog` entry (so the daemon does not resume it on
+  start), empty `verify` and `finalVerify`, and a real git worktree and branch
+  `task/<id>` created by the driver (starting a task whose branch is missing
+  fails). It is listed in the Plan view, not the rail. The driver picks the
+  Fast preset on it (the fake harness never answers a brief check), clicks
+  Start, waits for the running `Implement` stage, and clicks `Stop task`
+  before the app closes.
+
+No real harness runs: `<profile>/bin/claude` and `<profile>/bin/codex` print
+the init line the harness parser reads and then `exec sleep 600`, and
+`<profile>/bin` is first on the `PATH` given to the app (orchd runs a bare
+`claude` / `codex` from `PATH`). Rail rows and views are picked at the wide
+size first, because below 640 px the panel's container query hides the rail.
+The window is resized until the Orchestrator panel measures about 1100 px
+(wide) and about 520 px (narrow); the measured widths are in the report.
+
+It saves `artifacts/blueprint-running-{narrow,wide}.png` and
+`artifacts/blueprint-failed-{narrow,wide}.png` (crops of the task view `.td`),
+and `artifacts/blueprint-repo-inspector-{narrow,wide}.png` (the Pipeline view
+with the Advisor inspector). In `finally` it stops the daemon, then removes
+only its own worktree and branch (`git worktree remove --force`,
+`git branch -D task/<id>`, `git worktree prune`). It prints a JSON report
+`{screenshots, widths, pageErrors, error?}` and exits non-zero on a failed step
+or a page error.
+
 ## Worktree grouping and cleanup
 
 For workspace grouping, flat-list stability and merged/closed PR cleanup

@@ -23,6 +23,8 @@ pub(super) struct NewTask {
     pub(super) depends_on: Vec<String>,
     pub(super) parent: Option<String>,
     pub(super) paths: Vec<String>,
+    /// The sibling subtask whose branch this one continues.
+    pub(super) relay_of: Option<String>,
     /// The ordered parts a merged task checks after every attempt.
     pub(super) checklist: Vec<ChecklistItem>,
     pub(super) eval_set: Option<String>,
@@ -249,6 +251,10 @@ impl App {
             /// task only (an A/B arm).
             #[serde(default)]
             variant: Option<serde_json::Value>,
+            /// A preset id laid over `settings.experiments` before `variant`;
+            /// the repo's `repoPresets` entry when unset.
+            #[serde(default)]
+            preset: Option<String>,
             /// Land the finished task on its base branch by itself; the same
             /// as `variant.land`.
             #[serde(default)]
@@ -281,7 +287,19 @@ impl App {
             return Err("a subtask cannot be in the backlog".to_string());
         }
         let settings = self.settings.read().unwrap().clone();
-        let mut variant = resolve_variant(&settings.experiments, p.variant.as_ref())?;
+        let preset = match p.preset.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => Some(
+                settings
+                    .preset(id)
+                    .ok_or_else(|| format!("unknown preset \"{id}\""))?,
+            ),
+            None => settings.repo_preset(&p.repo),
+        };
+        let mut base_variant = settings.experiments.clone();
+        if let Some(preset) = &preset {
+            preset.values.apply(&mut base_variant);
+        }
+        let mut variant = resolve_variant(&base_variant, p.variant.as_ref())?;
         if let Some(land) = p.land {
             variant.land = land;
         }
@@ -381,6 +399,7 @@ impl App {
                     .filter(|p| !p.is_empty())
                     .collect(),
                 checklist: vec![],
+                relay_of: None,
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
                 eval_check_cmd: p.eval_check.clone().filter(|s| !s.trim().is_empty()),
@@ -504,10 +523,11 @@ impl App {
         let branch_opt = new.branch.clone();
         let base = new.base.clone();
         let wt_root = self.settings.read().unwrap().worktree_root.clone();
+        let home = self.home.clone();
         let created = tokio::task::spawn_blocking(move || {
             let branch = branch_opt
                 .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
-            let wt_path = git::worktree_path(&repo_root, &wt_root, &branch);
+            let wt_path = git::worktree_path(&repo_root, &home, &wt_root, &branch);
             if let Some(dir) = wt_path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
                 git::exclude_worktree_root(&repo_root, dir)
@@ -579,6 +599,7 @@ impl App {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Some(new.variant),
             eval_set: new.eval_set,
@@ -591,6 +612,7 @@ impl App {
             metrics: None,
             checklist: new.checklist,
             queue: QueueState {
+                relay_of: new.relay_of,
                 backlog: new.backlog,
                 ..Default::default()
             },
@@ -1030,11 +1052,11 @@ impl App {
             if let Some(q) = task.question.clone() {
                 // A base-check question: the task starts again only with the
                 // answer applied, and the owner's answer is remembered.
-                if let Some(command) = pre_existing_command(&q).map(str::to_string) {
+                if q.kind == QuestionKind::PreexistingFailure && !q.commands.is_empty() {
                     let base_sha = task.base_sha.clone();
                     record_owner_base_check(
                         &mut task,
-                        &command,
+                        &q.commands,
                         &base_sha,
                         &p.answer,
                         default_evidence.is_some(),
@@ -1268,6 +1290,59 @@ impl App {
         Ok(json!({"id": id, "amended": fields, "pending": false}))
     }
 
+    /// `task.preset {id, preset}`: writes a preset into the task's variant
+    /// before its first implement attempt.
+    pub(super) async fn handle_task_preset(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        #[derive(Deserialize)]
+        struct P {
+            id: String,
+            preset: String,
+        }
+        let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        validate_task_id(&self.store, &p.id)?;
+        let settings = self.settings.read().unwrap().clone();
+        let preset = settings
+            .preset(&p.preset)
+            .ok_or_else(|| format!("unknown preset \"{}\"", p.preset))?;
+        let mut task = self
+            .store
+            .load_task(&p.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.archived {
+            return Err("task is archived".to_string());
+        }
+        if implement_attempt_count(&task) > 0 {
+            return Err(
+                "the task has already run an implement attempt; a preset can only be set before it"
+                    .to_string(),
+            );
+        }
+        // A live loop keeps its own copy of the task and would overwrite
+        // this change with its next save.
+        if self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&p.id)
+            .is_some_and(|c| !c.cancel.is_cancelled())
+        {
+            return Err("the task is running: stop it before changing its preset".to_string());
+        }
+        let mut variant = task.variant();
+        preset.values.apply(&mut variant);
+        variant.check()?;
+        variant.check_routes(&settings.routes)?;
+        task.variant = Some(variant);
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+
     /// Cancels the loop and waits for it to actually exit before touching
     /// the filesystem, so a still-running attempt can never write into a
     /// directory that's mid-deletion.
@@ -1469,9 +1544,13 @@ mod answer_source_tests {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.request = request.map(str::to_string);
         task.question = Some(base_check::pre_existing_question(
-            command,
+            &[VerifyOutcome {
+                command: command.to_string(),
+                code: Some(1),
+                tail: "boom".to_string(),
+                ms: 1,
+            }],
             "0123456789",
-            "boom",
         ));
         app.store.save_task(&task).unwrap();
         task.id

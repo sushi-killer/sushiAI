@@ -124,6 +124,7 @@ pub(super) async fn owner_accepts(
         codex_mcp: &[],
         images: &[],
         repo_settings: true,
+        resume: None,
     };
     let brief_text = brief::build_accept_brief(task, &question.text, &question.options, answer);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -545,6 +546,7 @@ async fn run_triage(
         codex_mcp: &[],
         images: &[],
         repo_settings: true,
+        resume: None,
     };
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -727,6 +729,7 @@ async fn wait_for_triaged_answer(
                     asked_at: question.asked_at,
                     held_for_overseer: false,
                     held_at: None,
+                    commands: question.commands.clone(),
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));

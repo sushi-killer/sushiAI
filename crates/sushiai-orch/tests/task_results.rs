@@ -143,7 +143,7 @@ fn criteria_results_follow_checks_and_review_rulings_and_diff_stats_are_exact() 
             "repo": repo.path().to_str().unwrap(),
             "title": "Grounded",
             "goal": "Make the checks pass",
-                        "criteria": [
+            "criteria": [
                 "Alpha file exists -- check: test -f alpha.txt",
                 "Beta file exists -- check: test -f beta.txt",
                 "Gamma is documented",
@@ -441,12 +441,7 @@ fn subtasks_that_land_on_their_parent_get_landed_at_and_their_own_diff_stat() {
         json!({"repo": repo.path().to_str().unwrap(), "request": "build both parts", "start": true}),
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
-    let asked = settle(&daemon, &parent_id);
-    assert_eq!(asked["question"]["kind"], "preexisting_failure", "{asked}");
-    daemon.request(
-        "task.answer",
-        json!({"id": parent_id, "answer": "keep this check"}),
-    );
+    // The parent's verify names files the subtasks create: kept by rule.
     let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });

@@ -312,39 +312,6 @@ fn flat(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether a command is a whole-repo run: a CI entry with no target.
-fn is_whole_repo(command: &str) -> bool {
-    shell_segments(command).iter().any(|seg| {
-        if !runs_ci_entry(seg) {
-            return false;
-        }
-        let tokens: Vec<&str> = seg.split_whitespace().collect();
-        let at = tokens
-            .iter()
-            .position(|t| matches!(*t, "cargo" | "npm" | "pnpm" | "yarn" | "make"))
-            .unwrap_or(0);
-        let rest = &tokens[at..];
-        if rest.first() == Some(&"cargo") {
-            let targeted = rest.iter().any(|t| {
-                matches!(
-                    *t,
-                    "-p" | "--package" | "--test" | "--lib" | "--bin" | "--doc" | "--manifest-path"
-                )
-            });
-            let filter = rest.iter().skip(2).any(|t| !t.starts_with('-'));
-            return !targeted && !filter;
-        }
-        if matches!(rest.first(), Some(&"npm" | &"pnpm" | &"yarn"))
-            && rest.get(1) != Some(&"run")
-            && rest.get(1) == Some(&"test")
-        {
-            // `npm test -- <filter>` or `npm test <file>` is a targeted run.
-            return rest.len() <= 2;
-        }
-        true
-    })
-}
-
 fn path_allows(paths: &[String], rel: &str) -> bool {
     let rel = rel.trim_start_matches("./").trim_end_matches('/');
     paths.iter().any(|p| {
@@ -650,7 +617,12 @@ pub(super) fn code_checks(v: &DraftView, shared: &dyn Fn(&str) -> bool) -> Vec<P
             n += 1;
         }
     }
-    for (n, command) in v.verify.iter().filter(|c| is_whole_repo(c)).enumerate() {
+    for (n, command) in v
+        .verify
+        .iter()
+        .filter(|c| whole_repo_suite(v.worktree, c))
+        .enumerate()
+    {
         out.push(finding(
             "verify-cost",
             n,
@@ -735,8 +707,13 @@ fn build_review_prompt(task: &Task, request: &str, subtasks: &[brief::PlanSubtas
     let parts: Vec<serde_json::Value> = subtasks
         .iter()
         .map(|s| {
-            json!({"key": s.key, "request": s.request, "dependsOn": s.depends_on,
-                   "paths": s.paths, "check": s.check})
+            json!({"key": s.key, "title": s.title, "request": s.request,
+                   "goal": s.goal, "criteria": s.criteria, "verify": s.verify,
+                   "finalVerify": s.final_verify, "checks": s.checks,
+                   "heldOutCriterion": s.held_out.as_ref().map(|h| h.criterion), "tests": s.tests,
+                   "visualCriteria": s.visual_criteria, "screenshot": s.screenshot,
+                   "tier": s.tier, "dependsOn": s.depends_on,
+                   "paths": s.paths, "check": s.check_command()})
         })
         .collect();
     format!(
@@ -745,6 +722,9 @@ fn build_review_prompt(task: &Task, request: &str, subtasks: &[brief::PlanSubtas
             "request": request,
             "goal": task.goal,
             "criteria": task.criteria,
+            "checks": task.checks,
+            "heldOutCriterion": task.held_out.as_ref().map(|h| h.criterion),
+            "tests": task.planner_tests.files,
             "verify": task.verify,
             "finalVerify": task.final_verify,
             "paths": task.paths,
@@ -835,40 +815,12 @@ fn remove_criteria(task: &mut Task, remove: &[usize]) {
         .collect();
 }
 
-/// Moves whole-repo commands out of `verify` into `finalVerify` while another
-/// verify entry remains; returns the moved commands.
-fn move_whole_repo_commands(task: &mut Task) -> Vec<String> {
-    let mut moved = Vec::new();
-    let mut kept: Vec<String> = Vec::new();
-    let heavy: Vec<String> = task
-        .verify
-        .iter()
-        .filter(|c| is_whole_repo(c))
-        .cloned()
-        .collect();
-    if heavy.is_empty() || heavy.len() == task.verify.len() {
-        return moved;
-    }
-    for c in std::mem::take(&mut task.verify) {
-        if heavy.contains(&c) {
-            if !task.final_verify.contains(&c) {
-                task.final_verify.push(c.clone());
-            }
-            moved.push(c);
-        } else {
-            kept.push(c);
-        }
-    }
-    task.verify = kept;
-    moved
-}
-
 fn is_critical(f: &PlanFinding) -> bool {
     f.severity == Severity::Critical
 }
 
 /// Runs the gate on the draft just stored on the task: code checks, the one
-/// plan review, the brief check; then the one replan if anything is
+/// plan review; then the one replan if anything is
 /// critical, otherwise the findings are stored for the implementer.
 pub(super) async fn run(
     app: &Arc<App>,
@@ -946,23 +898,11 @@ pub(super) async fn run(
     if first_pass {
         task.plan_gate.reviewed = true;
     }
-    for moved in move_whole_repo_commands(&mut task) {
-        task.decisions.push(format!(
-            "Plan gate: moved `{}` from verify to finalVerify; it runs the whole repository",
-            truncate_chars(&moved, 160)
-        ));
-    }
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
 
-    // The brief check: a contradiction here uses the same single replan.
     let replanned = task.plan_gate.replanned;
-    let conflict = match check_brief(app, task_id, attempt_n, !replanned, cancel).await {
-        BriefAction::Cancelled => return GateAction::Cancelled,
-        BriefAction::Conflict(c) => Some(c),
-        BriefAction::Proceed => None,
-    };
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return GateAction::Proceed;
     };
@@ -984,15 +924,7 @@ pub(super) async fn run(
         };
         code_checks(&view, &is_shared)
     };
-    let mut all: Vec<PlanFinding> = code.iter().chain(review.iter()).cloned().collect();
-    if let Some(conflict) = &conflict {
-        all.push(PlanFinding {
-            id: "brief-check-0".to_string(),
-            severity: Severity::Critical,
-            kind: "contradiction".to_string(),
-            text: truncate_chars(conflict, MAX_FINDING_CHARS),
-        });
-    }
+    let all: Vec<PlanFinding> = code.iter().chain(review.iter()).cloned().collect();
 
     if all.iter().any(is_critical) && !replanned {
         let kinds: Vec<String> = {
@@ -1051,9 +983,9 @@ pub(super) async fn run(
         stored = code_checks(&view, &is_shared);
         stored.extend(review.iter().cloned());
     }
-    // Handled elsewhere: overlap by the merge, a contradiction by the brief
-    // conflict block. A verify-cost finding left here could not be moved.
-    stored.retain(|f| !matches!(f.kind.as_str(), "overlap" | "contradiction"));
+    // Handled elsewhere: overlap by the merge. A verify-cost finding left
+    // here could not be moved.
+    stored.retain(|f| f.kind != "overlap");
     // A review finding the replan was asked to fix is not carried on.
     if replanned {
         stored.retain(|f| !(f.id.starts_with("review-") && is_critical(f)));
@@ -1079,17 +1011,21 @@ pub(super) struct MergePlan {
     pub merged: Vec<usize>,
 }
 
-/// A part stays its own child only when it lists paths, has a `check` and
-/// overlaps no other part. Everything else is one merged group, in planner
+/// A part stays its own child when it lists paths and targeted proof.
+/// Overlapping complete drafts are serialised; incomplete overlaps become
+/// one merged group, in planner
 /// order made stable-topological by `dependsOn`. If the group, as one node,
 /// would make the dependency graph cyclic, everything merges.
 pub(super) fn merge_parts(parts: &[brief::PlanSubtask]) -> MergePlan {
     let keys: Vec<&str> = parts.iter().map(|p| p.key.trim()).collect();
     let stands_alone = |i: usize| {
         !parts[i].paths.is_empty()
-            && !parts[i].check.trim().is_empty()
-            && !(0..parts.len())
-                .any(|j| j != i && overlapping_path(&parts[i].paths, &parts[j].paths).is_some())
+            && !parts[i].check_command().is_empty()
+            && !(0..parts.len()).any(|j| {
+                j != i
+                    && overlapping_path(&parts[i].paths, &parts[j].paths).is_some()
+                    && !(parts[i].is_complete() && parts[j].is_complete())
+            })
     };
     let mut separate: Vec<usize> = (0..parts.len()).filter(|&i| stands_alone(i)).collect();
     let mut merged: Vec<usize> = (0..parts.len()).filter(|i| !separate.contains(i)).collect();
@@ -1149,7 +1085,7 @@ pub(super) fn checklist_of(parts: &[brief::PlanSubtask], merged: &[usize]) -> Ve
         .iter()
         .map(|&i| ChecklistItem {
             text: truncate_chars(parts[i].request.trim(), MAX_ITEM_CHARS),
-            check: parts[i].check.trim().to_string(),
+            check: parts[i].check_command().to_string(),
             passes: false,
         })
         .collect()
@@ -1246,6 +1182,7 @@ mod tests {
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
             check: check.into(),
+            ..Default::default()
         }
     }
 
@@ -1383,15 +1320,35 @@ mod tests {
 
     #[test]
     fn plan_gate_moves_whole_repo_commands_to_final_verify_when_another_remains() {
-        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Drafting);
-        task.verify = vec!["npm run ci".into(), "cargo test -p x --lib".into()];
-        assert_eq!(move_whole_repo_commands(&mut task), vec!["npm run ci"]);
+        use crate::engine::test_support::{attempt_with_failure, task_with_status, test_app};
+        let (app, dir) = test_app();
+        let mut settings = app.settings.read().unwrap().clone();
+        settings.review.clear();
+        let mut task = task_with_status(TaskStatus::Drafting);
+        let mut attempt = attempt_with_failure(1, "drafting");
+        attempt.stage = Stage::Plan;
+        attempt.status = AttemptStatus::Running;
+        attempt.failure = None;
+        task.attempts.push(attempt);
+        let draft = brief::parse_plan(
+            "```sushi-plan\n{\"title\":\"Run checks\",\"verify\":[\"npm run ci\",\"cargo test -p x --lib\"],\"finalVerify\":[\"npm run ci\"]}\n```",
+        ).unwrap();
+        store_draft(&app, &mut task, 0, &draft, &settings, dir.path());
         assert_eq!(task.verify, vec!["cargo test -p x --lib"]);
         assert_eq!(task.final_verify, vec!["npm run ci"]);
-        // The only entry stays.
-        task.verify = vec!["npm run ci".into()];
-        assert!(move_whole_repo_commands(&mut task).is_empty());
-        assert_eq!(task.verify, vec!["npm run ci"]);
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("npm run ci") && d.contains("moved to finalVerify")));
+
+        // A sole suite also runs once as the final gate, with review off.
+        let sole = brief::parse_plan(
+            "```sushi-plan\n{\"title\":\"Run checks\",\"verify\":[\"npm run ci\"]}\n```",
+        )
+        .unwrap();
+        store_draft(&app, &mut task, 0, &sole, &settings, dir.path());
+        assert!(task.verify.is_empty());
+        assert_eq!(task.final_verify, vec!["npm run ci"]);
     }
 
     #[test]
@@ -1409,6 +1366,39 @@ mod tests {
         let final_verify = vec!["npm run ci".to_string()];
         kept.final_verify = &final_verify;
         assert!(!kinds(&code_checks(&kept, &shared)).contains(&"shared-check"));
+    }
+
+    #[test]
+    fn the_parent_plan_review_sees_the_complete_drafts_its_children_will_run() {
+        let task = crate::engine::test_support::task_with_status(TaskStatus::Drafting);
+        let mut child = part("child", &[], &["child.txt"], "test -f child.txt");
+        child.title = "Write child".into();
+        child.goal = "Keep the requested behaviour".into();
+        child.criteria = vec!["Child behaves correctly".into()];
+        child.verify = vec!["test -f child.txt".into()];
+        child.final_verify = vec!["cargo test -p child".into()];
+        child.tests = vec![PlannedTest {
+            path: "child.test.ts".into(),
+            content: "assert(child())".into(),
+        }];
+        child.screenshot = Some("npm run screenshot:child".into());
+        child.held_out = Some(Check {
+            criterion: 0,
+            run: "secret-hidden-check".into(),
+            baseline: None,
+        });
+        let prompt = build_review_prompt(&task, "Build the child", &[child]);
+        let json: serde_json::Value =
+            serde_json::from_str(prompt.strip_prefix(REVIEW_PROMPT).unwrap().trim()).unwrap();
+        let child = &json["subtasks"][0];
+        assert!(!prompt.contains("secret-hidden-check"));
+        assert_eq!(child["heldOutCriterion"], 0);
+        assert_eq!(child["goal"], "Keep the requested behaviour");
+        assert_eq!(child["criteria"], json!(["Child behaves correctly"]));
+        assert_eq!(child["verify"], json!(["test -f child.txt"]));
+        assert_eq!(child["finalVerify"], json!(["cargo test -p child"]));
+        assert_eq!(child["tests"][0]["content"], "assert(child())");
+        assert_eq!(child["screenshot"], "npm run screenshot:child");
     }
 
     #[test]
@@ -1456,6 +1446,33 @@ mod tests {
         let plan = merge_parts(&parts);
         assert_eq!(plan.separate, vec![2]);
         assert_eq!(plan.merged, vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn complete_overlapping_drafts_keep_children_but_incomplete_overlaps_merge() {
+        let mut a = part("a", &[], &["src/shared"], "");
+        a.goal = "Add A".to_string();
+        a.criteria = vec!["A is present".to_string()];
+        a.verify = vec!["test -f src/shared/a".to_string()];
+        let mut b = part("b", &[], &["src/shared"], "");
+        b.goal = "Add B".to_string();
+        b.criteria = vec!["B is present".to_string()];
+        b.verify = vec!["test -f src/shared/b".to_string()];
+        assert_eq!(
+            merge_parts(&[a.clone(), b.clone()]),
+            MergePlan {
+                separate: vec![0, 1],
+                merged: vec![],
+            }
+        );
+        b.goal.clear();
+        assert_eq!(
+            merge_parts(&[a, b]),
+            MergePlan {
+                separate: vec![],
+                merged: vec![0, 1],
+            }
+        );
     }
 
     #[test]

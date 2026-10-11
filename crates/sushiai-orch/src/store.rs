@@ -480,6 +480,9 @@ mod tests {
                 review_cost_usd: None,
                 evidence: vec![],
                 evidence_tree: None,
+                review_tree: None,
+                review_base: None,
+                review_scope: None,
                 evidence_base: None,
                 evidence_from: None,
                 advice: None,
@@ -502,6 +505,7 @@ mod tests {
             pr_url: None,
             overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -601,6 +605,21 @@ mod tests {
         store.save_settings(&custom).unwrap();
         let loaded = store.load_settings().unwrap();
         assert_eq!(loaded.max_attempts, 7);
+    }
+
+    #[test]
+    fn settings_saved_before_presets_load_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        let o = value.as_object_mut().unwrap();
+        assert!(o.remove("presets").is_some());
+        assert!(o.remove("repoPresets").is_some());
+        std::fs::write(store.settings_path(), value.to_string()).unwrap();
+        let loaded = store.load_settings().unwrap();
+        assert!(loaded.presets.is_empty());
+        assert!(loaded.repo_presets.is_empty());
+        assert!(loaded.check_presets().is_ok());
     }
 
     #[test]

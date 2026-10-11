@@ -1072,13 +1072,19 @@ function OrchestratorSettingsBody({
       )}
       {row(
         "Worktree folder",
-        "Where new task worktrees go. A relative folder is resolved against the repo. Existing tasks keep their path.",
+        "Where new task worktrees go. Empty keeps them outside the repo, under ~/.sushiai/worktrees.noindex/<repo>. A relative folder is resolved against the repo. Existing tasks keep their path.",
         <label className="os-input os-input-wide">
           <input
             aria-label="Worktree folder"
             spellCheck={false}
-            value={settings.worktreeRoot ?? ""}
-            placeholder={defaults?.worktreeRoot || ".sushiai/worktrees"}
+            value={
+              settings.worktreeRoot === ".sushiai/worktrees"
+                ? ""
+                : (settings.worktreeRoot ?? "")
+            }
+            placeholder={
+              defaults?.worktreeRoot || "~/.sushiai/worktrees.noindex/<repo>"
+            }
             onChange={(event) =>
               update({ worktreeRoot: event.target.value || undefined })
             }

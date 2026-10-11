@@ -94,16 +94,28 @@ pub fn question_title(kind: QuestionKind, text: &str) -> String {
 }
 
 /// The question without the command output it quotes: a base-check question
-/// reads `<command> already fails on base <sha>: <output tail>`.
-fn question_prose(kind: QuestionKind, text: &str) -> &str {
-    const ALREADY_FAILS: &str = " already fails on base ";
-    if kind == QuestionKind::PreexistingFailure {
-        if let Some(at) = text.find(ALREADY_FAILS) {
-            let end = text[at..].find(": ").map_or(text.len(), |i| at + i);
-            return &text[..end];
+/// reads `<command>, <command> fail on base <sha>`, the commands read from
+/// the question and the short sha from the text.
+fn question_prose(question: &Question) -> String {
+    const ON_BASE: &str = " on base ";
+    if question.kind == QuestionKind::PreexistingFailure {
+        if let Some(at) = question.text.find(ON_BASE) {
+            // The header ends where the quoted output starts.
+            let rest = &question.text[at + ON_BASE.len()..];
+            let end = rest.find(':').unwrap_or(rest.len());
+            let sha = rest[..end].trim();
+            if question.commands.is_empty() {
+                return format!("{}{ON_BASE}{sha}", &question.text[..at]);
+            }
+            let verb = if question.commands.len() == 1 {
+                "fails"
+            } else {
+                "fail"
+            };
+            return format!("{} {verb}{ON_BASE}{sha}", question.commands.join(", "));
         }
     }
-    text
+    question.text.clone()
 }
 
 impl Entry {
@@ -114,6 +126,7 @@ impl Entry {
         let (kind, asked) = question.map_or((QuestionKind::AgentQuestion, ""), |q| {
             (q.kind, q.text.as_str())
         });
+        let prose = question.map_or_else(String::new, question_prose);
         let title = question_title(kind, asked);
         let entry = Entry::new(
             "answered",
@@ -121,7 +134,7 @@ impl Entry {
             Some(task_id),
             &format!("{title} \u{2192} {answer}"),
         );
-        let prose = question_prose(kind, asked).trim();
+        let prose = prose.trim();
         entry.with_detail(&format!("{prose}\n\nAnswer: {answer}"))
     }
 
@@ -218,18 +231,19 @@ mod tests {
     #[test]
     fn answered_reads_as_a_title_and_keeps_the_whole_exchange() {
         let cmd = "node --input-type=module -e \"import assert from 'node:assert/strict'\"";
-        let q = Question::new(
+        let mut q = Question::new(
             format!("{cmd} already fails on base 0123456: TOKEN=abc123 leaked output"),
             vec![],
             QuestionKind::PreexistingFailure,
             crate::model::AskedBy::Verify,
         );
-        let e = Entry::answered("/r", "t1", Some(&q), " keep this check ");
-        assert_eq!(e.text, "Base check failing \u{2192} keep this check");
+        q.commands = vec![cmd.to_string(), "npm test".to_string()];
+        let e = Entry::answered("/r", "t1", Some(&q), " keep all ");
+        assert_eq!(e.text, "Base check failing \u{2192} keep all");
         let d = e.detail.unwrap();
-        assert!(d.starts_with("node --input-type") && d.ends_with("\n\nAnswer: keep this check"));
+        assert!(d.starts_with("node --input-type") && d.ends_with("\n\nAnswer: keep all"));
         assert!(
-            d.contains("already fails on base 0123456") && !d.contains("TOKEN"),
+            d.contains(&format!("{cmd}, npm test fail on base 0123456")) && !d.contains("TOKEN"),
             "{d}"
         );
 

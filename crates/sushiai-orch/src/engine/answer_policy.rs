@@ -78,7 +78,7 @@ const CI_ENTRIES: [&[&str]; 11] = [
     &["make", "ci"],
 ];
 
-fn is_assignment(token: &str) -> bool {
+pub(super) fn is_assignment(token: &str) -> bool {
     token.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
             && !name.starts_with(|c: char| c.is_ascii_digit())
@@ -245,7 +245,7 @@ pub(super) fn remove_check_command(
 }
 
 /// Why a non-owner `answer` to `question` must not be given, when it removes
-/// a shared check: "drop this check" on a base-check question, or "drop
+/// a shared check: "drop all" on a base-check question, or "drop
 /// criterion" on an impossible one whose criterion carries one. Only the
 /// owner may; others may retry or stop. Callers that answer by rule, judge or
 /// triage escalate to the owner instead.
@@ -255,11 +255,11 @@ pub(super) fn shared_check_drop_refusal(
     question: &Question,
     answer: &str,
 ) -> Option<String> {
-    let commands: Vec<String> = if let Some(command) = pre_existing_command(question) {
+    let commands: Vec<String> = if question.kind == QuestionKind::PreexistingFailure {
         if !is_option(answer, base_check::PRE_EXISTING_DROP) {
             return None;
         }
-        vec![command.to_string()]
+        question.commands.clone()
     } else if let Some(n) = impossible_drop_target(question, answer) {
         criterion_commands(task, n)
     } else {
@@ -312,6 +312,26 @@ pub(super) fn shared_check_amend_refusal(
     removal_refusal(settings, task, &removed, Origin::Other)
 }
 
+/// Whether the policy already gave `answer` to every check `question` is
+/// about: a base-check rule fires once per command, not once per task. A
+/// question without commands counts as one unnamed command.
+fn covered_by_rule(task: &Task, question: &Question, answer: &str) -> bool {
+    let earlier = || {
+        task.assumptions.iter().filter(|a| {
+            (a.by == "policy" || a.by == "judge")
+                && a.kind == Some(question.kind)
+                && a.answer == answer
+        })
+    };
+    if question.commands.is_empty() {
+        return earlier().next().is_some();
+    }
+    question
+        .commands
+        .iter()
+        .all(|c| earlier().any(|a| a.commands.contains(c)))
+}
+
 /// The fixed rule for `question`: its answer and why. Each rule fires once
 /// (the review rule once per attempt); a repeat goes on as before.
 fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(String, String)> {
@@ -322,10 +342,8 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
             .iter()
             .any(|o| o == base_check::PARENT_KEEP)
     {
-        let kept = task.assumptions.iter().any(|a| {
-            a.by == "policy" && a.kind == Some(kind) && a.answer == base_check::PARENT_KEEP
-        });
-        return (!kept).then(|| {
+        let fresh = !covered_by_rule(task, question, base_check::PARENT_KEEP);
+        return fresh.then(|| {
             (
                 base_check::PARENT_KEEP.to_string(),
                 "the subtasks are meant to make the check pass: keep it, once".to_string(),
@@ -359,7 +377,12 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
     if kind == QuestionKind::ReviewNoVerdict && !question.options.iter().any(|o| o == answer) {
         return None;
     }
-    if answered_before(task, kind, once_per) {
+    let answered = if kind == QuestionKind::PreexistingFailure {
+        covered_by_rule(task, question, answer)
+    } else {
+        answered_before(task, kind, once_per)
+    };
+    if answered {
         return None;
     }
     Some((answer.to_string(), evidence.to_string()))
@@ -385,6 +408,7 @@ pub(super) fn record_policy_answer(
         by: by.to_string(),
         kind: Some(question.kind),
         attempt: Some(attempt_n),
+        commands: question.commands.clone(),
         overturned: false,
         owner_answer: None,
     });
@@ -511,7 +535,7 @@ async fn judge_impossible(
 ) -> Option<(String, String)> {
     let (n, evidence) = impossible_parts(question)?;
     let criterion = task.criteria.get(n)?.clone();
-    let (_, route, fallback) = check_route(app)?;
+    let (_, route, fallback) = check_route_for(app, &task.variant())?;
     let route = route?;
     if let Some(note) = fallback {
         task.decisions.push(format!("Answer judge: {note}"));
@@ -543,6 +567,7 @@ async fn judge_impossible(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
     };
     let result = run_harness(
@@ -678,5 +703,77 @@ mod tests {
         );
         let (answer, _) = rule_answer(&task, &q, 1).unwrap();
         assert_eq!(answer, "continue");
+    }
+
+    fn base_check_question(commands: &[&str], options: &[&str]) -> Question {
+        let failed: Vec<VerifyOutcome> = commands
+            .iter()
+            .map(|c| VerifyOutcome {
+                command: c.to_string(),
+                code: Some(1),
+                tail: "boom".to_string(),
+                ms: 1,
+            })
+            .collect();
+        let mut q = base_check::pre_existing_question(&failed, "0123456789");
+        q.options = opts(options);
+        q
+    }
+
+    #[test]
+    fn drop_all_with_a_shared_check_is_refused_for_a_non_owner() {
+        let settings = Settings::default();
+        let task = task_with_status(TaskStatus::Waiting);
+        let q = base_check_question(
+            &["node --test tests/x.test.cjs", "npm run ci"],
+            &["retry after the base is fixed", "drop all", "stop"],
+        );
+        let why = shared_check_drop_refusal(&settings, &task, &q, "drop all").unwrap();
+        assert!(
+            why.contains("`npm run ci`") && why.contains("only the owner"),
+            "{why}"
+        );
+        // Retry and stop are not removals.
+        assert!(shared_check_drop_refusal(&settings, &task, &q, "stop").is_none());
+        // Only task-specific checks: droppable by anyone.
+        let q = base_check_question(&["node --test tests/x.test.cjs"], &["drop all"]);
+        assert!(shared_check_drop_refusal(&settings, &task, &q, "drop all").is_none());
+        // Nothing is removed on a refusal: the owner's route is the only one.
+        let mut task = task;
+        task.verify = vec!["npm run ci".into(), "node --test tests/x.test.cjs".into()];
+        let q = base_check_question(
+            &["npm run ci", "node --test tests/x.test.cjs"],
+            &["drop all"],
+        );
+        assert!(removal_refusal(&settings, &task, &q.commands, Origin::Other).is_some());
+        assert_eq!(task.verify.len(), 2);
+    }
+
+    #[test]
+    fn a_base_check_rule_fires_once_per_command() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        let keep = base_check::PARENT_KEEP;
+        let first = base_check_question(&["a.sh", "b.sh"], &[keep, "drop all", "stop"]);
+        let (answer, _) = rule_answer(&task, &first, 1).unwrap();
+        assert_eq!(answer, keep);
+        record_policy_answer(&mut task, &first, &answer, "policy", "e", 1);
+        // The same commands again: covered.
+        assert!(rule_answer(&task, &first, 1).is_none());
+        // A new command in the list: the rule fires again.
+        let second = base_check_question(&["b.sh", "c.sh"], &[keep, "drop all", "stop"]);
+        assert!(rule_answer(&task, &second, 1).is_some());
+        record_policy_answer(&mut task, &second, keep, "policy", "e", 1);
+        assert!(rule_answer(&task, &second, 1).is_none());
+
+        // The retry rule of a single task is per command too.
+        let retry = base_check::PRE_EXISTING_RETRY;
+        let mut task = task_with_status(TaskStatus::Waiting);
+        let one = base_check_question(&["a.sh"], &[retry, "drop all", "stop"]);
+        let (answer, _) = rule_answer(&task, &one, 1).unwrap();
+        assert_eq!(answer, retry);
+        record_policy_answer(&mut task, &one, &answer, "policy", "e", 1);
+        assert!(rule_answer(&task, &one, 1).is_none());
+        let other = base_check_question(&["a.sh", "d.sh"], &[retry, "drop all", "stop"]);
+        assert!(rule_answer(&task, &other, 1).is_some());
     }
 }

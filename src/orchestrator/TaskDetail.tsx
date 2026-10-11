@@ -20,7 +20,6 @@ import {
   formatCost,
   formatDuration,
   formatTaskTier,
-  stageTrack,
   statusBadgeLabel,
   statusTone,
   variantLabel,
@@ -40,7 +39,10 @@ import {
   reportSummary,
   shortBranch,
 } from "./taskDetailModel";
-import { Chip, Criterion, StageTrack, Tag } from "../ui";
+import { Chip, Criterion, Tag } from "../ui";
+import { Blueprint } from "./Blueprint";
+import { canPickTaskPreset } from "./blueprintModel";
+import { usePipeline } from "./usePipeline";
 import "./task-detail.css";
 
 const DECISION_TAGS = ["Orchestrator"] as const;
@@ -501,6 +503,49 @@ function AssumptionsList({
   );
 }
 
+/** The selected task's pipeline diagram. Its preset can be chosen until the
+ * task has an implement attempt; the inspector never edits a task. */
+function TaskBlueprint({
+  task,
+  settings,
+  busy,
+  act,
+}: {
+  task: Task;
+  settings: Settings | null;
+  busy: boolean;
+  act(action: () => Promise<Task>): void;
+}) {
+  const orchestratorClient = useOrchestratorClient();
+  const { pipeline, error } = usePipeline({ taskId: task.id }, task.updatedAt);
+  const pickable = canPickTaskPreset(task);
+  return (
+    <Blueprint
+      pipeline={pipeline}
+      routes={settings?.routes ?? []}
+      error={error}
+      preset={{
+        options: [
+          { id: "", label: "Global settings" },
+          ...(pipeline?.presets ?? []).map((p) => ({
+            id: p.id,
+            label: p.label,
+          })),
+        ],
+        value: pipeline?.presetId ?? "",
+        disabled: !pickable || busy || !pipeline,
+        note: pickable
+          ? undefined
+          : "Fixed: the task already has an implement attempt.",
+        onChange: (id) => {
+          if (id && pickable)
+            act(() => orchestratorClient.taskPreset(task.id, id));
+        },
+      }}
+    />
+  );
+}
+
 /** One task's view: header and actions, the question blocking it, its report
  * or stage track, timeline, criteria, attempts and evidence, and the rest
  * (request, subtasks, assumptions, decisions, live log) under Details. */
@@ -843,7 +888,12 @@ export function TaskDetail({
             onOpen={onOpen}
           />
         ) : (
-          <StageTrack steps={stageTrack(selected)} />
+          <TaskBlueprint
+            task={selected}
+            settings={settings}
+            busy={busy}
+            act={act}
+          />
         )}
         {/* The one thing blocking the task goes first, above everything
          * that only describes it. */}

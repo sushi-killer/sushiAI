@@ -382,10 +382,13 @@ async fn parent_finals_on_base(
     }
     task.status = TaskStatus::Running;
     task.updated_at = now_ms();
-    if question
-        .commands
-        .iter()
-        .any(|c| task.final_verify.contains(c))
+    // A retry on an unchanged base would meet the same failure: every retry
+    // waits for the base to move and carries onto it.
+    if is_option(&answer, super::base_check::PRE_EXISTING_RETRY)
+        || question
+            .commands
+            .iter()
+            .any(|c| task.final_verify.contains(c))
     {
         let wt = PathBuf::from(&task.worktree);
         if !carry_after_base_moves(app, task, &wt, cancel, &mut None).await {

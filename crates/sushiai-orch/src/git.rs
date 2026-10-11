@@ -202,6 +202,7 @@ pub fn add_detached_worktree(repo_root: &Path, path: &Path, sha: &str) -> Result
 /// `git worktree remove --force <path>`, then `git worktree prune`. Both are
 /// best effort: the caller is cleaning up and has nothing left to do on error.
 pub fn remove_worktree(repo_root: &Path, path: &Path) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }
@@ -549,6 +550,7 @@ pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
 /// Removes a worktree and its branch that nothing has used yet (best
 /// effort: an undone step leaves at most an unused branch or directory).
 pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }
@@ -1111,6 +1113,7 @@ pub fn save_wip(worktree: &Path, task_id: &str) -> Result<bool, GitError> {
 /// Removes a task's worktree directory (its branch stays) and prunes the
 /// repo's worktree list.
 pub fn remove_task_worktree(repo_root: &Path, path: &Path) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }

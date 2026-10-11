@@ -472,7 +472,7 @@ pub(super) async fn run_harness(
                     // finds it by its process group and files.
                     return Err(RunError::Cancelled);
                 }
-                kill_group(pgid, &mut child).await;
+                crate::procs::kill_group(pgid, &mut child).await;
                 // A stopped run still ran: keep what it reported so far.
                 let fp = fingerprint_of(&outcome, req, &run_argv, codex_version.clone());
                 let mut partial = outcome.clone();
@@ -499,7 +499,7 @@ pub(super) async fn run_harness(
             }
             _ = tokio::time::sleep_until(guard.deadline()), if guard.armed() => {
                 let Some(trip) = guard.stall_expired() else { continue };
-                kill_group(pgid, &mut child).await;
+                crate::procs::kill_group(pgid, &mut child).await;
                 trip.apply(&mut outcome);
                 break;
             }
@@ -519,7 +519,7 @@ pub(super) async fn run_harness(
                             app.broadcast_log(task_id, attempt_n, note);
                         }
                         if let Some(trip) = guard.line(app, (harness_kind, model), &l, &outcome) {
-                            kill_group(pgid, &mut child).await;
+                            crate::procs::kill_group(pgid, &mut child).await;
                             trip.apply(&mut outcome);
                             break;
                         }

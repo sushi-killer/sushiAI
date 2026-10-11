@@ -133,17 +133,6 @@ fn tail(text: &str) -> String {
     text.chars().skip(skip).collect()
 }
 
-fn kill_group(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
-}
-
 fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
@@ -192,32 +181,71 @@ pub async fn run_setup(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start the worktree setup: {e}"))?;
-    let pid = child.id();
-    let out = tokio::select! {
-        r = child.wait_with_output() => r.map_err(|e| format!("worktree setup failed: {e}"))?,
-        _ = tokio::time::sleep(timeout) => {
-            kill_group(pid);
-            return Err(format!("worktree setup timed out after {}s", timeout.as_secs()));
-        }
-        _ = cancelled => {
-            kill_group(pid);
-            return Err("worktree setup stopped".to_string());
-        }
+    let pgid = child.id().and_then(|p| i32::try_from(p).ok());
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    // Drain the pipes while waiting, without moving `child`, so its group
+    // can still be stopped when the wait is dropped.
+    let read = async {
+        use tokio::io::AsyncReadExt;
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let (status, _, _) = tokio::try_join!(
+            child.wait(),
+            async {
+                match stdout.as_mut() {
+                    Some(s) => s.read_to_end(&mut out).await,
+                    None => Ok(0),
+                }
+            },
+            async {
+                match stderr.as_mut() {
+                    Some(s) => s.read_to_end(&mut err).await,
+                    None => Ok(0),
+                }
+            },
+        )?;
+        Ok::<_, std::io::Error>((status, out, err))
     };
-    if out.status.success() {
+    enum Ended {
+        Done(std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)>),
+        TimedOut,
+        Cancelled,
+    }
+    let ended = tokio::select! {
+        r = read => Ended::Done(r),
+        _ = tokio::time::sleep(timeout) => Ended::TimedOut,
+        _ = cancelled => Ended::Cancelled,
+    };
+    drop((stdout, stderr));
+    crate::procs::kill_group(pgid, &mut child).await;
+    if !matches!(ended, Ended::Done(_)) {
+        let dir = worktree.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
+    }
+    let (status, stdout, stderr) = match ended {
+        Ended::Done(r) => r.map_err(|e| format!("worktree setup failed: {e}"))?,
+        Ended::TimedOut => {
+            return Err(format!(
+                "worktree setup timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        Ended::Cancelled => return Err("worktree setup stopped".to_string()),
+    };
+    if status.success() {
         return Ok(());
     }
     let output = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     Err(format!(
         "worktree setup failed ({}): {}",
-        out.status,
+        status,
         tail(&output)
     ))
 }
@@ -432,5 +460,67 @@ mod tests {
             ))
             .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    fn gone(pid: i32) -> bool {
+        for _ in 0..200 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn stop_detached_grandchild(timeout: Duration, cancel: Duration) {
+        let (tmp, wt) = worktree();
+        let exe = crate::procs::testing::place(&wt);
+        let pidfile = tmp.path().join("pid");
+        let marker = tmp.path().join("marker");
+        let script = format!(
+            "trap 'echo t > {marker}; exit 0' TERM; {detach}; wait",
+            marker = shell_quote(&marker.display().to_string()),
+            detach = crate::procs::testing::detach(&exe, &pidfile),
+        );
+        std::fs::write(
+            wt.join(SETUP_FILE),
+            serde_json::json!({ "setup": script }).to_string(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(run_setup(
+                tmp.path(),
+                &wt,
+                "/usr/bin:/bin",
+                timeout,
+                sh,
+                async move { tokio::time::sleep(cancel).await },
+            ))
+            .unwrap_err();
+        assert!(
+            err.contains("timed out") || err.contains("stopped"),
+            "{err}"
+        );
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("the setup wrote the pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(marker.exists(), "the group was not sent SIGTERM first");
+        assert!(gone(pid), "the detached grandchild {pid} is still alive");
+    }
+
+    #[test]
+    fn a_timed_out_setup_gets_sigterm_and_loses_its_detached_grandchild() {
+        stop_detached_grandchild(Duration::from_millis(1500), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_cancelled_setup_gets_sigterm_and_loses_its_detached_grandchild() {
+        stop_detached_grandchild(Duration::from_secs(60), Duration::from_millis(1500));
     }
 }

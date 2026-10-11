@@ -17,6 +17,7 @@ pub mod loop_detect;
 pub mod mcp;
 pub mod model;
 pub mod overseer;
+pub mod procs;
 pub mod prompts;
 pub mod report;
 pub mod skill;

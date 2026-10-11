@@ -428,21 +428,6 @@ pub(super) fn diff_hash(worktree: &Path, base: &str) -> String {
     simple_hash(&input)
 }
 
-/// Shared by verify commands and the harness: SIGTERM the process group,
-/// give it 5s, then SIGKILL, then reap it.
-pub(super) async fn kill_group(pgid: Option<i32>, child: &mut tokio::process::Child) {
-    if let Some(pgid) = pgid {
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.wait().await;
-}
-
 /// Concurrently drain a child's stdout/stderr and wait for it to exit,
 /// without moving `child` -- so the caller still owns it (and can kill its
 /// process group) if this gets dropped by an outer timeout/cancellation.
@@ -786,8 +771,9 @@ pub(super) async fn run_held_out(
 }
 
 /// Run one verify command in its own process group (`setsid`, like the
-/// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
-/// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
+/// harness). After every outcome the group is stopped (SIGTERM, SIGKILL 5s
+/// later); on timeout *or* cancellation processes that left the group but
+/// run from `cwd` are stopped too -- a bare `tokio::time::timeout` around `Command::output()`
 /// only stops *waiting*, it never touches the still-running process (or any
 /// children it spawned), which is the bug this replaces.
 pub(super) async fn run_one_verify_command(
@@ -824,6 +810,13 @@ pub(super) async fn run_one_verify_command(
         _ = tokio::time::sleep(timeout) => Outcome::TimedOut,
         _ = cancel.cancelled() => Outcome::Cancelled,
     };
+    // Whatever the outcome, nothing the command left in its group outlives it.
+    crate::procs::kill_group(pgid, &mut child).await;
+    if matches!(outcome, Outcome::TimedOut | Outcome::Cancelled) {
+        // Processes that left the group (`setsid`) but run from this directory.
+        let dir = cwd.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
+    }
     match outcome {
         Outcome::Done(Ok((status, out_buf, err_buf))) => VerifyOutcome {
             command: cmd.to_string(),
@@ -837,24 +830,18 @@ pub(super) async fn run_one_verify_command(
             tail: format!("{INTERNAL_ERROR_PREFIX}{e}"),
             ms: start.elapsed().as_millis() as u64,
         },
-        Outcome::TimedOut => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: timed_out_tail(timeout),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
-        Outcome::Cancelled => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: CANCELLED_TAIL.to_string(),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
+        Outcome::TimedOut => VerifyOutcome {
+            command: cmd.to_string(),
+            code: None,
+            tail: timed_out_tail(timeout),
+            ms: start.elapsed().as_millis() as u64,
+        },
+        Outcome::Cancelled => VerifyOutcome {
+            command: cmd.to_string(),
+            code: None,
+            tail: CANCELLED_TAIL.to_string(),
+            ms: start.elapsed().as_millis() as u64,
+        },
     }
 }
 

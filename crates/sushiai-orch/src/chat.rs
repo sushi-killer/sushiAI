@@ -2252,7 +2252,7 @@ async fn run(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                kill_group(pgid, &mut child).await;
+                crate::procs::kill_group(pgid, &mut child).await;
                 record(&mut outcome.clone());
                 return Err(RunError::Cancelled);
             }

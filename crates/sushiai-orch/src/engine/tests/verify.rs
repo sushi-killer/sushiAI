@@ -262,3 +262,92 @@ fn the_base_preflight_scopes_by_planned_paths() {
     // No planned paths: no way to tell, so it runs.
     assert_eq!(run(&[]), commands);
 }
+
+/// Starts a long-lived process whose executable the test placed in `dir`,
+/// detached into its own session; writes its pid to `pidfile`.
+fn detached_sleep_command(dir: &Path, pidfile: &Path) -> String {
+    let exe = crate::procs::testing::place(dir);
+    crate::procs::testing::detach(&exe, pidfile)
+}
+
+async fn assert_pid_gone(pidfile: &Path) {
+    let pid: i32 = std::fs::read_to_string(pidfile)
+        .expect("the check wrote the pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+    let start = std::time::Instant::now();
+    while unsafe { libc::kill(pid, 0) == 0 } {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "process {pid} is still alive"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_timeout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("child.pid");
+    let cmd = format!("{}; wait", detached_sleep_command(tmp.path(), &pidfile));
+    let outcome = run_one_verify_command(
+        tmp.path(),
+        &cmd,
+        Duration::from_millis(1500),
+        SandboxMode::Host,
+        &[],
+        "",
+        &CancelToken::new(),
+    )
+    .await;
+    assert!(outcome.tail.contains("timed out"), "{}", outcome.tail);
+    assert_pid_gone(&pidfile).await;
+}
+
+#[tokio::test]
+async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("child.pid");
+    let cmd = format!("{}; wait", detached_sleep_command(tmp.path(), &pidfile));
+    let cancel = CancelToken::new();
+    let cancel2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        cancel2.cancel();
+    });
+    let outcome = run_one_verify_command(
+        tmp.path(),
+        &cmd,
+        Duration::from_secs(60),
+        SandboxMode::Host,
+        &[],
+        "",
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome.tail, "cancelled");
+    assert_pid_gone(&pidfile).await;
+}
+
+#[tokio::test]
+async fn verify_stops_a_process_left_in_the_group_after_a_normal_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("child.pid");
+    let cmd = format!(
+        "sleep 60 >/dev/null 2>&1 </dev/null & echo $! > {}",
+        pidfile.display()
+    );
+    let outcome = run_one_verify_command(
+        tmp.path(),
+        &cmd,
+        Duration::from_secs(60),
+        SandboxMode::Host,
+        &[],
+        "",
+        &CancelToken::new(),
+    )
+    .await;
+    assert_eq!(outcome.code, Some(0));
+    assert_pid_gone(&pidfile).await;
+}

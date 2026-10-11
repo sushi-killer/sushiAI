@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// Implements (writes a marker) and, the first time only, commits `$NEWFILE`
 /// to the base branch in `$REPO` while it works: the base moves under the
@@ -89,14 +88,14 @@ fn implements(task: &Value) -> Vec<&Value> {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(Path::new(&worktree));
+    remove_dir_retrying(Path::new(&worktree));
 }
 
 #[test]
 fn a_command_the_new_base_broke_waits_for_the_owner_without_costing_an_attempt() {
     let s = setup("broken.txt");
     let id = start(&s, "test ! -f broken.txt");
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "waiting" | "failed" | "done")
     });
     assert_eq!(task["status"], "waiting", "{task}");
@@ -129,9 +128,7 @@ fn a_command_the_new_base_broke_waits_for_the_owner_without_costing_an_attempt()
     // Dropping the check lets the same attempt finish: it never failed.
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "drop all"}));
-    let done = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
-        matches!(st, "failed" | "done")
-    });
+    let done = poll_until(&s.daemon, &id, |st| matches!(st, "failed" | "done"));
     assert_eq!(done["status"], "done", "{done}");
     let attempts = implements(&done);
     assert_eq!(attempts.len(), 1, "{done}");
@@ -145,7 +142,7 @@ fn a_command_that_passes_on_the_new_base_is_still_the_attempts_failure() {
     let s = setup("harmless.txt");
     // Fails only where the implementer's marker exists, so not on the base.
     let id = start(&s, "test ! -f CHANGED_MARKER.txt");
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "waiting" | "failed" | "done")
     });
     let attempts = implements(&task);
@@ -172,7 +169,7 @@ fn a_command_that_already_failed_on_the_old_base_is_not_blamed_on_the_new_one() 
     let s = setup("harmless.txt");
     // The check the work is meant to turn green: absent on every base.
     let id = start(&s, "test -f never-written.txt");
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "waiting" | "failed" | "done")
     });
     assert!(implements(&task).len() > 1, "counted as an attempt: {task}");

@@ -8,7 +8,6 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
 
 const GRAPH_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
@@ -152,9 +151,7 @@ fn land_one(daemon: &Daemon, repo: &Path) -> serde_json::Value {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let done = poll_until(daemon, &id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(done["status"], "done", "{done}");
     assert!(done["landedSha"].is_string(), "{done}");
     done

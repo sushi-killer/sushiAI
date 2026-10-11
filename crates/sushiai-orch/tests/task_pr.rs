@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::Duration;
 
 const SCRIPT: &str = r#"#!/bin/sh
 echo pr.txt > pr.txt
@@ -94,9 +93,7 @@ fn setup() -> Setup {
         .as_str()
         .unwrap()
         .to_string();
-    let done = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(done["status"], "done", "{done}");
     Setup {
         daemon,

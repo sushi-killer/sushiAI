@@ -40,14 +40,14 @@ fn engine_loop_passes_when_verify_succeeds() {
     let task_id = task["id"].as_str().unwrap().to_string();
     // No `task.start`: the full form starts by default, like the request form.
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(settled["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(settled["attempts"][0]["status"], "passed");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn project_secrets_reach_the_agent_but_not_settings_logs_or_task_mcp() {
         }),
     );
     let task_id = task["id"].as_str().unwrap();
-    let settled = poll_task_status(&daemon, task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(
         std::fs::read_to_string(marker).unwrap(),
@@ -131,7 +131,7 @@ fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2, "should stop after maxAttempts=2");
@@ -146,7 +146,7 @@ fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -178,7 +178,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         serde_json::json!({"settings": settings}),
     );
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(5));
+    let _ = wait_for_exit(first);
 
     let socket = socket_of(&home);
     let child = spawn_daemon(&home, &fake_bins);
@@ -192,14 +192,10 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         "title": "Always fails", "goal": "g", "criteria": [], "verify": ["false"], "start": true}),
     );
     let waiting_id = waiting["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while call("task.get", serde_json::json!({"id": waiting_id}))["status"] != "waiting" {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "first task never reached waiting"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until("the first task to reach waiting", || {
+        (call("task.get", serde_json::json!({"id": waiting_id}))["status"] == "waiting")
+            .then_some(())
+    });
 
     let passing = call(
         "task.create",
@@ -207,22 +203,13 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
         "title": "Passes", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
     );
     let passing_id = passing["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    loop {
-        let status = call("task.get", serde_json::json!({"id": passing_id}))["status"].clone();
-        if status == "done" {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "second task starved: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until("the second task to finish, not starve", || {
+        (call("task.get", serde_json::json!({"id": passing_id}))["status"] == "done").then_some(())
+    });
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(5));
+    let _ = wait_for_exit(child);
     for t in [&waiting, &passing] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -276,9 +263,7 @@ fn maxattempts_one_still_gives_the_implement_stage_its_own_one_attempt() {
     // If the plan attempt wrongly counted against maxAttempts, the implement
     // stage would already be "exhausted" before it ever got to try -- this
     // proves it actually got its own single attempt instead.
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let settled = poll_until(&daemon, &task_id, |s| s == "waiting");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(
         attempts.len(),
@@ -295,7 +280,7 @@ fn maxattempts_one_still_gives_the_implement_stage_its_own_one_attempt() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -328,7 +313,7 @@ fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -346,7 +331,7 @@ fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Waits until the daemon has saved the run's pgid. The harness script runs
@@ -354,18 +339,10 @@ fn a_task_is_carried_onto_its_base_when_the_base_moves_mid_attempt() {
 /// restart can only follow a run whose group it knows: killing the daemon in
 /// that gap legitimately interrupts and requeues the attempt.
 fn wait_for_saved_pgid(socket: &Path, id: &str) {
-    let start = Instant::now();
-    loop {
+    wait_until("the run's pgid to be saved", || {
         let t = request_on(socket, "task.get", serde_json::json!({"id": id}));
-        if t["attempts"][0]["pgid"].is_i64() {
-            return;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "the run's pgid was never saved: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        t["attempts"][0]["pgid"].is_i64().then_some(())
+    });
 }
 
 #[test]
@@ -404,14 +381,7 @@ fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
         "title": "Survives a crash", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while !marker.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "harness never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the harness to start", || marker.exists().then_some(()));
     wait_for_saved_pgid(&socket1, &id);
     first.kill().unwrap();
     let _ = first.wait();
@@ -420,18 +390,10 @@ fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
     let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
     let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
-    let start = Instant::now();
-    let settled = loop {
+    let settled = wait_until("the task to resume and finish after the restart", || {
         let t = call("task.get", serde_json::json!({"id": id}));
-        if t["status"] == "done" {
-            break t;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "task did not resume after restart: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "done").then_some(t)
+    });
     assert_eq!(
         settled["attempts"].as_array().unwrap().len(),
         1,
@@ -439,8 +401,8 @@ fn a_task_whose_daemon_crashed_resumes_its_surviving_run_on_restart() {
     );
     assert_eq!(settled["attempts"][0]["status"], "passed", "{settled}");
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 /// Starts a task whose first harness run hangs, then ends the daemon with
@@ -480,53 +442,41 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
         "title": "Survives a shutdown", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while !marker.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "harness never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the harness to start", || marker.exists().then_some(()));
     wait_for_saved_pgid(&socket1, &id);
     if stop_first {
         request_on(&socket1, "task.stop", serde_json::json!({"id": id}));
-        let start = Instant::now();
-        loop {
+        wait_until("the task to stop", || {
             let t = request_on(&socket1, "task.get", serde_json::json!({"id": id}));
-            if t["status"] == "stopped" {
-                break;
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "not stopped: {t}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            (t["status"] == "stopped").then_some(())
+        });
     }
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(10));
+    let _ = wait_for_exit(first);
 
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
     let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
-    let start = Instant::now();
-    let settled = loop {
-        let t = call("task.get", serde_json::json!({"id": id}));
-        let limit = if stop_first { 3 } else { 20 };
-        if t["status"] == "done" || (stop_first && start.elapsed() > Duration::from_secs(limit)) {
-            break t;
+    let settled = if stop_first {
+        // Absence check: this window gives a wrongly resumed run time to finish.
+        let start = Instant::now();
+        loop {
+            let t = call("task.get", serde_json::json!({"id": id}));
+            if t["status"] == "done" || start.elapsed() > Duration::from_secs(3) {
+                break t;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(
-            start.elapsed() < Duration::from_secs(limit),
-            "task did not resume after restart: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
+    } else {
+        wait_until("the task to resume and finish after the restart", || {
+            let t = call("task.get", serde_json::json!({"id": id}));
+            (t["status"] == "done").then_some(t)
+        })
     };
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
     settled
 }
 
@@ -555,7 +505,10 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude-silent.sh",
-        "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep 90\n",
+        &format!(
+            "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep {}\n",
+            deadline().as_secs() * 3
+        ),
     );
     let pid_file = scripts_dir.path().join("harness.pid");
     let daemon = Daemon::spawn(&[
@@ -582,7 +535,7 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
     assert_eq!(task["variant"]["stallTimeoutSecs"], 8, "{task}");
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(90));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"][0]["failure"]["kind"], "stall",
@@ -593,18 +546,13 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
         .trim()
         .parse()
         .unwrap();
-    let start = Instant::now();
-    while is_alive(pid) {
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "stalled harness {pid} is still running"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(&format!("the stalled harness {pid} to stop"), || {
+        (!is_alive(pid)).then_some(())
+    });
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -637,12 +585,12 @@ fn a_run_whose_wrapper_is_killed_before_its_exit_file_does_not_hang_the_task() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_ne!(settled["status"], "running", "{settled}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -670,7 +618,7 @@ fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2, "{settled}");
@@ -698,7 +646,7 @@ fn a_fresh_retry_starts_a_new_session_that_reads_the_earlier_handoff() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -729,7 +677,7 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(60));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"].as_array().unwrap().len(),
@@ -739,7 +687,7 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// The prompt-prefix trim (`--disallowedTools`) used to be gated behind
@@ -774,7 +722,7 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
 
     let argv = std::fs::read_to_string(&args).unwrap();
@@ -799,7 +747,7 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Emits the same `Bash` call three times, a different one on the second
@@ -842,7 +790,7 @@ fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(60));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 3, "{settled}");
@@ -874,7 +822,7 @@ fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -902,7 +850,7 @@ fn an_attempt_stores_the_model_and_harness_version_the_run_reported() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(15));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     let fp = &settled["attempts"][0]["fingerprint"];
     assert_eq!(
@@ -916,5 +864,5 @@ fn an_attempt_stores_the_model_and_harness_version_the_run_reported() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

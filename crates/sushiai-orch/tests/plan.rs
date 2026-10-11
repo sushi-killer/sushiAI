@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::{Duration, Instant};
 
 #[test]
 fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
@@ -32,9 +31,7 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
     assert_eq!(task["status"], "drafting");
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert_eq!(waiting["question"]["text"], "Which default theme?");
     assert_eq!(
         waiting["question"]["options"],
@@ -49,7 +46,7 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
         serde_json::json!({"id": task_id, "answer": "dark"}),
     );
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -70,7 +67,7 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -95,7 +92,7 @@ fn drafting_task_with_no_questions_goes_straight_to_done() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -103,7 +100,7 @@ fn drafting_task_with_no_questions_goes_straight_to_done() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -130,7 +127,7 @@ fn drafting_task_created_with_start_false_stops_after_planning_for_review() {
 
     // Planning runs regardless of `start: false` -- only whether it then
     // proceeds into implementing depends on it.
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "stopped" || s == "done" || s == "failed"
     });
     assert_eq!(settled["status"], "stopped", "task JSON: {settled}");
@@ -142,7 +139,7 @@ fn drafting_task_created_with_start_false_stops_after_planning_for_review() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// The plan branch never produces a valid ```sushi-plan fence, no matter how
@@ -221,7 +218,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         serde_json::json!({"settings": settings}),
     );
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(5));
+    let _ = wait_for_exit(first);
 
     let socket = socket_of(&home);
     let child = spawn_daemon(&home, &fake_bins);
@@ -234,14 +231,10 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         serde_json::json!({"repo": repo.path().to_str().unwrap(), "request": "add dark mode", "start": true}),
     );
     let drafting_id = drafting["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while call("task.get", serde_json::json!({"id": drafting_id}))["status"] != "waiting" {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "drafting task never reached waiting on its plan question"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until("the drafting task to wait on its plan question", || {
+        (call("task.get", serde_json::json!({"id": drafting_id}))["status"] == "waiting")
+            .then_some(())
+    });
 
     let passing = call(
         "task.create",
@@ -249,22 +242,17 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
         "title": "Passes", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
     );
     let passing_id = passing["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    loop {
-        let status = call("task.get", serde_json::json!({"id": passing_id}))["status"].clone();
-        if status == "done" {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "second task starved while the first sat on a plan question: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until(
+        "the second task to finish while the first sits on a plan question",
+        || {
+            (call("task.get", serde_json::json!({"id": passing_id}))["status"] == "done")
+                .then_some(())
+        },
+    );
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(5));
+    let _ = wait_for_exit(child);
     for t in [&drafting, &passing] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -293,9 +281,7 @@ fn stop_then_start_while_drafting_replans_from_scratch() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let first_wait = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let first_wait = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert!(first_wait["question"]["text"]
         .as_str()
         .unwrap()
@@ -309,15 +295,11 @@ fn stop_then_start_while_drafting_replans_from_scratch() {
     assert_eq!(plan_attempts_before, 1);
 
     daemon.request("task.stop", serde_json::json!({"id": task_id}));
-    let stopped = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "stopped" || s == "failed"
-    });
+    let stopped = poll_until(&daemon, &task_id, |s| s == "stopped" || s == "failed");
     assert_eq!(stopped["status"], "stopped", "task JSON: {stopped}");
 
     daemon.request("task.start", serde_json::json!({"id": task_id}));
-    let second_wait = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let second_wait = poll_until(&daemon, &task_id, |s| s == "waiting");
     let plan_attempts_after = second_wait["attempts"]
         .as_array()
         .unwrap()
@@ -331,7 +313,7 @@ fn stop_then_start_while_drafting_replans_from_scratch() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -359,9 +341,7 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
     assert!(waiting["question"]["text"]
         .as_str()
         .unwrap()
@@ -372,7 +352,7 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
         serde_json::json!({"id": task_id, "answer": "it's the settings screen's theme picker"}),
     );
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -390,7 +370,7 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -414,7 +394,7 @@ fn a_planned_task_routes_by_the_planners_tier() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -430,7 +410,7 @@ fn a_planned_task_routes_by_the_planners_tier() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -453,7 +433,7 @@ fn the_plan_brief_asks_for_a_contract() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     let brief = std::fs::read_to_string(
@@ -468,7 +448,7 @@ fn the_plan_brief_asks_for_a_contract() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// The planner flags a criterion visual although its check is a command.
@@ -513,7 +493,7 @@ fn a_visual_flag_on_a_command_checked_criterion_does_not_demand_an_image() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -532,7 +512,7 @@ fn a_visual_flag_on_a_command_checked_criterion_does_not_demand_an_image() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// The planner names a screenshot command it found in the repo.
@@ -578,7 +558,7 @@ fn a_planned_screenshot_command_reaches_the_task_and_the_plan_brief_asks_for_it(
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(
@@ -599,7 +579,7 @@ fn a_planned_screenshot_command_reaches_the_task_and_the_plan_brief_asks_for_it(
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// The parent plan splits into two parts; `PART_B_JSON` is part B's draft.

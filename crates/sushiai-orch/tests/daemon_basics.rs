@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 #[test]
 fn settings_task_create_and_list_round_trip() {
@@ -43,7 +42,7 @@ fn settings_task_create_and_list_round_trip() {
     assert_eq!(get["title"], "Add a widget");
 
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -77,8 +76,9 @@ fn shutdown_kills_a_live_orchestrator_chat_turn_s_child() {
     // from orchd's side. The rename keeps the test from reading the marker
     // between its creation and the pid landing in it.
     let body = format!(
-        "#!/bin/sh\ncat > /dev/null\necho $$ > {m}.tmp\nmv {m}.tmp {m}\nsleep 30\n",
-        m = marker.display()
+        "#!/bin/sh\ncat > /dev/null\necho $$ > {m}.tmp\nmv {m}.tmp {m}\nsleep {s}\n",
+        m = marker.display(),
+        s = deadline().as_secs() * 3
     );
     let script = fake_harness_script(scripts_dir.path(), "fake-claude-chat.sh", &body);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
@@ -95,14 +95,9 @@ fn shutdown_kills_a_live_orchestrator_chat_turn_s_child() {
         serde_json::json!({"repo": repo.path().to_str().unwrap(), "text": "hello"}),
     );
 
-    let start = Instant::now();
-    while !marker.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "chat harness never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the chat harness to start", || {
+        marker.exists().then_some(())
+    });
     let pid: i32 = std::fs::read_to_string(&marker)
         .unwrap()
         .trim()
@@ -187,5 +182,5 @@ fn an_old_settings_json_with_a_classifier_still_loads() {
     );
 
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(5));
+    let _ = wait_for_exit(child);
 }

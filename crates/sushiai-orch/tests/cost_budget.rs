@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::{Duration, Instant};
 
 #[test]
 fn a_daemon_restart_mid_attempt_keeps_the_surviving_run_s_estimated_cost() {
@@ -61,14 +60,11 @@ fn a_daemon_restart_mid_attempt_keeps_the_surviving_run_s_estimated_cost() {
     let id = task["id"].as_str().unwrap().to_string();
     // Killed only once the daemon has written the last message to disk.
     let events = data.join("tasks").join(&id).join("runs/1/events.jsonl");
-    let start = Instant::now();
-    while !std::fs::read_to_string(&events).is_ok_and(|t| t.contains("msg_2")) {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "harness never streamed its messages"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the harness to stream its messages", || {
+        std::fs::read_to_string(&events)
+            .is_ok_and(|t| t.contains("msg_2"))
+            .then_some(())
+    });
     first.kill().unwrap();
     let _ = first.wait();
 
@@ -76,18 +72,10 @@ fn a_daemon_restart_mid_attempt_keeps_the_surviving_run_s_estimated_cost() {
     let second = spawn_daemon(&home, &fake_bins);
     wait_for_socket(&socket2);
     let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
-    let start = Instant::now();
-    let settled = loop {
+    let settled = wait_until("the task to resume and finish after the restart", || {
         let t = call("task.get", serde_json::json!({"id": id}));
-        if t["status"] == "done" {
-            break t;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "task did not resume after restart: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "done").then_some(t)
+    });
     // Opus list prices per MTok: 4 input, 5 cache write, 0.20 cache read, 20
     // output; msg_1 counted once.
     let estimated = (10.0 * 4.0 + 20_000.0 * 5.0 + 100.0 * 20.0) / 1e6
@@ -106,8 +94,8 @@ fn a_daemon_restart_mid_attempt_keeps_the_surviving_run_s_estimated_cost() {
     let total = settled["costUsd"].as_f64().unwrap();
     assert!((total - estimated).abs() < 1e-9, "{total}");
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 /// One Opus message as `claude -p --output-format stream-json` streams it,
@@ -193,15 +181,11 @@ fn kill_during_side_run_and_restart(
     let created = call1("task.create", params);
     let id = created["id"].as_str().unwrap().to_string();
     let events = data.join("tasks").join(&id).join("runs").join(events);
-    let start = Instant::now();
-    while !std::fs::read_to_string(&events).is_ok_and(|t| t.contains("msg_side")) {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "the side run never streamed its message: {}",
-            call1("task.get", serde_json::json!({"id": id}))
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the side run to stream its message", || {
+        std::fs::read_to_string(&events)
+            .is_ok_and(|t| t.contains("msg_side"))
+            .then_some(())
+    });
     first.kill().unwrap();
     let _ = first.wait();
 
@@ -209,26 +193,18 @@ fn kill_during_side_run_and_restart(
     let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
     let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
-    let start = Instant::now();
-    let settled = loop {
+    let settled = wait_until("the task to finish after the restart", || {
         let t = call("task.get", serde_json::json!({"id": id}));
-        if t["status"] == "done" {
-            break t;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "task did not finish after restart: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "done").then_some(t)
+    });
     let runs = std::fs::read_to_string(scripts_dir.path().join("runs.log"))
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
         .collect();
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(created["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(created["worktree"].as_str().unwrap());
     (settled, runs)
 }
 
@@ -304,15 +280,13 @@ fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost() {
         .join("tasks")
         .join(&task_id)
         .join("runs/1/review/events.jsonl");
-    let start = Instant::now();
-    while !std::fs::read_to_string(&events).is_ok_and(|t| t.contains("msg_side")) {
-        assert!(start.elapsed() < Duration::from_secs(20), "no review ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    daemon.request("task.stop", serde_json::json!({"id": task_id}));
-    let stopped = poll_until(&daemon, &task_id, Duration::from_secs(10), |s| {
-        s == "stopped"
+    wait_until("a review to run", || {
+        std::fs::read_to_string(&events)
+            .is_ok_and(|t| t.contains("msg_side"))
+            .then_some(())
     });
+    daemon.request("task.stop", serde_json::json!({"id": task_id}));
+    let stopped = poll_until(&daemon, &task_id, |s| s == "stopped");
     let review = stopped["attempts"][0]["reviewCostUsd"].as_f64().unwrap();
     assert!((review - PRICED_MESSAGE_COST).abs() < 1e-9, "{stopped}");
     let total = stopped["costUsd"].as_f64().unwrap();
@@ -323,7 +297,7 @@ fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -355,7 +329,7 @@ fn a_task_over_its_dollar_budget_waits_before_the_next_attempt_and_raise_continu
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let waiting = poll_until(&daemon, &task_id, |s| {
         s == "waiting" || s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
@@ -383,7 +357,7 @@ fn a_task_over_its_dollar_budget_waits_before_the_next_attempt_and_raise_continu
         serde_json::json!({"id": task_id, "answer": "raise"}),
     );
     // Right after the answer the task can still read `waiting`.
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -393,7 +367,7 @@ fn a_task_over_its_dollar_budget_waits_before_the_next_attempt_and_raise_continu
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Logs every planner run to `$MSG_DIR/plan-runs`; the first one costs $0.01
@@ -456,7 +430,7 @@ fn a_plan_run_that_reaches_the_budget_waits_before_its_retry() {
             .count()
     };
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let waiting = poll_until(&daemon, &task_id, |s| {
         s == "waiting" || s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
@@ -474,7 +448,7 @@ fn a_plan_run_that_reaches_the_budget_waits_before_its_retry() {
     );
     // The new plan run brings the spend to the raised budget, so the
     // implement attempt asks again.
-    let again = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let again = poll_until(&daemon, &task_id, |s| {
         s == "waiting" && count_plan_runs() == 2
     });
     assert!(
@@ -490,7 +464,7 @@ fn a_plan_run_that_reaches_the_budget_waits_before_its_retry() {
         serde_json::json!({"id": task_id, "answer": "raise"}),
     );
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -499,7 +473,7 @@ fn a_plan_run_that_reaches_the_budget_waits_before_its_retry() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Implements like the other fakes; as reviewer, answers PASS and reports a
@@ -541,7 +515,7 @@ fn review_cost_lands_on_the_attempt_s_review_cost_usd_and_the_task_total() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
@@ -556,7 +530,7 @@ fn review_cost_lands_on_the_attempt_s_review_cost_usd_and_the_task_total() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -590,7 +564,7 @@ fn an_attempt_streaming_past_its_cap_is_stopped_as_budget_and_retried() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
 
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped" || s == "waiting"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -601,7 +575,7 @@ fn an_attempt_streaming_past_its_cap_is_stopped_as_budget_and_retried() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// A fake harness that costs $0.01 per run. The first review FAILs (so a
@@ -686,7 +660,7 @@ fn a_task_started_over_the_daily_budget_waits_and_run_anyway_or_stop_settle_it()
     let repo = init_git_repo();
     let task = daily_task(&daemon, repo.path());
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(15), |s| {
+    let waiting = poll_until(&daemon, &id, |s| {
         s == "waiting" || s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(waiting["status"], "waiting", "{waiting}");
@@ -711,7 +685,7 @@ fn a_task_started_over_the_daily_budget_waits_and_run_anyway_or_stop_settle_it()
         "task.answer",
         serde_json::json!({"id": id, "answer": "run anyway"}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let done = poll_until(&daemon, &id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(done["status"], "done", "{done}");
@@ -729,12 +703,12 @@ fn a_task_started_over_the_daily_budget_waits_and_run_anyway_or_stop_settle_it()
 
     let second = daily_task(&daemon, repo.path());
     let id2 = second["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &id2, Duration::from_secs(15), |s| s == "waiting");
+    poll_until(&daemon, &id2, |s| s == "waiting");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": id2, "answer": "stop"}),
     );
-    let stopped = poll_until(&daemon, &id2, Duration::from_secs(10), |s| s == "stopped");
+    let stopped = poll_until(&daemon, &id2, |s| s == "stopped");
     assert!(stopped["attempts"].as_array().unwrap().is_empty());
 
     daemon.shutdown_and_wait();
@@ -747,7 +721,7 @@ fn an_attempt_that_crosses_the_daily_budget_finishes_with_its_review_then_waits(
     let repo = init_git_repo();
     let task = daily_task(&daemon, repo.path());
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let waiting = poll_until(&daemon, &id, |s| {
         s == "waiting" || s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(waiting["status"], "waiting", "{waiting}");
@@ -762,7 +736,7 @@ fn an_attempt_that_crosses_the_daily_budget_finishes_with_its_review_then_waits(
         "task.answer",
         serde_json::json!({"id": id, "answer": "run anyway"}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let done = poll_until(&daemon, &id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(done["status"], "done", "{done}");

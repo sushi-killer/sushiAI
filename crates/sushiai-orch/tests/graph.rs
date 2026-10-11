@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn review_off(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -78,6 +78,7 @@ fn a_task_with_depends_on_is_not_started_until_its_dependency_is_done() {
 
     // Created with a dependency, the second task starts on its own, but its
     // loop must not run an attempt while the first is not done.
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let waiting = daemon.request("task.get", serde_json::json!({"id": second_id}));
     assert_eq!(waiting["status"], "queued", "task JSON: {waiting}");
@@ -102,7 +103,7 @@ fn a_task_with_depends_on_is_not_started_until_its_dependency_is_done() {
     let worktrees = [first["worktree"].clone(), second["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -125,7 +126,7 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
 
     // The parent's verify needs both files, which are absent on the base and
     // created by the subtasks: kept by rule, no question.
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -172,7 +173,7 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, *a, *b] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -220,7 +221,7 @@ fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, *a, *b] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -265,8 +266,8 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     assert!(!part_a_wt.exists(), "Part A's worktree was left behind");
 
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(&blocked);
-    let _ = std::fs::remove_dir_all(parent["worktree"].as_str().unwrap());
+    remove_dir_retrying(&blocked);
+    remove_dir_retrying(parent["worktree"].as_str().unwrap());
 }
 
 /// Two parts of a hand-built graph. Each writes its own file, or with
@@ -274,13 +275,24 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
 /// both lines. Every run notes how many runs were live when it started.
 const PARTS_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
-mkdir -p "$PARTS_LOG/live"
-touch "$PARTS_LOG/live/$$"
+# Holds the run open for a second, or until a second run has started, for at
+# most $PEER_WAIT tenths of a second. A run that finishes at once leaves its
+# `seen` file, so the run that started first still finds it.
+peer_wait() {
+  i=0
+  while [ "$i" -lt "${PEER_WAIT:-10}" ]; do
+    [ "$(ls "$PARTS_LOG/seen" | wc -l)" -ge 2 ] && return
+    sleep 0.1
+    i=$((i+1))
+  done
+}
+mkdir -p "$PARTS_LOG/live" "$PARTS_LOG/seen"
+touch "$PARTS_LOG/live/$$" "$PARTS_LOG/seen/$$"
 ls "$PARTS_LOG/live" | wc -l | tr -d ' ' >> "$PARTS_LOG/counts"
 case "$input" in
   *"These files conflict"*) printf 'one\ntwo\n' > shared.txt ;;
-  *PART_ONE*) sleep 1; if [ -n "$SHARED" ]; then echo one > shared.txt; else echo one > one.txt; fi ;;
-  *PART_TWO*) sleep 1; if [ -n "$SHARED" ]; then echo two > shared.txt; else echo two > two.txt; fi ;;
+  *PART_ONE*) peer_wait; if [ -n "$SHARED" ]; then echo one > shared.txt; else echo one > one.txt; fi ;;
+  *PART_TWO*) peer_wait; if [ -n "$SHARED" ]; then echo two > shared.txt; else echo two > two.txt; fi ;;
 esac
 rm -f "$PARTS_LOG/live/$$"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
@@ -335,9 +347,13 @@ fn two_independent_children_run_concurrently_and_both_land() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PARTS_SCRIPT);
     let log = tempfile::tempdir().unwrap();
+    // Each child waits for its peer to be live, up to one deadline, so a slow
+    // start of the second child cannot make the runs miss each other.
+    let peer_wait = (deadline().as_secs() * 10).to_string();
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("PARTS_LOG", log.path().to_str().unwrap()),
+        ("PEER_WAIT", &peer_wait),
     ]);
     review_off(&daemon);
     let repo = init_git_repo();
@@ -375,7 +391,7 @@ fn two_independent_children_run_concurrently_and_both_land() {
 
     daemon.shutdown_and_wait();
     for t in children.iter().chain([&parent]) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -438,7 +454,7 @@ fn a_child_whose_rebase_conflicts_is_retried_by_the_agent_not_dropped() {
 
     daemon.shutdown_and_wait();
     for t in children.iter().chain([&parent]) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -500,7 +516,7 @@ fn task_create_rejects_a_dependency_cycle_and_an_unknown_id_and_creates_nothing(
 
     daemon.shutdown_and_wait();
     for t in [&parent, &waiter] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -541,14 +557,10 @@ fn a_stopped_dependency_asks_its_dependent_and_dropping_it_lets_the_dependent_ru
         }),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &slow_id, Duration::from_secs(10), |s| {
-        s == "running"
-    });
+    poll_until(&daemon, &slow_id, |s| s == "running");
     daemon.request("task.stop", serde_json::json!({"id": slow_id}));
 
-    let asked = poll_until(&daemon, &dependent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &dependent_id, |s| s == "waiting");
     let question = asked["question"]["text"].as_str().unwrap();
     assert!(
         question.contains("\"SLOW dependency\" (stopped)"),
@@ -568,7 +580,7 @@ fn a_stopped_dependency_asks_its_dependent_and_dropping_it_lets_the_dependent_ru
 
     daemon.shutdown_and_wait();
     for t in [&slow, &dependent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -609,14 +621,9 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
         }),
     );
     let child_id = child["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "the child never ran"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the child to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
 
     let stopped = daemon.request("task.stop", serde_json::json!({"id": parent_id}));
     assert_eq!(
@@ -630,7 +637,7 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
     assert_eq!(parent_now["status"], "stopped", "{parent_now}");
 
     daemon.request("task.start", serde_json::json!({"id": parent_id}));
-    let parent_done = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    let parent_done = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "waiting")
     });
     assert_eq!(parent_done["status"], "done", "{parent_done}");
@@ -639,7 +646,7 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
 
     daemon.shutdown_and_wait();
     for t in [&parent_done, &child_done] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -677,14 +684,12 @@ fn create_and_stop_first_run(
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
     let task = daemon.request("task.create", params);
-    let start = Instant::now();
-    while !log.join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the first run to start", || {
+        log.join("slept").exists().then_some(())
+    });
     let id = task["id"].as_str().unwrap();
     daemon.request("task.stop", serde_json::json!({"id": id}));
-    poll_until(daemon, id, Duration::from_secs(10), |s| s == "stopped");
+    poll_until(daemon, id, |s| s == "stopped");
     task
 }
 
@@ -718,9 +723,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
     );
     let child_id = child["id"].as_str().unwrap().to_string();
 
-    let asked = poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
     assert!(
         asked["question"]["text"]
             .as_str()
@@ -728,6 +731,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
             .contains("(stopped)"),
         "{asked}"
     );
+    // Absence check: this window gives a forbidden child start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
@@ -741,7 +745,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
 
     daemon.shutdown_and_wait();
     for t in [&dep, &parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -773,7 +777,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         serde_json::json!({"settings": settings}),
     );
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(5));
+    let _ = wait_for_exit(first);
 
     let socket = socket_of(&home);
     let child = spawn_daemon(&home, &fake_bins);
@@ -788,11 +792,9 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         serde_json::json!({"repo": repo_path, "title": "Blocker", "goal": "g",
         "verify": ["true"], "start": true}),
     );
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the blocker to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
     let parent = call(
         "task.create",
         serde_json::json!({"repo": repo_path, "title": "Parent", "goal": "g",
@@ -815,21 +817,16 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         "task.stop",
         serde_json::json!({"id": blocker["id"].as_str().unwrap()}),
     );
-    let start = Instant::now();
-    let done = loop {
+    let done = wait_until("the parent to be done", || {
         let t = call("task.get", serde_json::json!({"id": parent_id}));
-        if t["status"] == "done" {
-            break t;
-        }
-        assert!(start.elapsed() < Duration::from_secs(20), "{t}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "done").then_some(t)
+    });
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
 
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(5));
+    let _ = wait_for_exit(child);
     for t in [&blocker, &parent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -850,26 +847,22 @@ fn retrying_a_stopped_dependency_finishes_the_dependency_and_its_dependent() {
         }),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &dependent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    poll_until(&daemon, &dependent_id, |s| s == "waiting");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": dependent_id, "answer": "retry the dependency"}),
     );
-    let dep_done = poll_until(&daemon, &dep_id, Duration::from_secs(20), |s| {
+    let dep_done = poll_until(&daemon, &dep_id, |s| {
         matches!(s, "done" | "failed" | "waiting")
     });
     assert_eq!(dep_done["status"], "done", "{dep_done}");
-    let dependent_done = poll_until(&daemon, &dependent_id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed")
-    });
+    let dependent_done = poll_until(&daemon, &dependent_id, |s| matches!(s, "done" | "failed"));
     assert_eq!(dependent_done["status"], "done", "{dependent_done}");
     assert!(dependent_done["question"].is_null(), "{dependent_done}");
 
     daemon.shutdown_and_wait();
     for t in [&dep, &dependent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -894,14 +887,14 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
         log.path(),
         serde_json::json!({"title": "Only part", "parent": parent_id}),
     );
-    let asked = poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
     assert!(asked["question"]["text"].is_string(), "{asked}");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "drop the dependency"}),
     );
+    poll_until(&daemon, &parent_id, |s| s == "stopped");
+    // Absence check: this window gives a forbidden attempt time to start.
     std::thread::sleep(Duration::from_millis(1500));
     let after = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(after["status"], "stopped", "{after}");
@@ -913,7 +906,7 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -1020,7 +1013,7 @@ fn a_dependents_first_brief_carries_the_landed_dependencys_results() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1056,7 +1049,7 @@ fn a_plan_brief_carries_the_results_of_a_dependency_that_was_already_done() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1097,7 +1090,7 @@ fn a_plan_brief_written_before_its_dependency_lands_has_no_landed_section() {
     daemon.shutdown_and_wait();
     for wt in worktrees {
         if let Some(wt) = wt.as_str() {
-            let _ = std::fs::remove_dir_all(wt);
+            remove_dir_retrying(wt);
         }
     }
 }
@@ -1138,7 +1131,7 @@ fn a_dependency_with_many_changed_files_lists_twenty_and_counts_the_rest() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1225,7 +1218,7 @@ fn children_of(daemon: &Daemon, parent: &serde_json::Value) -> Vec<serde_json::V
 
 fn remove_worktrees(tasks: &[&serde_json::Value]) {
     for t in tasks {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -1265,7 +1258,7 @@ fn a_parent_check_that_fails_after_its_subtasks_landed_gets_one_agent_attempt_an
     let repo = repo_on_work_branch();
     let parent_id = create_split(&daemon, repo.path(), true);
 
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -1327,7 +1320,7 @@ fn a_parent_verify_that_fails_on_the_base_asks_before_any_subtask_starts() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "drop all"}),
     );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -1342,25 +1335,27 @@ fn a_parent_verify_that_fails_on_the_base_asks_before_any_subtask_starts() {
 fn a_parent_final_that_fails_on_the_base_does_not_hold_back_the_children() {
     let log = tempfile::tempdir().unwrap();
     let ran = log.path().join("final.log");
-    // Starts, logs a line, and is still running when the children land.
-    let final_check = format!("echo start >> {}; sleep 20; exit 1", ran.display());
+    // Starts, logs a line, and is still running when the children land: it
+    // outlasts the deadline twice over, so the children must not wait for it.
+    let final_check = format!(
+        "echo start >> {}; sleep {}; exit 1",
+        ran.display(),
+        deadline().as_secs() * 2
+    );
     let (daemon, _scripts) = split_daemon_with_final("true", &final_check);
     let repo = repo_on_work_branch();
     let parent_id = create_split(&daemon, repo.path(), false);
 
-    let begun = std::time::Instant::now();
-    let (parent, children) = loop {
+    let (parent, children) = wait_until("both children to be done", || {
         let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
         let children = children_of(&daemon, &parent);
         if children.len() == 2 && children.iter().all(|c| c["status"] == "done") {
-            break (parent, children);
+            return Some((parent, children));
         }
         assert_ne!(parent["status"], "waiting", "no question first: {parent}");
-        assert!(begun.elapsed() < Duration::from_secs(15), "{parent}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        None
+    });
     assert!(parent["question"].is_null(), "{parent}");
-    assert!(begun.elapsed() < Duration::from_secs(15));
     // At least the base run; the parent's own gate may already have run it.
     let started = std::fs::read_to_string(&ran).map_or(0, |t| t.lines().count());
     assert!(
@@ -1417,7 +1412,7 @@ fn a_parent_whose_checks_name_absent_planned_files_asks_nothing() {
     let repo = repo_on_work_branch();
     let parent_id = create_split(&daemon, repo.path(), false);
 
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -1488,18 +1483,14 @@ fn a_parent_with_three_checks_failing_on_base_gets_one_question() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "keep all"}),
     );
-    let start = Instant::now();
-    let kept = loop {
+    let kept = wait_until("the three kept-check decisions", || {
         let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
         let kept: Vec<String> = decisions_of(&parent)
             .into_iter()
             .filter(|d| d.starts_with("Orchestrator: kept check "))
             .collect();
-        if kept.len() >= 3 || start.elapsed() > Duration::from_secs(30) {
-            break kept;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (kept.len() >= 3).then_some(kept)
+    });
     assert_eq!(kept.len(), 3, "{kept:?}");
     let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(
@@ -1524,7 +1515,7 @@ fn answering_stop_to_a_parents_base_check_question_stops_the_parent() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "stop"}),
     );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
@@ -1570,10 +1561,9 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "stop"}),
     );
-    poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "stopped"
-    });
-    // Give a wrongly relaunched loop time to run its preflight again.
+    poll_until(&daemon, &parent_id, |s| s == "stopped");
+    // Absence check: this window gives a wrongly relaunched loop time to run its
+    // preflight again.
     std::thread::sleep(Duration::from_millis(1500));
     let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
@@ -1615,6 +1605,7 @@ fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
     );
     let child_id = child["id"].as_str().unwrap().to_string();
 
+    // Absence check: this window gives a forbidden child start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
@@ -1622,15 +1613,13 @@ fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
     assert!(!log.path().join("slept").exists());
 
     daemon.request("task.start", serde_json::json!({"id": parent_id}));
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "child never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the child to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
 
     daemon.shutdown_and_wait();
     for t in [&parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -1831,7 +1820,7 @@ fn a_parent_gate_failure_gets_one_attempt_with_the_failing_tail() {
     let (parent, children) = gate_graph(&run, [gate, gate, gate]);
 
     let parent_id = parent["id"].as_str().unwrap();
-    let parent = poll_until(&run.daemon, parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&run.daemon, parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -1990,6 +1979,6 @@ fn a_child_whose_paths_a_landed_dependency_touched_gets_one_refresh() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, a, b, c] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }

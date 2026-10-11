@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::Duration;
 
 /// Answers by what it is asked: the check prompt gets `$CHECK_RESULT`, a
 /// planner brief a draft, anything else an implementation. Every kind of
@@ -65,7 +64,7 @@ fn run(check_result: &str, route: Option<&str>, create: serde_json::Value) -> Ru
     params["start"] = serde_json::json!(true);
     let created = daemon.request("task.create", params);
     let id = created["id"].as_str().unwrap().to_string();
-    let task = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
+    let task = poll_until(&daemon, &id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     let calls = std::fs::read_to_string(&log)

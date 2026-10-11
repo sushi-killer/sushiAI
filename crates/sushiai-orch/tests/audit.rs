@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 /// A fake harness for `repo.audit`: records its argv and brief next to the
 /// script (never in the audited repo), then replies with `reply` as its
@@ -25,18 +24,10 @@ fn fake_audit_harness(dir: &Path, reply: &str) -> PathBuf {
 }
 
 fn poll_audit(daemon: &Daemon, id: &str) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
+    wait_until("the audit to settle", || {
         let audit = daemon.request("repo.audit.get", serde_json::json!({"id": id}));
-        if audit["status"] != "running" {
-            return audit;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "audit did not settle: {audit}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        (audit["status"] != "running").then_some(audit)
+    })
 }
 
 #[test]

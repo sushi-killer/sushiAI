@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { removeDir } = require("./helpers/deadline.cjs");
 
 const { spawnPipe } = require("../electron/daemon/connectors.cjs");
 const { createCommandConnector } = require("../electron/daemon/command.cjs");
@@ -84,6 +85,6 @@ test("Orchestrator starting switched off is declared by the registration", () =>
     });
     assert.equal(off.isEnabled(ORCHESTRATOR_MANIFEST.id), false);
   } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    removeDir(dataDir);
   }
 });

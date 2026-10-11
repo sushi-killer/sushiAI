@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 /// One fake plays every role, told apart by the brief. `$LOG_DIR` counts the
 /// implement runs (`implement.<n>`, the body sees `$n`, the runs before this
@@ -107,7 +106,7 @@ fn create(s: &Setup, extra: Value) -> String {
 }
 
 fn finished(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     })
 }
@@ -135,7 +134,7 @@ fn runs(s: &Setup, prefix: &str) -> usize {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -299,7 +298,7 @@ fn a_verified_impossible_claim_on_a_shared_check_criterion_goes_to_the_owner() {
     // The owner (no source) may drop it.
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "drop criterion"}));
-    let after = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
+    let after = poll_until(&s.daemon, &id, |st| {
         matches!(st, "done" | "failed" | "stopped")
     });
     assert_eq!(after["criteria"].as_array().unwrap().len(), 2, "{after}");

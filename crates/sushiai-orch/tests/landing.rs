@@ -56,9 +56,7 @@ fn create(daemon: &Daemon, repo: &Path, name: &str, verify: &str, land: bool) ->
 }
 
 fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
-    poll_until(daemon, id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    })
+    poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
 fn decisions(task: &serde_json::Value) -> String {
@@ -162,7 +160,7 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     let task = create(&daemon, root, "one", "test -f one.txt", true);
     let id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": id}));
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
+    let waiting = poll_until(&daemon, &id, |s| {
         matches!(s, "landing" | "done" | "failed" | "stopped")
     });
     assert_eq!(waiting["status"], "landing", "{waiting}");
@@ -178,6 +176,7 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
 
     // A retry with the checkout still dirty changes nothing.
     daemon.request("task.start", serde_json::json!({"id": id}));
+    // Absence check: this window gives a forbidden landing time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let still = daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(still["status"], "landing", "{still}");
@@ -468,15 +467,13 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert!(!root.join("one.txt").exists());
 
     // The task's control is dropped a moment after `done` shows.
-    let start = std::time::Instant::now();
-    while daemon
-        .request_error("task.land", serde_json::json!({"id": id}))
-        .contains("busy")
-        && start.elapsed() < Duration::from_secs(10)
-    {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let landed = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
+    wait_until("the task's control to be dropped", || {
+        (!daemon
+            .request_error("task.land", serde_json::json!({"id": id}))
+            .contains("busy"))
+        .then_some(())
+    });
+    let landed = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(
         landed["landedSha"],
         git_out(root, &["rev-parse", "work"]),

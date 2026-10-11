@@ -48,7 +48,7 @@ fn run_with_diff_in(file: &str) -> (Value, std::path::PathBuf, tempfile::TempDir
     let marker = log.path().join("desktop-ran");
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
     drop(scripts);
     (done, marker, log)
 }

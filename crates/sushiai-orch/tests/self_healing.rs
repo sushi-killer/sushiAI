@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake plays every role, told apart by the brief; each reply is a JSON
 /// string literal taken from the environment.
@@ -116,7 +115,7 @@ fn create(s: &Setup, extra: Value) -> String {
 }
 
 fn finished(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     })
 }
@@ -155,7 +154,7 @@ fn orchd_assumptions(task: &Value) -> Vec<Value> {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -375,7 +374,7 @@ fn a_code_gap_ruling_leaves_the_criterion_and_the_retries_go_on() {
         &s,
         json!({"criteria": ["Clicking opens the panel -- check: read the handler"]}),
     );
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(90), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     });
     assert_ne!(task["status"], "done", "{task}");
@@ -569,7 +568,7 @@ fn after_the_first_attempt_a_p1_about_the_tasks_own_work_still_blocks() {
     );
     let s = setup(&[("REVIEW_REST", &blocking)], "claude-sonnet");
     let id = create(&s, json!({}));
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(90), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     });
     assert_ne!(task["status"], "done", "{task}");
@@ -609,9 +608,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         &s,
         json!({"criteria": ["The button is blue -- check: read the CSS"]}),
     );
-    let waiting = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
-        st == "waiting"
-    });
+    let waiting = poll_until(&s.daemon, &id, |st| st == "waiting");
     assert_eq!(
         waiting["question"]["kind"], "review_no_verdict",
         "{waiting}"
@@ -620,7 +617,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         "task.answer",
         json!({"id": id, "answer": "make the button green, not blue"}),
     );
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| st == "done");
+    let task = poll_until(&s.daemon, &id, |st| st == "done");
     assert_eq!(
         task["criteria"],
         json!(["The button is green -- check: read the CSS"]),

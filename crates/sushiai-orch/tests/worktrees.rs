@@ -5,7 +5,6 @@ mod common;
 use common::*;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 const PASS: &str = "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 /// Writes an uncommitted file, then hangs until the task is stopped.
@@ -44,14 +43,7 @@ fn create(daemon: &Daemon, repo: &Path, title: &str, start: bool) -> serde_json:
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let start = Instant::now();
-    while !cond() {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "timed out: {what}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn canon(p: &Path) -> std::path::PathBuf {
@@ -68,7 +60,7 @@ fn stop_hanging(daemon: &Daemon, id: &str, worktree: &Path) {
         worktree.join("AGENT_STARTED.txt").exists()
     });
     daemon.request("task.stop", serde_json::json!({"id": id}));
-    poll_until(daemon, id, Duration::from_secs(30), |s| s == "stopped");
+    poll_until(daemon, id, |s| s == "stopped");
 }
 
 #[test]
@@ -90,7 +82,7 @@ fn new_worktree_lives_under_sushiai_and_done_removes_it_but_keeps_the_commit() {
     );
     assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
 
-    let settled = poll_task_status(&daemon, &id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &id);
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(settled["worktreeRemoved"], true, "{settled}");
     assert!(!Path::new(&worktree).exists(), "worktree dir is gone");
@@ -218,7 +210,7 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     let done = create(&daemon, repo.path(), "Done", true);
     let done_id = done["id"].as_str().unwrap().to_string();
     let done_wt = done["worktree"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &done_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &done_id);
     assert_eq!(settled["status"], "done", "{settled}");
     git(&[
         "worktree",

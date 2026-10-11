@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Writes for the task whose goal names `FILE_<name>`: `a` makes `shared.txt`,
 /// `b` appends to it, anything else writes `<name>.txt`. A task holds until
@@ -80,11 +80,7 @@ fn release(gates: &Path, name: &str) {
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let begin = Instant::now();
-    while !cond() {
-        assert!(begin.elapsed() < Duration::from_secs(30), "never: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn started(gates: &Path, name: &str) -> bool {
@@ -92,9 +88,7 @@ fn started(gates: &Path, name: &str) -> bool {
 }
 
 fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
-    poll_until(daemon, id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    })
+    poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
 fn get(daemon: &Daemon, id: &str) -> serde_json::Value {
@@ -161,6 +155,7 @@ fn a_task_with_overlapping_paths_waits_for_the_first_and_starts_on_top_of_its_la
         "{waiting}"
     );
     assert!(decisions(&waiting).contains("Queue: waits for \"Add a\" on shared.txt"));
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(600));
     assert!(!started(gates.path(), "b"), "b ran while a held shared.txt");
     assert!(get(&daemon, &b)["attempts"].as_array().unwrap().is_empty());
@@ -377,7 +372,7 @@ fn overlapping_subtasks_relay_one_branch_and_the_parent_lands_the_chain_once() {
         }),
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(90), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     assert_eq!(parent["status"], "done", "{parent}");
@@ -528,6 +523,7 @@ fn a_subtask_is_planned_after_its_dependencies_landed_and_stopping_the_parent_sp
     let children = children_by_title(&daemon, &parent);
     let b = children.iter().find(|c| c["title"] == "Part B").unwrap();
     // B waits for A: it has not been planned, so nothing was spent on it.
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(800));
     let b = get(&daemon, b["id"].as_str().unwrap());
     assert!(b["attempts"].as_array().unwrap().is_empty(), "{b}");

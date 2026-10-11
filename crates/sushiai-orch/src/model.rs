@@ -541,6 +541,52 @@ impl PlanGate {
     }
 }
 
+/// The phases `TaskMetrics.cost_by_phase` always lists, in display order.
+pub const COST_PHASES: [&str; 8] = [
+    "plan",
+    "implement",
+    "review",
+    "triage",
+    "advisor",
+    "finding_judge",
+    "answer_judge",
+    "pick",
+];
+
+/// Where a failed task went wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCause {
+    Env,
+    Plan,
+    Impl,
+    ReviewLoop,
+}
+
+impl FailureCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureCause::Env => "env",
+            FailureCause::Plan => "plan",
+            FailureCause::Impl => "impl",
+            FailureCause::ReviewLoop => "review_loop",
+        }
+    }
+}
+
+/// First-pass facts of a finished task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskMetrics {
+    pub first_pass: bool,
+    pub owner_touches: u32,
+    /// USD per phase of `COST_PHASES`; 0 when a phase had no spend.
+    pub cost_by_phase: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_cause: Option<FailureCause>,
+    pub ended_at: i64,
+}
+
 /// One part of a merged task: its command runs after every attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1429,6 +1475,10 @@ pub struct Task {
     /// findings the implementer is told about.
     #[serde(default, skip_serializing_if = "PlanGate::is_default")]
     pub plan_gate: PlanGate,
+    /// How the task ended, set once when it reaches `done` or `failed` and
+    /// cleared when it starts again (`engine/metrics.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<TaskMetrics>,
     /// The ordered parts of a merged task: orchd runs each item's check
     /// after every attempt, before the full verify.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2313,6 +2363,7 @@ mod tests {
             eval_check: None,
             brief_check: Default::default(),
             plan_gate: Default::default(),
+            metrics: None,
             checklist: vec![],
             queue: Default::default(),
             created_at: 1,
@@ -2562,6 +2613,7 @@ mod tests {
             eval_check: None,
             brief_check: Default::default(),
             plan_gate: Default::default(),
+            metrics: None,
             checklist: vec![],
             queue: Default::default(),
             created_at: 1,
@@ -2630,6 +2682,7 @@ mod tests {
             findings: vec![],
             brief_check: Default::default(),
             plan_gate: Default::default(),
+            metrics: None,
             checklist: vec![],
             queue: Default::default(),
             created_at: 1,
@@ -2724,6 +2777,7 @@ mod tests {
             eval_check: None,
             brief_check: Default::default(),
             plan_gate: Default::default(),
+            metrics: None,
             checklist: vec![],
             queue: Default::default(),
             created_at: 1,

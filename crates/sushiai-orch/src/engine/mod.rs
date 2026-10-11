@@ -52,6 +52,7 @@ mod hooks;
 mod land;
 mod leases;
 mod lines;
+mod metrics;
 mod past_work;
 mod permissions;
 mod plan;

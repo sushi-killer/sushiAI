@@ -57,6 +57,64 @@ A question the orchestrator agent is looking at (its turn has started) is held: 
 
 A base check that fails on the task's base commit is run once more alone (the pair of runs is the only base-check pair of its repo at that time). If the rerun passes, the task records `Orchestrator: base check <cmd> flaky on <sha>: passed on rerun` and goes on without a question. A check that fails twice is asked about; only you may answer "drop this check" for a shared check: the repo's CI entry (`npm run ci`, `npm test`, `cargo test`), a `scopedChecks` or `afterLand` command, or a command you wrote in the task request. The orchestrator agent, the answer policy and the waiting default can answer "retry after the base is fixed" or "stop" for those; a check the planner invented for one task can still be dropped by the agent.
 
+## How a task is planned, gated and reviewed
+
+- **Plan gate and one replan.** After the planner's draft is stored and
+  before any question or split, code checks and one read-only review by
+  another model family (`planReview`; `""` turns it off, a missing route is
+  skipped with a `Plan gate:` decision line and never replaced) produce
+  findings. Any critical finding runs the planner again once, with the
+  findings in the prompt; the request text is never edited. Findings left
+  after that reach the implementer as plan notes.
+- **Merged checklist tasks.** Subtasks that list no paths, have no check or
+  overlap another part are merged into one task with a checklist, in planner
+  order. Each item's check runs before the full verify of every attempt and a
+  failing item fails the attempt by name. If one task remains it is the parent
+  itself.
+- **`groundedChecks` is removed.** The flag is no longer read. A settings
+  file or task that still carries it loads, and the key is dropped on the next
+  save. Checks are always baselined on the base commit.
+- **Protected planner tests and the held-out check.** The planner's test
+  files are committed first, hashed and denied to the implementer; an attempt
+  that changes them has them restored. The planner's checks and one held-out
+  check run on that commit before attempt 1: a check that already passes
+  proves nothing, one that cannot run is an environment fault, one that
+  fails gates the task. The held-out check is hidden from the implementer, its
+  failure has kind `heldout`, and its command appears in no brief or detail.
+- **Two review rounds, stable finding ids.** A review runs at most twice per
+  attempt (once more only after a missing verdict or a judge's drop). Every
+  finding has a stable id (`F-...`) that follows it across attempts, so a
+  finding that returns is recognised, and one that repeats twice goes to a
+  check or to the judge. After round two the last result stands and the owner
+  gets no further retry.
+- **Overseer state files.** Every overseer wake runs on a fresh harness
+  session and never touches the owner's session id. Per repo, orchd keeps one
+  file `<data>/overseer/<hash of repo>.md` (mode 0600) with the repo's open
+  tasks, the plan of the wake's task and the last 50 decisions. It is
+  rewritten when a wake starts, put at the top of the wake prompt, and gets one
+  decision line per wake. Check output is never written to it.
+- **Metrics in the `done` entry.** When a task ends `done` or `failed`, orchd
+  stores `metrics` on it and a top-level task adds one `done` entry to the
+  overseer log. Its text is
+  `first pass: yes|no; owner touches: N; cause: none|env|plan|impl|review_loop; cost: plan $0.02, implement $0.01`
+  (only nonzero phases, in the order plan, implement, review, triage,
+  advisor, finding_judge, answer_judge, pick; `cost: $0.00` with no spend).
+  First pass means done with exactly one implement attempt and no question the
+  owner answered; a parent is first pass when every subtask is and it ran no
+  attempt of its own. Owner touches count owner-answered questions plus
+  `Amended: ` decision lines. The cause comes from the last failure: errors,
+  budget, a missing harness and base-check failures are `env`; a failed plan
+  stage or a plan-gate drop is `plan`; verify, held-out, loop, stall,
+  protected path, no deliverable, evidence, conflict and blocked are `impl`;
+  review failures, the review-round limit and repeated findings are
+  `review_loop`. The entry detail adds the repo's first-pass rate and the
+  average cost per landed task over its last 20 finished top-level tasks.
+- **Late planning.** A task created with a `request` and a backlog bucket is
+  saved `queued` and plans nothing. When `task.start` or the autopilot starts
+  it, its worktree first moves to the current head of its base branch (when no
+  attempt ran and nothing in it changed), a `Rebase: planning from` decision
+  line is recorded when the head moved, and the plan is drafted on that code.
+
 ## `experiments` flags
 
 | Flag                                                                    | Default | What it does                                                                                         |

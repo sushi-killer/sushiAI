@@ -275,6 +275,36 @@ pub fn wip_ref(task_id: &str) -> String {
     format!("refs/orchd/wip/{task_id}")
 }
 
+/// Moves a worktree nothing has touched onto the current head of its base
+/// branch before planning: `Some(new_sha)` when it moved, `None` when the
+/// base did not move or the worktree has commits or tracked changes of its own.
+pub fn reset_untouched_to_base(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+) -> Result<Option<String>, GitError> {
+    let new_sha = run(
+        worktree,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
+    if new_sha == base_sha {
+        return Ok(None);
+    }
+    if run(worktree, &["rev-parse", "HEAD"])?.trim() != base_sha {
+        return Ok(None);
+    }
+    if !run(worktree, &["status", "--porcelain", "--untracked-files=no"])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+    Ok(Some(new_sha))
+}
+
 /// Carries the agent's uncommitted work from `base_sha` onto wherever
 /// `base_ref` points now. The work is first saved as a commit kept at
 /// [`wip_ref`], the branch moves to the new base, and the work is applied

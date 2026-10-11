@@ -173,6 +173,8 @@ Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImp
 stateDiagram-v2
   [*] --> drafting: task.create {repo, request}
   [*] --> queued: task.create {title, goal, criteria, verify}
+  [*] --> queued: task.create {repo, request, backlog}<br/>(no loop, no plan yet)
+  queued --> drafting: backlog start: task.start or the autopilot<br/>(a request task never planned; planned on the base's head)
   drafting --> waiting: planner question
   drafting --> queued: plan parsed
   drafting --> running: plan split into subtasks<br/>(the task becomes their parent)
@@ -197,10 +199,26 @@ stateDiagram-v2
 A task can be parked in the planning backlog (`task.backlog`, or `backlog` on
 `task.create`): a `next` or `later` bucket with an integer order. A backlog
 task is started only by `task.start` or the autopilot; recovery and the graph
-never start it (a drafting one resumes planning but stops after the plan). With
+never start it (a drafting one, left from before late planning, resumes planning
+but stops after the plan). With
 `settings.autopilot` on, the orchestrator starts the ready `next` tasks (every `dependsOn`
 done) in (order, createdAt, id) order while live loops are below `parallel`.
 Starting clears the backlog and records who started it in `decisions`.
+
+A backlog task created with a `request` is saved `queued` and spawns no loop, so
+nothing is planned while it waits. When it starts, the loop moves its worktree
+to the current head of its base branch (`git reset --hard`, only when the task
+has no attempt, `baseRef` is set, HEAD is still `baseSha` and no tracked file
+changed), sets `baseSha`, records `Rebase: planning from <base> at <sha>` when
+the sha changed, and then plans. The plan therefore reads the code as it is at
+start time, not as it was when the request was parked.
+
+When a task ends `done` or `failed`, `engine/metrics.rs` stores `metrics` on it
+once (`firstPass`, `ownerTouches`, `costByPhase` over the eight model phases,
+`failureCause` of `env | plan | impl | review_loop`, `endedAt`), and a
+top-level task adds one `done` entry to the overseer log with that line and the
+repo's first-pass rate and average cost per landed task over its last 20
+finished tasks. Starting a finished task again clears its metrics.
 
 A task graph is state the orchestrator keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, requests, `dependsOn`

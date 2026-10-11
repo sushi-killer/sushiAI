@@ -35,6 +35,14 @@ pub(super) async fn run_task_loop(
             }
         };
 
+        // A finished task started again is no longer finished.
+        if task.metrics.is_some() && !matches!(task.status, TaskStatus::Done | TaskStatus::Failed) {
+            task.metrics = None;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
+        }
+
         // A usage or rate limit pause that outlived the loop (a restart) is
         // served first, holding no slot; the mark is cleared when it ends.
         if let Some(until) = task.queue.paused_until {
@@ -225,6 +233,35 @@ pub(super) async fn run_task_loop(
         }
 
         if needs_planning(&task) {
+            // A task planned late (a backlog request) plans on the base as it
+            // is now, when nothing has touched its worktree yet.
+            // A subtask keeps the parent-head move done before attempt 1.
+            if task.attempts.is_empty() && task.parent.is_none() {
+                if let Some(base_ref) = task.base_ref.clone() {
+                    let (wt, from, r) = (
+                        PathBuf::from(&task.worktree),
+                        task.base_sha.clone(),
+                        base_ref.clone(),
+                    );
+                    let moved = tokio::task::spawn_blocking(move || {
+                        git::reset_untouched_to_base(&wt, &r, &from)
+                    })
+                    .await;
+                    if let Ok(Ok(Some(new_sha))) = moved {
+                        task.decisions.push(format!(
+                            "Rebase: planning from {base_ref} at {}",
+                            short_sha(&new_sha)
+                        ));
+                        task.base_sha = new_sha;
+                    }
+                }
+            }
+            if task.status == TaskStatus::Queued {
+                task.status = TaskStatus::Drafting;
+            }
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
             match run_plan_stage(
                 &app,
                 &task_id,
@@ -2567,6 +2604,7 @@ impl App {
 
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
+        self.record_task_metrics(task_id);
         if let Ok(Some(task)) = self.store.load_task(task_id) {
             self.drop_settled_output(&task);
             self.advance_graph(&task.repo);

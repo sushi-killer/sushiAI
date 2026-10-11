@@ -80,6 +80,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         eval_check: None,
         brief_check: Default::default(),
         plan_gate: Default::default(),
+        metrics: None,
         checklist: vec![],
         queue: Default::default(),
         created_at: 1,

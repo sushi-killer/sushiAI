@@ -348,7 +348,12 @@ fn hand_built_graph(
 #[test]
 fn two_independent_children_run_concurrently_and_both_land() {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PARTS_SCRIPT);
+    // A longer part, so a loaded machine still overlaps the two runs.
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &PARTS_SCRIPT.replace("sleep 1;", "sleep 8;"),
+    );
     let log = tempfile::tempdir().unwrap();
     // Each child waits for its peer to be live, up to one deadline, so a slow
     // start of the second child cannot make the runs miss each other.
@@ -1638,12 +1643,19 @@ fi
 exit 0
 "#;
 
-/// `PARTS_SCRIPT` that also writes fix.txt for a run told about a gate failure.
+/// `PARTS_SCRIPT` that also writes fix.txt for a run told about a gate
+/// failure and, with `BARRIER` set, makes a part wait until both parts are
+/// running, so the second to land always finds the parent branch moved.
 fn gate_script() -> String {
-    PARTS_SCRIPT.replace(
-        "case \"$input\" in\n",
-        "case \"$input\" in\n  *NEEDS-FIX*) echo fix > fix.txt ;;\n",
-    )
+    PARTS_SCRIPT
+        .replace(
+            "case \"$input\" in\n",
+            "case \"$input\" in\n  *NEEDS-FIX*) echo fix > fix.txt ;;\n",
+        )
+        .replace(
+            "rm -f \"$PARTS_LOG/live/$$\"\n",
+            "if [ -n \"$BARRIER\" ]; then\n  touch \"$PARTS_LOG/arrived.$$\"\n  i=0\n  while [ \"$(ls \"$PARTS_LOG\" | grep -c '^arrived')\" -lt 2 ] && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done\nfi\nrm -f \"$PARTS_LOG/live/$$\"\n",
+        )
 }
 
 struct GateRun {
@@ -1655,6 +1667,10 @@ struct GateRun {
 
 /// A daemon whose harness is `gate_script` and whose `npm` is the fake one.
 fn gate_daemon(fail: bool, gate_at: Option<&str>) -> GateRun {
+    gate_daemon_env(fail, gate_at, &[])
+}
+
+fn gate_daemon_env(fail: bool, gate_at: Option<&str>, extra: &[(&str, &str)]) -> GateRun {
     let scripts = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let log = tempfile::tempdir().unwrap();
@@ -1666,13 +1682,15 @@ fn gate_daemon(fail: bool, gate_at: Option<&str>) -> GateRun {
         bin.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let daemon = Daemon::spawn(&[
+    let mut vars = vec![
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("PARTS_LOG", log.path().to_str().unwrap()),
         ("NPM_LOG", npm_log.to_str().unwrap()),
         ("NPM_FAIL", if fail { "1" } else { "" }),
         ("PATH", &path),
-    ]);
+    ];
+    vars.extend_from_slice(extra);
+    let daemon = Daemon::spawn(&vars);
     review_off(&daemon);
     let repo = init_git_repo();
     if let Some(at) = gate_at {
@@ -1727,6 +1745,15 @@ fn deferred_lines(task: &serde_json::Value) -> Vec<String> {
 
 /// A parent with `finals[0]` and two children with `finals[1..]`, started.
 fn gate_graph(run: &GateRun, finals: [&[&str]; 3]) -> (serde_json::Value, Vec<serde_json::Value>) {
+    gate_graph_with(run, finals, "")
+}
+
+/// `gate_graph` whose part Two verifies after `two_prefix` (e.g. `sleep 6 &&`).
+fn gate_graph_with(
+    run: &GateRun,
+    finals: [&[&str]; 3],
+    two_prefix: &str,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
     let repo = run.repo.path().to_str().unwrap();
     let parent = run.daemon.request(
         "task.create",
@@ -1748,7 +1775,7 @@ fn gate_graph(run: &GateRun, finals: [&[&str]; 3]) -> (serde_json::Value, Vec<se
             "task.create",
             serde_json::json!({
                 "repo": repo, "title": title, "goal": goal,
-                "verify": [format!("test -f {file}")],
+                "verify": [format!("{}test -f {file}", if i == 1 { two_prefix } else { "" })],
                 "finalVerify": finals[i + 1], "parent": parent_id,
             }),
         );
@@ -1783,6 +1810,32 @@ fn a_two_child_graph_runs_the_shared_gate_once_at_the_parent() {
             "the stored finalVerify is kept: {c}"
         );
     }
+    let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();
+    assert_eq!(npm_runs_in(&run, &all), [0, 0, 1]);
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn a_carried_child_does_not_run_a_parent_deferred_final_at_landing() {
+    let run = gate_daemon_env(false, None, &[("BARRIER", "1")]);
+    let gate: &[&str] = &["npm run ci"];
+    // Part Two verifies slowly, so part One lands first and Two is carried by
+    // the landing itself, not by the rebase that follows its agent run.
+    let (parent, children) = gate_graph_with(&run, [gate, gate, gate], "sleep 6 && ");
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    for c in &children {
+        assert_eq!(c["status"], "done", "task JSON: {c}");
+    }
+    let carried = children
+        .iter()
+        .filter(|c| {
+            decisions_of(c)
+                .iter()
+                .any(|d| d.starts_with("Land: carried the work onto"))
+        })
+        .count();
+    assert_eq!(carried, 1, "one child lands on a moved parent branch");
     let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();
     assert_eq!(npm_runs_in(&run, &all), [0, 0, 1]);
     finish_gate(run, &parent, &children);

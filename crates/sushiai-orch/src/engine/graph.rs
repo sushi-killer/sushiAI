@@ -619,7 +619,7 @@ pub(super) async fn run_parent(
         // A command that already passed on exactly this tree in a subtask
         // is not run again; it counts as passed.
         let (checks, passed_before) =
-            drop_passed_on_tree(app, Path::new(&task.worktree), checks).await;
+            drop_passed_on_tree(app, Path::new(&task.worktree), &task.base_sha, checks).await;
         let mut skipped = skipped;
         skipped.extend(passed_before);
         let sandbox = app.settings.read().unwrap().sandbox;
@@ -735,11 +735,13 @@ pub(super) async fn run_parent(
 }
 
 /// Splits `checks` into those still to run and one decision line per command
-/// that passed on this worktree's exact tree in a subtask's final run. Every
+/// that passed on this worktree's exact tree under the same `base_sha` in a
+/// subtask's final run (a pass under another base does not count). Every
 /// command runs when the tree cannot be read.
 async fn drop_passed_on_tree(
     app: &Arc<App>,
     worktree: &Path,
+    base_sha: &str,
     checks: Vec<String>,
 ) -> (Vec<String>, Vec<String>) {
     let wt = worktree.to_path_buf();
@@ -753,7 +755,7 @@ async fn drop_passed_on_tree(
     let passes = app.gate_passes.lock().unwrap();
     let (passed, rest): (Vec<String>, Vec<String>) = checks
         .into_iter()
-        .partition(|c| passes.contains(&(tree.clone(), c.clone())));
+        .partition(|c| passes.contains(&(tree.clone(), base_sha.to_string(), c.clone())));
     let lines = passed
         .iter()
         .map(|c| format!("Orchestrator: {c} passed on this tree in a subtask; not run again"))
@@ -1476,5 +1478,68 @@ impl App {
             .map_err(|e| e.to_string())?
             .unwrap_or(task);
         serde_json::to_value(&latest).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::test_support::{init_git_repo, test_app};
+
+    fn outcome(command: &str, code: Option<i32>) -> VerifyOutcome {
+        VerifyOutcome {
+            command: command.to_string(),
+            code,
+            tail: String::new(),
+            ms: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_under_one_base_is_not_reused_under_another() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let tree = git::worktree_tree(&repo).unwrap();
+        crate::engine::task_loop::record_gate_passes(
+            &app,
+            &tree,
+            "base-a",
+            &[outcome("npm run ci", Some(0))],
+        );
+        let cmds = vec!["npm run ci".to_string()];
+
+        let (rest, lines) = drop_passed_on_tree(&app, &repo, "base-a", cmds.clone()).await;
+        assert!(rest.is_empty(), "{rest:?}");
+        assert_eq!(lines.len(), 1);
+        let (rest, lines) = drop_passed_on_tree(&app, &repo, "base-b", cmds.clone()).await;
+        assert_eq!(rest, cmds);
+        assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_final_is_never_recorded_as_a_pass() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let tree = git::worktree_tree(&repo).unwrap();
+        crate::engine::task_loop::record_gate_passes(
+            &app,
+            &tree,
+            "base-a",
+            &[
+                outcome("timed out", None),
+                outcome("failed", Some(1)),
+                outcome("passed", Some(0)),
+            ],
+        );
+        let cmds: Vec<String> = ["timed out", "failed", "passed"]
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        let (rest, _) = drop_passed_on_tree(&app, &repo, "base-a", cmds).await;
+        assert_eq!(rest, ["timed out", "failed"]);
     }
 }

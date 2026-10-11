@@ -144,3 +144,24 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         diff_stat: None,
     }
 }
+
+/// Runs `git` in `dir`, panicking on failure; returns its stdout.
+pub(super) fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A git repo in `dir` with one commit.
+pub(super) fn init_git_repo(dir: &std::path::Path) {
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["config", "user.email", "test@example.com"]);
+    git_in(dir, &["config", "user.name", "Test"]);
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "-q", "-m", "init"]);
+}

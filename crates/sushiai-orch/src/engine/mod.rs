@@ -354,9 +354,11 @@ pub struct App {
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
-    /// (tree hash, command) pairs that passed in a subtask's final run: a
-    /// parent on the same tree does not run that command again.
-    gate_passes: StdMutex<std::collections::HashSet<(String, String)>>,
+    /// (tree hash, base sha, command) triples that passed (exit 0) in a
+    /// subtask's final run: a parent on the same tree and the same base does
+    /// not run that command again. The base is part of the key because every
+    /// command sees it as `ORCHD_BASE_SHA`.
+    gate_passes: StdMutex<std::collections::HashSet<(String, String, String)>>,
     /// Keyed by (base sha, command): background base runs in flight. The
     /// receiver flips to `true` when the job is over; its result, if any, is
     /// then in `base_runs`. One pair runs on base at most once per daemon.

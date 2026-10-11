@@ -322,22 +322,35 @@ pub(super) async fn check_brief(
     action
 }
 
-/// The files the dependencies' last passed implement attempts changed.
-fn landed_files(app: &App, task: &Task) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
-    for dep in task
+/// The files the dependencies changed: each one's landed diff (or, not yet
+/// landed, its branch over its base) read from git; the last passed implement
+/// attempt's changed files when git cannot read the range.
+async fn landed_files(app: &App, task: &Task) -> Vec<String> {
+    let deps: Vec<Task> = task
         .depends_on
         .iter()
         .filter_map(|id| app.store.load_task(id).ok().flatten())
-    {
-        let passed = dep
-            .attempts
-            .iter()
-            .rev()
-            .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
-        for f in passed.map(|a| a.changed_files.as_slice()).unwrap_or(&[]) {
-            if !files.contains(f) {
-                files.push(f.clone());
+        .collect();
+    let mut files: Vec<String> = Vec::new();
+    for dep in deps {
+        let (from, to) = super::reports::task_range(&dep);
+        let repo = PathBuf::from(&dep.repo);
+        let from_git = tokio::task::spawn_blocking(move || git::numstat(&repo, &from, &to).ok())
+            .await
+            .unwrap_or(None);
+        let paths: Vec<String> = match from_git {
+            Some(entries) => entries.into_iter().map(|e| e.0).collect(),
+            None => dep
+                .attempts
+                .iter()
+                .rev()
+                .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed)
+                .map(|a| a.changed_files.clone())
+                .unwrap_or_default(),
+        };
+        for f in paths {
+            if !files.contains(&f) {
+                files.push(f);
             }
         }
     }
@@ -378,7 +391,7 @@ pub(super) async fn refresh_after_dependencies(
     {
         return false;
     }
-    let changed = landed_files(app, &task);
+    let changed = landed_files(app, &task).await;
     let commands: Vec<&String> = task.verify.iter().chain(&task.final_verify).collect();
     let targets: Vec<String> = commands.iter().flat_map(|c| check_targets(c)).collect();
     let touched = overlapping_path(&task.paths, &changed).is_some()
@@ -581,5 +594,65 @@ mod tests {
             &off
         )
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_split_parent_dependency_triggers_the_refresh_from_its_landed_diff() {
+        use crate::engine::test_support::{git_in, init_git_repo, task_with_status, test_app};
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().brief_check_route = String::new();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("src/touched.txt"), "x\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "landed"]);
+        let landed = git_in(&repo, &["rev-parse", "HEAD"]);
+        // A split parent: no implement attempt of its own, only a landing.
+        let mut dep = task_with_status(TaskStatus::Done);
+        dep.repo = repo.display().to_string();
+        dep.landed_sha = Some(landed);
+        app.store.save_task(&dep).unwrap();
+
+        let child_with = |paths: &[&str]| {
+            let mut t = task_with_status(TaskStatus::Queued);
+            t.repo = repo.display().to_string();
+            t.planned_by_parent = true;
+            t.depends_on = vec![dep.id.clone()];
+            t.paths = paths.iter().map(|p| p.to_string()).collect();
+            app.store.save_task(&t).unwrap();
+            t
+        };
+        let hit = child_with(&["src/touched.txt"]);
+        let miss = child_with(&["src/other.txt"]);
+
+        for t in [&hit, &miss] {
+            let cancelled = refresh_after_dependencies(&app, &t.id, 1, &CancelToken::new()).await;
+            assert!(!cancelled);
+        }
+        let refresh_lines = |t: &Task| {
+            app.store
+                .load_task(&t.id)
+                .unwrap()
+                .unwrap()
+                .decisions
+                .iter()
+                .filter(|d| d.starts_with("Refresh:"))
+                .count()
+        };
+        assert_eq!(
+            refresh_lines(&hit),
+            1,
+            "the touched part starts the refresh"
+        );
+        assert_eq!(refresh_lines(&miss), 0);
+        assert!(
+            app.store
+                .load_task(&miss.id)
+                .unwrap()
+                .unwrap()
+                .brief_check
+                .refreshed
+        );
     }
 }

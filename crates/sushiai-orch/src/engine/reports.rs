@@ -55,11 +55,9 @@ fn follow_up_request(task: &Task, note: &str) -> String {
     text
 }
 
-/// Git facts about the work of a finished task: its landing commit, else the
-/// commits its branch holds over the base it started from.
 /// What the task changed: the landing commit against its parent once landed,
 /// else its branch against its base.
-fn task_range(task: &Task) -> (String, String) {
+pub(super) fn task_range(task: &Task) -> (String, String) {
     match &task.landed_sha {
         Some(sha) => (format!("{sha}^"), sha.clone()),
         None => (task.base_sha.clone(), task.branch.clone()),

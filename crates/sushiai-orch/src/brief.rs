@@ -898,7 +898,9 @@ const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
-const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Draft every part completely, as you would a task of its own: `key`, `title`, `goal`, `criteria` (strings or `{\"text\": \"...\", \"visual\": true}`, as above), `verify`, `finalVerify`, `paths`, `tier` and `dependsOn`. A part with a title, goal, criteria and verify runs as drafted and is not planned again. Each part's `request` is what its own planner drafts from when the draft is incomplete, so keep it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. The top-level verify and finalVerify carry the whole-repo checks (the full CI script): they run once on the combined result, so a part's own finalVerify lists only checks for its own part. When the request fits one session, leave `subtasks` out.";
+/// Added to [`PLAN_SUBTASKS`] under `variant.grounded_checks`.
+const PLAN_SUBTASK_CHECKS: &str = "Draft `checks` and `heldOut` for each part as well, under the same rules as above; their `criterion` indices count that part's own `criteria`, from 0.";
+const PLAN_SUBTASKS: &str = "When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; parts whose paths overlap (or that list none) are run one after another instead of side by side. Draft every part completely, as you would a task of its own: `key`, `title`, `goal`, `criteria` (strings or `{\"text\": \"...\", \"visual\": true}`, as above), `verify`, `finalVerify`, `paths`, `screenshot` (the repo command that captures the screenshot evidence when the part changes a screen, else empty), `tier` and `dependsOn`. A part with a title, goal, criteria and verify runs as drafted and is not planned again. Each part's `request` is what its own planner drafts from when the draft is incomplete, so keep it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. The top-level verify and finalVerify carry the whole-repo checks (the full CI script): they run once on the combined result, so a part's own finalVerify lists only checks for its own part. When the request fits one session, leave `subtasks` out.";
 
 /// The drafting-stage brief for a top-level task: the owner's request
 /// verbatim, then the fixed planning instructions and report format (spec:
@@ -939,9 +941,17 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
     }
     if split {
         extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
+        if variant.grounded_checks {
+            extra.push_str(&format!(" {PLAN_SUBTASK_CHECKS}"));
+        }
+        let part_checks = if variant.grounded_checks {
+            "\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},"
+        } else {
+            ""
+        };
         format = format.replace(
             "]}]}\n```",
-            "]}],\"subtasks\":[{\"key\":\"a\",\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],\"finalVerify\":[],\"paths\":[\"src/...\"],\"tier\":\"mechanical|standard|hard\",\"dependsOn\":[],\"request\":\"...\"}]}\n```",
+            &format!("]}}],\"subtasks\":[{{\"key\":\"a\",\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],{part_checks}\"finalVerify\":[],\"paths\":[\"src/...\"],\"screenshot\":\"\",\"tier\":\"mechanical|standard|hard\",\"dependsOn\":[],\"request\":\"...\"}}]}}\n```"),
         );
     } else {
         extra.push_str(&format!("\n\n{PLAN_SUBTASK_GATE}"));
@@ -1112,6 +1122,14 @@ pub struct PlanSubtask {
     /// Repo-relative files or directories this part edits.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// `variant.grounded_checks`: indices count this part's own `criteria`.
+    #[serde(default, deserialize_with = "lenient_checks")]
+    pub checks: Vec<Check>,
+    #[serde(default, rename = "heldOut", deserialize_with = "lenient_check")]
+    pub held_out: Option<Check>,
+    /// The repo command that captures this part's screenshot evidence.
+    #[serde(default)]
+    pub screenshot: Option<String>,
 }
 
 /// A handoff the agent wrote as null or as an object/array still reads:
@@ -3093,6 +3111,25 @@ mod tests {
         // The retry briefs only add their one-line reminder in front.
         assert!(build_plan_retry_brief("Fix it", &variant, "")
             .ends_with(&build_plan_brief("Fix it", &variant, "")));
+    }
+
+    #[test]
+    fn plan_brief_with_grounded_checks_asks_for_part_checks() {
+        let grounded = Variant {
+            grounded_checks: true,
+            ..Variant::default()
+        };
+        let part = "\"verify\":[],\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},\"finalVerify\":[]";
+        let brief = build_plan_brief("Fix it", &grounded, "");
+        let subtasks = &brief[brief.find("\"subtasks\":[{").unwrap()..];
+        assert!(subtasks.contains(part), "{subtasks}");
+        assert!(subtasks.contains("\"screenshot\":\"\""), "{subtasks}");
+        assert!(brief.contains("Draft `checks` and `heldOut` for each part"));
+        let plain = build_plan_brief("Fix it", &Variant::default(), "");
+        let subtasks = &plain[plain.find("\"subtasks\":[{").unwrap()..];
+        assert!(!subtasks.contains("heldOut") && !subtasks.contains("\"checks\""));
+        assert!(subtasks.contains("\"screenshot\":\"\""), "{subtasks}");
+        assert!(!plain.contains("Draft `checks`"));
     }
 
     #[test]

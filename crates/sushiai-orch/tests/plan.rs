@@ -716,3 +716,59 @@ fn an_incomplete_part_draft_is_still_planned_by_its_own_planner() {
     assert_eq!(b["status"], "done", "{b}");
     daemon.shutdown_and_wait();
 }
+
+/// Like `PARENT_DRAFTS_SCRIPT`, part A drafted with `checks`, an
+/// out-of-range check, a `heldOut` check and a `screenshot` command.
+const GROUNDED_PART_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+out() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
+case "$input" in
+  *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *sushi-plan*) out '"```sushi-plan\n{\"title\":\"One part\",\"goal\":\"Create a.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"true\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f a.txt\"},{\"criterion\":9,\"run\":\"test -f nowhere.txt\"}],\"heldOut\":{\"criterion\":0,\"run\":\"test -s a.txt\"},\"screenshot\":\"  mkdir -p artifacts && echo png > artifacts/a.png  \",\"paths\":[\"a.txt\"],\"request\":\"CHILD_REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B\"}]}\n```"' ;;
+  *MAKE_A*) echo a > a.txt; out "$report" ;;
+  *MAKE_B*) echo b > b.txt; out "$report" ;;
+  *) out "$report" ;;
+esac
+"#;
+
+#[test]
+fn a_parent_drafted_part_keeps_its_drafted_checks_and_held_out() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", GROUNDED_PART_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "build the part",
+            "variant": {"groundedChecks": true},
+            "start": true,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = settle(&daemon, &parent_id);
+    let children = children_of(&daemon, &parent);
+    assert_eq!(children.len(), 2, "{parent}");
+    let a = children.iter().find(|c| c["title"] == "Part A").unwrap();
+    assert_eq!(a["plannedByParent"], true, "{a}");
+    assert_eq!(plan_attempts(a), 0, "{a}");
+    let checks = a["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "the out-of-range check is dropped: {a}");
+    assert_eq!(checks[0]["criterion"], 0);
+    assert_eq!(checks[0]["run"], "test -f a.txt");
+    assert_eq!(a["heldOut"]["run"], "test -s a.txt", "{a}");
+    assert_eq!(
+        a["briefCheck"]["screenshot"], "mkdir -p artifacts && echo png > artifacts/a.png",
+        "{a}"
+    );
+    daemon.shutdown_and_wait();
+}

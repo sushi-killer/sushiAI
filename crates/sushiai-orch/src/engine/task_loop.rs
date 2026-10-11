@@ -2489,6 +2489,15 @@ pub(super) enum Tail {
     Return,
 }
 
+/// Remembers the commands that exited 0 on `tree` under `base_sha`. A run
+/// with no exit code (timed out, cancelled, killed) is never a pass.
+pub(super) fn record_gate_passes(app: &App, tree: &str, base_sha: &str, results: &[VerifyOutcome]) {
+    let mut passes = app.gate_passes.lock().unwrap();
+    for r in results.iter().filter(|r| r.code == Some(0)) {
+        passes.insert((tree.to_string(), base_sha.to_string(), r.command.clone()));
+    }
+}
+
 /// A passed review (or an accepted attempt): the task's final checks run on
 /// the worktree, then `finish_attempt` commits or lands it. A failing final
 /// check is a `Verify` failure -- or, when it already failed on the base, a
@@ -2542,11 +2551,8 @@ pub(super) async fn finish_after_review(
             app.finish_task_loop(task_id);
             return Tail::Return;
         }
-        if let Some(tree) = tree {
-            let mut passes = app.gate_passes.lock().unwrap();
-            for r in final_results.iter().filter(|r| r.code == Some(0)) {
-                passes.insert((tree.clone(), r.command.clone()));
-            }
+        if let Some(tree) = &tree {
+            record_gate_passes(app, tree, &task.base_sha, &final_results);
         }
         task.attempts[idx]
             .verify

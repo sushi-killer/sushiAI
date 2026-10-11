@@ -1082,6 +1082,17 @@ async fn split_into_subtasks(
             (drafted_verify, Vec::new())
         };
         let mut criteria = non_empty(&part.criteria);
+        // Indices count the part's own criteria, before the review entries.
+        let own_criteria = criteria.len();
+        let grounded = parent.variant().grounded_checks;
+        let (checks, held_out) = if grounded {
+            (
+                valid_checks(part.checks.clone(), own_criteria),
+                valid_check(part.held_out.clone(), own_criteria),
+            )
+        } else {
+            (vec![], None)
+        };
         criteria.extend(
             judged
                 .into_iter()
@@ -1103,8 +1114,8 @@ async fn split_into_subtasks(
                 criteria,
                 verify,
                 final_verify: non_empty(&part.final_verify),
-                checks: vec![],
-                held_out: None,
+                checks,
+                held_out,
                 request: Some(subtask_request(&parent, &part.request)),
                 branch: None,
                 base: parent.branch.clone(),
@@ -1138,6 +1149,12 @@ async fn split_into_subtasks(
         };
         child.planned_tier = part.tier;
         child.visual_criteria = part.visual_criteria.clone();
+        child.brief_check.screenshot = part
+            .screenshot
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
         child.planned_by_parent = complete;
         if let Err(e) = app.store.save_task(&child) {
             children.push(child);

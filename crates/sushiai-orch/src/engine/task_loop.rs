@@ -1,4 +1,5 @@
 use super::recovery::{follow_run, resumable_attempt};
+use super::time_budget;
 use super::*;
 
 /// The per-task attempt loop (spec "Engine", steps 1-10). Runs as its own
@@ -369,23 +370,23 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        // Every check command runs on the base once: one the repository
-        // cannot run is rewritten, one broken for an unrelated reason stops
-        // gating, before an attempt is spent on either.
+        // Every check command runs on the base once, in the background:
+        // attempt 1 starts at once and the job holds no slot. A command the
+        // repository cannot run is rewritten, one broken for an unrelated
+        // reason stops gating; the loop applies the ruling where it is
+        // needed (a failing verify command, the gate before finalVerify).
         if completed_implement_attempts(&task) == 0
             && !task.brief_check.feasibility_done
             && parent_failure.is_none()
         {
+            if heal_grep_dashes(&mut task) {
+                app.verify_cache.lock().unwrap().remove(&task_id);
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
             let attempt_n = task.attempts.len() as u32 + 1;
-            if !heal_feasibility(&app, &task_id, attempt_n, &cancel).await {
-                drop(permit);
-                mark_stopped_if_not_already(&app, &task_id).await;
-                app.finish_task_loop(&task_id);
-                return;
-            }
-            if let Ok(Some(reloaded)) = app.store.load_task(&task_id) {
-                task = reloaded;
-            }
+            spawn_base_preflight(&app, &task, attempt_n, &cancel);
         }
 
         let status = task.status;
@@ -542,7 +543,8 @@ pub(super) async fn run_task_loop(
             let guard = Guard::for_variant(
                 &task.variant(),
                 registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
-            );
+            )
+            .with_time_budget(settings.implement_budget_mins, a.started_at);
             let result = follow_run(&app, &task, idx, &cancel, guard).await;
             (
                 settings,
@@ -790,6 +792,9 @@ pub(super) async fn run_task_loop(
                 review_cost_usd: None,
                 evidence: vec![],
                 evidence_tree: None,
+                review_tree: None,
+                review_base: None,
+                review_scope: None,
                 evidence_base: None,
                 evidence_from: None,
                 advice: None,
@@ -839,6 +844,7 @@ pub(super) async fn run_task_loop(
                 codex_mcp: &codex_mcp,
                 images: &[],
                 repo_settings: true,
+                resume: None,
             };
 
             let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -857,6 +863,10 @@ pub(super) async fn run_task_loop(
                 Guard::for_variant(
                     &task.variant(),
                     registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
+                )
+                .with_time_budget(
+                    settings.implement_budget_mins,
+                    task.attempts[idx].started_at,
                 ),
             );
             // Recorded after the reload below, which would drop a line pushed now.
@@ -1024,6 +1034,54 @@ pub(super) async fn run_task_loop(
         task.attempts[idx].cost_estimated = outcome.cost_estimated;
         if let Some(cost) = cost {
             task.cost_usd += cost;
+        }
+
+        if outcome.time_budget {
+            let detail = outcome.error.clone().unwrap_or_default();
+            let (wt, base) = (worktree.clone(), base_sha.clone());
+            let changed = tokio::task::spawn_blocking(move || {
+                git::changed_files(&wt, &base).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            let session = outcome.session_id.as_deref().filter(|_| !b_won);
+            let report = time_budget::report_after_budget(
+                &app, &task_id, attempt_n, &route, &worktree, &run_dir, session, &changed, &cancel,
+            )
+            .await;
+            let a = &mut task.attempts[idx];
+            a.handoff = Some(report.handoff);
+            a.summary = report.summary;
+            a.changed_files = changed;
+            if report.cost > 0.0 {
+                a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + report.cost);
+                task.cost_usd += report.cost;
+            }
+            record_diff_stat(&mut task, idx, &worktree, &base_sha).await;
+            match fail_and_continue(
+                &app,
+                &task_id,
+                &mut task,
+                idx,
+                FailureKind::TimeBudget,
+                detail,
+                &mut attempt_budget,
+                &pending_answer,
+                &cancel,
+                &mut permit,
+            )
+            .await
+            {
+                LoopSignal::Continue => {
+                    drop(permit);
+                    continue;
+                }
+                LoopSignal::Stop => {
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
         }
 
         if outcome.stalled || outcome.over_budget {
@@ -1621,7 +1679,45 @@ pub(super) async fn run_task_loop(
             return;
         }
         task.attempts[idx].verify = verify_results.clone();
+        let mut preflight_checked = false;
         while let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)).cloned() {
+            // The base preflight may rule on this very command (it cannot
+            // run here, or fails for an unrelated reason): its ruling comes
+            // before the failure counts. A changed command runs again, so a
+            // rewrite spends no counted attempt.
+            if !preflight_checked {
+                preflight_checked = true;
+                let before = task.verify.clone();
+                if !settle_base_preflight(&app, &mut task, &cancel).await {
+                    interrupt_attempt(&app, &mut task, idx);
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+                if task.verify != before {
+                    let (verify_commands, skipped) =
+                        scope_to_diff(&app, &task.repo, &worktree, &base_sha, &task.verify).await;
+                    record_skips(&mut task, skipped);
+                    verify_results = run_verify_cached(
+                        &app,
+                        &task_id,
+                        &worktree,
+                        &run_dir,
+                        &base_sha,
+                        &verify_commands,
+                        &cancel,
+                    )
+                    .await;
+                    if cancel.is_cancelled() {
+                        interrupt_attempt(&app, &mut task, idx);
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                    task.attempts[idx].verify = verify_results.clone();
+                    continue;
+                }
+            }
             // The work was carried onto a base that moved during this
             // attempt: a command that passed on the old base and fails on
             // the new one alone is the base's failure, not the attempt's.
@@ -2043,6 +2139,10 @@ pub(super) async fn run_task_loop(
                 // Findings a judge dropped in this attempt, and its judge runs.
                 let mut dropped: Vec<(String, String)> = Vec::new();
                 let mut judge_runs = 0u32;
+                // After a narrow PASS that left files no open finding names,
+                // every later round of this attempt is a full review; the
+                // escalation happens at most once.
+                let mut force_full = false;
                 loop {
                     let reviewed = run_review(
                         &app,
@@ -2062,6 +2162,7 @@ pub(super) async fn run_task_loop(
                         round,
                         after_no_verdict,
                         &dropped,
+                        force_full,
                     )
                     .await;
                     // The task's total, and separately the attempt's
@@ -2076,7 +2177,34 @@ pub(super) async fn run_task_loop(
                         Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
                     review_cost = 0.0;
                     let (why, no_verdict) = match reviewed {
-                        Ok((r, recorded_as_pass)) => {
+                        Ok((r, recorded_as_pass, saw)) => {
+                            task.attempts[idx].review_tree = saw.tree.clone();
+                            task.attempts[idx].review_base = Some(base_sha.clone());
+                            task.attempts[idx].review_scope = Some(saw.scope);
+                            if r.verdict == Verdict::Pass
+                                && saw.scope == ReviewScope::Narrow
+                                && !force_full
+                            {
+                                let unnamed = unnamed_changes_since_full_review(
+                                    &task,
+                                    attempt_n,
+                                    saw.tree.as_deref(),
+                                    &worktree,
+                                    &base_sha,
+                                )
+                                .await;
+                                if !unnamed.is_empty() {
+                                    task.decisions.push(format!(
+                                        "Orchestrator: attempt {attempt_n} narrow review passed, but {} changed since the last full review and no open finding names {}; reviewing the whole change once",
+                                        unnamed.join(", "),
+                                        if unnamed.len() == 1 { "it" } else { "them" }
+                                    ));
+                                    force_full = true;
+                                    round += 1;
+                                    after_no_verdict = false;
+                                    continue;
+                                }
+                            }
                             if recorded_as_pass {
                                 task.decisions.push(
                                     "Orchestrator: review FAIL recorded as PASS (only P2/P3 findings)"
@@ -2315,6 +2443,54 @@ pub(super) async fn run_task_loop(
     }
 }
 
+/// The files the task changed since the last full review that no open finding
+/// of the review the narrow one built on names, by `path:line`. Empty when
+/// nothing is unnamed or it cannot be told (no full review with a tree, a git
+/// error).
+async fn unnamed_changes_since_full_review(
+    task: &Task,
+    attempt_n: u32,
+    now_tree: Option<&str>,
+    worktree: &Path,
+    base_sha: &str,
+) -> Vec<String> {
+    let Some(now_tree) = now_tree else {
+        return Vec::new();
+    };
+    let Some(open) = narrow_basis(task, attempt_n).and_then(|a| a.review.as_ref()) else {
+        return Vec::new();
+    };
+    let Some((full_tree, full_base)) = task
+        .attempts
+        .iter()
+        .rev()
+        .filter(|a| a.stage == Stage::Implement && a.n < attempt_n)
+        .find(|a| a.review_scope == Some(ReviewScope::Full) && a.review_tree.is_some())
+        .and_then(|a| Some((a.review_tree.clone()?, a.review_base.clone())))
+    else {
+        return Vec::new();
+    };
+    let named = brief::finding_paths(&open.findings);
+    let (wt, now, base) = (
+        worktree.to_path_buf(),
+        now_tree.to_string(),
+        base_sha.to_string(),
+    );
+    tokio::task::spawn_blocking(move || {
+        let files = match &full_base {
+            Some(old_base) => git::own_changes_between(&wt, &full_tree, old_base, &now, &base),
+            None => git::diff_trees_name_only(&wt, &full_tree, &now),
+        }
+        .unwrap_or_default();
+        files
+            .into_iter()
+            .filter(|f| !named.contains(f))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Records the worktree's diff against `base` on the attempt and the task.
 async fn record_diff_stat(task: &mut Task, idx: usize, worktree: &Path, base: &str) {
     let (wt, base) = (worktree.to_path_buf(), base.to_string());
@@ -2390,6 +2566,54 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
         }
         _ => {}
     }
+}
+
+/// How often a task that waits for its base branch to move looks at it.
+const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
+
+/// A "retry after the base is fixed" answer: waits until the base branch has
+/// moved past the task's base, then carries the work onto it. No attempt
+/// starts on the same base: the failure it would meet is the one already
+/// known. Returns `false` when `cancel` fired while waiting. A task without a
+/// base branch, or one whose branch cannot be read, goes on at once.
+pub(super) async fn carry_after_base_moves(
+    app: &Arc<App>,
+    task: &mut Task,
+    worktree: &Path,
+    cancel: &CancelToken,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> bool {
+    if let Some(base_ref) = task.base_ref.clone() {
+        let mut noted = false;
+        loop {
+            let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
+            let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+            if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
+                break;
+            }
+            if !noted {
+                noted = true;
+                // No slot is held while nothing runs.
+                permit.take();
+                task.decisions.push(format!(
+                    "Orchestrator: waiting for {base_ref} to move past {} before the retry",
+                    short_sha(&task.base_sha)
+                ));
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(task);
+                app.broadcast_task(task);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return false,
+                _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+            }
+        }
+    }
+    carry_onto_newest_base(task, worktree).await;
+    true
 }
 
 /// The attempt's loop was cancelled after its run: interrupted, never a
@@ -2525,6 +2749,14 @@ pub(super) async fn finish_after_review(
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Tail {
+    // The gate: the base preflight is settled before finalVerify runs on
+    // the worktree, so a ruling of the judge never comes after a landing.
+    if !settle_base_preflight(app, task, cancel).await {
+        interrupt_attempt(app, task, idx);
+        *permit = None;
+        app.finish_task_loop(task_id);
+        return Tail::Return;
+    }
     // The commands the parent runs anyway are left out of this run; the
     // stored `finalVerify` is not changed.
     let (to_run, deferred) = split_deferred(app, settings, task);
@@ -2544,7 +2776,7 @@ pub(super) async fn finish_after_review(
                 .ok()
                 .and_then(|r| r.ok())
         };
-        let final_results = run_verify_commands(
+        let mut final_results = run_verify_commands(
             worktree,
             &run_dir.join("final"),
             &final_commands,
@@ -2558,6 +2790,43 @@ pub(super) async fn finish_after_review(
             *permit = None;
             app.finish_task_loop(task_id);
             return Tail::Return;
+        }
+        // A final that ended without an exit code (timed out) says nothing
+        // about the work: it runs once more on the kept worktree, as an
+        // environment failure, and no implement session is spent on it.
+        let timed_out: Vec<String> = final_results
+            .iter()
+            .filter(|v| v.code.is_none())
+            .map(|v| v.command.clone())
+            .collect();
+        if !timed_out.is_empty() {
+            task.decisions.push(format!(
+                "Orchestrator: final check timed out (environment): {}; rerun once on the same tree",
+                timed_out.join(", ")
+            ));
+            let rerun = run_verify_commands(
+                worktree,
+                &run_dir.join("final-rerun"),
+                &timed_out,
+                settings.sandbox,
+                &task.base_sha,
+                cancel,
+            )
+            .await;
+            if cancel.is_cancelled() {
+                interrupt_attempt(app, task, idx);
+                *permit = None;
+                app.finish_task_loop(task_id);
+                return Tail::Return;
+            }
+            for again in rerun {
+                if let Some(slot) = final_results
+                    .iter_mut()
+                    .find(|v| v.command == again.command)
+                {
+                    *slot = again;
+                }
+            }
         }
         if let Some(tree) = &tree {
             record_gate_passes(app, tree, &task.base_sha, &final_results);
@@ -2686,7 +2955,12 @@ pub(super) async fn finish_after_review(
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                carry_onto_newest_base(task, worktree).await;
+                if !carry_after_base_moves(app, task, worktree, cancel, permit).await {
+                    interrupt_attempt(app, task, idx);
+                    *permit = None;
+                    app.finish_task_loop(task_id);
+                    return Tail::Return;
+                }
                 *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(task);

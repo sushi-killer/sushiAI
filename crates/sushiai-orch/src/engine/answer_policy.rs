@@ -531,7 +531,7 @@ async fn judge_impossible(
 ) -> Option<(String, String)> {
     let (n, evidence) = impossible_parts(question)?;
     let criterion = task.criteria.get(n)?.clone();
-    let (_, route, fallback) = check_route(app)?;
+    let (_, route, fallback) = check_route_for(app, &task.variant())?;
     let route = route?;
     if let Some(note) = fallback {
         task.decisions.push(format!("Answer judge: {note}"));
@@ -563,6 +563,7 @@ async fn judge_impossible(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
     };
     let result = run_harness(

@@ -10,7 +10,7 @@ use crate::model::{
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 5;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 8;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -65,7 +65,7 @@ const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run the verification commands yourself before finishing. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
 
 /// `variant.grounded_checks`: the checks that fail on the base are part of
 /// the contract.
@@ -491,10 +491,18 @@ pub fn conflict_block(conflict: &str, impossible: bool) -> String {
     )
 }
 
+/// The one-turn prompt for an attempt that ran out of time: report, do no
+/// more work.
+pub fn time_budget_report_prompt() -> String {
+    format!(
+        "The time budget is spent: stop working and reply with the sushi-report only.\n\n{REPORT_FORMAT_BLOCK}"
+    )
+}
+
 /// Tells the implementer that the work was finished and checked, and only a
 /// landing conflict is left: resolve the markers, nothing else.
 pub fn conflict_only_block() -> String {
-    "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run the verification commands, then finish.\n\n".to_string()
+    "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run only a targeted test for the files you touched (one test file or one test name, not the listed verification commands or a whole-repo suite: the orchestrator runs those after you finish and gives any failure back to you), then finish.\n\n".to_string()
 }
 
 /// Tells the implementer of a parent task why finishing the parent failed
@@ -916,34 +924,26 @@ pub fn build_subtask_plan_brief(request: &str, variant: &Variant, past_work: &st
     plan_brief(request, variant, past_work, false)
 }
 
-fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
-    let mut extra = String::new();
-    extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
+/// The `sushi-plan` report format the variant and the split choice ask for;
+/// a fresh draft and a correction turn end with the same one.
+fn plan_report_format(variant: &Variant, split: bool) -> String {
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
-        extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
         format = format.replace(
             "\"options\":[\"...\",\"...\"]}",
             "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
-    extra.push_str(&format!("\n\n{PLAN_PATHS}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
-    extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     format = format.replace("\"verify\":[],", "\"verify\":[],\"finalVerify\":[],");
     format = format.replace("\"verify\":[],", "\"verify\":[],\"screenshot\":\"\",");
     if variant.grounded_checks {
-        extra.push_str(&format!("\n\n{PLAN_CHECKS}"));
         format = format.replace(
             "\"verify\":[],",
             "\"verify\":[],\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},",
         );
     }
     if split {
-        extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
-        if variant.grounded_checks {
-            extra.push_str(&format!(" {PLAN_SUBTASK_CHECKS}"));
-        }
         let part_checks = if variant.grounded_checks {
             "\"checks\":[{\"criterion\":0,\"run\":\"...\"}],\"heldOut\":{\"criterion\":0,\"run\":\"...\"},"
         } else {
@@ -953,9 +953,30 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
             "]}]}\n```",
             &format!("]}}],\"subtasks\":[{{\"key\":\"a\",\"title\":\"...\",\"goal\":\"...\",\"criteria\":[],\"verify\":[],{part_checks}\"finalVerify\":[],\"paths\":[\"src/...\"],\"screenshot\":\"\",\"tier\":\"mechanical|standard|hard\",\"dependsOn\":[],\"request\":\"...\"}}]}}\n```"),
         );
+    }
+    format
+}
+
+fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) -> String {
+    let mut extra = String::new();
+    extra.push_str(&format!("\n\n{PLAN_CONTRACT}"));
+    if variant.batch_questions {
+        extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
+    }
+    extra.push_str(&format!("\n\n{PLAN_PATHS}"));
+    extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
+    if variant.grounded_checks {
+        extra.push_str(&format!("\n\n{PLAN_CHECKS}"));
+    }
+    if split {
+        extra.push_str(&format!("\n\n{PLAN_SUBTASKS}"));
+        if variant.grounded_checks {
+            extra.push_str(&format!(" {PLAN_SUBTASK_CHECKS}"));
+        }
     } else {
         extra.push_str(&format!("\n\n{PLAN_SUBTASK_GATE}"));
     }
+    let format = plan_report_format(variant, split);
     let past_work = if past_work.is_empty() {
         String::new()
     } else {
@@ -965,6 +986,18 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
         "## Request\n\n{}\n\n{past_work}## Instructions\n\n{}{extra}\n\n{format}",
         request.trim(),
         PLAN_INSTRUCTIONS,
+    )
+}
+
+/// Sent into the planner's own session (resumed) when the brief check found
+/// two requirements of its draft contradicting each other: only the
+/// conflict, the instruction to change nothing else, and the report format.
+/// The session already holds the request, the repo and the previous plan.
+pub fn build_plan_correction_brief(conflict: &str, variant: &Variant, split: bool) -> String {
+    format!(
+        "Your plan has a contradiction: {}\n\nFix only this contradiction and keep every other part of your previous plan unchanged. Reply with the full corrected plan.\n\n{}",
+        conflict.trim(),
+        plan_report_format(variant, split),
     )
 }
 
@@ -1005,9 +1038,10 @@ const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fa
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
 
 /// Sent instead of [`build_plan_brief`] on the one retry after an
-/// unparseable draft -- a fresh read-only session (planning never resumes,
-/// same as review), so it still needs the full request, just with an
-/// explicit reminder in front of it.
+/// unparseable draft -- a fresh read-only session (an unparseable reply has
+/// no plan to correct; only a brief-check contradiction resumes the planner,
+/// see [`build_plan_correction_brief`]), so it still needs the full request,
+/// just with an explicit reminder in front of it.
 pub fn build_plan_retry_brief(request: &str, variant: &Variant, past_work: &str) -> String {
     plan_retry(&build_plan_brief(request, variant, past_work))
 }
@@ -1494,14 +1528,127 @@ pub fn build_review_brief(
     evidence_from: Option<u32>,
     diff: &str,
 ) -> String {
+    review_brief(
+        task,
+        implementer_note,
+        agent_decisions,
+        verify_results,
+        screenshots,
+        evidence_from,
+        ReviewBody::Full(diff),
+    )
+}
+
+/// What a retry review is asked to look at instead of the whole change.
+pub struct NarrowReview<'a> {
+    /// The findings of the review before it that are still open.
+    pub open_findings: &'a [String],
+    /// Criteria that review did not rule met: ruled on now.
+    pub open_criteria: &'a [String],
+    /// Criteria that review ruled met: not checked again.
+    pub settled_criteria: &'a [String],
+    /// The task's own changes since the reviewed tree.
+    pub delta: &'a str,
+}
+
+enum ReviewBody<'a> {
+    Full(&'a str),
+    Narrow(&'a NarrowReview<'a>),
+}
+
+/// The brief of a review after a failed review: the open findings, the
+/// criteria still to rule on and the task's own changes since the reviewed
+/// tree, instead of every criterion and the full diff. Everything else is the
+/// full review's brief.
+pub fn build_narrow_review_brief(
+    task: &Task,
+    implementer_note: &str,
+    agent_decisions: &[String],
+    verify_results: &[VerifyOutcome],
+    screenshots: &[(String, Option<u32>)],
+    evidence_from: Option<u32>,
+    narrow: &NarrowReview,
+) -> String {
+    review_brief(
+        task,
+        implementer_note,
+        agent_decisions,
+        verify_results,
+        screenshots,
+        evidence_from,
+        ReviewBody::Narrow(narrow),
+    )
+}
+
+/// The `path` of every `path:line` token in the findings: backticks, quotes
+/// and a leading `./` trimmed, exact match. A token with no `:<digits>` tail
+/// names no path.
+pub fn finding_paths(findings: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for finding in findings {
+        for token in finding.split_whitespace() {
+            let token =
+                token.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ';'));
+            let token = token.trim_end_matches([':', '.']);
+            let Some((path, line)) = token.rsplit_once(':') else {
+                continue;
+            };
+            let line = line.split(['-', ',']).next().unwrap_or("");
+            if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let path = path
+                .trim_matches(|c: char| matches!(c, '`' | '"' | '\''))
+                .trim_start_matches("./");
+            if !path.chars().any(char::is_alphabetic) || out.iter().any(|p| p == path) {
+                continue;
+            }
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+fn review_brief(
+    task: &Task,
+    implementer_note: &str,
+    agent_decisions: &[String],
+    verify_results: &[VerifyOutcome],
+    screenshots: &[(String, Option<u32>)],
+    evidence_from: Option<u32>,
+    body: ReviewBody,
+) -> String {
     let mut out = String::new();
     out.push_str("## Review\n\n");
     out.push_str(&task.goal);
-    out.push_str("\n\n## Acceptance criteria\n\n");
-    for c in &task.criteria {
-        out.push_str("- ");
-        out.push_str(c);
-        out.push('\n');
+    match &body {
+        ReviewBody::Full(_) => {
+            out.push_str("\n\n## Acceptance criteria\n\n");
+            for c in &task.criteria {
+                out.push_str("- ");
+                out.push_str(c);
+                out.push('\n');
+            }
+        }
+        ReviewBody::Narrow(narrow) => {
+            out.push_str("\n\n## Criteria to rule on now\n\n");
+            if narrow.open_criteria.is_empty() {
+                out.push_str("(none: the last review ruled every criterion met)\n");
+            }
+            for c in narrow.open_criteria {
+                out.push_str("- ");
+                out.push_str(c);
+                out.push('\n');
+            }
+            if !narrow.settled_criteria.is_empty() {
+                out.push_str("\n## Settled criteria\n\nThe last review ruled these met. They are settled: do not check them again and do not rule on them.\n\n");
+                for c in narrow.settled_criteria {
+                    out.push_str("- ");
+                    out.push_str(c);
+                    out.push('\n');
+                }
+            }
+        }
     }
     let variant = task.variant();
     out.push_str("\n## Implementer\n\n");
@@ -1548,17 +1695,31 @@ pub fn build_review_brief(
             }
         }
     }
-    let previous = previous_review_findings(task);
+    let previous = match &body {
+        ReviewBody::Full(_) => previous_review_findings(task),
+        ReviewBody::Narrow(narrow) => narrow.open_findings.to_vec(),
+    };
     if !previous.is_empty() {
         out.push_str("\n## Previous review\n\n");
         out.push_str(&untrusted_block(
-            "The findings the previous attempt's review reported",
+            match &body {
+                ReviewBody::Full(_) => "The findings the previous attempt's review reported",
+                ReviewBody::Narrow(_) => "The open findings of the last review",
+            },
             &previous.join("\n"),
         ));
         out.push_str("\nThe implementer has tried to fix them. Mark each finding you report now with `repeat`: true when it is the same problem still present, false when it is new.\n");
     }
-    out.push_str("\n## Diff\n\n```diff\n");
-    out.push_str(diff);
+    match &body {
+        ReviewBody::Full(diff) => {
+            out.push_str("\n## Diff\n\n```diff\n");
+            out.push_str(diff);
+        }
+        ReviewBody::Narrow(narrow) => {
+            out.push_str("\n## Changes since the last review\n\nThis is a narrow review. Rule only on the open findings above, the criteria to rule on now, and anything new in these changes. Files the task did not change since the last review are not shown and were reviewed before.\n\n```diff\n");
+            out.push_str(narrow.delta);
+        }
+    }
     out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n");
     out.push_str(if previous.is_empty() {
         REVIEW_REPORT_EXAMPLE
@@ -2009,6 +2170,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -2230,6 +2394,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -2424,6 +2591,25 @@ mod tests {
     }
 
     #[test]
+    fn the_correction_brief_is_short_and_ends_with_the_plan_format() {
+        let variant = Variant {
+            grounded_checks: true,
+            batch_questions: true,
+            ..Variant::default()
+        };
+        let fresh = build_plan_brief("Fix it", &variant, "");
+        let fix = build_plan_correction_brief(" A vs B ", &variant, true);
+        assert!(fix.starts_with("Your plan has a contradiction: A vs B"));
+        assert!(fix.contains("keep every other part of your previous plan unchanged"));
+        assert!(!fix.contains("Fix it") && !fix.contains("AGENTS.md"));
+        let format = &fresh[fresh.find("## Report format").unwrap()..];
+        assert!(fix.ends_with(format));
+        assert!(fix.len() < fresh.len() / 2);
+        let part = build_plan_correction_brief("x", &Variant::default(), false);
+        assert!(!part.contains("subtasks") && part.contains("\"finalVerify\":[]"));
+    }
+
+    #[test]
     fn plan_retry_brief_still_carries_the_original_request() {
         let retry = build_plan_retry_brief("add dark mode", &Variant::default(), "");
         assert!(retry.contains("add dark mode"));
@@ -2538,6 +2724,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -3408,6 +3597,9 @@ mod tests {
             review_cost_usd: None,
             evidence: vec![],
             evidence_tree: None,
+            review_tree: None,
+            review_base: None,
+            review_scope: None,
             evidence_base: None,
             evidence_from: None,
             advice: None,
@@ -3614,5 +3806,31 @@ mod pick_tests {
         );
         assert_eq!(parse_pick("```sushi-pick\n{\"pick\":\"c\"}\n```"), None);
         assert_eq!(parse_pick("no block"), None);
+    }
+}
+
+#[cfg(test)]
+mod narrow_review_tests {
+    use super::*;
+
+    #[test]
+    fn finding_paths_reads_path_line_tokens() {
+        let findings = vec![
+            "P1: src/a.rs:12 - missing check".to_string(),
+            "P2: `./src/b.rs:3-9` - odd".to_string(),
+            "P1: \"web/c.ts:7\", and src/a.rs:40:".to_string(),
+            "P2: no path here, v1.2 and 10:30 are not paths".to_string(),
+            "Unmet criterion: Beta is done (missing)".to_string(),
+        ];
+        assert_eq!(
+            finding_paths(&findings),
+            vec!["src/a.rs", "src/b.rs", "web/c.ts"]
+        );
+    }
+
+    #[test]
+    fn finding_paths_needs_an_exact_path() {
+        assert!(finding_paths(&["P1: a.rs - no line".to_string()]).is_empty());
+        assert!(finding_paths(&["P1: :12 - nothing".to_string()]).is_empty());
     }
 }

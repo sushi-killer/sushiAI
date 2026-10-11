@@ -484,6 +484,85 @@ pub(super) fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<Str
     })
 }
 
+/// Whether `command` runs a whole repository's suite: `npm run ci`, `cargo
+/// test --workspace`, `make test`, a bare `pytest`, `go test ./...`, or an
+/// `npm|pnpm|yarn run <script>` whose `<cwd>/package.json` script body is one
+/// of these (one level, no further script expansion). Such a check is
+/// finalVerify's job, not a per-attempt verify command. The command is split
+/// on `&&`, `||` and `;`; one such segment is enough.
+pub(super) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
+    let segments = |text: &str| -> Vec<String> {
+        text.replace("&&", ";")
+            .replace("||", ";")
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let words_of = |segment: &str| -> Vec<String> {
+        segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .map(String::from)
+            .collect()
+    };
+    let direct = |words: &[String]| -> bool {
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let is_suite_word = |x: &str| matches!(x, "ci" | "test" | "check");
+        match w.as_slice() {
+            ["npm", "test"] => true,
+            ["npm", "run", x] => is_suite_word(x),
+            ["pnpm" | "yarn", x] => is_suite_word(x),
+            ["pnpm" | "yarn", "run", x] => is_suite_word(x),
+            ["make", x] => is_suite_word(x),
+            ["pytest"] => true,
+            ["go", "test", rest @ ..] => {
+                rest.contains(&"./...")
+                    && rest.iter().all(|a| *a == "./..." || a.starts_with('-'))
+                    && !rest.contains(&"-run")
+            }
+            ["cargo", "test", rest @ ..] => {
+                if rest.contains(&"--workspace") {
+                    return true;
+                }
+                let before_args = rest.iter().take_while(|a| **a != "--");
+                let mut scoped_or_filtered = false;
+                for a in before_args {
+                    let flag = a.split('=').next().unwrap_or(a);
+                    if matches!(flag, "-p" | "--package" | "--test" | "--lib" | "--bin")
+                        || !a.starts_with('-')
+                    {
+                        scoped_or_filtered = true;
+                    }
+                }
+                !scoped_or_filtered
+            }
+            _ => false,
+        }
+    };
+    segments(command).iter().any(|segment| {
+        let words = words_of(segment);
+        if direct(&words) {
+            return true;
+        }
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let script = match w.as_slice() {
+            ["npm" | "pnpm" | "yarn", "run", name] => *name,
+            _ => return false,
+        };
+        let Ok(text) = std::fs::read_to_string(cwd.join("package.json")) else {
+            return false;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        json.get("scripts")
+            .and_then(|s| s.get(script))
+            .and_then(|b| b.as_str())
+            .is_some_and(|body| segments(body).iter().any(|s| direct(&words_of(s))))
+    })
+}
+
 /// Lines a test runner prints for a failure: cargo's `... FAILED` and
 /// `panicked at`, node's `not ok` / `AssertionError`, and the assertion
 /// detail lines that follow a panic.

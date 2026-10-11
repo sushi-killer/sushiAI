@@ -401,6 +401,276 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
     PlanOutcome::Ended
 }
 
+/// A running plan attempt on `route`.
+fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
+    Attempt {
+        n,
+        stage: Stage::Plan,
+        route_id: route.id.clone(),
+        harness: route.harness,
+        model: route.model.clone().unwrap_or_default(),
+        reason: reason.to_string(),
+        session_id: None,
+        pgid: None,
+        started_at: now_ms(),
+        ended_at: None,
+        status: AttemptStatus::Running,
+        summary: None,
+        handoff: None,
+        disputes: vec![],
+        changed_files: vec![],
+        verify: vec![],
+        gate_blocks: 0,
+        prefix_tokens: None,
+        review: None,
+        failure: None,
+        usage: None,
+        cost_usd: None,
+        cost_estimated: false,
+        review_cost_usd: None,
+        evidence: vec![],
+        evidence_tree: None,
+        review_tree: None,
+        review_base: None,
+        review_scope: None,
+        evidence_base: None,
+        evidence_from: None,
+        advice: None,
+        advisor_cost_usd: None,
+        fingerprint: None,
+        review_fingerprint: None,
+        advisor_fingerprint: None,
+        candidates: vec![],
+        criteria_results: vec![],
+        diff_stat: None,
+    }
+}
+
+/// The run files of a read-only planner session: an empty MCP config and,
+/// for Claude, read-only settings with the route's profile. The caller
+/// deletes the key file when the run ends.
+fn write_planner_run_files(
+    app: &Arc<App>,
+    route: &Route,
+    settings: &Settings,
+    run_dir: &Path,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let settings_path = run_dir.join("settings.json");
+    let key_path = run_dir.join("key");
+    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+    if matches!(route.harness, Harness::Claude) {
+        // Same lean shape as review (read-only, no Stop hook -- no
+        // token is ever registered for a drafting session), but the
+        // planner route can still carry a profile (env/API key) the
+        // same way an implement route can.
+        write_readonly_claude_settings_with_profile(
+            route,
+            app,
+            &key_path,
+            settings,
+            &deny_read,
+            &settings_path,
+        );
+    }
+    (mcp_path, settings_path, key_path)
+}
+
+/// Writes a parsed draft into the task and ends the plan attempt `idx` as
+/// passed; the first draft and a corrected one go through the same code.
+fn store_draft(
+    app: &Arc<App>,
+    task: &mut Task,
+    idx: usize,
+    draft: &brief::PlanDraft,
+    settings: &Settings,
+    worktree: &Path,
+) {
+    task.title = draft.title.clone();
+    task.goal = draft.goal.clone();
+    task.planned_tier = draft.tier;
+    // A whole-repo suite is no per-attempt check: it runs once, as a
+    // finalVerify, on the final tree. Before the split, so it also applies
+    // when review is off.
+    let (suites, kept): (Vec<String>, Vec<String>) = draft
+        .verify
+        .iter()
+        .cloned()
+        .partition(|c| whole_repo_suite(worktree, c));
+    // With review off nobody would check a moved entry: keep it as is.
+    let (verify, judged) = if task.variant().review_route_id(settings).is_empty() {
+        (kept, Vec::new())
+    } else {
+        split_verify_commands(worktree, &kept)
+    };
+    // What the planner says the task edits: the queue holds it back while
+    // another live task on the same base holds any of these paths.
+    if task.paths.is_empty() {
+        task.paths = draft
+            .paths
+            .iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+    }
+    task.criteria = draft.criteria.clone();
+    task.visual_criteria = draft.visual_criteria.clone();
+    task.criteria.extend(
+        judged
+            .into_iter()
+            .map(|v| format!("Checked by review (not a shell command): {v}")),
+    );
+    task.verify = verify;
+    if task.variant().grounded_checks {
+        // Stored before any split, so a splitting parent keeps them.
+        task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
+        task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+    }
+    task.final_verify = draft
+        .final_verify
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .cloned()
+        .collect();
+    for suite in suites {
+        if !task.final_verify.contains(&suite) {
+            task.final_verify.push(suite.clone());
+        }
+        task.decisions.push(format!(
+            "Orchestrator: verify entry {suite} is a whole-repo suite; moved to finalVerify"
+        ));
+    }
+    task.brief_check.screenshot = draft
+        .screenshot
+        .clone()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    task.attempts[idx].status = AttemptStatus::Passed;
+    task.attempts[idx].ended_at = Some(now_ms());
+    task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(task);
+    app.broadcast_task(task);
+}
+
+/// Why a brief-check correction produced no draft.
+enum Uncorrected {
+    /// Draft from scratch instead; the reason is for the decision line.
+    Fresh(String),
+    /// The task was cancelled; the plan attempt at this index is open.
+    Cancelled(usize),
+}
+
+/// A brief-check contradiction in plan attempt `idx`'s draft: resumes that
+/// attempt's planner session with a short correction turn and stores the
+/// corrected draft. Never fails the task: no session, a failed run or an
+/// unparseable reply is `Fresh`.
+async fn correct_draft(
+    app: &Arc<App>,
+    task_id: &str,
+    idx: usize,
+    route: &Route,
+    conflict: &str,
+    cancel: &CancelToken,
+) -> Result<brief::PlanDraft, Uncorrected> {
+    let fresh = |why: &str| Uncorrected::Fresh(why.to_string());
+    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+        return Err(fresh("the task could not be read"));
+    };
+    let Some(session) = task.attempts.get(idx).and_then(|a| a.session_id.clone()) else {
+        return Err(fresh("the planner attempt has no session id"));
+    };
+    if task.cost_budget().is_some_and(|b| task.cost_usd >= b) {
+        return Err(fresh("the cost budget is reached"));
+    }
+    let settings = app.settings.read().unwrap().clone();
+    let attempt_n = task.attempts.len() as u32 + 1;
+    task.attempts
+        .push(new_plan_attempt(attempt_n, route, "brief correction"));
+    let at = task.attempts.len() - 1;
+    task.updated_at = now_ms();
+    let _ = app.store.save_task(&task);
+    app.broadcast_task(&task);
+
+    let worktree = PathBuf::from(&task.worktree);
+    let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let (mcp_path, settings_path, key_path) =
+        write_planner_run_files(app, route, &settings, &run_dir);
+    let req = harness::RunRequest {
+        resume: Some(&session),
+        ..review_request(route, &worktree, &mcp_path, &settings_path, &[])
+    };
+    let brief_text =
+        brief::build_plan_correction_brief(conflict, &task.variant(), task.parent.is_none());
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let result = run_harness(
+        app,
+        task_id,
+        attempt_n,
+        RunTrack::Attempt,
+        &worktree,
+        &req,
+        CostTag::task("plan", &route.id),
+        &brief_text,
+        &run_dir.join("events.jsonl"),
+        cancel,
+        Guard::off(),
+    )
+    .await;
+    let _ = std::fs::remove_file(&key_path);
+    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+        task = reloaded;
+    }
+    let fail = |task: &mut Task, kind: FailureKind, why: String| {
+        record_failure(task, at, kind, why.clone());
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        Err(Uncorrected::Fresh(why))
+    };
+    let o = match result {
+        Ok(o) => o,
+        Err(RunError::Cancelled) => return Err(Uncorrected::Cancelled(at)),
+        Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
+            return fail(
+                &mut task,
+                FailureKind::Error,
+                format!("the resumed run could not start: {msg}"),
+            );
+        }
+    };
+    // A resumed Claude session's own total also covers the run before it.
+    let own = match route.harness {
+        Harness::Claude => o.streamed_cost(&settings.prices),
+        Harness::Codex => None,
+    };
+    if let Some(cost) = own.or(o.cost_usd) {
+        let a = &mut task.attempts[at];
+        a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + cost);
+        a.cost_estimated |= o.cost_estimated;
+        task.cost_usd += cost;
+    }
+    task.attempts[at].fingerprint = o.fingerprint.clone();
+    if let Some(err) = o.error {
+        return fail(
+            &mut task,
+            FailureKind::Error,
+            format!("the resumed run failed ({err})"),
+        );
+    }
+    let Some(draft) = brief::parse_plan(&o.final_text.unwrap_or_default()) else {
+        return fail(
+            &mut task,
+            FailureKind::NoDeliverable,
+            "the resumed reply had no valid sushi-plan block".to_string(),
+        );
+    };
+    store_draft(app, &mut task, at, &draft, &settings, &worktree);
+    Ok(draft)
+}
+
 /// Runs the drafting stage (spec "Plan stage" steps 1-6) for a task created
 /// via the `{repo, request}` form: a fresh read-only planner session drafts
 /// title/goal/criteria/verify from the owner's one-sentence request (one
@@ -506,83 +776,16 @@ pub(super) async fn run_plan_stage(
         let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
         let _ = std::fs::create_dir_all(&run_dir);
 
-        let attempt = Attempt {
-            n: attempt_n,
-            stage: Stage::Plan,
-            route_id: route.id.clone(),
-            harness: route.harness,
-            model: route.model.clone().unwrap_or_default(),
-            reason: "drafting".to_string(),
-            session_id: None,
-            pgid: None,
-            started_at: now_ms(),
-            ended_at: None,
-            status: AttemptStatus::Running,
-            summary: None,
-            handoff: None,
-            disputes: vec![],
-            changed_files: vec![],
-            verify: vec![],
-            gate_blocks: 0,
-            prefix_tokens: None,
-            review: None,
-            failure: None,
-            usage: None,
-            cost_usd: None,
-            cost_estimated: false,
-            review_cost_usd: None,
-            evidence: vec![],
-            evidence_tree: None,
-            evidence_base: None,
-            evidence_from: None,
-            advice: None,
-            advisor_cost_usd: None,
-            fingerprint: None,
-            review_fingerprint: None,
-            advisor_fingerprint: None,
-            candidates: vec![],
-            criteria_results: vec![],
-            diff_stat: None,
-        };
+        let attempt = new_plan_attempt(attempt_n, &route, "drafting");
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
         task.updated_at = now_ms();
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
 
-        let mcp_path = run_dir.join("mcp.json");
-        let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-        let settings_path = run_dir.join("settings.json");
-        let key_path = run_dir.join("key");
-        let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-        if matches!(route.harness, Harness::Claude) {
-            // Same lean shape as review (read-only, no Stop hook -- no
-            // token is ever registered for a drafting session), but the
-            // planner route can still carry a profile (env/API key) the
-            // same way an implement route can.
-            write_readonly_claude_settings_with_profile(
-                &route,
-                app,
-                &key_path,
-                &settings,
-                &deny_read,
-                &settings_path,
-            );
-        }
-        let req = harness::RunRequest {
-            harness: route.harness,
-            worktree: &worktree,
-            model: route.model.as_deref(),
-            effort: route.effort.as_deref(),
-            max_budget_usd: None,
-            review: true,
-            mcp_config: Some(&mcp_path),
-            settings_path: Some(&settings_path),
-            network_allowed: false,
-            codex_mcp: &[],
-            images: &[],
-            repo_settings: true,
-        };
+        let (mcp_path, settings_path, key_path) =
+            write_planner_run_files(app, &route, &settings, &run_dir);
+        let req = review_request(&route, &worktree, &mcp_path, &settings_path, &[]);
 
         // Once per round: the retry brief carries the same section.
         let past_work = {
@@ -802,60 +1005,45 @@ pub(super) async fn run_plan_stage(
             }
         };
 
-        task.title = draft.title.clone();
-        task.goal = draft.goal.clone();
-        task.planned_tier = draft.tier;
-        // With review off nobody would check a moved entry: keep it as is.
-        let (verify, judged) = if variant.review_route_id(&settings).is_empty() {
-            (draft.verify.clone(), Vec::new())
-        } else {
-            split_verify_commands(&worktree, &draft.verify)
-        };
-        // What the planner says the task edits: the queue holds it back while
-        // another live task on the same base holds any of these paths.
-        if task.paths.is_empty() {
-            task.paths = draft
-                .paths
-                .iter()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-        }
-        task.criteria = draft.criteria.clone();
-        task.visual_criteria = draft.visual_criteria.clone();
-        task.criteria.extend(
-            judged
-                .into_iter()
-                .map(|v| format!("Checked by review (not a shell command): {v}")),
-        );
-        task.verify = verify;
-        if task.variant().grounded_checks {
-            // Stored before any split, so a splitting parent keeps them.
-            task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
-            task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
-        }
-        task.final_verify = draft
-            .final_verify
-            .iter()
-            .filter(|c| !c.trim().is_empty())
-            .cloned()
-            .collect();
-        task.brief_check.screenshot = draft
-            .screenshot
-            .clone()
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty());
-        task.attempts[idx].status = AttemptStatus::Passed;
-        task.attempts[idx].ended_at = Some(now_ms());
-        task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
+        store_draft(app, &mut task, idx, &draft, &settings, &worktree);
 
         // Do the draft's own requirements contradict each other? One
         // redraft, once per task; the check runs again on the new draft.
+        let mut draft = draft;
         match check_brief(app, task_id, attempt_n, true, cancel).await {
-            BriefAction::Redraft => continue,
+            BriefAction::Redraft(conflict) => {
+                // The planner's own session fixes the contradiction when it
+                // can; otherwise a fresh draft reads the request again.
+                match correct_draft(app, task_id, idx, &route, &conflict, cancel).await {
+                    Ok(corrected) => {
+                        draft = corrected;
+                        // The task has had its one redraft: a second
+                        // conflict is kept for the implement brief.
+                        if let BriefAction::Cancelled =
+                            check_brief(app, task_id, attempt_n, true, cancel).await
+                        {
+                            return end_plan_stage(app, task_id, Some(idx)).await;
+                        }
+                    }
+                    Err(Uncorrected::Cancelled(at)) => {
+                        return end_plan_stage(app, task_id, Some(at)).await;
+                    }
+                    Err(Uncorrected::Fresh(why)) => {
+                        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                            let request = t.request.clone().unwrap_or_default();
+                            t.request =
+                                Some(format!("{request}\n\n{}", redraft_request_note(&conflict)));
+                            t.decisions.push(format!(
+                                "Brief check: the planner session was not resumed ({why}); drafting from scratch"
+                            ));
+                            t.updated_at = now_ms();
+                            let _ = app.store.save_task(&t);
+                            app.broadcast_task(&t);
+                        }
+                        continue;
+                    }
+                }
+            }
             BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
             BriefAction::Proceed => {}
         }

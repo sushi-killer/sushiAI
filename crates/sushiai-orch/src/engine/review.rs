@@ -420,6 +420,7 @@ pub(super) fn review_request<'a>(
         codex_mcp: &[],
         images,
         repo_settings: true,
+        resume: None,
     }
 }
 
@@ -441,6 +442,33 @@ pub(super) fn head_chars(s: &str, max: usize) -> String {
     } else {
         head
     }
+}
+
+/// What a review run looked at: the scope it ran with and the worktree tree
+/// it saw (`None` when the snapshot failed).
+pub(super) struct ReviewSaw {
+    pub scope: ReviewScope,
+    pub tree: Option<String>,
+}
+
+/// The earlier implement attempt a retry review builds on: the latest one
+/// before `attempt_n` that has a review. `None` for a first attempt.
+fn latest_reviewed_before(task: &Task, attempt_n: u32) -> Option<&Attempt> {
+    task.attempts
+        .iter()
+        .rev()
+        .find(|a| a.stage == Stage::Implement && a.n < attempt_n && a.review.is_some())
+}
+
+/// The attempt a narrow review of attempt `attempt_n` is built on: the latest
+/// reviewed earlier attempt, when its review failed and recorded a tree.
+pub(super) fn narrow_basis(task: &Task, attempt_n: u32) -> Option<&Attempt> {
+    latest_reviewed_before(task, attempt_n).filter(|a| {
+        a.review_tree.is_some()
+            && a.review
+                .as_ref()
+                .is_some_and(|r| r.verdict == Verdict::Fail)
+    })
 }
 
 /// Review run `round` of an attempt (1 = the first). A re-run after a reply
@@ -466,13 +494,29 @@ pub(super) async fn run_review(
     round: u32,
     after_no_verdict: bool,
     dropped: &[(String, String)],
-) -> Result<(ReviewResult, bool), ReviewFailure> {
+    force_full: bool,
+) -> Result<(ReviewResult, bool, ReviewSaw), ReviewFailure> {
     let wt = worktree.to_path_buf();
-    let base = base_sha.to_string();
-    let diff =
+    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt).ok())
+        .await
+        .unwrap_or(None);
+    // A retry after a failed review looks only at that review's open
+    // findings and the task's own changes since; anything else (attempt 1, no
+    // recorded tree, a git error) reviews the whole change.
+    let narrow = match (force_full, &tree, narrow_basis(task, attempt_n)) {
+        (false, Some(now_tree), Some(basis)) => {
+            narrow_inputs(task, basis, now_tree, worktree, base_sha).await
+        }
+        _ => None,
+    };
+    let diff = if narrow.is_some() {
+        String::new()
+    } else {
+        let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
         tokio::task::spawn_blocking(move || git::diff_full(&wt, &base, 60_000).unwrap_or_default())
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
 
     let evidence = task.variant().review_evidence;
     let this_attempt = task
@@ -511,15 +555,31 @@ pub(super) async fn run_review(
             .map(|s| (s, Some(source_attempt)))
             .collect()
     };
-    let mut brief_text = brief::build_review_brief(
-        task,
-        implementer_note,
-        agent_decisions,
-        verify_results,
-        &shown,
-        evidence_from,
-        &diff,
-    );
+    let mut brief_text = match &narrow {
+        Some(n) => brief::build_narrow_review_brief(
+            task,
+            implementer_note,
+            agent_decisions,
+            verify_results,
+            &shown,
+            evidence_from,
+            &brief::NarrowReview {
+                open_findings: &n.open_findings,
+                open_criteria: &n.open_criteria,
+                settled_criteria: &n.settled,
+                delta: &n.delta,
+            },
+        ),
+        None => brief::build_review_brief(
+            task,
+            implementer_note,
+            agent_decisions,
+            verify_results,
+            &shown,
+            evidence_from,
+            &diff,
+        ),
+    };
     brief_text.push_str(&brief::dropped_findings_block(dropped));
     if after_no_verdict {
         brief_text.push('\n');
@@ -574,8 +634,15 @@ pub(super) async fn run_review(
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             *fingerprint = outcome.fingerprint.clone();
             let text = outcome.final_text.unwrap_or_default();
-            if let Some(result) = brief::parse_review_with_rule(&text) {
-                return Ok(result);
+            if let Some((mut result, recorded_as_pass)) = brief::parse_review_with_rule(&text) {
+                let scope = match &narrow {
+                    Some(n) => {
+                        carry_settled(task, n, &mut result);
+                        ReviewScope::Narrow
+                    }
+                    None => ReviewScope::Full,
+                };
+                return Ok((result, recorded_as_pass, ReviewSaw { scope, tree }));
             }
             Err(match outcome.error {
                 Some(error) => ReviewFailure::Harness(format!("review did not run ({error})")),
@@ -594,6 +661,95 @@ pub(super) async fn run_review(
             Err(ReviewFailure::Cancelled)
         }
         Err(RunError::Io(why) | RunError::NotFound(why)) => Err(ReviewFailure::Harness(why)),
+    }
+}
+
+/// What a narrow review is given.
+struct NarrowInputs {
+    open_findings: Vec<String>,
+    open_criteria: Vec<String>,
+    /// Criteria the basis review ruled met, and that attempt's number.
+    settled: Vec<String>,
+    settled_index: Vec<usize>,
+    settled_from: u32,
+    delta: String,
+}
+
+/// The narrow review's inputs from the basis attempt's failed review, or
+/// `None` when the delta cannot be computed (a git error): the review is then
+/// a full one.
+async fn narrow_inputs(
+    task: &Task,
+    basis: &Attempt,
+    now_tree: &str,
+    worktree: &Path,
+    base_sha: &str,
+) -> Option<NarrowInputs> {
+    let review = basis.review.as_ref()?;
+    let old_tree = basis.review_tree.clone()?;
+    let old_base = basis.review_base.clone();
+    let (wt, now, base) = (
+        worktree.to_path_buf(),
+        now_tree.to_string(),
+        base_sha.to_string(),
+    );
+    let delta = tokio::task::spawn_blocking(move || -> Option<String> {
+        let files = match &old_base {
+            Some(old_base) => git::own_changes_between(&wt, &old_tree, old_base, &now, &base),
+            None => git::diff_trees_name_only(&wt, &old_tree, &now),
+        }
+        .ok()?;
+        if files.is_empty() {
+            return Some("(no file changed since the last review)".to_string());
+        }
+        git::diff_trees(&wt, &old_tree, &now, &files, 60_000).ok()
+    })
+    .await
+    .ok()??;
+    let mut settled = Vec::new();
+    let mut settled_index = Vec::new();
+    let mut open_criteria = Vec::new();
+    for (i, criterion) in task.criteria.iter().enumerate() {
+        let met = review
+            .criteria
+            .iter()
+            .any(|r| r.met == Some(true) && criterion_index(task, &r.criterion) == Some(i));
+        if met {
+            settled.push(criterion.clone());
+            settled_index.push(i);
+        } else {
+            open_criteria.push(criterion.clone());
+        }
+    }
+    Some(NarrowInputs {
+        open_findings: review.findings.clone(),
+        open_criteria,
+        settled,
+        settled_index,
+        settled_from: basis.n,
+        delta,
+    })
+}
+
+/// Copies the settled rulings into a narrow review's result, so the criteria
+/// results and the verdict rule still see them as met. A ruling the reviewer
+/// gave now wins.
+fn carry_settled(task: &Task, narrow: &NarrowInputs, result: &mut ReviewResult) {
+    for (&i, criterion) in narrow.settled_index.iter().zip(&narrow.settled) {
+        let ruled_now = result
+            .criteria
+            .iter()
+            .any(|r| criterion_index(task, &r.criterion) == Some(i));
+        if !ruled_now {
+            result.criteria.push(CriterionRuling {
+                criterion: criterion.clone(),
+                met: Some(true),
+                evidence: Some(format!(
+                    "settled in the attempt {} review",
+                    narrow.settled_from
+                )),
+            });
+        }
     }
 }
 

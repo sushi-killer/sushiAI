@@ -242,7 +242,10 @@ the first child started and its gated and held-out checks run once here). With
 the base head, squashed to one commit titled with its title, checked again
 when the head moved, and done (`landing` while the base checkout is dirty,
 retried without re-running checks; a refused landing leaves it done on its own
-branch). A failing parent check, or a landing that conflicts or fails its
+branch). A "retry after the base is fixed" answer waits, holding no slot, until
+the base branch has moved, and only then carries the work and retries; base
+results are kept in `base-results.json` by (base sha, command), never a timeout.
+A failing parent check, or a landing that conflicts or fails its
 re-check, is not the end of the graph: the parent gets an ordinary implement
 attempt on its own worktree, with the failure in its brief (one attempt for a
 failed check, with the failing command and its output tail in the brief,
@@ -257,17 +260,22 @@ drop it, or stop.
 
 `engine/healing.rs` lets the orchestrator repair a task's own contract without the owner,
 each change a decision line plus an assumption (`by: orchd`) the owner can
-overturn. Before the first attempt every verify/finalVerify/check command runs
-on the base (`base_check.rs`); one that fails goes to the cheap judge
-(`briefCheckRoute`), which leaves it, rewrites it to a check the repo can run,
-or marks it non-gating. When review marks the same criterion unmet in two
+overturn. From the first attempt on, a background job (no slot, no task
+writes) runs every verify/check command on the base (`base_check.rs`); one
+that fails goes to the cheap judge (`briefCheckRoute`), which leaves it,
+rewrites it to a check the repo can run, or marks it non-gating. The loop
+applies the result before finalVerify runs and before a failing verify
+command counts as a failure. When review marks the same criterion unmet in two
 attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
 criterion is amended and the same attempt reviewed again). A planner-named
 screenshot command is run by the orchestrator itself; otherwise an earlier attempt's
 images count while no UI file it changed has changed. After the first attempt
 only P0/P1 findings about the task's own work block; the rest are report
 follow-ups. An owner or policy answer that contradicts a criterion amends it
-before the next attempt and review.
+before the next attempt and review. A brief-check contradiction in a planner
+draft resumes the planner's own session once with the conflict (a short
+correction turn); without a session, or when the resumed run fails or does not
+parse, it falls back to a fresh draft.
 
 ## 2b. Evolution flow
 
@@ -289,12 +297,14 @@ flowchart LR
 ```mermaid
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
-  split["Verify entries that are not shell commands<br/>become review criteria"]
+  split["Plan lint: a whole-repo suite in verify (npm run ci,<br/>cargo test --workspace, ...) moves to finalVerify;<br/>verify entries that are not shell commands become review criteria"]
   baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
-  basecheck["Background base jobs, started before attempt 1<br/>finalVerify runs on the base in the background (one job per sha + command,<br/>cached, a failure is re-run once); attempt 1 does not wait.<br/>A parent's verify still blocks, with one question"]
+  basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]
+  gate["Landing gate, before finalVerify runs on the worktree<br/>waits for the preflight, applies the judge's rulings to the task"]
   tier["Tier<br/>planner's tier, else standard"]
   impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
+  timebudget["Time budget<br/>implement run past settings.implementBudgetMins -> kill,<br/>report-only resume of its session, kind time_budget"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   gated["Gated checks<br/>baseline-fail checks must now pass"]
@@ -302,7 +312,7 @@ flowchart TD
   evidence["Evidence gate<br/>visual criterion needs a saved image, or the images of an<br/>earlier attempt when only artifacts/ or tests changed since"]
   impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
-  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report"]
+  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees only the open findings,<br/>the criteria not yet ruled met and the task's own changes since"]
   final["Final checks<br/>task.finalVerify, once, after review passes"]
   baserun{"Same command on the base?<br/>base lookup: the cache, else the in-flight job,<br/>else one job in a throwaway worktree on base sha"}
   commit["Commit on the task branch"]
@@ -317,6 +327,8 @@ flowchart TD
   baseline -.->|"starts, does not wait"| basecheck
   impl -.- stall
   stall -->|stalled| fail
+  impl -.- timebudget
+  timebudget -->|out of time| fail
   verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> review
   gated -->|fails, kind verify| fail
   heldout -->|fails, kind heldout| fail
@@ -326,14 +338,17 @@ flowchart TD
   ownerQ -->|drop criterion or retry| impl
   ownerQ -->|"drop all"| commit
   basecheck -.->|"result is cached for the lookup after the final checks"| baserun
+  basecheck -.->|result| gate
+  basecheck -.->|"ruling for a failing verify command, applied before it counts"| verify
   land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
-  review -->|PASS| final -->|all exit 0| commit --> done
+  review -->|PASS| gate --> final -->|all exit 0| commit --> done
   final -->|all exit 0, subtask| land --> done
   final -->|non-zero| baserun
   baserun -->|passes on base| fail
   baserun -->|"keep rule: targets absent on base, the plan creates them"| fail
   baserun -->|"every other final that also fails: ONE question lists them all (retry after the base is fixed / drop all / stop), no extra attempt"| ownerQ
   land -->|conflict / verify fails| fail
+  review -->|"narrow PASS and a changed file no open finding names: one full review, its verdict stands"| review
   review -->|"no verdict: review again once, same attempt"| review
   review -->|"no verdict twice"| ownerQ
   ownerQ -->|"review retry: same attempt"| review
@@ -352,6 +367,15 @@ flowchart TD
 
   classDef planned stroke-dasharray: 5 5
 ```
+
+The base preflight is a background job per task: attempt 1 starts at once and
+the job holds no slot. Its result lives in memory; only the loop applies it to
+its own task. After a daemon restart the gate starts the job again.
+
+The parent preflight (`graph.rs` `parent_base_preflight`) still blocks: it holds
+no slot either, and its answer decides what the subtasks must make pass before
+any of them starts, so moving it to the background would let a subtask run
+against a check the owner may drop.
 
 ## 4. Roles and models
 

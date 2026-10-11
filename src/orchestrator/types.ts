@@ -125,6 +125,10 @@ export type Settings = {
   /** Seconds one verify command may run; absent on an orchd without the
    * setting (the daemon then uses its own default, 1200). */
   verifyTimeoutSecs?: number;
+  /** Minutes an implement attempt may run before it is stopped and asked
+   * for a short report (failure kind "time_budget"). 0 = no limit; the
+   * daemon default is 45. Advanced JSON only, no Settings field. */
+  implementBudgetMins: number;
   /** Tasks may land on the repo's default branch (per-repo overrides in
    * `landOnDefaultRepos`). */
   landOnDefault?: boolean;
@@ -364,6 +368,7 @@ export type FailureKind =
   | "stall"
   | "loop"
   | "budget"
+  | "time_budget"
   | "verify"
   | "conflict"
   | "heldout"

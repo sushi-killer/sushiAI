@@ -90,6 +90,7 @@ pub(super) async fn run_advisor_before_retry(
         codex_mcp: &[],
         images: &[],
         repo_settings: true,
+        resume: None,
     };
     let result = run_harness(
         app,

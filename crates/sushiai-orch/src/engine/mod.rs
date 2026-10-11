@@ -69,6 +69,7 @@ mod rpc_tasks;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
+mod time_budget;
 mod verify;
 mod wait_sla;
 mod worktrees;
@@ -353,7 +354,9 @@ pub struct App {
     /// post-session gate so an unchanged diff never re-runs verify twice.
     verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
     /// Keyed by (base sha, command): what a command did on that commit, so an
-    /// unchanged base is never checked twice for the same command.
+    /// unchanged base is never checked twice for the same command. Kept on
+    /// disk (`base-results.json`), so a restart does not run them again; a
+    /// run that ended without an exit code (a timeout) is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
     /// (tree hash, base sha, command) triples that passed (exit 0) in a
     /// subtask's final run: a parent on the same tree and the same base does
@@ -369,6 +372,9 @@ pub struct App {
     /// Cancelled by `shutdown_for` only: a task stop must not end a job
     /// another task may be waiting on.
     base_cancel: CancelToken,
+    /// Keyed by task id: the task's base preflight, a background job that
+    /// holds no slot (`healing.rs`). The loop applies its result.
+    base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
     /// Concurrency limit (`settings.parallel` at startup -- a live
@@ -536,6 +542,7 @@ impl App {
         let slots = Arc::new(Semaphore::new(parallel_limit as usize));
 
         let messages = messages::load(&data_dir);
+        let base_runs_dir = data_dir.clone();
         let app = Arc::new(App {
             store,
             data_dir,
@@ -557,11 +564,12 @@ impl App {
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
-            base_runs: std::sync::Mutex::new(HashMap::new()),
+            base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
             gate_passes: StdMutex::new(Default::default()),
             base_jobs: StdMutex::new(HashMap::new()),
             base_flaky: StdMutex::new(Default::default()),
             base_cancel: CancelToken::new(),
+            base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
             parallel_limit,

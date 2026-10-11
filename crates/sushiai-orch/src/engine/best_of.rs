@@ -175,7 +175,7 @@ struct Eval {
 }
 
 fn run_finished(res: &Result<harness::RunOutcome, RunError>) -> bool {
-    matches!(res, Ok(o) if !o.stalled && !o.over_budget && o.looped.is_none())
+    matches!(res, Ok(o) if !o.stalled && !o.over_budget && !o.time_budget && o.looped.is_none())
 }
 
 fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Path) -> f64 {
@@ -345,6 +345,12 @@ where
     let events_a = run_dir.join("events.jsonl");
     let events_b = run_dir_b.join("events.jsonl");
     let variant = task.variant();
+    let started_at = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|a| a.n == attempt_n)
+        .map_or_else(now_ms, |a| a.started_at);
     let codex_mcp_b = tools_b.codex_servers(&prep.messages_server);
     let req_b = harness::RunRequest {
         harness: b_route.harness,
@@ -360,6 +366,7 @@ where
         codex_mcp: &codex_mcp_b,
         images: &[],
         repo_settings: true,
+        resume: None,
     };
     let b_run = run_harness(
         app,
@@ -377,7 +384,8 @@ where
             prep.registered
                 .as_ref()
                 .map(|(_, ctx)| ctx.hook_running.clone()),
-        ),
+        )
+        .with_time_budget(settings.implement_budget_mins, started_at),
     );
     let (a_res, b_res) = tokio::join!(a_run, b_run);
     if let Some((token, ctx)) = &prep.registered {

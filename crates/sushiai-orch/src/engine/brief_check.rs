@@ -9,8 +9,9 @@ const MAX_CONFLICT_CHARS: usize = 400;
 /// What the caller does after a check.
 pub(super) enum BriefAction {
     Proceed,
-    /// The planner's draft contradicts itself: draft again, once.
-    Redraft,
+    /// The planner's draft contradicts itself (the conflict text): draft
+    /// again, once.
+    Redraft(String),
     /// The task was cancelled while the check ran.
     Cancelled,
 }
@@ -161,6 +162,7 @@ pub(super) async fn run_judge(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &[])
     };
     let result = run_harness(
@@ -215,12 +217,7 @@ pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
 /// cheapest available route stands in, the reason to record; `None` overall
 /// when the setting is empty, i.e. cheap checks are off. `"auto"` names no
 /// route: it is the cheapest configured route whose harness is available.
-pub(super) fn check_route(app: &App) -> Option<(String, Option<Route>, Option<String>)> {
-    check_route_for(app, &Variant::default())
-}
-
-/// `check_route` for a task: its variant may switch the check off or name
-/// another route.
+/// The variant may switch the check off or name another route.
 pub(super) fn check_route_for(
     app: &App,
     variant: &Variant,
@@ -248,9 +245,18 @@ pub(super) fn check_route_for(
     Some((route_id, cheapest, note))
 }
 
+/// The line a fresh redraft appends to the request so the new planner
+/// session knows what the previous draft got wrong.
+pub(super) fn redraft_request_note(conflict: &str) -> String {
+    format!(
+        "(Brief check: the previous draft's requirements contradict each other: {conflict}. Draft again so that no two requirements conflict.)"
+    )
+}
+
 /// Checks the stored task's goal and criteria once. `can_redraft` is true
-/// for a planner draft: a contradiction then asks the planner to draft again
-/// (at most once per task). Otherwise, and for an unusable reply, the task
+/// for a planner draft: a contradiction then asks the planner to correct it
+/// (at most once per task); the caller changes the request only when it has
+/// to draft from scratch (see [`redraft_request_note`]). Otherwise, and for an unusable reply, the task
 /// carries on; a conflict is kept for the implement and review briefs.
 pub(super) async fn check_brief(
     app: &Arc<App>,
@@ -301,12 +307,8 @@ pub(super) async fn check_brief(
                 task.decisions
                     .push(format!("Brief check: {conflict} (drafting again)"));
                 task.brief_check.redrafted = true;
-                let request = task.request.clone().unwrap_or_default();
-                task.request = Some(format!(
-                    "{request}\n\n(Brief check: the previous draft's requirements contradict each other: {conflict}. Draft again so that no two requirements conflict.)"
-                ));
                 task.status = TaskStatus::Drafting;
-                action = BriefAction::Redraft;
+                action = BriefAction::Redraft(conflict);
             } else {
                 task.decisions.push(format!("Brief check: {conflict}"));
                 task.brief_check.conflict = Some(conflict);
@@ -315,7 +317,7 @@ pub(super) async fn check_brief(
     }
     // A redraft is checked again; anything else is settled for good. A tool
     // the task lacks is asked about before the first attempt, once.
-    if !matches!(action, BriefAction::Redraft) && !task.brief_check.missing_tool_asked {
+    if !matches!(action, BriefAction::Redraft(_)) && !task.brief_check.missing_tool_asked {
         if let Some(missing) = missing {
             task.decisions.push(format!(
                 "Brief check: criterion {} needs {}, which the task will not have",
@@ -324,7 +326,7 @@ pub(super) async fn check_brief(
             task.brief_check.missing_tool = Some(missing);
         }
     }
-    task.brief_check.done = !matches!(action, BriefAction::Redraft);
+    task.brief_check.done = !matches!(action, BriefAction::Redraft(_));
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
@@ -419,7 +421,7 @@ pub(super) async fn refresh_after_dependencies(
         settle(None, &|_| {});
         return false;
     }
-    let Some((route_id, route, fallback)) = check_route(app) else {
+    let Some((route_id, route, fallback)) = check_route_for(app, &task.variant()) else {
         settle(
             Some("Refresh: skipped, the brief-check route is empty".to_string()),
             &|_| {},

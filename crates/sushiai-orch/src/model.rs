@@ -140,6 +140,10 @@ pub struct Settings {
     /// hook's budget derives from it, capped under Claude's 600 s hook limit.
     #[serde(default = "default_verify_timeout_secs")]
     pub verify_timeout_secs: u64,
+    /// Minutes an implement attempt may run before it is stopped and asked
+    /// for a short report (failure kind `time_budget`); `0` = no limit.
+    #[serde(default = "default_implement_budget_mins")]
+    pub implement_budget_mins: f64,
     /// Route id used for the drafting/plan stage of a `{repo, request}`
     /// `task.create`; `""` turns planning off (that create form is then
     /// rejected -- there is nothing to run it with).
@@ -514,6 +518,10 @@ fn default_verify_timeout_secs() -> u64 {
     1200
 }
 
+fn default_implement_budget_mins() -> f64 {
+    45.0
+}
+
 fn default_planner() -> String {
     "claude-opus".to_string()
 }
@@ -620,6 +628,7 @@ impl Default for Settings {
             daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
             verify_timeout_secs: default_verify_timeout_secs(),
+            implement_budget_mins: default_implement_budget_mins(),
             planner: default_planner(),
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
@@ -1722,6 +1731,15 @@ pub struct VerifyOutcome {
     pub ms: u64,
 }
 
+/// How much of an attempt a review looked at: everything, or only the open
+/// findings of the review before it and the task's changes since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewScope {
+    Full,
+    Narrow,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Verdict {
@@ -1864,6 +1882,8 @@ pub enum FailureKind {
     Loop,
     /// The attempt's estimated cost passed `variant.max_attempt_cost_usd`.
     Budget,
+    /// The implement run was still going at `settings.implement_budget_mins`.
+    TimeBudget,
     Verify,
     /// Landing carried the work onto a moved base and files conflict: the
     /// next attempt only resolves them.
@@ -1885,6 +1905,7 @@ impl FailureKind {
             FailureKind::Stall => "stall",
             FailureKind::Loop => "loop",
             FailureKind::Budget => "budget",
+            FailureKind::TimeBudget => "time_budget",
             FailureKind::Verify => "verify",
             FailureKind::Conflict => "conflict",
             FailureKind::Heldout => "heldout",
@@ -2019,6 +2040,18 @@ pub struct Attempt {
     /// attempt can tell the task's own edits from carried-in base commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_base: Option<String>,
+    /// Git tree id of the worktree the last review run of this attempt that
+    /// gave a verdict saw; the next attempt's review is narrowed to what
+    /// changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_tree: Option<String>,
+    /// The task's base commit when `review_tree` was taken, so a later review
+    /// can leave out files only the base moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    /// Whether that review saw the full diff or only the narrow delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_scope: Option<ReviewScope>,
     /// The attempt whose `evidence` this attempt reused because it changed
     /// only `artifacts/` or test files since.
     #[serde(default, skip_serializing_if = "Option::is_none")]

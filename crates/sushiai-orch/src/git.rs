@@ -892,18 +892,40 @@ pub fn diff_stat(cwd: &Path, base: &str) -> Result<String, GitError> {
 /// diff capped at 60000 chars).
 pub fn diff_full(cwd: &Path, base: &str, max_chars: usize) -> Result<String, GitError> {
     let out = run(cwd, &["diff", base])?;
+    Ok(truncate_diff(out, max_chars))
+}
+
+/// `git diff <old> <new> -- <paths>` between two tree ids, truncated like
+/// [`diff_full`]. No paths, no diff.
+pub fn diff_trees(
+    cwd: &Path,
+    old: &str,
+    new: &str,
+    paths: &[String],
+    max_chars: usize,
+) -> Result<String, GitError> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args = vec!["diff", old, new, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let out = run(cwd, &args)?;
+    Ok(truncate_diff(out, max_chars))
+}
+
+fn truncate_diff(out: String, max_chars: usize) -> String {
     if out.len() <= max_chars {
-        return Ok(out);
+        return out;
     }
     let mut end = max_chars;
     while end > 0 && !out.is_char_boundary(end) {
         end -= 1;
     }
-    Ok(format!(
+    format!(
         "{}\n... [truncated, {} bytes total]",
         &out[..end],
         out.len()
-    ))
+    )
 }
 
 /// Changed files, combining working-tree changes and committed changes
@@ -1347,6 +1369,30 @@ mod tests {
             own_changes_between(&repo, &old_tree, &base1, &edited, &base2).unwrap(),
             vec!["own.tsx".to_string()]
         );
+    }
+
+    #[test]
+    fn diff_trees_holds_only_the_given_paths_and_truncates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        std::fs::write(repo.join("a.txt"), "a1\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b1\n").unwrap();
+        let old = worktree_tree(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b2\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        let new = worktree_tree(&repo).unwrap();
+        let only_a = diff_trees(&repo, &old, &new, &["a.txt".to_string()], 10_000).unwrap();
+        assert!(only_a.contains("+a2"), "{only_a}");
+        assert!(
+            !only_a.contains("b2") && !only_a.contains("c.txt"),
+            "{only_a}"
+        );
+        assert_eq!(diff_trees(&repo, &old, &new, &[], 10_000).unwrap(), "");
+        let cut = diff_trees(&repo, &old, &new, &["a.txt".to_string()], 20).unwrap();
+        assert!(cut.contains("[truncated,"), "{cut}");
     }
 
     #[test]

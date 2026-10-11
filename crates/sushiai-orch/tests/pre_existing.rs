@@ -295,7 +295,7 @@ fn a_final_the_work_turns_green_asks_nothing_and_stays() {
 }
 
 #[test]
-fn an_owner_retry_on_an_unmoved_base_keeps_the_check_and_runs_a_second_attempt() {
+fn an_owner_retry_waits_for_the_base_to_move_keeps_the_check_and_runs_a_second_attempt() {
     let scripts = tempfile::tempdir().unwrap();
     let count = scripts.path().join("count");
     let daemon = spawn(scripts.path());
@@ -310,8 +310,14 @@ fn an_owner_retry_on_an_unmoved_base_keeps_the_check_and_runs_a_second_attempt()
     let waiting = waiting_with_attempts(&daemon, &id, 1);
     let base_sha = waiting["baseSha"].as_str().unwrap().to_string();
 
-    // Nothing moved on the base: the check stays and one more attempt runs.
+    // Nothing moved on the base: no attempt starts until it does.
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let idle = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(idle["attempts"].as_array().unwrap().len(), 1, "{idle}");
+    std::fs::write(repo.path().join("OTHER.txt"), "other\n").unwrap();
+    git_out(repo.path(), &["add", "OTHER.txt"]);
+    git_out(repo.path(), &["commit", "-q", "-m", "move the base"]);
     let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 2, "{done}");
     assert_eq!(done["finalVerify"][0], check.as_str(), "{done}");

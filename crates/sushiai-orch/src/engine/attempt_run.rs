@@ -106,10 +106,14 @@ pub(super) enum RunTrack {
     Resumable,
 }
 
-/// What ends a run early: silence, a loop, or spend past the cap. The same
-/// guard watches a run this daemon started and one it adopted.
+/// What ends a run early: silence, a loop, spend past the cap, or the
+/// wall-clock budget. The same guard watches a run this daemon started and
+/// one it adopted.
 pub(super) struct Guard {
     stall: Option<Stall>,
+    /// The wall-clock deadline of an implement run, and its length in
+    /// minutes for the message.
+    wall: Option<(tokio::time::Instant, f64)>,
     detector: Option<LoopDetector>,
     /// Dollars one attempt may spend; `None` = no cap.
     cap: Option<f64>,
@@ -121,6 +125,7 @@ pub(super) enum Trip {
     Stalled(String),
     Looped(String),
     OverBudget(String),
+    TimeBudget(String),
 }
 
 impl Trip {
@@ -135,6 +140,10 @@ impl Trip {
                 outcome.over_budget = true;
                 outcome.error = Some(error);
             }
+            Trip::TimeBudget(error) => {
+                outcome.time_budget = true;
+                outcome.error = Some(error);
+            }
         }
     }
 }
@@ -144,6 +153,7 @@ impl Guard {
     pub fn off() -> Self {
         Guard {
             stall: None,
+            wall: None,
             detector: None,
             cap: None,
             last_output: tokio::time::Instant::now(),
@@ -157,36 +167,58 @@ impl Guard {
                 limit: Duration::from_secs(variant.stall_timeout_secs),
                 paused: hook_running.unwrap_or_default(),
             }),
+            wall: None,
             detector: variant.loop_detect.then(LoopDetector::new),
             cap: (variant.max_attempt_cost_usd > 0.0).then_some(variant.max_attempt_cost_usd),
             last_output: tokio::time::Instant::now(),
         }
     }
 
-    pub(super) fn armed(&self) -> bool {
-        self.stall.is_some()
+    /// Adds the wall-clock budget of an implement run: `mins` after the
+    /// attempt started (`started_at_ms`), so a run a restarted daemon adopts
+    /// does not get a fresh one. `0` (or less) = no budget.
+    pub fn with_time_budget(mut self, mins: f64, started_at_ms: i64) -> Self {
+        if mins > 0.0 {
+            let left_ms = started_at_ms as f64 + mins * 60_000.0 - now_ms() as f64;
+            let left = Duration::from_millis(left_ms.max(0.0) as u64);
+            self.wall = Some((tokio::time::Instant::now() + left, mins));
+        }
+        self
     }
 
-    /// When the silence limit runs out. An unset limit still needs a
-    /// deadline that does not overflow `Instant` (select! builds a disabled
-    /// branch's future too).
+    pub(super) fn armed(&self) -> bool {
+        self.stall.is_some() || self.wall.is_some()
+    }
+
+    /// The earlier of the silence limit and the wall deadline. An unset
+    /// limit still needs a deadline that does not overflow `Instant`
+    /// (select! builds a disabled branch's future too).
     pub(super) fn deadline(&self) -> tokio::time::Instant {
         let limit = self
             .stall
             .as_ref()
             .map_or(Duration::from_secs(365 * 24 * 3600), |s| s.limit);
-        self.last_output + limit
+        let silent = self.last_output + limit;
+        self.wall.map_or(silent, |(wall, _)| wall.min(silent))
     }
 
     pub(super) fn heard(&mut self) {
         self.last_output = tokio::time::Instant::now();
     }
 
-    /// The silence limit ran out. Silence is the only stall signal; a long
+    /// The wall deadline passed (`TimeBudget`), or the silence limit ran
+    /// out. Silence is the only stall signal; a long
     /// Bash call or the Stop hook's verify (up to 540s) is silent too, so the
     /// limit must sit above them. While a hook runs no stall fires, and the
     /// moment it ends counts as activity: the window starts then.
     pub(super) fn stall_expired(&mut self) -> Option<Trip> {
+        if let Some((wall, mins)) = self.wall {
+            if tokio::time::Instant::now() >= wall {
+                return Some(Trip::TimeBudget(format!(
+                    "The attempt ran past its {mins} minute time budget; the run was stopped."
+                )));
+            }
+        }
         let stall = self.stall.as_ref()?;
         if stall.paused.running.load(Ordering::SeqCst) {
             self.heard();
@@ -582,7 +614,7 @@ pub(super) async fn run_harness(
         task_id,
         attempt_n,
         &tag,
-        (req.harness, req.model, false),
+        (req.harness, req.model, req.resume.is_some()),
         &outcome,
         started_at,
     );
@@ -816,6 +848,21 @@ mod stall_tests {
 
     fn ago(secs: u64) -> tokio::time::Instant {
         tokio::time::Instant::now() - Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn the_wall_deadline_trips_and_no_budget_is_not_armed() {
+        let off = Guard::off().with_time_budget(0.0, now_ms());
+        assert!(!off.armed());
+        let mut fresh = Guard::off().with_time_budget(10.0, now_ms());
+        assert!(fresh.armed());
+        assert!(fresh.stall_expired().is_none());
+        // Started 2 minutes ago with a 1 minute budget: already past.
+        let mut late = Guard::off().with_time_budget(1.0, now_ms() - 120_000);
+        assert!(matches!(late.stall_expired(), Some(Trip::TimeBudget(_))));
+        let (stall, _) = guarded(10);
+        let both = stall.with_time_budget(1.0, now_ms());
+        assert!(both.deadline() <= tokio::time::Instant::now() + Duration::from_secs(10));
     }
 
     #[test]

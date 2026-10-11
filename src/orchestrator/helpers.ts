@@ -619,6 +619,7 @@ const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
   stall: "stalled",
   loop: "looped",
   budget: "over budget",
+  time_budget: "out of time",
   verify: "verify failed",
   conflict: "conflict",
   heldout: "held-out check failed",

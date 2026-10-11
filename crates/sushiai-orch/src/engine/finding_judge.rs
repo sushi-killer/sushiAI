@@ -212,6 +212,7 @@ pub(super) async fn judge_finding(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &images)
     };
     let result = run_harness(

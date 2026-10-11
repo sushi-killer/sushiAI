@@ -388,7 +388,9 @@ async fn parent_finals_on_base(
         .any(|c| task.final_verify.contains(c))
     {
         let wt = PathBuf::from(&task.worktree);
-        carry_onto_newest_base(task, &wt).await;
+        if !carry_after_base_moves(app, task, &wt, cancel, &mut None).await {
+            return ParentGate::End;
+        }
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
         return ParentGate::Again;

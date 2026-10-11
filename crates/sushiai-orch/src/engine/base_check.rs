@@ -1,4 +1,5 @@
 use super::*;
+use serde::Serialize;
 
 /// Options of the pre-existing final-check question, in the order shown.
 pub(super) const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
@@ -269,6 +270,53 @@ pub(super) fn answerer_label(task: &Task) -> Option<&'static str> {
     }
 }
 
+const BASE_RUNS_FILE: &str = "base-results.json";
+/// Most results kept on disk; the rest are dropped when the file is written.
+const BASE_RUNS_KEPT: usize = 1000;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredBaseRun {
+    base_sha: String,
+    outcome: VerifyOutcome,
+}
+
+/// The base results of an earlier daemon: (base sha, command) -> outcome.
+/// A missing or unreadable file is an empty cache; an entry without an exit
+/// code is skipped.
+pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), VerifyOutcome> {
+    let rows: Vec<StoredBaseRun> = std::fs::read_to_string(data_dir.join(BASE_RUNS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter(|r| r.outcome.code.is_some())
+        .map(|r| ((r.base_sha, r.outcome.command.clone()), r.outcome))
+        .collect()
+}
+
+/// Writes the cache next to the other daemon state (best effort).
+fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutcome>) {
+    let rows: Vec<StoredBaseRun> = cache
+        .iter()
+        .filter(|(_, o)| o.code.is_some())
+        .take(BASE_RUNS_KEPT)
+        .map(|((sha, _), o)| StoredBaseRun {
+            base_sha: sha.clone(),
+            outcome: o.clone(),
+        })
+        .collect();
+    let (path, tmp) = (
+        data_dir.join(BASE_RUNS_FILE),
+        data_dir.join(format!("{BASE_RUNS_FILE}.tmp")),
+    );
+    if let Ok(text) = serde_json::to_string(&rows) {
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
@@ -337,11 +385,13 @@ pub(super) async fn run_on_base(
         let cancelled = cancel.is_cancelled();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
-            if !cancelled {
+            // A timeout says nothing about the commit: never stored.
+            if !cancelled && r.code.is_some() {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
             }
             known.insert(c.clone(), r);
         }
+        save_base_runs(&app.data_dir, &cache);
     }
     Ok(commands
         .iter()
@@ -536,7 +586,9 @@ pub(super) async fn wait_on_broken_base(
         }
     }
     let wt = PathBuf::from(&task.worktree);
-    carry_onto_newest_base(task, &wt).await;
+    if !carry_after_base_moves(app, task, &wt, cancel, permit).await {
+        return BaseBreak::Stopped;
+    }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
     app.broadcast_task(task);

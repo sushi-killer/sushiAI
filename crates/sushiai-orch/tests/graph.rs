@@ -1745,15 +1745,19 @@ fn deferred_lines(task: &serde_json::Value) -> Vec<String> {
 
 /// A parent with `finals[0]` and two children with `finals[1..]`, started.
 fn gate_graph(run: &GateRun, finals: [&[&str]; 3]) -> (serde_json::Value, Vec<serde_json::Value>) {
-    gate_graph_with(run, finals, "")
+    let parent = gate_graph_with(run, finals, ["test -f one.txt", "test -f two.txt"]);
+    let parent = settle(&run.daemon, parent["id"].as_str().unwrap());
+    let children = children_of(&run.daemon, &parent);
+    assert_eq!(children.len(), 2);
+    (parent, children)
 }
 
-/// `gate_graph` whose part Two verifies after `two_prefix` (e.g. `sleep 6 &&`).
+/// Creates the gate graph with per-child verify commands, without waiting for it to settle.
 fn gate_graph_with(
     run: &GateRun,
     finals: [&[&str]; 3],
-    two_prefix: &str,
-) -> (serde_json::Value, Vec<serde_json::Value>) {
+    child_verify: [&str; 2],
+) -> serde_json::Value {
     let repo = run.repo.path().to_str().unwrap();
     let parent = run.daemon.request(
         "task.create",
@@ -1764,26 +1768,20 @@ fn gate_graph_with(
         }),
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
-    for (i, (title, goal, file)) in [
-        ("One", "PART_ONE", "one.txt"),
-        ("Two", "PART_TWO", "two.txt"),
-    ]
-    .iter()
-    .enumerate()
+    for (i, (title, goal)) in [("One", "PART_ONE"), ("Two", "PART_TWO")]
+        .iter()
+        .enumerate()
     {
         run.daemon.request(
             "task.create",
             serde_json::json!({
                 "repo": repo, "title": title, "goal": goal,
-                "verify": [format!("{}test -f {file}", if i == 1 { two_prefix } else { "" })],
+                "verify": [child_verify[i]],
                 "finalVerify": finals[i + 1], "parent": parent_id,
             }),
         );
     }
-    let parent = settle(&run.daemon, &parent_id);
-    let children = children_of(&run.daemon, &parent);
-    assert_eq!(children.len(), 2);
-    (parent, children)
+    parent
 }
 
 fn finish_gate(run: GateRun, parent: &serde_json::Value, children: &[serde_json::Value]) {
@@ -1819,9 +1817,23 @@ fn a_two_child_graph_runs_the_shared_gate_once_at_the_parent() {
 fn a_carried_child_does_not_run_a_parent_deferred_final_at_landing() {
     let run = gate_daemon_env(false, None, &[("BARRIER", "1")]);
     let gate: &[&str] = &["npm run ci"];
-    // Part Two verifies slowly, so part One lands first and Two is carried by
-    // the landing itself, not by the rebase that follows its agent run.
-    let (parent, children) = gate_graph_with(&run, [gate, gate, gate], "sleep 6 && ");
+    // Hold One until Two is past its post-agent rebase, then hold Two until
+    // One has landed so the carry happens under the landing lock.
+    let parent = gate_graph_with(
+        &run,
+        [gate, gate, gate],
+        [
+            r#"test -f one.txt && i=0 && while [ ! -f "$PARTS_LOG/two-verifying" ]; do [ "$i" -lt 1500 ] || exit 1; sleep 0.2; i=$((i+1)); done"#,
+            r#"test -f two.txt && touch "$PARTS_LOG/two-verifying" && i=0 && while [ ! -f "$PARTS_LOG/one-landed" ]; do [ "$i" -lt 1500 ] || exit 1; sleep 0.2; i=$((i+1)); done"#,
+        ],
+    );
+    let children = children_of(&run.daemon, &parent);
+    let one = children.iter().find(|c| c["title"] == "One").unwrap();
+    poll_until(&run.daemon, one["id"].as_str().unwrap(), |s| s == "done");
+    std::fs::write(run.npm_log.parent().unwrap().join("one-landed"), b"").unwrap();
+    let parent = settle(&run.daemon, parent["id"].as_str().unwrap());
+    let children = children_of(&run.daemon, &parent);
+    assert_eq!(children.len(), 2);
 
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
     for c in &children {

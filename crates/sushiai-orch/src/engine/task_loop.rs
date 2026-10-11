@@ -2564,7 +2564,13 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
             task.base_sha = new_sha;
         }
-        _ => {}
+        Ok(Ok(git::Rebase::Skipped { reason })) => task
+            .decisions
+            .push(format!("Rebase: not carried onto {base_ref}: {reason}")),
+        Ok(Err(e)) => task
+            .decisions
+            .push(format!("Rebase: carrying onto {base_ref} failed: {e}")),
+        Ok(Ok(git::Rebase::Unchanged)) | Err(_) => {}
     }
 }
 

@@ -329,6 +329,13 @@ pub fn carry_onto_moved_base(
     }
     let head = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
     if head != base_sha {
+        // Someone merged the new base into the branch: nothing to carry.
+        if run(worktree, &["merge-base", "--is-ancestor", &new_sha, "HEAD"]).is_ok() {
+            return Ok(Rebase::Moved {
+                new_sha,
+                rewritten: false,
+            });
+        }
         return skipped("the task branch has commits of its own");
     }
     let rewritten = run(
@@ -1742,6 +1749,30 @@ mod tests {
         let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
         assert!(matches!(r, Rebase::Skipped { .. }), "{r:?}");
         assert!(wt.join("a.txt").exists());
+
+        // The same branch after the new base was merged into it: the base
+        // moves to that head and the branch is left as it is.
+        let base_head = git(&repo_root, &["rev-parse", "HEAD"]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "merge",
+                "-q",
+                "--no-edit",
+                &base_head,
+            ],
+        );
+        let merged = git(&wt, &["rev-parse", "HEAD"]);
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert!(
+            matches!(r, Rebase::Moved { ref new_sha, rewritten: false } if *new_sha == base_head),
+            "{r:?}"
+        );
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), merged);
 
         // A base rewritten so the task's base is no longer in its history:
         // the task's own edits are carried onto the amended head.

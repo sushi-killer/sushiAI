@@ -17,7 +17,7 @@ test.afterEach(async () => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const { DEADLINE_MS } = require("./helpers/deadline.cjs");
+const { DEADLINE_MS, removeDir } = require("./helpers/deadline.cjs");
 
 // A wait for something that must happen: `ms` is only a floor, the shared
 // deadline keeps it from failing on a loaded machine.
@@ -38,7 +38,7 @@ const within = async (check, ms, what) => {
 // A fake ssh (and connector command) over tests/fixtures/fake-proxy.cjs.
 function fakeProxy(mode) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-"));
-  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(() => removeDir(dir));
   const script = path.join(dir, "ssh");
   fs.writeFileSync(
     script,
@@ -699,7 +699,7 @@ test("connection profiles keep the connector, need no socket, and tell listeners
   const connections = new Connections(dir, { ssh: "/nonexistent/ssh" });
   cleanups.push(async () => {
     await connections.close().catch(() => {});
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   });
   await connections.init();
   const seen = [];
@@ -973,7 +973,7 @@ test("the old-daemon stop script signals only a daemon that holds the lock", asy
   const { spawn, execFileSync } = require("node:child_process");
   const { STOP_DAEMON_COMMAND } = require("../electron/host-setup.cjs");
   const home = fs.mkdtempSync(path.join("/tmp", "stop-"));
-  cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }));
+  cleanups.push(() => removeDir(home));
   fs.mkdirSync(path.join(home, ".sushiai"), { mode: 0o700 });
   const run = () =>
     execFileSync("/bin/sh", ["-c", STOP_DAEMON_COMMAND], {
@@ -1019,7 +1019,7 @@ test("a port forward is its own process", async () => {
   cleanups.push(async () => {
     for (const server of servers) server.close();
     await connections.close().catch(() => {});
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   });
   await connections.init();
   const profile = await connections.save({ host: "user@devbox" });

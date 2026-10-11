@@ -317,6 +317,10 @@ pub(super) async fn run_on_base(
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
         let _ = std::fs::create_dir_all(run_dir);
+        let setup = match setup {
+            Ok(()) => super::worktrees::setup_worktree(Path::new(repo), &wt, sandbox, cancel).await,
+            err => err,
+        };
         let ran = match setup {
             Ok(()) => {
                 Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, base_sha, cancel).await)

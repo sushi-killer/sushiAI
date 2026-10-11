@@ -16,7 +16,7 @@ pub(super) fn set_verify_timeout_secs(secs: u64) {
     VERIFY_TIMEOUT_SECS.store(secs.max(1), Ordering::SeqCst);
 }
 
-fn verify_timeout() -> Duration {
+pub(super) fn verify_timeout() -> Duration {
     Duration::from_secs(VERIFY_TIMEOUT_SECS.load(Ordering::SeqCst))
 }
 
@@ -25,7 +25,7 @@ fn verify_timeout() -> Duration {
 /// and cache locations a build/test command routinely touches. Network is
 /// deliberately left open (verify commands may need to hit a registry, run
 /// a dev server, etc.) -- only the filesystem is restricted.
-fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
+pub(super) fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let tmp_dir = std::env::var("TMPDIR").unwrap_or_default();
     let mut paths = vec![
@@ -66,7 +66,7 @@ fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
 /// `sandbox-exec`-wraps the command on macOS when `sandbox == Native`;
 /// plain `/bin/sh -c` for `Host`, and on non-macOS (`sandbox-exec` doesn't
 /// exist there -- a documented limitation, not a bug).
-fn build_verify_command(
+pub(super) fn build_verify_command(
     cwd: &Path,
     cmd: &str,
     sandbox: SandboxMode,
@@ -96,9 +96,13 @@ fn build_verify_command(
         command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(cmd);
     }
+    let path = augmented_path();
+    if let Some(wrapper) = crate::worktree_env::rustc_wrapper(&path) {
+        command.env("RUSTC_WRAPPER", wrapper);
+    }
     command
         .current_dir(cwd)
-        .env("PATH", augmented_path())
+        .env("PATH", path)
         .env("ORCHD_BASE_SHA", base_sha)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -329,6 +333,9 @@ pub(super) async fn run_eval_check(
         Ok(Ok(())) => {}
         Ok(Err(e)) => return failed(format!("could not check out {sha}: {e}")),
         Err(e) => return failed(format!("check checkout panicked: {e}")),
+    }
+    if let Err(e) = super::worktrees::setup_worktree(repo, &path, sandbox, cancel).await {
+        return failed(e);
     }
     let allow_write = verify_allow_write_paths(&path, run_dir);
     let out = run_one_verify_command(

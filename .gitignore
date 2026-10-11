@@ -20,8 +20,11 @@ promo/assets/frame-*.png
 
 # Rust build output of the orchestrator daemon.
 
-# orchd task worktrees live inside the repo; the main checkout never walks them.
-.sushiai/
+# Local orchd state under .sushiai/ stays out of git; the committed worktree
+# setup (.sushiai/setup.json) is the one exception. Task worktrees live under
+# the sushiAI home, outside the repo.
+/.sushiai/*
+!/.sushiai/setup.json
 
 /target/
 

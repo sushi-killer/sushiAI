@@ -503,10 +503,11 @@ impl App {
         let branch_opt = new.branch.clone();
         let base = new.base.clone();
         let wt_root = self.settings.read().unwrap().worktree_root.clone();
+        let home = self.home.clone();
         let created = tokio::task::spawn_blocking(move || {
             let branch = branch_opt
                 .unwrap_or_else(|| git::unique_branch_name(&repo_root, &title_for_branch));
-            let wt_path = git::worktree_path(&repo_root, &wt_root, &branch);
+            let wt_path = git::worktree_path(&repo_root, &home, &wt_root, &branch);
             if let Some(dir) = wt_path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
                 git::exclude_worktree_root(&repo_root, dir)

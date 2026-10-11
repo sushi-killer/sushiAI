@@ -314,6 +314,19 @@ where
         .await
         .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
     };
+    let made = match made {
+        Ok(()) => {
+            let setup =
+                super::worktrees::setup_worktree(&repo, &wt_b, settings.sandbox, cancel).await;
+            if setup.is_err() {
+                let (r, p, b) = (repo.clone(), wt_b.clone(), branch_b.clone());
+                let _ =
+                    tokio::task::spawn_blocking(move || git::discard_worktree(&r, &p, &b)).await;
+            }
+            setup.map_err(git::GitError)
+        }
+        err => err,
+    };
     if let Err(e) = made {
         extra.decisions.push(format!(
             "Best-of: could not create the sibling worktree ({e}); ran a single candidate"

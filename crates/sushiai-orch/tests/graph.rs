@@ -233,8 +233,11 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     review_off(&daemon);
     let repo = init_git_repo();
     // Part B's worktree path is already taken, so creating Part B fails
-    // after Part A was created.
-    let parent_dir = repo.path().join(".sushiai/worktrees");
+    // after Part A was created. A relative override keeps the paths known.
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["worktreeRoot"] = serde_json::json!(".wt");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let parent_dir = repo.path().join(".wt");
     let blocked = parent_dir.join("task-part-b");
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(blocked.join("occupied.txt"), "x\n").unwrap();

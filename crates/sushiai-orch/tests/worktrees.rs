@@ -64,22 +64,22 @@ fn stop_hanging(daemon: &Daemon, id: &str, worktree: &Path) {
 }
 
 #[test]
-fn new_worktree_lives_under_sushiai_and_done_removes_it_but_keeps_the_commit() {
+fn new_worktree_lives_outside_the_repo_under_the_home_and_done_removes_it_but_keeps_the_commit() {
     let (daemon, _scripts) = spawn(PASS);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), "Pass case", true);
     let id = task["id"].as_str().unwrap().to_string();
     let worktree = task["worktree"].as_str().unwrap().to_string();
-    assert!(
-        canon(Path::new(&worktree).parent().unwrap())
-            == canon(&repo.path().join(".sushiai/worktrees")),
-        "{worktree}"
-    );
-    let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
-    assert!(
-        exclude.lines().any(|l| l == "/.sushiai/worktrees/"),
-        "{exclude}"
-    );
+    let repo_dir = canon(repo.path());
+    let root = canon(&daemon.home.path().join("worktrees.noindex"));
+    let parent = canon(Path::new(&worktree).parent().unwrap());
+    assert_eq!(parent.parent().unwrap(), root, "{worktree}");
+    let id_dir = parent.file_name().unwrap().to_string_lossy().to_string();
+    let name = repo_dir.file_name().unwrap().to_string_lossy().to_string();
+    assert!(id_dir.starts_with(&format!("{name}-")), "{id_dir}");
+    assert_eq!(id_dir.len(), name.len() + 9, "{id_dir}");
+    assert!(canon(Path::new(&worktree)).starts_with(&root));
+    assert!(!canon(Path::new(&worktree)).starts_with(&repo_dir));
     assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
 
     let settled = poll_task_status(&daemon, &id);
@@ -250,7 +250,10 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
 
     // A worktree no task knows about.
-    let unknown = repo.path().join(".sushiai/worktrees/unknown");
+    let unknown = daemon
+        .home
+        .path()
+        .join("worktrees.noindex/stray-repo/unknown");
     git(&[
         "worktree",
         "add",

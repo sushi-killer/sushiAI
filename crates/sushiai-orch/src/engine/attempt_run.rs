@@ -372,9 +372,13 @@ pub(super) async fn run_harness(
         );
     }
     cmd = tokio::process::Command::new(&bin);
+    let path = augmented_path();
+    if let Some(wrapper) = crate::worktree_env::rustc_wrapper(&path) {
+        cmd.env("RUSTC_WRAPPER", wrapper);
+    }
     cmd.args(&argv)
         .current_dir(worktree)
-        .env("PATH", augmented_path())
+        .env("PATH", path)
         // Lets a repo's own hooks tell an orchd-run agent from a person's
         // session (sushiAI's lesson reminder stays quiet for it).
         .env("ORCHD_TASK", task_id)

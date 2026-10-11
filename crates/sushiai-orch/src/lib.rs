@@ -22,6 +22,7 @@ pub mod report;
 pub mod skill;
 pub mod store;
 pub mod timeline;
+pub mod worktree_env;
 
 use std::future::Future;
 use std::io;

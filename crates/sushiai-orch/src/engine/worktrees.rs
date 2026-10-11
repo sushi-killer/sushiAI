@@ -7,6 +7,28 @@ fn has_worktree(path: &str) -> bool {
     Path::new(path).join(".git").exists()
 }
 
+/// Runs the setup of a worktree (see `worktree_env`) in the same sandbox as a
+/// verify command (`Host` runs it unsandboxed), with the verify timeout and
+/// the task's cancel token. The worktree holds agent-written files, so setup
+/// gets no more rights than a check.
+pub(super) async fn setup_worktree(
+    repo: &Path,
+    worktree: &Path,
+    sandbox: SandboxMode,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let allow_write = verify::verify_allow_write_paths(worktree, worktree);
+    crate::worktree_env::run_setup(
+        repo,
+        worktree,
+        &augmented_path(),
+        verify::verify_timeout(),
+        |script| verify::build_verify_command(worktree, script, sandbox, &allow_write, ""),
+        cancel.cancelled(),
+    )
+    .await
+}
+
 /// An archived task's saved evidence images are removed once it has not
 /// changed for this long.
 const EVIDENCE_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
@@ -72,6 +94,35 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Runs the task's worktree setup once: a task with no attempt yet, or a
+    /// worktree just recreated. `worktree-setup.done` in the task folder
+    /// records that it ran; a task already running when this shipped (it has
+    /// attempts, no marker) is left alone.
+    pub(super) async fn ensure_worktree_setup(
+        &self,
+        task: &Task,
+        recreated: bool,
+        sandbox: SandboxMode,
+        cancel: &CancelToken,
+    ) -> Result<(), String> {
+        let marker = self.store.task_dir(&task.id).join("worktree-setup.done");
+        if recreated {
+            let _ = std::fs::remove_file(&marker);
+        }
+        if marker.exists() || !(recreated || task.attempts.is_empty()) {
+            return Ok(());
+        }
+        setup_worktree(
+            Path::new(&task.repo),
+            Path::new(&task.worktree),
+            sandbox,
+            cancel,
+        )
+        .await?;
+        let _ = std::fs::write(&marker, "");
+        Ok(())
     }
 
     /// Recreates the task's worktree from its branch when it is gone,

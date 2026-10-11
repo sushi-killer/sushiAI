@@ -193,8 +193,9 @@ pub struct Settings {
     #[serde(default)]
     pub evolution: EvolutionSettings,
     /// Where new task worktrees go; a relative value is resolved against the
-    /// repo root. Existing tasks keep the path they were created with.
-    #[serde(default = "default_worktree_root")]
+    /// repo root. Empty (the default) means `<home>/worktrees.noindex/<repo-id>`.
+    /// Existing tasks keep the path they were created with.
+    #[serde(default)]
     pub worktree_root: String,
     /// Land tasks may move the repo's default branch (origin/HEAD, else
     /// main/master). Off: such a landing is refused and the task stays done
@@ -405,10 +406,6 @@ pub struct RepoNote {
     pub text: String,
     pub source: String,
     pub created_at: i64,
-}
-
-fn default_worktree_root() -> String {
-    ".sushiai/worktrees".to_string()
 }
 
 /// Tool-call inputs containing one of these count as process work (lesson
@@ -629,7 +626,7 @@ impl Default for Settings {
             prices: default_prices(),
             work_buckets: WorkBuckets::default(),
             evolution: EvolutionSettings::default(),
-            worktree_root: default_worktree_root(),
+            worktree_root: String::new(),
             land_on_default: false,
             land_on_default_repos: Default::default(),
             gate_at: Default::default(),

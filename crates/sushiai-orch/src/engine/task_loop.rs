@@ -56,13 +56,14 @@ pub(super) async fn run_task_loop(
 
         // A worktree removed while the task was archived comes back before
         // anything touches it.
-        match app.ensure_worktree(&mut task).await {
+        let recreated = match app.ensure_worktree(&mut task).await {
             Ok(true) => {
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
+                true
             }
-            Ok(false) => {}
+            Ok(false) => false,
             Err(e) => {
                 task.decisions.push(format!("Worktree: {e}"));
                 task.status = TaskStatus::Failed;
@@ -72,6 +73,25 @@ pub(super) async fn run_task_loop(
                 app.finish_task_loop(&task_id);
                 return;
             }
+        };
+        // A new (or recreated) worktree runs its setup before anything else
+        // uses it; a failing setup fails the task with no attempt.
+        let sandbox = app.settings.read().unwrap().sandbox;
+        if let Err(e) = app
+            .ensure_worktree_setup(&task, recreated, sandbox, &cancel)
+            .await
+        {
+            if cancel.is_cancelled() {
+                mark_stopped_if_not_already(&app, &task_id).await;
+            } else {
+                task.decisions.push(format!("Worktree setup: {e}"));
+                task.status = TaskStatus::Failed;
+                task.updated_at = now_ms();
+                let _ = app.store.save_task(&task);
+                app.broadcast_task(&task);
+            }
+            app.finish_task_loop(&task_id);
+            return;
         }
 
         // The task graph: a parent never implements, and a task whose

@@ -96,19 +96,41 @@ pub fn unique_branch_name(repo_root: &Path, title: &str) -> String {
     }
 }
 
-/// Where a task's worktree goes: `<root>/<branch with / -> ->`, with `root`
-/// (the `worktreeRoot` setting) resolved against the repo root when relative.
-pub fn worktree_path(repo_root: &Path, root: &str, branch: &str) -> PathBuf {
-    let root = if root.trim().is_empty() {
-        ".sushiai/worktrees"
-    } else {
-        root.trim()
-    };
-    repo_root.join(root).join(branch.replace('/', "-"))
+/// The `worktreeRoot` value older installs stored as the default. It counts as
+/// empty: worktrees no longer live inside the repo by default.
+const LEGACY_WORKTREE_ROOT: &str = ".sushiai/worktrees";
+
+/// `<repo folder name>-<8 hex digits>`: the folder name plus a stable FNV-1a
+/// hash of the full repo-root path, so two repos with one name never share.
+fn repo_id(repo_root: &Path) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for b in repo_root.to_string_lossy().bytes() {
+        hash = (hash ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    let name = repo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    format!("{name}-{hash:08x}")
 }
 
-/// Makes the repo ignore the whole relative `worktree_root` (`/.sushiai/worktrees/`
-/// by default, `/src/.wt/` for `src/.wt`, never all of `src/`) through `.git/info/exclude`, never a tracked
+/// Where a task's worktree goes: `<root>/<branch with / -> ->`. An empty
+/// `root` (the `worktreeRoot` setting, or the legacy stored default) means
+/// `<home>/worktrees.noindex/<repo-id>`; the `.noindex` suffix keeps Spotlight
+/// from indexing worktrees, `node_modules` and build output. Any other value
+/// is resolved against the repo root when relative.
+pub fn worktree_path(repo_root: &Path, home: &Path, root: &str, branch: &str) -> PathBuf {
+    let root = root.trim();
+    let base = if root.is_empty() || root == LEGACY_WORKTREE_ROOT {
+        home.join("worktrees.noindex").join(repo_id(repo_root))
+    } else {
+        repo_root.join(root)
+    };
+    base.join(branch.replace('/', "-"))
+}
+
+/// Makes the repo ignore the whole relative `worktree_root` (`/src/.wt/` for
+/// `src/.wt`, never all of `src/`) through `.git/info/exclude`, never a tracked
 /// file. A root outside the repo needs nothing.
 pub fn exclude_worktree_root(repo_root: &Path, worktree_root: &Path) -> std::io::Result<()> {
     let Ok(rel) = worktree_root.strip_prefix(repo_root) else {
@@ -572,82 +594,70 @@ fn append_to_info_exclude(worktree: &Path, rel_paths: &[String]) -> std::io::Res
     Ok(())
 }
 
-/// Copy `.env`, `.env.local`, `.claude/settings.local.json` from the main
-/// checkout when present and gitignored there; symlink `node_modules` when
-/// the main checkout has it and the worktree doesn't. Every bootstrapped
-/// path is also recorded in the worktree's `info/exclude`, so it never shows
-/// up as a "changed file" in the gate or gets swept into `git add -A`.
-pub fn bootstrap_worktree(main_root: &Path, worktree: &Path) -> std::io::Result<()> {
-    let mut bootstrapped = Vec::new();
-    for rel in [".env", ".env.local", ".claude/settings.local.json"] {
-        let src = main_root.join(rel);
-        if !src.is_file() {
-            continue;
+/// Gitignored files a new worktree needs but git does not carry. With a
+/// `.worktreeinclude` in the main checkout (gitignore syntax) these are the
+/// untracked files it matches that the checkout also ignores; without one,
+/// `.env`, `.env.local` and `.claude/settings.local.json` when ignored.
+fn include_candidates(main_root: &Path) -> Vec<String> {
+    let list = main_root.join(".worktreeinclude");
+    let found: Vec<String> = if list.is_file() {
+        let out = Command::new("git")
+            .args(["ls-files", "-z", "--others", "--ignored"])
+            .arg(format!("--exclude-from={}", list.display()))
+            .current_dir(main_root)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
         }
-        if !is_git_ignored(main_root, rel) {
-            continue; // only ever copy files the main checkout itself ignores
-        }
-        let dst = worktree.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(&src, &dst)?;
-        bootstrapped.push(rel.to_string());
-    }
-
-    for rel in node_modules_dirs(main_root) {
-        let main_modules = main_root.join(&rel);
-        let worktree_modules = worktree.join(&rel);
-        if worktree_modules.exists() || !worktree_modules.parent().is_some_and(Path::is_dir) {
-            continue;
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&main_modules, &worktree_modules)?;
-        bootstrapped.push(rel);
-    }
-
-    if !bootstrapped.is_empty() {
-        append_to_info_exclude(worktree, &bootstrapped)?;
-    }
-    Ok(())
+    } else {
+        [".env", ".env.local", ".claude/settings.local.json"]
+            .map(str::to_string)
+            .to_vec()
+    };
+    // Only ever copy files the main checkout itself ignores.
+    found
+        .into_iter()
+        .filter(|rel| is_git_ignored(main_root, rel))
+        .collect()
 }
 
-/// `node_modules` dirs of the main checkout, as relative paths: the root one
-/// and those of packages one or two levels down (`hub/`, `hub/web/`).
-// ponytail: depth 2 covers nested packages seen so far; read workspaces from package.json if deeper ones appear.
-fn node_modules_dirs(main_root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut level = vec![String::new()];
-    for _ in 0..3 {
-        let mut next = Vec::new();
-        for rel in level {
-            let dir = main_root.join(&rel);
-            let join = |name: &str| {
-                if rel.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{rel}/{name}")
-                }
+/// Copies the files [`include_candidates`] names into the worktree: regular
+/// files only (a symlink is skipped), never over a file the worktree already
+/// has. Every copied path is also recorded in the worktree's `info/exclude`,
+/// so it never shows up as a "changed file" in the gate or gets swept into
+/// `git add -A`.
+pub fn bootstrap_worktree(main_root: &Path, worktree: &Path) -> std::io::Result<()> {
+    let mut copied = Vec::new();
+    for rel in include_candidates(main_root) {
+        let src = main_root.join(&rel);
+        let dst = worktree.join(&rel);
+        let is_file = std::fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file());
+        if !is_file || dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+            // A tracked symlinked directory must not send the copy outside.
+            let inside = match (parent.canonicalize(), worktree.canonicalize()) {
+                (Ok(p), Ok(w)) => p.starts_with(w),
+                _ => false,
             };
-            if dir.join("node_modules").is_dir() {
-                found.push(join("node_modules"));
-            }
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+            if !inside {
                 continue;
-            };
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || name == "node_modules" || name == "target" {
-                    continue;
-                }
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    next.push(join(&name));
-                }
             }
         }
-        level = next;
+        std::fs::copy(&src, &dst)?;
+        copied.push(rel);
     }
-    found
+    if !copied.is_empty() {
+        append_to_info_exclude(worktree, &copied)?;
+    }
+    Ok(())
 }
 
 /// `git status --porcelain -z --untracked-files=all`, one path per returned
@@ -1483,14 +1493,44 @@ mod tests {
     }
 
     #[test]
-    fn worktree_path_lives_under_the_root_setting_with_dashed_branch() {
+    fn worktree_root_defaults_to_a_noindex_folder_under_the_home_outside_the_repo() {
         let repo = Path::new("/Users/me/Desktop/Test");
+        let home = Path::new("/h/.sushiai");
+        let id = repo_id(repo);
+        assert!(
+            id.starts_with("Test-") && id.len() == "Test-".len() + 8,
+            "{id}"
+        );
+        assert_eq!(id, repo_id(repo), "the id is stable");
+        assert_ne!(id, repo_id(Path::new("/Users/me/Other/Test")));
+        let want = home
+            .join("worktrees.noindex")
+            .join(&id)
+            .join("task-add-a-button");
+        assert_eq!(worktree_path(repo, home, "", "task/add-a-button"), want);
+        assert!(want
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .ends_with("worktrees.noindex"));
+        // The value older installs stored counts as the default.
         assert_eq!(
-            worktree_path(repo, ".sushiai/worktrees", "task/add-a-button"),
-            Path::new("/Users/me/Desktop/Test/.sushiai/worktrees/task-add-a-button")
+            worktree_path(repo, home, ".sushiai/worktrees", "task/add-a-button"),
+            want
+        );
+    }
+
+    #[test]
+    fn a_worktree_root_override_still_resolves_against_the_repo_or_as_absolute() {
+        let repo = Path::new("/Users/me/Desktop/Test");
+        let home = Path::new("/h/.sushiai");
+        assert_eq!(
+            worktree_path(repo, home, "src/.wt", "task/x"),
+            Path::new("/Users/me/Desktop/Test/src/.wt/task-x")
         );
         assert_eq!(
-            worktree_path(repo, "/tmp/wt", "task/x"),
+            worktree_path(repo, home, "/tmp/wt", "task/x"),
             Path::new("/tmp/wt/task-x")
         );
     }
@@ -1516,7 +1556,7 @@ mod tests {
         let feature_sha = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-"]);
 
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", "task/on-feature");
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/on-feature");
         let created = create_worktree(&repo_root, "task/on-feature", &wt_path, "feature").unwrap();
         assert_eq!(created.base_sha, feature_sha);
         assert!(wt_path.join("feature.txt").exists());
@@ -1542,7 +1582,7 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
-        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/carry");
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/carry");
         let created = create_worktree(&repo_root, "task/carry", &wt, "HEAD").unwrap();
 
         // The agent edits README and adds a file; meanwhile the base gains
@@ -1610,7 +1650,7 @@ mod tests {
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
         let first = git(&repo_root, &["rev-parse", "HEAD"]);
-        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/skip");
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/skip");
         let created = create_worktree(&repo_root, "task/skip", &wt, "HEAD").unwrap();
         std::fs::write(repo_root.join("b.txt"), "b\n").unwrap();
         git(&repo_root, &["add", "."]);
@@ -1711,7 +1751,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "Add a button");
         assert_eq!(branch, "task/add-a-button");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
         assert!(created.path.exists());
         assert!(!created.base_sha.is_empty());
@@ -1741,7 +1781,7 @@ mod tests {
         init_repo(&repo_root);
 
         let branch = unique_branch_name(&repo_root, "Hook test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         // An agent-writable pre-commit hook that would prove it ran by
@@ -1775,52 +1815,121 @@ mod tests {
         let _ = created;
     }
 
-    #[test]
-    fn bootstrap_copies_gitignored_env_and_symlinks_node_modules_and_excludes_both() {
+    /// A repo with a committed `kept.txt` and `.gitignore` ignoring the
+    /// given patterns, plus a worktree of it; returns (tmp, repo, worktree).
+    fn repo_with_worktree(ignore: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
         std::fs::create_dir_all(&repo_root).unwrap();
         init_repo(&repo_root);
-        std::fs::write(repo_root.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
-        std::fs::create_dir_all(repo_root.join("hub/web")).unwrap();
-        std::fs::write(repo_root.join("hub/package.json"), "{}").unwrap();
-        std::fs::write(repo_root.join("hub/web/package.json"), "{}").unwrap();
-        Command::new("git")
-            .args(["add", ".gitignore", "hub"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-q", "-m", "add gitignore"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
-        std::fs::create_dir_all(repo_root.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo_root.join("node_modules/pkg/index.js"), "").unwrap();
-        std::fs::create_dir_all(repo_root.join("hub/node_modules/vite")).unwrap();
-        std::fs::create_dir_all(repo_root.join("hub/web/node_modules/react")).unwrap();
-
+        std::fs::write(repo_root.join(".gitignore"), ignore).unwrap();
+        std::fs::write(repo_root.join("kept.txt"), "tracked\n").unwrap();
+        for args in [
+            &["add", ".gitignore", "kept.txt"][..],
+            &["commit", "-q", "-m", "add files"][..],
+        ] {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_root)
+                .status()
+                .unwrap();
+        }
         let branch = unique_branch_name(&repo_root, "Bootstrap test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
-        let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
+        create_worktree(&repo_root, &branch, &wt, "HEAD").unwrap();
+        (tmp, repo_root, wt)
+    }
 
-        bootstrap_worktree(&repo_root, &wt_path).unwrap();
+    #[test]
+    fn bootstrap_without_a_worktreeinclude_copies_the_default_files_and_links_nothing() {
+        let (_tmp, repo, wt) = repo_with_worktree(".env\nnode_modules/\n");
+        std::fs::write(repo.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::create_dir_all(repo.join("hub/node_modules/vite")).unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(wt.join("hub")).unwrap();
 
-        assert!(wt_path.join(".env").exists());
+        bootstrap_worktree(&repo, &wt).unwrap();
+
         assert_eq!(
-            std::fs::read_to_string(wt_path.join(".env")).unwrap(),
+            std::fs::read_to_string(wt.join(".env")).unwrap(),
             "SECRET=1\n"
         );
-        assert!(wt_path.join("node_modules/pkg/index.js").exists());
-        assert!(wt_path.join("hub/node_modules/vite").is_dir());
-        assert!(wt_path.join("hub/web/node_modules/react").is_dir());
+        // Nothing named node_modules is linked or created anywhere.
+        let mut stack = vec![wt.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                assert_ne!(e.file_name(), "node_modules", "{:?}", e.path());
+                if e.file_name() != ".git" && e.file_type().unwrap().is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+        let changed = changed_files(&wt, "HEAD").unwrap();
+        assert!(!changed.iter().any(|f| f == ".env"));
+    }
 
-        // Neither bootstrapped path is ever a "changed file".
-        let changed = changed_files(&wt_path, &created.base_sha).unwrap();
-        assert!(!changed
-            .iter()
-            .any(|f| f == ".env" || f.contains("node_modules")));
+    #[cfg(unix)]
+    #[test]
+    fn worktreeinclude_never_copies_through_a_symlinked_directory() {
+        let (tmp, repo, wt) = repo_with_worktree("*.secret\n");
+        std::fs::write(repo.join(".worktreeinclude"), "*.secret\n").unwrap();
+        std::fs::create_dir_all(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/a.secret"), "a\n").unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, wt.join("conf")).unwrap();
+
+        bootstrap_worktree(&repo, &wt).unwrap();
+
+        assert!(
+            !outside.join("a.secret").exists(),
+            "the copy left the worktree"
+        );
+    }
+
+    #[test]
+    fn worktreeinclude_copies_matching_ignored_files_only() {
+        let (_tmp, repo, wt) = repo_with_worktree("*.secret\n*.keep\n");
+        std::fs::write(
+            repo.join(".worktreeinclude"),
+            "*.secret\n*.keep\nkept.txt\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/a.secret"), "a\n").unwrap();
+        std::fs::write(repo.join("b.keep"), "from main\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "untracked, not ignored\n").unwrap();
+        std::fs::write(repo.join("outside.secret"), "target\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(repo.join("outside.secret"), repo.join("link.secret")).unwrap();
+        std::fs::write(wt.join("b.keep"), "already there\n").unwrap();
+        std::fs::write(wt.join("kept.txt"), "edited in worktree\n").unwrap();
+
+        bootstrap_worktree(&repo, &wt).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join("conf/a.secret")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("outside.secret")).unwrap(),
+            "target\n"
+        );
+        assert!(
+            wt.join("link.secret").symlink_metadata().is_err(),
+            "a symlink is skipped"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("b.keep")).unwrap(),
+            "already there\n",
+            "an existing worktree file is not overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("kept.txt")).unwrap(),
+            "edited in worktree\n",
+            "a tracked file is left alone"
+        );
+        assert!(!wt.join("c.txt").exists(), "not ignored, not copied");
     }
 
     #[test]
@@ -1833,7 +1942,7 @@ mod tests {
         std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
 
         let branch = unique_branch_name(&repo_root, "No bootstrap test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();

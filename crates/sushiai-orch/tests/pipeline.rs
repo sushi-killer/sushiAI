@@ -341,3 +341,95 @@ fn task_preset_is_refused_after_an_implement_attempt() {
     let err = daemon.request_error("task.preset", json!({"id": id, "preset": "fast"}));
     assert!(err.contains("implement attempt"), "{err}");
 }
+
+const MISSING_CLI: &str = "/nonexistent/orchd-test/harness";
+
+/// A daemon whose Claude and Codex CLIs are a stub script (`true`) or missing.
+fn spawn_with_clis(claude: bool, codex: bool) -> (Daemon, tempfile::TempDir) {
+    let scripts = tempfile::tempdir().unwrap();
+    let bin = |name: &str, present: bool| {
+        if present {
+            fake_harness_script(scripts.path(), name, "#!/bin/sh\nexit 0\n")
+                .to_str()
+                .unwrap()
+                .to_string()
+        } else {
+            MISSING_CLI.to_string()
+        }
+    };
+    let (claude_bin, codex_bin) = (bin("claude.sh", claude), bin("codex.sh", codex));
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", &claude_bin),
+        ("ORCHD_CODEX_BIN", &codex_bin),
+    ]);
+    (daemon, scripts)
+}
+
+#[test]
+fn describe_resolves_the_model_of_brief_check_and_judge() {
+    let (daemon, _scripts) = spawn_with_clis(true, true);
+    set_settings(&daemon, |s| s["briefCheckRoute"] = json!("auto"));
+    let d = daemon.request("pipeline.describe", json!({}));
+    for id in ["brief-check", "judge"] {
+        assert_eq!(stage(&d, id)["routeId"], "auto", "{id}");
+        assert_eq!(stage(&d, id)["model"], "sonnet", "{id}");
+        assert_eq!(stage(&d, id)["enabled"], true, "{id}");
+    }
+
+    set_settings(&daemon, |s| s["briefCheckRoute"] = json!("claude-opus"));
+    let d = daemon.request("pipeline.describe", json!({}));
+    for id in ["brief-check", "judge"] {
+        assert_eq!(stage(&d, id)["routeId"], "claude-opus", "{id}");
+        assert_eq!(stage(&d, id)["model"], "opus", "{id}");
+    }
+
+    set_settings(&daemon, |s| s["briefCheckRoute"] = json!("auto"));
+    let repo = init_git_repo();
+    let task = create(
+        &daemon,
+        repo.path(),
+        json!({"variant": {"briefCheckRoute": "claude-opus"}}),
+    );
+    let d = daemon.request("pipeline.describe", json!({"taskId": task["id"]}));
+    assert_eq!(stage(&d, "brief-check")["routeId"], "claude-opus");
+    assert_eq!(stage(&d, "brief-check")["model"], "opus");
+    assert_eq!(stage(&d, "judge")["routeId"], "auto");
+    assert_eq!(stage(&d, "judge")["model"], "sonnet");
+}
+
+#[test]
+fn describe_shows_the_label_when_the_resolved_route_has_no_model() {
+    let (daemon, _scripts) = spawn_with_clis(false, true);
+    for route in ["auto", "claude-opus"] {
+        set_settings(&daemon, |s| s["briefCheckRoute"] = json!(route));
+        let d = daemon.request("pipeline.describe", json!({}));
+        for id in ["brief-check", "judge"] {
+            assert_eq!(stage(&d, id)["routeId"], route, "{id}");
+            assert_eq!(stage(&d, id)["model"], "Codex", "{id}");
+        }
+    }
+}
+
+#[test]
+fn describe_shows_no_model_when_the_brief_check_is_off() {
+    let (daemon, _scripts) = spawn_with_clis(true, true);
+    set_settings(&daemon, |s| s["briefCheckRoute"] = json!(""));
+    let d = daemon.request("pipeline.describe", json!({}));
+    for id in ["brief-check", "judge"] {
+        assert_eq!(stage(&d, id)["enabled"], false, "{id}");
+        assert!(stage(&d, id).get("model").is_none(), "{id}");
+    }
+
+    let repo = init_git_repo();
+    let repo_path = repo.path().to_str().unwrap();
+    set_settings(&daemon, |s| {
+        s["briefCheckRoute"] = json!("auto");
+        s["repoPresets"] = json!({ repo_path: "fast" });
+    });
+    let d = daemon.request("pipeline.describe", json!({"repo": repo_path}));
+    assert_eq!(stage(&d, "brief-check")["enabled"], false);
+    assert!(stage(&d, "brief-check").get("model").is_none());
+    assert_eq!(stage(&d, "judge")["enabled"], true);
+    assert_eq!(stage(&d, "judge")["routeId"], "auto");
+    assert_eq!(stage(&d, "judge")["model"], "sonnet");
+}

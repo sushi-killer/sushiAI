@@ -7,6 +7,7 @@
 
 use super::chat_tools;
 use super::*;
+use crate::overseer_state;
 use serde::Serialize;
 
 const SERVER: &str = "sushiai-orchestrator";
@@ -1425,7 +1426,24 @@ pub(super) fn wake(app: &App, repo: &str) {
         return;
     };
     save(app, repo, &session);
-    let prompt = format!("{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}");
+    let senders: Vec<String> = app
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| ids.contains(&m.id))
+        .map(|m| m.from.clone())
+        .collect();
+    let state = overseer_state::begin(
+        &app.data_dir,
+        repo,
+        &app.store.list_tasks().unwrap_or_default(),
+        &senders,
+    );
+    let prompt = format!(
+        "{}{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}",
+        state_header(&state)
+    );
     let app = app.arc();
     let repo = repo.to_string();
     tokio::spawn(async move {
@@ -1440,6 +1458,14 @@ pub(super) fn wake(app: &App, repo: &str) {
         )
         .await;
     });
+}
+
+/// The top of a wake prompt: the overseer's state file, which stands in for the
+/// chat history a wake does not resume.
+fn state_header(state: &str) -> String {
+    format!(
+        "Overseer state for this repo, kept by orchd between wakes. Your earlier turns are not resumed; this file is what you remember.\n\n{state}\n---\n\n"
+    )
 }
 
 /// An overseer wake skipped because the chat was busy.
@@ -1586,6 +1612,14 @@ pub(super) fn wake_overseer(
         &format!("Woke for {reason}"),
     ));
     save(app, repo, &session);
+    let wake_ids: Vec<String> = task_id.map(str::to_string).into_iter().collect();
+    let state = overseer_state::begin(
+        &app.data_dir,
+        repo,
+        &app.store.list_tasks().unwrap_or_default(),
+        &wake_ids,
+    );
+    let prompt = format!("{}{prompt}", state_header(&state));
     let app = app.arc();
     let repo = repo.to_string();
     let task_id = task_id.map(str::to_string);
@@ -2014,7 +2048,9 @@ async fn run_turn(
         Turn::Owner(_) => chat_tools::for_turn(app, &settings).await,
         Turn::Questions(_) | Turn::Overseer { .. } => chat_tools::TurnTools::default(),
     };
-    let session = thread.session_id.clone();
+    // Only the owner's turns resume the harness session; a wake starts fresh.
+    let owner = matches!(turn, Turn::Owner(_));
+    let session = thread.session_id.clone().filter(|_| owner);
     let key_path = dir.join("key");
     let argv = match route.harness {
         Harness::Claude => {
@@ -2061,7 +2097,18 @@ async fn run_turn(
             cancel.cancel();
         })
     });
-    let (result, tools) = match run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await {
+    let (result, tools) = match run(
+        app,
+        &repo,
+        &mut thread,
+        &route,
+        &argv,
+        &text,
+        &cancel,
+        session.is_some(),
+    )
+    .await
+    {
         Ok((outcome, tools)) => (Ok(outcome), tools),
         Err(error) => (Err(error), Vec::new()),
     };
@@ -2075,13 +2122,9 @@ async fn run_turn(
     // but the owner may have been shown a fresher note: keep this turn's
     // session.
     thread.note = None;
-    if let Turn::Overseer {
-        reason,
-        task_id,
-        held,
-        ..
-    } = &turn
-    {
+    if !owner {
+        let timed = matches!(result, Err(RunError::Cancelled))
+            && timed_out.load(std::sync::atomic::Ordering::SeqCst);
         let (cost, end) = match &result {
             Ok(o) => (
                 o.cost_usd,
@@ -2094,21 +2137,35 @@ async fn run_turn(
                     (None, None) => TurnEnd::Silent,
                 },
             ),
-            Err(RunError::Cancelled) if timed_out.load(std::sync::atomic::Ordering::SeqCst) => {
-                (None, TurnEnd::Failed("timed out".to_string()))
-            }
+            Err(RunError::Cancelled) if timed => (None, TurnEnd::Failed("timed out".to_string())),
             Err(RunError::Cancelled) => (None, TurnEnd::Stopped),
             Err(RunError::Io(error) | RunError::NotFound(error)) => {
                 (None, TurnEnd::Failed(error.clone()))
             }
         };
-        record_overseer_end(app, &repo, reason, task_id.as_deref(), started, cost, end);
-        // Still waiting after the turn: it escalated, the owner is asked now.
-        app.release_holds(&repo, held);
+        let (reason, task_id) = match &turn {
+            Turn::Overseer {
+                reason, task_id, ..
+            } => (*reason, task_id.as_deref()),
+            _ => ("questions", None),
+        };
+        let outcome = match &end {
+            TurnEnd::Reply(reply) => reply.clone(),
+            TurnEnd::Stopped => "stopped".to_string(),
+            TurnEnd::Failed(_) if timed => "timed out".to_string(),
+            TurnEnd::Failed(error) => format!("failed: {error}"),
+            TurnEnd::Silent => "no reply".to_string(),
+        };
+        overseer_state::add_decision(&app.data_dir, &repo, now_ms(), reason, task_id, &outcome);
+        if let Turn::Overseer { held, .. } = &turn {
+            record_overseer_end(app, &repo, reason, task_id, started, cost, end);
+            // Still waiting after the turn: it escalated, the owner is asked now.
+            app.release_holds(&repo, held);
+        }
     }
     match (result, &turn) {
         (Ok(outcome), _) => {
-            if outcome.session_id.is_some() {
+            if owner && outcome.session_id.is_some() {
                 thread.session_id = outcome.session_id.clone();
             }
             match (
@@ -2125,9 +2182,9 @@ async fn run_turn(
                     messages::reply_where_unanswered(app, ids, &reply)
                 }
                 (None, Some(error), _) => {
-                    // A session the CLI no longer knows fails every resume.
-                    thread.session_id = None;
-                    if matches!(turn, Turn::Owner(_)) {
+                    if owner {
+                        // A session the CLI no longer knows fails every resume.
+                        thread.session_id = None;
                         thread.error = Some(truncate_chars(&error, 2000));
                     }
                 }
@@ -2191,6 +2248,7 @@ pub(super) fn record_overseer_end(
     app.record_overseer(entry);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     app: &Arc<App>,
     repo: &str,
@@ -2199,10 +2257,10 @@ async fn run(
     argv: &[String],
     text: &str,
     cancel: &CancelToken,
+    thread_resumed: bool,
 ) -> Result<(harness::RunOutcome, Vec<ChatTool>), RunError> {
     let harness_kind = route.harness;
     let started_at = now_ms();
-    let thread_resumed = thread.session_id.is_some();
     let record = |outcome: &mut harness::RunOutcome| {
         finalize_cost(app, harness_kind, route.model.as_deref(), outcome);
         outcome.fingerprint = Some(outcome.build_fingerprint(harness_kind, None, String::new()));

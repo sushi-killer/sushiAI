@@ -138,7 +138,7 @@ fn validate_task_id(store: &Store, id: &str) -> Result<(), String> {
 
 /// FNV-1a 64-bit -- fast, dependency-free, plenty for a cache key (not a
 /// security boundary).
-fn simple_hash(s: &str) -> String {
+pub(crate) fn simple_hash(s: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         hash ^= b as u64;

@@ -17,7 +17,15 @@ test.afterEach(async () => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const until = async (check, ms = 5000, what = "condition") => {
+const { DEADLINE_MS } = require("./helpers/deadline.cjs");
+
+// A wait for something that must happen: `ms` is only a floor, the shared
+// deadline keeps it from failing on a loaded machine.
+const until = async (check, ms = DEADLINE_MS, what = "condition") =>
+  within(check, Math.max(ms, DEADLINE_MS), what);
+
+// A bound that is the point of the test (sooner than a backoff): not stretched.
+const within = async (check, ms, what) => {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const value = await check();
@@ -167,18 +175,18 @@ for (const [name, mode, expected] of [
 
 test("ssh connector: proxy exit 2 reconnects at once, not after the backoff", async () => {
   const proxy = fakeProxy({ dieAfterMs: 150, dieCode: 2 });
-  // A backoff of 5 s would fail the wait below.
+  // A backoff of 60 s would fail the wait below.
   const { manager, seen } = sshManager(proxy, {
-    backoffMinMs: 5000,
-    backoffMaxMs: 5000,
+    backoffMinMs: 60000,
+    backoffMaxMs: 60000,
   });
   manager.start();
   await until(() => stateOf(manager).state === "ready", 5000, "first ready");
   proxy.setMode({});
-  await until(
+  await within(
     () =>
       stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
-    2500,
+    20000,
     "reconnect",
   );
   const offline = seen.find((state) => state.state === "offline");
@@ -799,10 +807,10 @@ test("a connection that stays up refills the budget", async () => {
       [PROFILE.id]: createSshConnector({
         profile: PROFILE,
         ssh: proxy.script,
-        helloTimeoutMs: 3000,
+        helloTimeoutMs: 15000,
       }),
     },
-    backoffMinMs: 5000,
+    backoffMinMs: 60000,
     stableMs: 50,
     random: () => 1,
   });
@@ -815,11 +823,11 @@ test("a connection that stays up refills the budget", async () => {
   assert.equal(proxy.spawns(), 2);
   await sleep(150); // the second connection is stable too
   proxy.killLatest();
-  await until(() => proxy.spawns() >= 3, 2500, "immediate reconnect");
+  await within(() => proxy.spawns() >= 3, 20000, "immediate reconnect");
   await until(() => stateOf(manager).state === "ready");
   await sleep(150); // stable again: the one immediate retry is back
   proxy.killLatest();
-  await until(() => proxy.spawns() >= 4, 2500, "immediate reconnect again");
+  await within(() => proxy.spawns() >= 4, 20000, "immediate reconnect again");
 });
 
 test("a daemon speaking another protocol is failed/incompatible and never retried", async () => {

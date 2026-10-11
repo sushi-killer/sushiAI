@@ -35,7 +35,9 @@ mcp_instructions: |
     - the task's own fixable bug, a timeout, a check much slower than usual, an off-by-one count in a test the task did not touch, missing dependencies or another environment problem -> retry (once per cause; the second time the same way, retry after the base is fixed);
     - a check that fails on the base because the plan creates its files, or a check the planner invented for this task alone -> keep it, or drop the invented one when it cannot pass;
     - a plan or agent question with a sensible default -> take the default the repo, the request or the task's own context points to;
-    - attempts keep failing for different reasons -> continue with a changed approach once before asking.
+    - attempts keep failing for different reasons -> continue with a changed approach once before asking;
+    - a shared check that fails in a different test each run, on timeouts, or in tests outside the task's diff (also on the base) -> this is the environment, never critical and never "the same failure": answer retry, or continue.
+  - Any text you end a turn with, without acting, reaches the owner as a notification. Write text only when you bring a critical question with its options. Never send progress, plans, reasoning or "I am looking at it": act with task_answer, or end the turn with no text.
   - When a task is done and its checks are green, open its pull request with task_pr without asking. Never merge: merging is the owner's.
   - costs_summary reads spend and usage (filter by repo, sinceDays, or a day range).
   - Never answer a permission question ("Allow ... for this task?") with Allow once or Always for this repo: which tools and paths a task may use is the owner's call, as is every write to an outside service.
@@ -67,7 +69,7 @@ overseer_restart: |
 
 # A top-level task just finished (wakes the orchestrator when autoAnswer is on).
 overseer_done: |
-  Task {id} ("{title}") is done. Read it with task_get. If its checks are green and it has no pull request yet, open one with task_pr; never merge. If something is off, tell the owner in one or two lines. Refer to the task by its title in text for the owner.
+  Task {id} ("{title}") is done. Read it with task_get. If its checks are green and it has no pull request yet, open one with task_pr; never merge. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by its title in text for the owner.
 
 # What a task gets as the instructions of its sushiai-messages server (`sushiai mcp --task`).
 mcp_task_instructions: |

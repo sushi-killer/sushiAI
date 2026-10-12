@@ -210,7 +210,41 @@ fn day(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Whether `like` claims an owner precedent.
+fn claims_owner_precedent(like: &str) -> bool {
+    like.trim_start()
+        .get(..15)
+        .is_some_and(|head| head.eq_ignore_ascii_case("owner precedent"))
+}
+
 impl App {
+    /// Refuses a `like` that names an owner precedent no owner record backs: a
+    /// decision line must not claim a precedent that does not exist.
+    pub(super) fn verify_like(
+        &self,
+        like: Option<&str>,
+        task: &Task,
+        answer: &str,
+    ) -> Result<(), String> {
+        if !like.is_some_and(claims_owner_precedent) {
+            return Ok(());
+        }
+        let backed = task.question.as_ref().is_some_and(|q| {
+            let key = precedents::question_key(q, task);
+            precedents::owner_matches(&self.data_dir, &task.repo, &key)
+                .iter()
+                .any(|p| p.answer == answer.trim() || is_option(answer, &p.answer))
+        });
+        if backed {
+            Ok(())
+        } else {
+            Err(format!(
+                "`like` names an owner precedent, but the owner has no matching answer to \"{}\"",
+                answer.trim()
+            ))
+        }
+    }
+
     /// The answer an owner precedent gives to `question` (asked on `task`) and
     /// the `like` text for its decision line. None unless the owner's newest
     /// precedents for the question agree on one answer that is still an option,
@@ -249,6 +283,10 @@ impl App {
             };
             let key = precedents::question_key(question, task);
             let found = precedents::owner_matches(&self.data_dir, &task.repo, &key);
+            let found: Vec<_> = found
+                .into_iter()
+                .filter(|p| hard_limit(question, &p.answer).is_none())
+                .collect();
             if found.is_empty() {
                 continue;
             }
@@ -643,6 +681,7 @@ mod tests {
         let (app, dir) = overseer_app();
         let repo = repo_root(&app, dir.path()).await;
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
+        remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         let (answer, task) = park(&app, waiting_task(&repo, base_q())).await;
         assert_eq!(answer.as_deref(), Some(RETRY));
         let line = task
@@ -687,6 +726,7 @@ mod tests {
         let (app, dir) = overseer_app();
         let repo = repo_root(&app, dir.path()).await;
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
+        remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), "stop", AnsweredBy::Owner);
         let (answer, _) = park(&app, waiting_task(&repo, base_q())).await;
         assert_eq!(answer, None);
@@ -698,6 +738,7 @@ mod tests {
     async fn decision_memory_a_different_failure_or_a_stop_is_not_the_same_question() {
         let (app, dir) = overseer_app();
         let repo = repo_root(&app, dir.path()).await;
+        remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         let mut other = base_q();
         other.commands = vec!["npm test".into()];
@@ -776,6 +817,15 @@ mod tests {
                 "{}",
                 q.text
             );
+            // A plain overseer answer, no `like`, is refused as well; the
+            // owner's own answer is not.
+            app.store.save_task(&task).unwrap();
+            let err = app
+                .handle_task_answer(json!({"id": task.id, "answer": answer, "source": "overseer"}))
+                .await;
+            assert!(err.is_err(), "{}", q.text);
+            let still = app.store.load_task(&task.id).unwrap().unwrap();
+            assert_eq!(still.status, TaskStatus::Waiting, "{}", q.text);
         }
         // Whole words only: `improve` is not a PR, a routine question is free.
         let routine = free_q("Improve the naming of the helper?", &["yes", "no"]);
@@ -792,6 +842,7 @@ mod tests {
     async fn decision_memory_respects_the_continue_cap_and_the_base_retry_guard() {
         let (app, dir) = overseer_app();
         let repo = repo_root(&app, dir.path()).await;
+        remember(&app, &repo, &exhausted_q(), "continue", AnsweredBy::Owner);
         remember(&app, &repo, &exhausted_q(), "continue", AnsweredBy::Owner);
         // One continue left: the precedent answers and its line counts.
         let mut task = waiting_task(&repo, exhausted_q());
@@ -817,6 +868,7 @@ mod tests {
         assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
 
         // One non-owner retry per base.
+        remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         let mut retried = waiting_task(&repo, base_q());
         retried.decisions.push(format!(
@@ -979,5 +1031,96 @@ mod tests {
         );
         assert!(!text.contains("lead"), "{text}");
         assert_eq!(text.matches("the owner answered").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn decision_memory_the_prompt_hides_precedents_that_hit_a_hard_limit() {
+        let (app, _dir) = test_app();
+        let q = free_q("Push the branch to origin?", &["push", "hold"]);
+        remember(&app, "/r1", &q, "push", AnsweredBy::Owner);
+        let task = waiting_task("/r1", q);
+        assert_eq!(app.with_precedents("Prompt.".into(), &[&task]), "Prompt.");
+    }
+
+    #[tokio::test]
+    async fn decision_memory_a_like_must_name_a_precedent_that_exists() {
+        let (app, dir) = overseer_app();
+        let repo = repo_root(&app, dir.path()).await;
+        let q = free_q("Which naming style?", &["snake", "camel"]);
+        let task = waiting_task(&repo, q.clone());
+        app.store.save_task(&task).unwrap();
+        let err = app
+            .handle_task_answer(json!({
+                "id": task.id, "answer": "snake", "source": "overseer",
+                "like": "owner precedent: snake, 2026-10-01"
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no matching answer"), "{err}");
+        remember(&app, &repo, &q, "snake", AnsweredBy::Owner);
+        // A precedent for another answer does not back this one.
+        let err = app
+            .handle_task_answer(json!({
+                "id": task.id, "answer": "camel", "source": "overseer",
+                "like": "Owner precedent: camel"
+            }))
+            .await;
+        assert!(err.is_err());
+        app.handle_task_answer(json!({
+            "id": task.id, "answer": "snake", "source": "overseer",
+            "like": "owner precedent: snake"
+        }))
+        .await
+        .unwrap();
+    }
+
+    /// An owner answer to `q` given `ago` ms before now, on its own task.
+    fn remember_at(app: &App, repo: &str, q: &Question, answer: &str, ago: i64) {
+        let mut task = answered_task(repo, q, answer, AnsweredBy::Owner);
+        task.question_history[0].answered_at = crate::model::now_ms() - ago;
+        app.store.save_task(&task).unwrap();
+    }
+
+    #[tokio::test]
+    async fn decision_memory_the_newest_owner_answers_must_agree() {
+        let (app, dir) = overseer_app();
+        let repo = repo_root(&app, dir.path()).await;
+        let q = free_q("Which naming style?", &["snake", "camel"]);
+        let key = precedents::question_key(&q, &waiting_task(&repo, q.clone()));
+        let agreed = |app: &App| precedents::owner_answer(&app.data_dir, &repo, &key);
+        // One answer is not enough.
+        remember_at(&app, &repo, &q, "camel", 9000);
+        assert_eq!(agreed(&app), None);
+        // One old different answer, then two newer ones: the window holds
+        // camel, snake, snake and blocks.
+        remember_at(&app, &repo, &q, "snake", 5000);
+        remember_at(&app, &repo, &q, "snake", 4000);
+        assert_eq!(agreed(&app), None);
+        // A third newer answer fills the window: the old one stops blocking.
+        remember_at(&app, &repo, &q, "snake", 3000);
+        assert_eq!(agreed(&app).map(|a| a.0), Some("snake".to_string()));
+        // A newer different answer blocks again.
+        remember_at(&app, &repo, &q, "camel", 1000);
+        assert_eq!(agreed(&app), None);
+    }
+
+    #[tokio::test]
+    async fn decision_memory_a_resave_after_eviction_counts_nothing_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = free_q("Which naming style?", &["snake", "camel"]);
+        let now = crate::model::now_ms();
+        let mut first = answered_task("/r1", &q, "snake", AnsweredBy::Owner);
+        first.question_history[0].answered_at = now - 30_000;
+        precedents::sync(dir.path(), &first);
+        for i in 0..520 {
+            let mut other = answered_task("/r2", &q, "camel", AnsweredBy::Owner);
+            other.question_history[0].answered_at = now - 20_000 + i;
+            precedents::sync(dir.path(), &other);
+        }
+        precedents::forget_synced();
+        precedents::sync(dir.path(), &first);
+        let (list, _) = precedents::list(dir.path(), "/r1");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].count, 1);
     }
 }

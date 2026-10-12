@@ -106,13 +106,19 @@ pub(crate) fn option_part(options: &[String]) -> String {
     options.join("\u{1f}")
 }
 
-/// The key of a question: task id, kind and sorted options.
+/// The key of a question: task id, kind, sorted options and, when known, the
+/// time it was asked, so a later question of the same shape is a new one. A
+/// key from before `asked_at` was added has no fourth part and never matches.
 pub(crate) fn decision_key(task_id: &str, question: &Question) -> String {
-    format!(
+    let key = format!(
         "{task_id}|{}|{}",
         kind_name(question.kind),
         option_part(&question.options)
-    )
+    );
+    match question.asked_at {
+        Some(at) => format!("{key}|{at}"),
+        None => key,
+    }
 }
 
 fn is_notice(entry: &Entry) -> bool {
@@ -371,6 +377,31 @@ mod tests {
         assert_ne!(a, decision_key("t2", &q(&["A", "B"])));
         assert_ne!(a, decision_key("t1", &q(&["A"])));
         assert!(a.starts_with("t1|plan_question|"), "{a}");
+    }
+
+    #[test]
+    fn a_later_question_on_the_same_task_is_a_new_decision() {
+        let mut first = Question::new(
+            "Which?",
+            vec!["A".into(), "B".into()],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Plan,
+        );
+        first.asked_at = Some(1_000);
+        let mut second = first.clone();
+        second.asked_at = Some(2_000);
+        let (a, b) = (decision_key("t1", &first), decision_key("t1", &second));
+        assert_ne!(a, b);
+        let log = [noticed(&a, 5_000)];
+        let settings = NoticeSettings {
+            remind_hours: 0,
+            quiet: None,
+        };
+        assert_eq!(verdict(&log, &a, 6_000, 0, &settings), Verdict::Duplicate);
+        assert_eq!(verdict(&log, &b, 6_000, 0, &settings), Verdict::Notify);
+        // A key logged before `asked_at` joined it never matches a new one.
+        let old = noticed("t1|attempts_failing|A\u{1f}B", 5_000);
+        assert_eq!(verdict(&[old], &b, 6_000, 0, &settings), Verdict::Notify);
     }
 
     #[test]

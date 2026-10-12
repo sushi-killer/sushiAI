@@ -8,8 +8,9 @@ const PRE_EXISTING_OPTIONS: [&str; 3] = [PRE_EXISTING_RETRY, PRE_EXISTING_DROP, 
 
 /// Options of the question about a parent's checks that fail on the base:
 /// the subtasks are usually meant to make them pass.
-pub(super) const PARENT_KEEP: &str = "keep all";
-const PARENT_CHECK_OPTIONS: [&str; 3] = [PARENT_KEEP, PRE_EXISTING_DROP, "stop"];
+pub(super) const KEEP_ALL: &str = "keep all";
+const PARENT_CHECK_OPTIONS: [&str; 3] = [KEEP_ALL, PRE_EXISTING_DROP, "stop"];
+pub(super) const KEPT_BY_TASK_TARGET: &str = "the task is meant to make it pass";
 
 /// Why a failing check is kept by rule: the files it names do not exist on
 /// the base, and the plan creates them.
@@ -25,7 +26,7 @@ pub(super) fn kept_check_line(command: &str, reason: &str) -> String {
 
 /// Whether `task` already keeps `command` although it fails on the base.
 pub(super) fn is_kept(task: &Task, command: &str) -> bool {
-    [KEPT_BY_PLAN, KEPT_BY_ANSWER]
+    [KEPT_BY_PLAN, KEPT_BY_ANSWER, KEPT_BY_TASK_TARGET]
         .iter()
         .any(|reason| task.decisions.contains(&kept_check_line(command, reason)))
 }
@@ -102,6 +103,7 @@ pub(super) fn check_targets(command: &str) -> Vec<String> {
             .trim_end_matches([';', ',', ')'])
             .trim_start_matches('(')
             .trim_matches(|c| c == '"' || c == '\'');
+        let token = path_without_location(token);
         if token.is_empty()
             || token.starts_with(['-', '/', '~', '$', '>', '<', '|', '&'])
             || token.contains("://")
@@ -126,6 +128,111 @@ pub(super) fn check_targets(command: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn path_without_location(path: &str) -> &str {
+    let mut parts = path.split(':');
+    let first = parts.next().unwrap_or(path);
+    let line = parts.next();
+    if line.is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        && parts
+            .next()
+            .is_none_or(|n| n.chars().all(|c| c.is_ascii_digit()))
+    {
+        first
+    } else {
+        path
+    }
+}
+
+fn looks_like_identifier_or_path(token: &str) -> bool {
+    token.len() >= 6
+        && (token.contains('_')
+            || token.contains("::")
+            || token.contains('/')
+            || token.rsplit_once('.').is_some_and(|(name, ext)| {
+                !name.is_empty()
+                    && !ext.is_empty()
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            }))
+}
+
+fn text_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c.is_whitespace() || "`\"'[](){}".contains(c))
+        .filter(|token| !token.is_empty())
+}
+
+fn output_paths(output: &str) -> Vec<String> {
+    output
+        .split(|c: char| c.is_whitespace() || "`\"'[](){}<>,;".contains(c))
+        .filter_map(|token| {
+            let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | ')' | '('));
+            let path = path_without_location(token);
+            (path != token || check_targets(path).iter().any(|t| t == path))
+                .then(|| path.strip_prefix("./").unwrap_or(path).to_string())
+        })
+        .collect()
+}
+
+/// Whether a pre-existing failing check is part of this task's target.
+/// `output` is the cached base-run tail, or the tail quoted in the question;
+/// changed files are relative to the task's base SHA.
+pub(super) fn is_task_target(
+    task: &Task,
+    command: &str,
+    output: &str,
+    changed_files: &[String],
+) -> bool {
+    let flat = super::answer_policy::flat_command(command);
+    let named_in_request_or_goal = task
+        .request
+        .iter()
+        .chain(std::iter::once(&task.goal))
+        .any(|text| super::answer_policy::flat_command(text).contains(&flat));
+    let named_in_criteria = task.criteria.iter().any(|criterion| {
+        let flat_criterion = super::answer_policy::flat_command(criterion);
+        if !flat_criterion.contains(&flat) {
+            return false;
+        }
+        let Some((prose, gate)) = criterion.split_once("-- check:") else {
+            return true;
+        };
+        let named_in_prose = super::answer_policy::flat_command(prose).contains(&flat);
+        let named_only_as_ci_gate = super::answer_policy::runs_ci_entry(command)
+            && super::answer_policy::flat_command(gate).contains(&flat)
+            && !named_in_prose;
+        !named_only_as_ci_gate
+    });
+    if (named_in_request_or_goal || named_in_criteria)
+        && !super::answer_policy::runs_ci_entry(command)
+    {
+        return true;
+    }
+
+    let named_tokens: Vec<String> = task
+        .request
+        .iter()
+        .chain(std::iter::once(&task.goal))
+        .chain(task.criteria.iter())
+        .flat_map(|text| text_tokens(text))
+        .filter(|token| looks_like_identifier_or_path(token))
+        .map(str::to_string)
+        .collect();
+    if named_tokens.iter().any(|token| output.contains(token)) {
+        return true;
+    }
+
+    let mut paths = check_targets(command);
+    paths.extend(output_paths(output));
+    paths.iter().any(|path| {
+        let path = path_without_location(path);
+        changed_files.iter().any(|changed| {
+            let changed = changed.strip_prefix("./").unwrap_or(changed);
+            changed == path
+                || changed.ends_with(&format!("/{path}"))
+                || path.ends_with(&format!("/{changed}"))
+        })
+    })
 }
 
 /// Whether `target` (a file, a directory or a glob) names something in
@@ -1793,6 +1900,54 @@ mod tests {
         assert!(target_in_plan_path("src/new/a.rs", "src/**"));
         assert!(target_in_plan_path("src/new/*.rs", "src/new/a.rs"));
         assert!(!target_in_plan_path("tests/a.rs", "src/new"));
+    }
+
+    #[test]
+    fn task_target_detection_uses_request_output_and_changed_paths_but_ignores_ci_gates() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
+        assert!(is_task_target(
+            &task,
+            "cargo test -p sushiai-orch --lib",
+            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
+            &[]
+        ));
+
+        task.request = None;
+        assert!(is_task_target(
+            &task,
+            "cargo test -p sushiai-orch",
+            "error in crates/sushiai-orch/tests/base_retry.rs:17:2",
+            &["crates/sushiai-orch/tests/base_retry.rs".into()]
+        ));
+
+        task.criteria = vec!["Checks pass -- check: npm run ci".into()];
+        assert!(!is_task_target(&task, "npm run ci", "ci failed", &[]));
+        task.criteria =
+            vec!["Run the focused test -- check: node --test tests/base_retry.test.cjs".into()];
+        assert!(is_task_target(
+            &task,
+            "node --test tests/base_retry.test.cjs",
+            "test failed",
+            &[]
+        ));
+        task.criteria = vec!["Checks pass -- check: npm run ci".into()];
+        task.goal = "Fix the failing a_base_retry_carries_the_planner_test_commit test".into();
+        assert!(is_task_target(
+            &task,
+            "npm run ci",
+            "a_base_retry_carries_the_planner_test_commit ... FAILED",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_task_target_keep_decision_survives_later_base_checks() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        task.decisions
+            .push(kept_check_line("cargo test", KEPT_BY_TASK_TARGET));
+        assert!(is_kept(&task, "cargo test"));
+        assert!(!is_kept(&task, "npm test"));
     }
 }
 

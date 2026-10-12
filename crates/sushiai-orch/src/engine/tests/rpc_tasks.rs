@@ -595,7 +595,7 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
                     ..Default::default()
                 });
                 tx.send(Reply {
-                    text: PARENT_KEEP.into(),
+                    text: KEEP_ALL.into(),
                     default_evidence: None,
                 })
                 .unwrap();

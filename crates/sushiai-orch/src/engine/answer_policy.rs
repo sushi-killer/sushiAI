@@ -32,6 +32,59 @@ pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
     policy_on(app) && !owner_only(kind) && policy_answers(task) < MAX_POLICY_ANSWERS
 }
 
+fn quoted_base_tail(question: &Question, command: &str) -> String {
+    let listed = format!("- {command}: ");
+    question
+        .text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(&listed).map(str::to_string).or_else(|| {
+                line.strip_prefix(&format!("{command} already fails on base "))
+                    .and_then(|rest| rest.split_once(": ").map(|(_, tail)| tail.to_string()))
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Context needed by the pre-existing-failure policy. Keep filesystem and
+/// store reads here so the answer rule itself remains deterministic.
+fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool>, bool) {
+    let changed = git::changed_files(Path::new(&task.worktree), &task.base_sha).unwrap_or_default();
+    let base_runs = app.base_runs.lock().unwrap();
+    let targeted = question
+        .commands
+        .iter()
+        .map(|command| {
+            let output = base_runs
+                .get(&(task.base_sha.clone(), command.clone()))
+                .map(|run| run.tail.clone())
+                .unwrap_or_else(|| quoted_base_tail(question, command));
+            base_check::is_task_target(task, command, &output, &changed)
+        })
+        .collect();
+    drop(base_runs);
+    let base_moves = task.base_ref.as_ref().is_some_and(|base_ref| {
+        app.store
+            .list_tasks()
+            .unwrap_or_default()
+            .iter()
+            .any(|other| {
+                other.id != task.id
+                    && !other.archived
+                    && matches!(
+                        other.status,
+                        TaskStatus::Queued
+                            | TaskStatus::Running
+                            | TaskStatus::Waiting
+                            | TaskStatus::Landing
+                    )
+                    && crate::model::same_repo_path(&other.repo, &task.repo)
+                    && other.base_ref.as_ref() == Some(base_ref)
+            })
+    });
+    (targeted, base_moves)
+}
+
 /// Kinds only the owner may allow: never the policy, the chat agent or an
 /// MCP client (see [`is_refusal`] for what those may still answer).
 pub(super) fn owner_only(kind: QuestionKind) -> bool {
@@ -80,7 +133,7 @@ const CI_ENTRIES: [&[&str]; 11] = [
 
 const SHARED_CHECK_NAMES: [&str; 4] = ["ci", "test", "lint", "build"];
 
-fn flat_command(command: &str) -> String {
+pub(super) fn flat_command(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -406,22 +459,14 @@ fn covered_by_rule(task: &Task, question: &Question, answer: &str) -> bool {
 
 /// The fixed rule for `question`: its answer and why. Each rule fires once
 /// (the review rule once per attempt); a repeat goes on as before.
-fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(String, String)> {
+fn rule_answer_with_context(
+    task: &Task,
+    question: &Question,
+    attempt_n: u32,
+    targeted: &[bool],
+    base_moves: bool,
+) -> Option<(String, String)> {
     let kind = question.kind;
-    if kind == QuestionKind::PreexistingFailure
-        && question
-            .options
-            .iter()
-            .any(|o| o == base_check::PARENT_KEEP)
-    {
-        let fresh = !covered_by_rule(task, question, base_check::PARENT_KEEP);
-        return fresh.then(|| {
-            (
-                base_check::PARENT_KEEP.to_string(),
-                "the subtasks are meant to make the check pass: keep it, once".to_string(),
-            )
-        });
-    }
     let (answer, evidence, once_per) = match kind {
         QuestionKind::ReviewNoVerdict => (
             "retry",
@@ -438,11 +483,36 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
             "a dependency that ended is retried once",
             None,
         ),
-        QuestionKind::PreexistingFailure => (
-            base_check::PRE_EXISTING_RETRY,
-            "the check already fails on the base: wait for the base to move, once",
-            None,
-        ),
+        QuestionKind::PreexistingFailure => {
+            if question
+                .options
+                .iter()
+                .any(|option| option == base_check::KEEP_ALL)
+            {
+                (
+                    base_check::KEEP_ALL,
+                    "the subtasks are meant to make the check pass: keep it, once",
+                    None,
+                )
+            } else {
+                let all_targeted = !targeted.is_empty() && targeted.iter().all(|value| *value);
+                if all_targeted {
+                    (
+                        base_check::KEEP_ALL,
+                        "the task is meant to make the check pass",
+                        None,
+                    )
+                } else if base_moves {
+                    (
+                        base_check::PRE_EXISTING_RETRY,
+                        "another live task targets this base branch: wait for it to move, once",
+                        None,
+                    )
+                } else {
+                    return None;
+                }
+            }
+        }
         _ => return None,
     };
     // A review that may not run again offers no `retry`: nothing to answer.
@@ -458,6 +528,11 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
         return None;
     }
     Some((answer.to_string(), evidence.to_string()))
+}
+
+#[cfg(test)]
+fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(String, String)> {
+    rule_answer_with_context(task, question, attempt_n, &[false], true)
 }
 
 /// Records an automatic answer as an assumption the owner can overturn, with
@@ -546,7 +621,13 @@ pub(super) async fn try_policy_answer(
             (answer, "judge", reason)
         }
         _ => {
-            let (answer, evidence) = rule_answer(task, &question, attempt_n)?;
+            let (targeted, base_moves) = if question.kind == QuestionKind::PreexistingFailure {
+                policy_base_context(app, task, &question)
+            } else {
+                (Vec::new(), false)
+            };
+            let (answer, evidence) =
+                rule_answer_with_context(task, &question, attempt_n, &targeted, base_moves)?;
             (answer, "policy", evidence)
         }
     };
@@ -960,29 +1041,108 @@ mod tests {
     #[test]
     fn a_base_check_rule_fires_once_per_command() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        let keep = base_check::PARENT_KEEP;
+        let keep = base_check::KEEP_ALL;
         let first = base_check_question(&["a.sh", "b.sh"], &[keep, "drop all", "stop"]);
-        let (answer, _) = rule_answer(&task, &first, 1).unwrap();
+        let (answer, _) = rule_answer_with_context(&task, &first, 1, &[true, true], false).unwrap();
         assert_eq!(answer, keep);
         record_policy_answer(&mut task, &first, &answer, "policy", "e", 1);
         // The same commands again: covered.
-        assert!(rule_answer(&task, &first, 1).is_none());
+        assert!(rule_answer_with_context(&task, &first, 1, &[true, true], false).is_none());
         // A new command in the list: the rule fires again.
         let second = base_check_question(&["b.sh", "c.sh"], &[keep, "drop all", "stop"]);
-        assert!(rule_answer(&task, &second, 1).is_some());
+        assert!(rule_answer_with_context(&task, &second, 1, &[true, true], false).is_some());
         record_policy_answer(&mut task, &second, keep, "policy", "e", 1);
-        assert!(rule_answer(&task, &second, 1).is_none());
+        assert!(rule_answer_with_context(&task, &second, 1, &[true, true], false).is_none());
 
         // The retry rule of a single task is per command too.
         let retry = base_check::PRE_EXISTING_RETRY;
         let mut task = task_with_status(TaskStatus::Waiting);
         let one = base_check_question(&["a.sh"], &[retry, "drop all", "stop"]);
-        let (answer, _) = rule_answer(&task, &one, 1).unwrap();
+        let (answer, _) = rule_answer_with_context(&task, &one, 1, &[false], true).unwrap();
         assert_eq!(answer, retry);
         record_policy_answer(&mut task, &one, &answer, "policy", "e", 1);
-        assert!(rule_answer(&task, &one, 1).is_none());
+        assert!(rule_answer_with_context(&task, &one, 1, &[false], true).is_none());
         let other = base_check_question(&["a.sh", "d.sh"], &[retry, "drop all", "stop"]);
-        assert!(rule_answer(&task, &other, 1).is_some());
+        assert!(rule_answer_with_context(&task, &other, 1, &[false, false], true).is_some());
+    }
+
+    #[test]
+    fn preexisting_policy_keeps_targets_retries_only_moving_bases_and_otherwise_defers() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
+        let command = "cargo test -p sushiai-orch --test base_retry";
+        let question = base_check::pre_existing_question(
+            &[VerifyOutcome {
+                command: command.into(),
+                code: Some(1),
+                tail: "test a_base_retry_carries_the_planner_test_commit ... FAILED".into(),
+                ..Default::default()
+            }],
+            &task.base_sha,
+        );
+        let targeted = base_check::is_task_target(
+            &task,
+            command,
+            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
+            &[],
+        );
+        let (answer, evidence) =
+            rule_answer_with_context(&task, &question, 1, &[targeted], false).unwrap();
+        assert_eq!(answer, base_check::KEEP_ALL);
+        assert!(evidence.contains("task is meant to make the check pass"));
+
+        task.request = None;
+        let path_command = "cargo test -p sushiai-orch --test base_retry";
+        let path_output = "error in crates/sushiai-orch/tests/base_retry.rs:17:2";
+        let path_target = base_check::is_task_target(
+            &task,
+            path_command,
+            path_output,
+            &["crates/sushiai-orch/tests/base_retry.rs".into()],
+        );
+        assert!(path_target);
+        let path_question = base_check::pre_existing_question(
+            &[VerifyOutcome {
+                command: path_command.into(),
+                code: Some(1),
+                tail: path_output.into(),
+                ..Default::default()
+            }],
+            &task.base_sha,
+        );
+        let (answer, _) =
+            rule_answer_with_context(&task, &path_question, 1, &[path_target], false).unwrap();
+        assert_eq!(answer, base_check::KEEP_ALL);
+
+        let control = base_check_question(
+            &["make verify"],
+            &[base_check::PRE_EXISTING_RETRY, "drop all", "stop"],
+        );
+        assert!(rule_answer_with_context(&task, &control, 1, &[false], false).is_none());
+        let (answer, _) = rule_answer_with_context(&task, &control, 1, &[false], true).unwrap();
+        assert_eq!(answer, base_check::PRE_EXISTING_RETRY);
+
+        let parent_options = base_check_question(
+            &["make verify"],
+            &[base_check::KEEP_ALL, "drop all", "stop"],
+        );
+        for base_moves in [false, true] {
+            let (answer, evidence) =
+                rule_answer_with_context(&task, &parent_options, 1, &[false], base_moves).unwrap();
+            assert_eq!(answer, base_check::KEEP_ALL);
+            assert!(evidence.contains("subtasks are meant to make the check pass"));
+        }
+
+        let mixed = base_check_question(
+            &[
+                "cargo test -p sushiai-orch --test base_retry",
+                "make verify",
+            ],
+            &[base_check::PRE_EXISTING_RETRY, "drop all", "stop"],
+        );
+        let (answer, _) = rule_answer_with_context(&task, &mixed, 1, &[true, false], true).unwrap();
+        assert_eq!(answer, base_check::PRE_EXISTING_RETRY);
+        assert!(rule_answer_with_context(&task, &mixed, 1, &[true, false], false).is_none());
     }
 }
 

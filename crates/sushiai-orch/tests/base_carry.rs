@@ -21,10 +21,15 @@ case "$input" in
   *'## Conflict-only attempt'*) printf 'base\nchild\n' > README.md; out "$report" ;;
   *sushi-plan*)
     case "$input" in
+      *OWN_TARGET*) out '"```sushi-plan\n{\"title\":\"Fix target check\",\"goal\":\"OWN_TARGET: fix grep -q fixed status.txt\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"]}\n```"' ;;
+      *IDLE_BASE*) out '"```sushi-plan\n{\"title\":\"Unrelated task\",\"goal\":\"IDLE_BASE: edit README without changing status.txt\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"]}\n```"' ;;
       *SECOND_WORK*) out '"```sushi-plan\n{\"title\":\"Second child\",\"goal\":\"SECOND_WORK: create second.txt\",\"verify\":[\"test -f second.txt\"]}\n```"' ;;
       *CHILD_WORK*) out '"```sushi-plan\n{\"title\":\"Child\",\"goal\":\"CHILD_WORK: edit README\",\"verify\":[\"true\"]}\n```"' ;;
       *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Finish the children\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"],\"subtasks\":[{\"key\":\"child\",\"title\":\"Child\",\"request\":\"CHILD_WORK edit README\",\"paths\":[\"README.md\"],\"check\":\"grep -q child README.md\"},{\"key\":\"second\",\"title\":\"Second child\",\"request\":\"SECOND_WORK create second.txt\",\"paths\":[\"second.txt\"],\"check\":\"test -f second.txt\",\"dependsOn\":[\"child\"]}]}\n```"' ;;
     esac ;;
+  *OWN_TARGET*)
+    if [ -e .own-target-retried ]; then printf 'fixed\n' > status.txt; else touch .own-target-retried; fi
+    printf 'child\n' > README.md; out "$report" ;;
   *SECOND_WORK*) echo second > second.txt; out "$report" ;;
   *) echo child > README.md; out "$report" ;;
 esac
@@ -34,6 +39,7 @@ fn configure(socket: &Path, policy: bool) {
     let mut settings = request_on(socket, "settings.get", json!({}));
     settings["review"] = json!("");
     settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = json!("");
     settings["answerPolicy"] = json!(policy);
     fit_sandbox(&mut settings);
     request_on(socket, "settings.set", json!({"settings": settings}));
@@ -405,7 +411,13 @@ fn a_parent_keeps_carried_children_when_landing_on_the_default_branch_is_refused
     }
 }
 
-fn retry_survives_restart(parent: bool, policy: bool, agent: bool, answer_before_restart: bool) {
+fn retry_survives_restart(
+    parent: bool,
+    policy: bool,
+    agent: bool,
+    answer_before_restart: bool,
+    sibling_live: bool,
+) {
     let scripts = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
@@ -415,6 +427,10 @@ fn retry_survives_restart(parent: bool, policy: bool, agent: bool, answer_before
     wait_for_socket(&socket);
     configure(&socket, policy);
     let repo = repo();
+    if sibling_live {
+        let sibling = create(&socket, repo.path(), false);
+        preexisting_question(&socket, &sibling);
+    }
     let id = create(&socket, repo.path(), parent);
     if !policy && answer_before_restart {
         preexisting_question(&socket, &id);
@@ -514,25 +530,131 @@ fn retry_survives_restart(parent: bool, policy: bool, agent: bool, answer_before
 
 #[test]
 fn a_parent_does_not_repeat_a_base_question_after_an_owner_retry_and_restart() {
-    retry_survives_restart(true, false, false, true);
+    retry_survives_restart(true, false, false, true, false);
 }
 
 #[test]
 fn an_owner_retry_still_waits_for_the_base_after_a_restart() {
-    retry_survives_restart(false, false, false, true);
+    retry_survives_restart(false, false, false, true, false);
 }
 
 #[test]
 fn an_orchestrator_retry_still_waits_for_the_base_after_a_restart() {
-    retry_survives_restart(false, false, true, true);
+    retry_survives_restart(false, false, true, true, false);
 }
 
 #[test]
 fn a_policy_retry_still_waits_for_the_base_after_a_restart() {
-    retry_survives_restart(false, true, false, true);
+    retry_survives_restart(false, true, false, true, true);
 }
 
 #[test]
 fn an_answer_to_a_base_question_after_restart_waits_for_the_base() {
-    retry_survives_restart(false, false, false, false);
+    retry_survives_restart(false, false, false, false, false);
+}
+
+#[test]
+fn a_targeted_final_keeps_the_check_and_retries_on_the_unchanged_base() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    configure(&daemon.socket, true);
+    let repo = repo();
+    let mut params = json!({"repo": repo.path(), "start": true, "land": false,
+        "title": "Fix target check", "goal": "OWN_TARGET: fix grep -q fixed status.txt",
+        "verify": ["true"], "finalVerify": [CHECK]});
+    let id = request_on(&daemon.socket, "task.create", params.take())["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let original_base = get(&daemon.socket, &id)["baseSha"].clone();
+    let finished = done(&daemon.socket, &id);
+    assert_eq!(finished["baseSha"], original_base, "{finished}");
+    let implementing = attempts(&finished);
+    assert_eq!(implementing.len(), 2, "{finished}");
+    assert!(
+        implementing.last().unwrap()["verify"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["command"] == CHECK && result["code"] == 0),
+        "{finished}"
+    );
+    assert!(
+        decisions(&finished)
+            .iter()
+            .any(|d| d.contains("kept check") && d.contains("task is meant to make it pass")),
+        "{finished}"
+    );
+    assert!(
+        decisions(&finished)
+            .iter()
+            .any(|d| d.starts_with("Policy:") && d.contains("-> keep all")),
+        "{finished}"
+    );
+    assert!(
+        finished["questionHistory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["kind"] == "preexisting_failure"
+                    && entry["answer"] == "keep all"
+                    && entry["answeredBy"] == "policy"
+            }),
+        "{finished}"
+    );
+    assert!(
+        !decisions(&finished)
+            .iter()
+            .any(|d| d.contains("waiting for work to move")),
+        "{finished}"
+    );
+    assert_eq!(preexisting_count(&finished), 1, "{finished}");
+    let worktrees = clean_worktrees(&daemon.socket, repo.path());
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        remove_dir_retrying(wt);
+    }
+}
+
+#[test]
+fn an_untargeted_final_on_an_idle_base_stays_open_for_the_overseer() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    configure(&daemon.socket, true);
+    let repo = repo();
+    let id = request_on(
+        &daemon.socket,
+        "task.create",
+        json!({"repo": repo.path(), "start": true, "land": false,
+            "title": "Unrelated task", "goal": "IDLE_BASE: edit README without changing status.txt",
+            "verify": ["true"], "finalVerify": [CHECK]}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let waiting = preexisting_question(&daemon.socket, &id);
+    assert_eq!(
+        waiting["question"]["kind"], "preexisting_failure",
+        "{waiting}"
+    );
+    assert!(
+        decisions(&waiting)
+            .iter()
+            .all(|d| !d.contains("waiting for work to move")),
+        "{waiting}"
+    );
+    assert!(
+        decisions(&waiting)
+            .iter()
+            .all(|decision| !decision.starts_with("Policy:")),
+        "{waiting}"
+    );
+    let worktrees = clean_worktrees(&daemon.socket, repo.path());
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        remove_dir_retrying(wt);
+    }
 }

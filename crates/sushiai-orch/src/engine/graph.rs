@@ -190,9 +190,9 @@ pub(super) fn apply_base_check_answer(
         }
         return dropped;
     }
-    if question.options.iter().any(|o| o == PARENT_KEEP) {
+    if is_option(answer, KEEP_ALL) {
         for command in &question.commands {
-            let line = kept_check_line(command, KEPT_BY_ANSWER);
+            let line = kept_check_line(command, KEPT_BY_TASK_TARGET);
             if !task.decisions.contains(&line) {
                 task.decisions.push(line);
             }
@@ -396,11 +396,14 @@ async fn parent_finals_on_base(
     task.updated_at = now_ms();
     // A retry on an unchanged base would meet the same failure: every retry
     // waits for the base to move and carries onto it.
-    if is_option(&answer, super::base_check::PRE_EXISTING_RETRY)
-        || question
-            .commands
-            .iter()
-            .any(|c| task.final_verify.contains(c))
+    let kept_all =
+        !question.commands.is_empty() && question.commands.iter().all(|c| is_kept(task, c));
+    if !kept_all
+        && (is_option(&answer, super::base_check::PRE_EXISTING_RETRY)
+            || question
+                .commands
+                .iter()
+                .any(|c| task.final_verify.contains(c)))
     {
         let wt = PathBuf::from(&task.worktree);
         match carry_after_base_moves(app, task, &wt, pending_answer, cancel, &mut None).await {
@@ -417,6 +420,11 @@ async fn parent_finals_on_base(
         app.save_task_logged(task);
         app.broadcast_task(task);
         return ParentGate::Again;
+    }
+    if kept_all {
+        app.save_task_logged(task);
+        app.broadcast_task(task);
+        return ParentGate::Go(results);
     }
     app.save_task_logged(task);
     app.broadcast_task(task);
@@ -1042,7 +1050,7 @@ pub(super) async fn land_on_parent(
                     return failed(
                         FailureKind::Error,
                         "Could not anchor the relay's planner tests".into(),
-                    )
+                    );
                 }
             }
         }

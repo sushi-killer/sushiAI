@@ -3225,6 +3225,42 @@ pub(super) async fn finish_after_review(
             if apply_base_check_answer(&settings, task, &question, &answer, origin) {
                 app.verify_cache.lock().unwrap().remove(task_id);
             }
+            let kept_all =
+                !question.commands.is_empty() && question.commands.iter().all(|c| is_kept(task, c));
+            if kept_all {
+                let mut details: Vec<String> = final_results
+                    .iter()
+                    .filter(|result| question.commands.contains(&result.command))
+                    .map(final_failure_detail)
+                    .collect();
+                if !ordinary_detail.is_empty() {
+                    details.push(ordinary_detail.clone());
+                }
+                return match fail_and_continue(
+                    app,
+                    task_id,
+                    task,
+                    idx,
+                    FailureKind::Verify,
+                    details.join("\n\n"),
+                    attempt_budget,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    LoopSignal::Continue => {
+                        *permit = None;
+                        Tail::Continue
+                    }
+                    LoopSignal::Stop => {
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        Tail::Return
+                    }
+                };
+            }
             let stays = question
                 .commands
                 .iter()

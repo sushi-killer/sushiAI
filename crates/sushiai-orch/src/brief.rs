@@ -151,6 +151,62 @@ pub fn parse_pick(text: &str) -> Option<(bool, String)> {
     }
 }
 
+/// A resumed implementer already has the task and its earlier work in context.
+pub fn build_resume_brief(
+    task: &Task,
+    previous: &Attempt,
+    messages: &str,
+    advice: Option<&str>,
+) -> String {
+    let mut out = String::from("## Failed checks\n\nContinue in this session and fix the failed checks on the kept worktree.\n\n");
+    if let Some(failure) = &previous.failure {
+        out.push_str(&clip_middle(&failure.detail, MAX_LATEST_FAILURE_DETAIL));
+        out.push_str("\n\n");
+    }
+    for result in previous
+        .verify
+        .iter()
+        .filter(|v| v.code != Some(0) && !is_held_out(v))
+    {
+        if previous
+            .failure
+            .as_ref()
+            .is_some_and(|f| f.detail.contains(&result.command))
+        {
+            continue;
+        }
+        out.push_str(&format!(
+            "`{}` exited {}.\n{}\n\n",
+            result.command,
+            result
+                .code
+                .map_or_else(|| "without an exit code".into(), |code| code.to_string()),
+            tail_chars(&result.tail, MAX_LATEST_FAILURE_DETAIL)
+        ));
+    }
+    out.push_str(messages);
+    let answers: Vec<_> = task
+        .question_history
+        .iter()
+        .filter(|q| {
+            q.answered_at > previous.started_at && q.answered_by == crate::model::AnsweredBy::Owner
+        })
+        .collect();
+    if !answers.is_empty() {
+        out.push_str("\n\n## Owner answers\n\n");
+        for q in answers {
+            out.push_str(&format!("- {} -> {}\n", q.question, q.answer));
+        }
+    }
+    if let Some(advice) = advice {
+        out.push_str("\n\n");
+        out.push_str(&advisor_block(advice));
+    }
+    out.push_str("\n\n");
+    out.push_str(REPORT_FORMAT_BLOCK);
+    out
+}
+
 /// Full brief for an implement attempt.
 pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> String {
     let mut out = String::new();
@@ -242,7 +298,7 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     }
 
     if !task.final_verify.is_empty() {
-        out.push_str("## Final checks\n\nThe orchestrator runs these once, after review passes. They are slow: do not run them yourself.\n\n");
+        out.push_str("## Final checks\n\nThe orchestrator runs these alongside review, after the fast gates pass. They are slow: do not run them yourself.\n\n");
         for v in &task.final_verify {
             out.push_str("- `");
             out.push_str(v);
@@ -1108,7 +1164,7 @@ const PLAN_PATHS: &str = "List in `paths` the repo-relative files or directories
 /// Added to a subtask's plan brief only: its parent runs the whole-repo checks.
 const PLAN_SUBTASK_GATE: &str = "This request is one part of a larger task. Whole-repo checks it shares with its parent (the full CI script) run once at the parent, on the combined result, so this part's `finalVerify` lists only checks for its own part.";
 
-const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs once, after review passes and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.";
+const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs alongside review, after the fast gates pass and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.";
 
 /// Asks the reviewer for a ruling on every criterion.
 pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";

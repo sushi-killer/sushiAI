@@ -109,7 +109,8 @@ const PRICED_MESSAGE_COST: f64 = (10.0 * 4.0 + 20_000.0 * 5.0 + 500.0 * 20.0) / 
 /// Implements for $0.01 and reviews PASS for $0.05, except that the first
 /// run whose brief matches `$HANG_ON` (a `case` pattern, unquoted) streams
 /// [`PRICED_MESSAGE`] and hangs with no `result`. Only the second implement
-/// run creates SECOND. Each run appends its kind to `$LOG_DIR/runs.log`.
+/// run creates SECOND and, as a resumed session does, reports the spend so
+/// far ($0.02). Each run appends its kind to `$LOG_DIR/runs.log`.
 fn side_run_hang_script() -> String {
     format!(
         r###"#!/bin/sh
@@ -132,9 +133,9 @@ case "$brief" in
   printf '%s\n' '{{"type":"result","total_cost_usd":0.03,"result":"Create SECOND."}}' ;;
 *)
   echo implement >> "$LOG_DIR/runs.log"
-  if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
+  if [ -f FIRST ]; then echo x > SECOND; cost=0.02; else echo x > FIRST; cost=0.01; fi
   printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-fake"}}'
-  printf '%s\n' '{{"type":"result","total_cost_usd":0.01,"usage":{{"input_tokens":1,"output_tokens":1}},"result":"```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}}\n```"}}' ;;
+  printf '%s\n' '{{"type":"result","total_cost_usd":COSTX,"usage":{{"input_tokens":1,"output_tokens":1}},"result":"```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}}\n```"}}' | sed "s/COSTX/$cost/" ;;
 esac
 "###
     )

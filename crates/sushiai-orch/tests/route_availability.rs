@@ -196,7 +196,9 @@ fn a_missing_claude_sends_the_planner_and_the_attempt_to_codex() {
     assert_eq!(calls(&s.log), ["codex-plan", "codex-implement"]);
     assert_eq!(task["attempts"].as_array().unwrap().len(), 2);
     let lines = decisions(&task);
-    let swap = format!("Orchestrator: claude-opus unavailable ({MISSING} not found), using codex");
+    // A small request plans on the standard tier route.
+    let swap =
+        format!("Orchestrator: claude-sonnet unavailable ({MISSING} not found), using codex");
     assert!(lines.contains(&swap), "{lines:?}");
     s.daemon.shutdown_and_wait();
 }

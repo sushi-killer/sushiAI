@@ -1,0 +1,4 @@
+- Small task requests now draft on the standard-tier route, with configurable character and path limits and a recorded routing decision. Larger requests and lists use the planner; setting `smallPlanMaxChars` to `0` disables small-request routing.
+- Task runs now receive their project’s enabled MCP servers, with repo-specific `mcpEnable` and `mcpDisable` settings. Personal Claude servers and globally enabled connected tools are no longer added automatically; task messaging always remains available.
+- Reviews and slow final checks now run together after the fast gates pass. A failed check discards the review; a failed review cancels the checks, and passing results are reused through owner questions.
+- Retries after a failed check resume the implementer's session on the same route with the failure output and new owner answers. Rejected resumes fall back to a fresh run, and resumed Claude spending counts only the new attempt.

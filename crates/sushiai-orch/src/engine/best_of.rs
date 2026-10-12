@@ -152,13 +152,15 @@ pub(super) struct BestOfExtra {
 /// The second candidate's route when best-of applies to this attempt (the
 /// first implement attempt of a hard task with `bestOf` 2), `Err` with a
 /// decision line when it applies but there is no route to run it on.
+/// `first_attempt` is true when no implement attempt exists yet.
 pub(super) fn second_route(
     task: &Task,
     settings: &Settings,
     route: &Route,
+    first_attempt: bool,
 ) -> Result<Option<Route>, String> {
     let variant = task.variant();
-    if variant.best_of < 2 || task.tier != Tier::Hard || implement_attempt_count(task) != 1 {
+    if variant.best_of < 2 || task.tier != Tier::Hard || !first_attempt {
         return Ok(None);
     }
     let other = match variant.best_of_route.as_deref() {
@@ -365,6 +367,11 @@ where
 
     let _ = std::fs::create_dir_all(&run_dir_b);
     let tools_b = permissions::task_tools(app, settings, task, &wt_b);
+    for line in &tools_b.notes {
+        if !task.decisions.contains(line) && !extra.decisions.contains(line) {
+            extra.decisions.push(line.clone());
+        }
+    }
     let prep = prepare_run(
         app, task, task_id, b_route, settings, &wt_b, attempt_n, &run_dir_b, &tools_b,
     );
@@ -787,7 +794,7 @@ mod route_tests {
         task.attempts
             .push(attempt_with_failure(2, "first implement"));
         assert_eq!(
-            second_route(&task, &settings, route)
+            second_route(&task, &settings, route, implement_attempt_count(&task) == 1)
                 .unwrap()
                 .unwrap()
                 .harness,
@@ -795,6 +802,10 @@ mod route_tests {
         );
         task.attempts
             .push(attempt_with_failure(3, "second implement"));
-        assert!(second_route(&task, &settings, route).unwrap().is_none());
+        assert!(
+            second_route(&task, &settings, route, implement_attempt_count(&task) == 1)
+                .unwrap()
+                .is_none()
+        );
     }
 }

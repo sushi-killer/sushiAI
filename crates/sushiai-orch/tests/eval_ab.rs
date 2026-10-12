@@ -288,7 +288,7 @@ fn variant_route_overrides_pick_the_planner_and_the_tier_s_implement_route() {
         s == "stopped" || s == "done" || s == "failed"
     });
     assert_eq!(
-        other_settled["attempts"][0]["routeId"], "claude-opus",
+        other_settled["attempts"][0]["routeId"], "claude-sonnet",
         "{other_settled}"
     );
     assert!(

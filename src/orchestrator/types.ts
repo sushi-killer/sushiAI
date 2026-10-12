@@ -61,6 +61,10 @@ export type Settings = {
   routes: Route[];
   /** Servers the orchestrator chat may use, each toggled in Settings. */
   chatTools: ChatToolConfig[];
+  /** Exact repo path -> connected tool ids enabled for task runs. */
+  mcpEnable?: Record<string, string[]>;
+  /** Exact repo path -> server names excluded from task runs. */
+  mcpDisable?: Record<string, string[]>;
   tiers: Record<Tier, string>;
   /** Route id; "" turns review off, "auto" picks the cheapest route that is
    * never weaker than the implementer (at least 2, 3 on the hard tier),
@@ -88,6 +92,11 @@ export type Settings = {
    * request; "" turns drafting off, so `task.create` always needs the full
    * form instead. */
   planner: string;
+  /** Unicode character limit for standard-tier planning; 0 disables the
+   * whole small-request check and sends every request to the planner. */
+  smallPlanMaxChars?: number;
+  /** Distinct repo path limit for standard-tier planning. */
+  smallPlanMaxPaths?: number;
   /** Route the orchestrator agent runs on (its chat and, with `autoAnswer`,
    * its answers to stuck questions); "" means the standard tier's route. */
   orchestrator: string;

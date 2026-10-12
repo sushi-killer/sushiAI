@@ -401,9 +401,9 @@ flowchart TD
   split["Plan lint: a whole-repo suite in verify (npm run ci,<br/>cargo test --workspace, ...) moves to finalVerify;<br/>verify entries that are not shell commands become review criteria"]
   baseline["Baseline, before attempt 1<br/>planner's tests are committed first; planner's checks and held-out check run on that commit;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]
-  gate["Landing gate, before finalVerify runs on the worktree<br/>waits for the preflight, applies the judge's rulings to the task"]
+  gate["Preflight gate, before review and finalVerify run on the worktree<br/>waits for the preflight, applies the judge's rulings to the task"]
   tier["Tier<br/>planner's tier, else standard"]
-  impl["Implement<br/>route = tiers[tier]; a retry starts a fresh session<br/>with the brief, earlier handoffs and the last failure"]
+  impl["Implement<br/>route = tiers[tier]; a failed-check retry resumes the same route's session<br/>with failure output and new answers; other retries start fresh"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   timebudget["Time budget<br/>implement run past settings.implementBudgetMins -> kill,<br/>report-only resume of its session, kind time_budget"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
@@ -415,7 +415,8 @@ flowchart TD
   impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
   review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees only the open findings,<br/>the criteria not yet ruled met and the task's own changes since"]
-  final["Final checks<br/>task.finalVerify, once, after review passes"]
+  final["Final checks<br/>task.finalVerify, alongside review after the fast gates<br/>passing results are kept through review questions"]
+  join{"Review accepted and final checks pass"}
   baserun{"Same command on the base?<br/>base lookup: the cache, else the in-flight job,<br/>else one job in a throwaway worktree on base sha"}
   commit["Commit on the task branch"]
   done([done])
@@ -431,7 +432,8 @@ flowchart TD
   stall -->|stalled| fail
   impl -.- timebudget
   timebudget -->|out of time| fail
-  verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> review
+  verify -->|all exit 0| gated -->|pass| heldout -->|pass| evidence -->|saved or reused image| protect --> gate --> review
+  gate --> final
   gated -->|fails, kind verify| fail
   heldout -->|fails, kind heldout| fail
   evidence -->|no image, kind evidence| fail
@@ -443,8 +445,11 @@ flowchart TD
   basecheck -.->|result| gate
   basecheck -.->|"ruling for a failing verify command, applied before it counts"| verify
   land["Subtask: land on the parent's branch<br/>one at a time per parent; carry onto its head,<br/>verify again if it moved, fast-forward"]
-  review -->|PASS| gate --> final -->|all exit 0| commit --> done
-  final -->|all exit 0, subtask| land --> done
+  review -->|PASS or owner approves| join
+  final -->|all exit 0| join -->|task| commit --> done
+  join -->|subtask| land --> done
+  final -.->|fails: discard review| review
+  review -.->|FAIL: cancel checks| final
   final -->|non-zero| baserun
   baserun -->|passes on base| fail
   baserun -->|"keep rule: targets absent on base, the plan creates them"| fail
@@ -453,7 +458,8 @@ flowchart TD
   review -->|"narrow PASS and a changed file no open finding names: one full review, its verdict stands"| review
   review -->|"no verdict: review again once, same attempt"| review
   review -->|"no verdict twice"| ownerQ
-  ownerQ -->|"review retry: same attempt"| review
+  ownerQ -->|"review retry: same attempt, keep final results"| review
+  ownerQ -->|"approve unreviewed: keep final results"| join
   verify -->|non-zero| fail
   review -->|FAIL| fail
   review -->|"FAIL, repeated finding the implementer disputed"| judge

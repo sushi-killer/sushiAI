@@ -27,7 +27,7 @@ case "$input" in
       *CHILD_WORK*) out '"```sushi-plan\n{\"title\":\"Child\",\"goal\":\"CHILD_WORK: edit README\",\"verify\":[\"true\"]}\n```"' ;;
       *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Finish the children\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"],\"subtasks\":[{\"key\":\"child\",\"title\":\"Child\",\"request\":\"CHILD_WORK edit README\",\"paths\":[\"README.md\"],\"check\":\"grep -q child README.md\"},{\"key\":\"second\",\"title\":\"Second child\",\"request\":\"SECOND_WORK create second.txt\",\"paths\":[\"second.txt\"],\"check\":\"test -f second.txt\",\"dependsOn\":[\"child\"]}]}\n```"' ;;
     esac ;;
-  *OWN_TARGET*)
+  *OWN_TARGET*|*'## Failed checks'*)
     if [ -e .own-target-retried ]; then printf 'fixed\n' > status.txt; else touch .own-target-retried; fi
     printf 'child\n' > README.md; out "$report" ;;
   *SECOND_WORK*) echo second > second.txt; out "$report" ;;

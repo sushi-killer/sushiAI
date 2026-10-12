@@ -330,6 +330,9 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
+    settings["planner"] = serde_json::json!("claude-opus");
+    settings["tiers"]["standard"] = serde_json::json!("claude-sonnet");
+    settings["smallPlanMaxChars"] = serde_json::json!(40);
     settings["answerPolicy"] = serde_json::json!(false);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
 
@@ -369,6 +372,29 @@ fn unparseable_plan_then_owner_clarification_leads_to_a_successful_replan() {
     assert_eq!(
         plan_attempts, 2,
         "the first (unparseable) round and the successful replan: {settled}"
+    );
+
+    assert!(settled["request"].as_str().unwrap().chars().count() > 40);
+    assert!(
+        settled["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["stage"] == "plan")
+            .all(|a| a["routeId"] == "claude-sonnet"),
+        "{settled}"
+    );
+    let route_lines: Vec<_> = settled["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d.as_str().unwrap().starts_with("Plan route:"))
+        .collect();
+    assert_eq!(
+        route_lines,
+        vec![&serde_json::json!(
+            "Plan route: claude-sonnet (small request: 36 chars <= 40, 0 paths <= 3, no list)"
+        )]
     );
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
@@ -772,4 +798,122 @@ fn a_parent_drafted_part_keeps_its_drafted_checks_and_held_out() {
         "{a}"
     );
     daemon.shutdown_and_wait();
+}
+
+fn assert_plan_route(
+    request: &str,
+    max_chars: usize,
+    variant: serde_json::Value,
+    route: &str,
+    reason: &str,
+) {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-plan-route.sh", FAKE_PLANNER_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["planner"] = serde_json::json!("claude-opus");
+    settings["tiers"]["standard"] = serde_json::json!("claude-sonnet");
+    settings["smallPlanMaxChars"] = serde_json::json!(max_chars);
+    settings["briefCheckRoute"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(), "request": request,
+            "variant": variant, "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap();
+    let settled = poll_until(&daemon, id, |s| s == "stopped" || s == "failed");
+    assert_eq!(settled["status"], "stopped", "{settled}");
+    let attempt = &settled["attempts"][0];
+    assert_eq!(attempt["stage"], "plan");
+    assert_eq!(attempt["routeId"], route, "{settled}");
+    let line = format!("Plan route: {route} ({reason})");
+    assert_eq!(
+        settled["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d.as_str() == Some(line.as_str()))
+            .count(),
+        1,
+        "{settled}"
+    );
+    if variant["plannerRoute"].is_string() {
+        let line = format!("Variant: planner -> route {route} (override)");
+        assert!(
+            settled["decisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d.as_str() == Some(line.as_str())),
+            "{settled}"
+        );
+    }
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
+fn plan_route_small_request_uses_standard_with_size_facts() {
+    let request = "Fix src/button.rs";
+    assert_plan_route(
+        request,
+        1200,
+        serde_json::json!({}),
+        "claude-sonnet",
+        &format!(
+            "small request: {} chars <= 1200, 1 paths <= 3, no list",
+            request.chars().count()
+        ),
+    );
+}
+
+#[test]
+fn plan_route_long_request_uses_planner() {
+    assert_plan_route(
+        &"x".repeat(1201),
+        1200,
+        serde_json::json!({}),
+        "claude-opus",
+        "not small: 1201 chars > 1200",
+    );
+}
+
+#[test]
+fn plan_route_numbered_and_bulleted_lists_use_planner() {
+    for request in ["1. Fix button\n2. Add test", "- Fix button\n+ Add test"] {
+        assert_plan_route(
+            request,
+            1200,
+            serde_json::json!({}),
+            "claude-opus",
+            "not small: 2 list items >= 2",
+        );
+    }
+}
+
+#[test]
+fn plan_route_variant_override_wins_for_small_request() {
+    assert_plan_route(
+        "Fix button",
+        1200,
+        serde_json::json!({"plannerRoute": "claude-opus"}),
+        "claude-opus",
+        "variant.plannerRoute",
+    );
+}
+
+#[test]
+fn plan_route_zero_turns_off_the_entire_small_request_check() {
+    assert_plan_route(
+        "Fix button",
+        0,
+        serde_json::json!({}),
+        "claude-opus",
+        "small-request check off: smallPlanMaxChars = 0",
+    );
 }

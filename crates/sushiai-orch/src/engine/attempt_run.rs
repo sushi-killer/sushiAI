@@ -678,13 +678,16 @@ pub(super) async fn run_harness(
                 let fp = fingerprint_of(&outcome, req, &run_argv, codex_version.clone());
                 let mut partial = outcome.clone();
                 finalize_cost(app, req.harness, req.model, &mut partial);
+                if track_attempt {
+                    price_resumed_attempt(app, task_id, attempt_n, req.harness, req.resume, &mut partial);
+                }
                 partial.fingerprint = Some(fp.clone());
                 record_run(
                     app,
                     task_id,
                     attempt_n,
                     &tag,
-                    (req.harness, req.model, false),
+                    (req.harness, req.model, req.resume.is_some()),
                     &partial,
                     started_at,
                 );
@@ -777,6 +780,16 @@ pub(super) async fn run_harness(
         }
     }
     finalize_cost(app, req.harness, req.model, &mut outcome);
+    if track_attempt {
+        price_resumed_attempt(
+            app,
+            task_id,
+            attempt_n,
+            req.harness,
+            req.resume,
+            &mut outcome,
+        );
+    }
     outcome.fingerprint = Some(fingerprint_of(&outcome, req, &run_argv, codex_version));
     record_run(
         app,
@@ -843,6 +856,52 @@ pub(super) fn finalize_cost(
     }
     if harness == Harness::Claude {
         outcome.estimate_cost(&app.settings.read().unwrap().prices);
+    }
+}
+
+pub(super) fn price_resumed_attempt(
+    app: &App,
+    task_id: &str,
+    attempt_n: u32,
+    harness: Harness,
+    resume: Option<&str>,
+    outcome: &mut harness::RunOutcome,
+) {
+    let Some(session) = resume.filter(|_| harness == Harness::Claude) else {
+        return;
+    };
+    let task = app.store.load_task(task_id).ok().flatten();
+    price_claude_resume(
+        task.as_ref()
+            .map_or(&[][..], |task| task.attempts.as_slice()),
+        attempt_n,
+        session,
+        &app.settings.read().unwrap().prices,
+        outcome,
+    );
+}
+
+pub(super) fn price_claude_resume(
+    attempts: &[Attempt],
+    attempt_n: u32,
+    session: &str,
+    prices: &std::collections::BTreeMap<String, Price>,
+    outcome: &mut harness::RunOutcome,
+) {
+    if let Some(own) = outcome.streamed_cost(prices) {
+        outcome.cost_usd = Some(own);
+        outcome.cost_estimated = true;
+    } else if let Some(total) = outcome.cost_usd {
+        let earlier: f64 = attempts
+            .iter()
+            .filter(|a| {
+                a.stage == Stage::Implement
+                    && a.n < attempt_n
+                    && a.session_id.as_deref() == Some(session)
+            })
+            .filter_map(|a| a.cost_usd)
+            .sum();
+        outcome.cost_usd = Some((total - earlier).max(0.0));
     }
 }
 

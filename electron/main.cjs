@@ -426,7 +426,6 @@ orchestrator = registerOrchestratorExtension({
   send,
   notify: (notice) => orchestratorNotices.publish(notice),
   onTask: (task) => orchestratorNotices.onTask(task),
-  getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
   getConnections: () => connections,

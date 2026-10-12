@@ -196,6 +196,19 @@ emit "$REPORT""#,
     let section = section.split("\n## ").next().unwrap();
     assert!(!section.contains("no-such-tool-anywhere") && !section.contains("`true`"));
     assert!(brief.contains("```sushi-impossible"));
+    let retry = std::fs::read_to_string(
+        s.daemon
+            .data_dir()
+            .join("tasks")
+            .join(&id)
+            .join("runs/2/brief.md"),
+    )
+    .unwrap();
+    assert!(
+        retry.contains("## Failed checks") && !retry.contains("## Task"),
+        "{retry}"
+    );
+    assert!(retry.contains("grep -q ok impl.txt exited 2."), "{retry}");
     cleanup(s, &[&done]);
 }
 

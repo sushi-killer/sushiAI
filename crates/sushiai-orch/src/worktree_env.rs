@@ -84,25 +84,7 @@ fn default_install(worktree: &Path) -> Option<Step> {
 /// `"sccache"` when it is on `path` and the owner left `RUSTC_WRAPPER` alone.
 /// Applied to setup, verify and agent processes; `CARGO_TARGET_DIR` is never set.
 pub fn rustc_wrapper(path: &str) -> Option<&'static str> {
-    let wrapper = rustc_wrapper_in(path, std::env::var_os("RUSTC_WRAPPER").is_some())?;
-    start_sccache_server(path);
-    Some(wrapper)
-}
-
-/// Starts the sccache server from the daemon, outside any sandbox, once. The
-/// first wrapped compile would otherwise start it inside one task's sandbox,
-/// and later worktrees' writes could be denied. "Already running" is ignored.
-fn start_sccache_server(path: &str) {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    STARTED.get_or_init(|| {
-        let _ = std::process::Command::new("sccache")
-            .arg("--start-server")
-            .env("PATH", path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
+    rustc_wrapper_in(path, std::env::var_os("RUSTC_WRAPPER").is_some())
 }
 
 fn rustc_wrapper_in(path: &str, owner_set: bool) -> Option<&'static str> {

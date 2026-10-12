@@ -1,5 +1,22 @@
 use super::*;
 
+fn wrap_task_harness(
+    bin: String,
+    argv: Vec<String>,
+    req: &harness::RunRequest<'_>,
+) -> (String, Vec<String>) {
+    #[cfg(target_os = "macos")]
+    if req.harness == Harness::Codex && harness::task_run_uses_outer_sandbox(req) {
+        if let Some(policy) = req.task_sandbox {
+            let mut wrapped = vec!["-p".into(), verify::to_sbpl(policy), bin];
+            wrapped.extend(argv);
+            return ("sandbox-exec".into(), wrapped);
+        }
+    }
+    let _ = req;
+    (bin, argv)
+}
+
 /// What a run is for, so its cost record names the stage. `repo` is set for
 /// a run that is no task's (audit, evolution proposal, chat): its `task_id`
 /// argument is then the audit or proposal id, kept as the record's `runId`.
@@ -345,6 +362,16 @@ pub(super) async fn run_harness(
     cancel: &CancelToken,
     mut guard: Guard,
 ) -> Result<harness::RunOutcome, RunError> {
+    let RunSecrets {
+        env: project_env,
+        redaction: redaction_env,
+    } = run_secrets(app, task_id).map_err(|error| {
+        if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+            task.decisions.push(format!("Orchestrator: {error}"));
+            let _ = app.store.save_task(&task);
+        }
+        RunError::Io(error)
+    })?;
     let track_attempt = track != RunTrack::No;
     let started_at = now_ms();
     let mut argv = harness::build_argv(req);
@@ -375,10 +402,10 @@ pub(super) async fn run_harness(
         Harness::Claude => None,
     };
     let mut cmd;
-    let (project_env, redaction_env) = run_secrets(app, task_id);
     let files = RunFiles::of(events_path);
     // What the fingerprint hashes: the harness's own argv, not the wrapper's.
     let run_argv = argv.clone();
+    (bin, argv) = wrap_task_harness(bin, argv, req);
     if track_attempt {
         // stdin, stdout and stderr are files and a wrapper writes the exit
         // code last, so the run does not depend on this process staying
@@ -416,6 +443,11 @@ pub(super) async fn run_harness(
         .env("ORCHD_TASK", task_id)
         .env("SUSHIAI_HOME", &app.home)
         .envs(&project_env);
+    if cfg!(target_os = "macos") && req.task_run && !req.review {
+        if let Some(policy) = req.task_sandbox {
+            policy.apply_check_env(cmd.as_std_mut());
+        }
+    }
     if let Some(token) = app.hook_token_of(task_id, attempt_n) {
         cmd.env("SUSHIAI_ORCH_TOKEN", token);
     }
@@ -623,31 +655,27 @@ pub(super) async fn run_harness(
 
 /// The project's agent variables, and every value known for the project
 /// (agent and MCP variables) that a run's output must not keep.
-pub(super) fn run_secrets(
-    app: &App,
-    task_id: &str,
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    app.store
-        .load_task(task_id)
-        .ok()
-        .flatten()
-        .and_then(|task| {
-            task.project_id.or_else(|| {
-                app.secrets
-                    .read()
-                    .unwrap()
-                    .repo_projects
-                    .get(&task.repo)
-                    .cloned()
-            })
-        })
-        .map_or_else(Default::default, |id| {
-            let secrets = app.secrets.read().unwrap();
-            let agent = secrets.projects.get(&id).cloned().unwrap_or_default();
-            let mut known = agent.clone();
-            known.extend(secrets.project_mcp.get(&id).cloned().unwrap_or_default());
-            (agent, known)
-        })
+#[derive(Default)]
+pub(super) struct RunSecrets {
+    pub env: HashMap<String, String>,
+    pub redaction: HashMap<String, String>,
+}
+
+pub(super) fn run_secrets(app: &App, task_id: &str) -> Result<RunSecrets, String> {
+    let Some(task) = app.store.load_task(task_id).ok().flatten() else {
+        return Ok(Default::default());
+    };
+    let secrets = app.secrets.read().unwrap();
+    let id = secrets::project_for_repo(&secrets, &task.repo, task.project_id.as_deref())?;
+    Ok(id.map_or_else(Default::default, |id| {
+        let agent = secrets.projects.get(&id).cloned().unwrap_or_default();
+        let mut known = agent.clone();
+        known.extend(secrets.project_mcp.get(&id).cloned().unwrap_or_default());
+        RunSecrets {
+            env: agent,
+            redaction: known,
+        }
+    }))
 }
 
 pub(super) fn redact(line: &str, env: &std::collections::HashMap<String, String>) -> String {
@@ -817,8 +845,77 @@ pub(super) fn read_cancelled_fingerprint(events_path: &Path) -> Option<Fingerpri
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn codex_task_wrapper_preserves_host_and_non_task_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let policy = TaskSandbox::build(crate::sandbox::Inputs {
+            repo_root: root,
+            worktree: root,
+            run_dir: root,
+            data_dir: &root.join("data"),
+            sushiai_home: &root.join("sushiai"),
+            worktree_root: "",
+            home: &root.join("home"),
+            daemon_socket: &root.join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        let mut req = harness::RunRequest {
+            harness: Harness::Codex,
+            worktree: root,
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            review: false,
+            task_run: true,
+            task_sandbox: Some(&policy),
+            mcp_config: None,
+            settings_path: None,
+            network_allowed: false,
+            codex_mcp: &[],
+            images: &[],
+            repo_settings: true,
+            resume: None,
+        };
+        let argv = harness::codex_argv(&req);
+        let (bin, wrapped) = wrap_task_harness("codex".into(), argv.clone(), &req);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(bin, "sandbox-exec");
+            assert_eq!(
+                &wrapped[..3],
+                &["-p", verify::to_sbpl(&policy).as_str(), "codex"]
+            );
+            assert_eq!(&wrapped[3..], argv);
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!((bin, wrapped), ("codex".into(), argv.clone()));
+        req.task_sandbox = None;
+        assert_eq!(
+            wrap_task_harness("codex".into(), argv.clone(), &req),
+            ("codex".into(), argv.clone())
+        );
+        req.task_sandbox = Some(&policy);
+        req.review = true;
+        assert_eq!(
+            wrap_task_harness("codex".into(), argv.clone(), &req),
+            ("codex".into(), argv.clone())
+        );
+        req.review = false;
+        req.task_run = false;
+        assert_eq!(
+            wrap_task_harness("codex".into(), argv.clone(), &req),
+            ("codex".into(), argv)
+        );
+    }
 
     #[test]
     fn redacts_known_values_longest_first() {

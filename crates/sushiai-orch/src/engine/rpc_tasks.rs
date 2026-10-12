@@ -340,6 +340,11 @@ impl App {
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         let repo = repo_root.to_string_lossy().to_string();
+        let project_id = secrets::project_for_repo(
+            &self.secrets.read().unwrap(),
+            &repo,
+            p.project_id.as_deref(),
+        )?;
         // Checked before anything is created: a rejected graph leaves no
         // worktree, branch or record behind.
         let (depends_on, parent) =
@@ -376,7 +381,7 @@ impl App {
                 id: uuid::Uuid::new_v4().to_string(),
                 backlog,
                 repo_root,
-                project_id: p.project_id,
+                project_id,
                 title,
                 goal,
                 checks: valid_checks(p.checks, p.criteria.len()),

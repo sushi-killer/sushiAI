@@ -17,9 +17,12 @@ pub mod loop_detect;
 pub mod mcp;
 pub mod model;
 pub mod overseer;
+#[path = "../../process.rs"]
+pub mod process;
 pub mod procs;
 pub mod prompts;
 pub mod report;
+pub mod sandbox;
 pub mod skill;
 pub mod store;
 pub mod timeline;

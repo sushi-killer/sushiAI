@@ -148,6 +148,8 @@ impl Store {
                         }
                         let key_file = run_dir.join("key");
                         let _ = fs::remove_file(key_file);
+                        let _ = fs::remove_file(run_dir.join("mcp.json"));
+                        let _ = fs::remove_file(run_dir.join("b/mcp.json"));
                         attempt.status = AttemptStatus::Interrupted;
                         attempt.ended_at = Some(crate::model::now_ms());
                         settle(&mut task, idx);
@@ -348,10 +350,10 @@ fn kill_stale_process_group(_pgid: i32, _run_dir: &Path) {}
 /// A run's wrapper shell carries its exit file as `$0`, so this tells the
 /// run's group from an unrelated process that reuses a saved pgid.
 pub fn group_started_with(pgid: i32, path: &Path) -> bool {
-    std::process::Command::new("ps")
-        .args(["-ww", "-o", "args=", "-p", &pgid.to_string()])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&*path.to_string_lossy()))
+    crate::process::argv(pgid).is_some_and(|args| {
+        args.iter()
+            .any(|arg| arg.contains(&*path.to_string_lossy()))
+    })
 }
 
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
@@ -659,6 +661,18 @@ mod tests {
         let done_task = sample_task("done", TaskStatus::Done, AttemptStatus::Passed);
         store.save_task(&running_task).unwrap();
         store.save_task(&done_task).unwrap();
+        let run_dir = store.run_dir(&running_task.id, running_task.attempts[0].n);
+        fs::create_dir_all(run_dir.join("b")).unwrap();
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            fs::write(run_dir.join(file), "synthetic secret").unwrap();
+        }
+        assert!(store
+            .recover_interrupted_with(|_, _| RunFate::Resume, |_, _| {})
+            .unwrap()
+            .is_empty());
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            assert!(run_dir.join(file).exists());
+        }
 
         let recovered = store.recover_interrupted(|_, _| {}).unwrap();
         assert_eq!(recovered.len(), 1);
@@ -667,6 +681,9 @@ mod tests {
         let reloaded = store.load_task("running").unwrap().unwrap();
         assert_eq!(reloaded.status, TaskStatus::Queued);
         assert_eq!(reloaded.attempts[0].status, AttemptStatus::Interrupted);
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            assert!(!run_dir.join(file).exists());
+        }
 
         // Untouched task stays as-is.
         let untouched = store.load_task("done").unwrap().unwrap();

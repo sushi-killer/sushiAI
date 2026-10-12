@@ -4,6 +4,7 @@
 //! [`RunOutcome`] as the engine reads the child's stdout.
 
 use crate::model::{price_for, Fingerprint, Harness, Price, SandboxMode};
+use crate::sandbox::TaskSandbox;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,11 +18,15 @@ pub struct RunRequest<'a> {
     pub max_budget_usd: Option<f64>,
     /// Read-only review session instead of an implement session.
     pub review: bool,
+    /// Only task implement runs use the orchd policy (including host overrides).
+    pub task_run: bool,
+    pub task_sandbox: Option<&'a TaskSandbox>,
     /// Claude only: paths to the run's `mcp.json` / `settings.json`.
     pub mcp_config: Option<&'a Path>,
     pub settings_path: Option<&'a Path>,
     /// Codex only: whether the sandbox has network access
-    /// (`sandbox_workspace_write.network_access`).
+    /// (`sandbox_workspace_write.network_access`). Task implement shell
+    /// commands use the outer profile and have open network regardless.
     pub network_allowed: bool,
     /// Codex only: MCP servers (name, `{command, args, env?}` or `{url}`)
     /// passed as `-c mcp_servers.*` flags; Claude reads its servers from
@@ -99,7 +104,8 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         "stream-json".to_string(),
         "--verbose".to_string(),
         "--setting-sources".to_string(),
-        if req.repo_settings {
+        // Project sandbox grants merge with CLI settings and can widen the policy.
+        if req.repo_settings && !(req.task_run && req.task_sandbox.is_some()) {
             "project,local"
         } else {
             ""
@@ -150,7 +156,8 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
 }
 
 /// `codex exec --json --skip-git-repo-check -C
-/// <worktree> --sandbox workspace-write -c
+/// <worktree> --sandbox danger-full-access` for task implement runs wrapped
+/// by orchd; other non-review runs keep `workspace-write`. The config
 /// sandbox_workspace_write.network_access=<bool> [--model] [-c
 /// model_reasoning_effort="<e>"] -`; review uses `--sandbox read-only` and
 /// drops the network flag (nothing to write, nothing to reach).
@@ -169,6 +176,8 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     argv.push("--skip-git-repo-check".to_string());
     let mode = if req.review {
         "read-only"
+    } else if task_run_uses_outer_sandbox(req) {
+        "danger-full-access"
     } else {
         "workspace-write"
     };
@@ -203,6 +212,12 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     }
     argv.push("-".to_string());
     argv
+}
+
+/// Whether orchd will wrap this task run in its native macOS profile.
+/// Codex can use full access only when that outer profile is actually present.
+pub(super) fn task_run_uses_outer_sandbox(req: &RunRequest<'_>) -> bool {
+    cfg!(target_os = "macos") && req.task_run && !req.review && req.task_sandbox.is_some()
 }
 
 pub fn build_argv(req: &RunRequest) -> Vec<String> {
@@ -331,6 +346,38 @@ pub fn build_claude_settings(
     serde_json::Value::Object(obj)
 }
 
+/// Implement settings share the task policy; other stages keep their old settings.
+pub fn build_claude_task_settings(
+    profile: Option<&serde_json::Value>,
+    sandbox: Option<&TaskSandbox>,
+    allowed_domains: &[String],
+    stop_hook: Option<StopHook<'_>>,
+) -> serde_json::Value {
+    let denied: Vec<String> = sandbox
+        .into_iter()
+        .flat_map(|policy| &policy.denied_read_roots)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let mode = if sandbox.is_some() {
+        SandboxMode::Native
+    } else {
+        SandboxMode::Host
+    };
+    let mut settings = build_claude_settings(profile, mode, allowed_domains, &denied, stop_hook);
+    if let Some(policy) = sandbox {
+        settings["sandbox"]["filesystem"]["allowWrite"] = serde_json::json!(policy.write_roots);
+        settings["sandbox"]["filesystem"]["allowRead"] = serde_json::json!(policy.read_exceptions);
+        let deny = settings["permissions"]["deny"].as_array_mut().unwrap();
+        deny.extend(
+            policy
+                .read_tool_denied_roots
+                .iter()
+                .map(|path| serde_json::json!(format!("Read(/{}/**)", path.display()))),
+        );
+    }
+    settings
+}
+
 /// POSIX single-quote quoting: the hook command (and a profile's
 /// `apiKeyHelper`) runs through a shell, and the real data dir
 /// (`Application Support`) contains a space.
@@ -392,6 +439,17 @@ fn stable_settings(settings: &serde_json::Value) -> String {
         }
         if let Some(sandbox) = obj.get_mut("sandbox").and_then(|s| s.as_object_mut()) {
             sandbox.remove("filesystem");
+        }
+        if let Some(deny) = obj
+            .get_mut("permissions")
+            .and_then(|p| p.get_mut("deny"))
+            .and_then(|d| d.as_array_mut())
+        {
+            deny.retain(|entry| {
+                !entry
+                    .as_str()
+                    .is_some_and(|rule| rule.starts_with("Read(//"))
+            });
         }
     }
     settings.to_string()
@@ -797,6 +855,82 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn codex_task_implements_use_full_access_only_with_the_outer_sandbox() {
+        let wt = Path::new("/worktree");
+        let mut req = base_req(Harness::Codex, wt);
+        req.task_run = true;
+        req.network_allowed = false;
+        assert!(codex_argv(&req).contains(&"workspace-write".to_string()));
+
+        let root = tempfile::tempdir().unwrap();
+        let policy = TaskSandbox::build(crate::sandbox::Inputs {
+            repo_root: root.path(),
+            worktree: root.path(),
+            run_dir: root.path(),
+            data_dir: &root.path().join("data"),
+            sushiai_home: &root.path().join("sushiai"),
+            worktree_root: "",
+            home: &root.path().join("home"),
+            daemon_socket: &root.path().join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        req.task_sandbox = Some(&policy);
+        let mode = if cfg!(target_os = "macos") {
+            "danger-full-access"
+        } else {
+            "workspace-write"
+        };
+        assert!(codex_argv(&req).contains(&mode.to_string()));
+        req.resume = Some("session");
+        assert!(codex_argv(&req).contains(&format!("sandbox_mode=\"{mode}\"")));
+        req.review = true;
+        assert!(codex_argv(&req).contains(&"sandbox_mode=\"read-only\"".to_string()));
+        req.resume = None;
+        assert!(codex_argv(&req).contains(&"read-only".to_string()));
+    }
+
+    #[test]
+    fn native_claude_tasks_cannot_inherit_project_sandbox_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let policy = TaskSandbox::build(crate::sandbox::Inputs {
+            repo_root: root,
+            worktree: root,
+            run_dir: root,
+            data_dir: &root.join("data"),
+            sushiai_home: &root.join("sushiai"),
+            worktree_root: "",
+            home: &root.join("home"),
+            daemon_socket: &root.join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        let mut req = base_req(Harness::Claude, root);
+        req.repo_settings = true;
+        req.task_run = true;
+        req.task_sandbox = Some(&policy);
+        let sources = |req: &RunRequest| {
+            let argv = claude_argv(req);
+            argv[argv.iter().position(|a| a == "--setting-sources").unwrap() + 1].clone()
+        };
+        assert_eq!(sources(&req), "");
+        req.task_sandbox = None;
+        assert_eq!(sources(&req), "project,local");
+        req.task_sandbox = Some(&policy);
+        req.task_run = false;
+        assert_eq!(sources(&req), "project,local");
+    }
+
+    #[test]
     fn a_silent_failed_exit_reads_as_words_without_a_code() {
         use std::os::unix::process::ExitStatusExt;
         let exited = std::process::ExitStatus::from_raw(1 << 8);
@@ -819,6 +953,8 @@ mod tests {
             effort: None,
             max_budget_usd: None,
             review: false,
+            task_run: false,
+            task_sandbox: None,
             mcp_config: None,
             settings_path: None,
             network_allowed: true,
@@ -1378,7 +1514,7 @@ mod tests {
             serde_json::json!({
                 "env": {"ANTHROPIC_API_KEY": key},
                 "hooks": {"Stop": key},
-                "permissions": {"allow": ["Bash"]},
+                "permissions": {"allow": ["Bash"], "deny": ["Bash(git push:*)", format!("Read(//{key}/**)")]},
                 "bashOutputMaxChars": if cap { 1 } else { 2 },
             })
         };

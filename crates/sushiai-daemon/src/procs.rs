@@ -1,9 +1,7 @@
-//! CPU time of the processes below an agent, read from `ps` (the same on macOS and Linux).
+//! CPU time of an agent's descendants from native process data.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
-
-use tokio::process::Command;
 
 /// `[[dd-]hh:]mm:ss[.cc]` as milliseconds.
 pub fn parse_cpu_time(text: &str) -> Option<u64> {
@@ -41,19 +39,21 @@ pub fn descendants_cpu_ms(table: &str, root: u32) -> u64 {
     total
 }
 
-/// The CPU time all descendants of `root` have used so far; `None` when `ps` cannot say.
+/// CPU time of descendants, excluding the root itself.
 pub async fn sample(root: u32) -> Option<u64> {
-    let run = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,time="])
-        .kill_on_drop(true)
-        .output();
-    let out = tokio::time::timeout(Duration::from_secs(10), run)
+    let run = tokio::task::spawn_blocking(move || {
+        let table = crate::process::list_pids()
+            .into_iter()
+            .filter_map(crate::process::info)
+            .map(|p| format!("{} {} {}", p.pid, p.parent_pid, p.cpu_ms as f64 / 1000.0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        descendants_cpu_ms(&table, root)
+    });
+    tokio::time::timeout(Duration::from_secs(10), run)
         .await
         .ok()?
-        .ok()?;
-    out.status
-        .success()
-        .then(|| descendants_cpu_ms(&String::from_utf8_lossy(&out.stdout), root))
+        .ok()
 }
 
 #[cfg(test)]

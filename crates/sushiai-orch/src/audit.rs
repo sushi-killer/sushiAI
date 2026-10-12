@@ -313,6 +313,8 @@ mod tests {
                 effort: Some("high"),
                 max_budget_usd: None,
                 review: true,
+                task_run: false,
+                task_sandbox: None,
                 mcp_config: Some(&mcp),
                 settings_path: Some(&settings_path),
                 network_allowed: false,

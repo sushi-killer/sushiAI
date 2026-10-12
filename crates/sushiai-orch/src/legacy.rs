@@ -31,16 +31,9 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// Whether `ps` names an executable containing `orchd`. When `ps` cannot answer, the answer
-/// is no: killing a process we cannot identify is worse than leaving an old daemon running.
+/// An unidentified process is left alone.
 fn looks_like_orchd(pid: i32) -> bool {
-    match std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).contains("orchd"),
-        _ => false,
-    }
+    crate::process::executable(pid).is_some_and(|exe| exe.to_string_lossy().contains("orchd"))
 }
 
 fn terminate(pid: i32) {
@@ -65,14 +58,7 @@ fn terminate(pid: i32) {
 
 /// A zombie has exited and only waits for its parent; it counts as stopped.
 fn reaped(pid: i32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()
-        .map(|out| {
-            let stat = String::from_utf8_lossy(&out.stdout);
-            stat.trim().is_empty() || stat.trim().starts_with('Z')
-        })
-        .unwrap_or(false)
+    !crate::process::alive(pid)
 }
 
 #[cfg(test)]

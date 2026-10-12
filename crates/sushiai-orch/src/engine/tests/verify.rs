@@ -1,3 +1,59 @@
+#[test]
+fn native_check_command_gets_electron_env_and_host_does_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let policy = TaskSandbox::build(crate::sandbox::Inputs {
+        repo_root: root,
+        worktree: root,
+        run_dir: &root.join("run"),
+        data_dir: &root.join("data"),
+        sushiai_home: &root.join("sushiai"),
+        worktree_root: "",
+        home: &root.join("home"),
+        daemon_socket: &root.join("daemon.sock"),
+        cargo_home: None,
+        rustup_home: None,
+        tmp_dir: None,
+        npm_cache: None,
+        known_project_folders: &[],
+        known_task_worktrees: &[],
+    });
+    let native = verify::build_verify_command(root, "true", Some(&policy), "base");
+    let host = verify::build_verify_command(root, "true", None, "base");
+    let electron_env = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "ELECTRON_DISABLE_SANDBOX")
+            .and_then(|(_, value)| value.map(|value| value.to_os_string()))
+    };
+    assert_eq!(electron_env(&native), Some("1".into()));
+    assert_eq!(electron_env(&host), None);
+    assert_eq!(policy.check_env_remove_prefixes, vec!["SCCACHE_"]);
+    let rustc_wrapper = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "RUSTC_WRAPPER")
+            .and_then(|(_, value)| value.map(|value| value.to_os_string()))
+    };
+    assert_eq!(
+        rustc_wrapper(&native).as_deref(),
+        Some(std::ffi::OsStr::new(""))
+    );
+    let cargo_rustc_wrapper = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CARGO_BUILD_RUSTC_WRAPPER")
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+    };
+    assert_eq!(cargo_rustc_wrapper(&native), None);
+    #[cfg(target_os = "macos")]
+    assert_eq!(native.as_std().get_program(), "sandbox-exec");
+    assert_eq!(host.as_std().get_program(), "/bin/sh");
+}
+
 #[tokio::test]
 async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
     let tmp = tempfile::tempdir().unwrap();
@@ -14,8 +70,7 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
         tmp.path(),
         &cmd,
         Duration::from_millis(300),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &cancel,
     )
@@ -49,16 +104,8 @@ async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         cancel2.cancel();
     });
-    let outcome = run_one_verify_command(
-        tmp.path(),
-        &cmd,
-        Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
-        "",
-        &cancel,
-    )
-    .await;
+    let outcome =
+        run_one_verify_command(tmp.path(), &cmd, Duration::from_secs(60), None, "", &cancel).await;
     assert_eq!(outcome.tail, "cancelled");
 }
 
@@ -191,16 +238,27 @@ fn desktop_scope() -> Vec<ScopedCheck> {
     vec![ScopedCheck {
         repo: None,
         command: "npm run test:desktop".into(),
-        paths: ["src/app/**", "src/extensions/**", "electron/**", "src/styles/**", "*.html"]
-            .map(String::from)
-            .to_vec(),
+        paths: [
+            "src/app/**",
+            "src/extensions/**",
+            "electron/**",
+            "src/styles/**",
+            "*.html",
+        ]
+        .map(String::from)
+        .to_vec(),
     }]
 }
 
 #[test]
 fn a_scoped_command_is_skipped_when_no_changed_file_is_under_its_paths() {
     let commands = vec!["npm run test:desktop".to_string(), "npm test".to_string()];
-    let (run, lines) = filter_scoped(&desktop_scope(), "/repo", &commands, &["orchd/src/x.rs".into()]);
+    let (run, lines) = filter_scoped(
+        &desktop_scope(),
+        "/repo",
+        &commands,
+        &["orchd/src/x.rs".into()],
+    );
     assert_eq!(run, vec!["npm test"]);
     assert_eq!(
         lines,
@@ -213,7 +271,12 @@ fn a_scoped_command_is_skipped_when_no_changed_file_is_under_its_paths() {
 #[test]
 fn a_scoped_command_runs_when_a_changed_file_matches() {
     let commands = vec!["npm run test:desktop".to_string()];
-    for file in ["electron/main.cjs", "src/app/Shell.tsx", "index.html", "web/x.html"] {
+    for file in [
+        "electron/main.cjs",
+        "src/app/Shell.tsx",
+        "index.html",
+        "web/x.html",
+    ] {
         let (run, lines) = filter_scoped(&desktop_scope(), "/repo", &commands, &[file.into()]);
         assert_eq!(run, commands, "{file}");
         assert!(lines.is_empty(), "{file}");
@@ -240,7 +303,9 @@ fn a_scoped_entry_for_another_repo_or_without_paths_does_not_scope() {
         command: "make *".into(),
         paths: vec!["lib/**".into()],
     }];
-    assert!(filter_scoped(&here, "/repo", &commands, &["app/x".into()]).0.is_empty());
+    assert!(filter_scoped(&here, "/repo", &commands, &["app/x".into()])
+        .0
+        .is_empty());
 }
 
 #[test]
@@ -295,8 +360,7 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_timeout()
         tmp.path(),
         &cmd,
         Duration::from_millis(1500),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )
@@ -316,16 +380,8 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() 
         tokio::time::sleep(Duration::from_millis(1500)).await;
         cancel2.cancel();
     });
-    let outcome = run_one_verify_command(
-        tmp.path(),
-        &cmd,
-        Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
-        "",
-        &cancel,
-    )
-    .await;
+    let outcome =
+        run_one_verify_command(tmp.path(), &cmd, Duration::from_secs(60), None, "", &cancel).await;
     assert_eq!(outcome.tail, "cancelled");
     assert_pid_gone(&pidfile).await;
 }
@@ -342,8 +398,7 @@ async fn verify_stops_a_process_left_in_the_group_after_a_normal_exit() {
         tmp.path(),
         &cmd,
         Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )

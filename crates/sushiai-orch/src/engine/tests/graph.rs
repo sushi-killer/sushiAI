@@ -43,7 +43,7 @@ fn waits_state_reads_dependencies_and_children() {
 
 #[tokio::test]
 async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_check() {
-    let (app, dir) = test_app();
+    let (app, dir) = test_app_fitting_sandbox();
     let repo = dir.path().join("repo");
     let worktree = dir.path().join("worktree");
     std::fs::create_dir_all(&repo).unwrap();
@@ -80,7 +80,7 @@ async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_che
 
 #[tokio::test]
 async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_command() {
-    let (app, dir) = test_app();
+    let (app, dir) = test_app_fitting_sandbox();
     let repo = dir.path().join("repo");
     let worktree = dir.path().join("worktree");
     std::fs::create_dir_all(&repo).unwrap();

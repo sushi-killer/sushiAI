@@ -38,6 +38,8 @@ pub(super) async fn report_after_budget(
             effort: route.effort.as_deref(),
             max_budget_usd: None,
             review: true,
+            task_run: false,
+            task_sandbox: None,
             mcp_config: None,
             settings_path: None,
             network_allowed: false,

@@ -820,7 +820,7 @@ pub(super) async fn capture_screenshots(
     idx: usize,
     worktree: &Path,
     run_dir: &Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) {
     let Some(cmd) = task.brief_check.screenshot.clone() else {

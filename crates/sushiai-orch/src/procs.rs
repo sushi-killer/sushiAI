@@ -1,7 +1,8 @@
 //! Stopping processes: a whole process group, and every process whose
 //! executable lives inside an orchd-owned directory.
 
-use std::path::{Path, PathBuf};
+use crate::process::{executable as exe_path, list_pids};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// SIGTERM to a group, then SIGKILL, give it this long in between.
@@ -73,57 +74,6 @@ pub fn stop_processes_under(dir: &Path) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn list_pids() -> Vec<i32> {
-    // SAFETY: the buffer is sized from the count the first call returns.
-    unsafe {
-        let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
-        if n <= 0 {
-            return Vec::new();
-        }
-        let cap = n as usize + 64;
-        let mut buf = vec![0i32; cap];
-        let got = libc::proc_listallpids(
-            buf.as_mut_ptr().cast(),
-            (cap * std::mem::size_of::<i32>()) as libc::c_int,
-        );
-        if got <= 0 {
-            return Vec::new();
-        }
-        buf.truncate(got as usize);
-        buf
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn exe_path(pid: i32) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut buf = vec![0u8; 4096];
-    // SAFETY: the buffer is 4096 bytes, the size passed.
-    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    if n <= 0 {
-        return None;
-    }
-    buf.truncate(n as usize);
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf)))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn list_pids() -> Vec<i32> {
-    std::fs::read_dir("/proc")
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn exe_path(pid: i32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
 /// Test helpers: a long-lived process whose executable lives in a directory
 /// the test picks. A copy of `/bin/sleep` does not do: on Apple silicon a
 /// copied system binary is killed at exec, so the copy is of the running
@@ -160,16 +110,7 @@ mod tests {
     use std::process::{Command, Stdio};
 
     fn alive(pid: i32) -> bool {
-        // A zombie still answers kill(0); `ps` state Z counts as gone.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return false;
-        }
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        crate::process::alive(pid)
     }
 
     /// The body of the helper process the tests start from a copy of the

@@ -624,12 +624,16 @@ pub(super) async fn run_parent(
             drop_passed_on_tree(app, Path::new(&task.worktree), &task.base_sha, checks).await;
         let mut skipped = skipped;
         skipped.extend(passed_before);
-        let sandbox = app.settings.read().unwrap().sandbox;
+        let sandbox = app.task_sandbox(
+            &task.repo,
+            Path::new(&task.worktree),
+            &app.store.task_dir(task_id).join("runs/parent"),
+        );
         let results = run_verify_commands(
             Path::new(&task.worktree),
             &app.store.task_dir(task_id).join("runs").join("parent"),
             &checks,
-            sandbox,
+            sandbox.as_ref(),
             &task.base_sha,
             cancel,
         )
@@ -647,7 +651,11 @@ pub(super) async fn run_parent(
             }
         }
     };
-    let sandbox = app.settings.read().unwrap().sandbox;
+    let sandbox = app.task_sandbox(
+        &task.repo,
+        Path::new(&task.worktree),
+        &app.store.task_dir(task_id).join("runs/parent"),
+    );
     // Once, after verify and finalVerify: the gated checks, then the held-out
     // one. The line for a failure names its kind and criterion, and never the
     // held-out command.
@@ -657,8 +665,15 @@ pub(super) async fn run_parent(
         let wt = Path::new(&task.worktree);
         let gated = gated_checks(&task);
         let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
-        let gated_results =
-            run_verify_commands(wt, &dir, &commands, sandbox, &task.base_sha, cancel).await;
+        let gated_results = run_verify_commands(
+            wt,
+            &dir,
+            &commands,
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
         if let Some((check, failed)) = gated
             .iter()
             .zip(&gated_results)
@@ -676,7 +691,8 @@ pub(super) async fn run_parent(
                 tail_chars(failed.tail.trim(), 600)
             ));
         } else if let Some(held) = gated_held_out(&task) {
-            let (result, detail) = run_held_out(&task, &held, wt, &dir, sandbox, cancel).await;
+            let (result, detail) =
+                run_held_out(&task, &held, wt, &dir, sandbox.as_ref(), cancel).await;
             if detail.is_some() {
                 grounded_failure = Some(format!(
                     "Orchestrator: every subtask landed, but the held-out check for criterion {} failed (heldout) on {}: {}",
@@ -1082,6 +1098,7 @@ pub(super) async fn carry_and_check(
             let results = run_verify_cached(
                 app,
                 &task.id,
+                &task.repo,
                 worktree,
                 run_dir,
                 &new_sha,
@@ -1112,12 +1129,12 @@ pub(super) async fn carry_and_check(
                 scope_to_diff(app, &task.repo, worktree, &task.base_sha, extra_final).await;
             record_skips(task, skipped);
             if !extra_final.is_empty() {
-                let sandbox = app.settings.read().unwrap().sandbox;
+                let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
                 let finals = run_verify_commands(
                     worktree,
                     &run_dir.join("final-land"),
                     &extra_final,
-                    sandbox,
+                    sandbox.as_ref(),
                     &task.base_sha,
                     cancel,
                 )

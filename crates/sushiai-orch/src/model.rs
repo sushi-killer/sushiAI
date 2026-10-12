@@ -118,10 +118,12 @@ pub struct Settings {
     /// the implementer's own route only when no other route exists.
     pub review: String,
     pub sandbox: SandboxMode,
+    #[serde(default)]
+    pub sandbox_repos: BTreeMap<String, SandboxMode>,
     pub allowed_domains: Vec<String>,
-    /// Codex's sandbox has no per-domain filter, just a network on/off
-    /// switch (spec assumption); this is that switch. Default `false` --
-    /// `allowedDomains` only ever governs Claude's allowlist.
+    /// Network switch for Codex's workspace sandbox. Task implement shells
+    /// use the outer task profile with open network even when this is false.
+    /// `allowedDomains` only governs Claude's allowlist.
     #[serde(default)]
     pub codex_network: bool,
     pub protected_paths: Vec<String>,
@@ -548,6 +550,14 @@ pub enum GateAt {
 }
 
 impl Settings {
+    pub fn sandbox_for(&self, repo: &str) -> SandboxMode {
+        self.sandbox_repos
+            .iter()
+            .find(|(path, _)| same_repo_path(path, repo))
+            .map(|(_, mode)| *mode)
+            .unwrap_or(self.sandbox)
+    }
+
     /// Whether the checks a subtask shares with its parent run at the parent:
     /// the per-repo entry when there is one, else true.
     pub fn gates_at_parent(&self, repo: &str) -> bool {
@@ -618,8 +628,8 @@ impl Default for Settings {
             tiers,
             review: "auto".to_string(),
             sandbox: SandboxMode::Native,
-            // Open network by default: the sandbox's job is keeping writes
-            // inside the worktree, not blocking package registries.
+            sandbox_repos: BTreeMap::new(),
+            // Task filesystem isolation leaves package registries reachable.
             allowed_domains: vec!["*".to_string()],
             codex_network: false,
             protected_paths: vec![],

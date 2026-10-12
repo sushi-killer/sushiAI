@@ -8,9 +8,13 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+#[path = "../support/native_sandbox.rs"]
+mod native_sandbox;
+pub use native_sandbox::fit_sandbox;
 
 pub struct Daemon {
     pub child: DaemonChild,
@@ -274,25 +278,42 @@ impl Drop for Daemon {
 /// verify runs `cargo test`: every daemon here would then fail each
 /// verify command it wraps in `sandbox-exec`, so no task could ever pass.
 pub fn native_sandbox_unavailable() -> bool {
-    static UNAVAILABLE: OnceLock<bool> = OnceLock::new();
-    *UNAVAILABLE.get_or_init(|| {
-        cfg!(target_os = "macos")
-            && !Command::new("sandbox-exec")
-                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-    })
+    native_sandbox::native_sandbox_unavailable_reason().is_some()
 }
 
-/// Switches a `settings.get` result to the `host` sandbox when the native
-/// one can't be applied here; anywhere else the tests keep exercising the
-/// real `sandbox-exec` path.
-pub fn fit_sandbox(settings: &mut serde_json::Value) {
-    if native_sandbox_unavailable() {
-        settings["sandbox"] = serde_json::json!("host");
+/// Disposable package-manager state with read-only access to the installed
+/// toolchains and dependency sources. Native profiles allow writing the new
+/// homes, never the symlink targets in the owner's homes.
+pub fn sandbox_toolchain_homes(user: &Path) -> (PathBuf, PathBuf) {
+    let owner_home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let cargo_source = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| owner_home.join(".cargo"));
+    let rustup_source = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| owner_home.join(".rustup"));
+    let cargo = user.join(".cargo");
+    let rustup = user.join(".rustup");
+    std::fs::create_dir_all(&cargo).unwrap();
+    std::fs::create_dir_all(&rustup).unwrap();
+    for (source, target, names) in [
+        (&cargo_source, &cargo, &["bin", "registry", "git"][..]),
+        (&rustup_source, &rustup, &["toolchains"][..]),
+    ] {
+        for name in names {
+            if source.join(name).exists() {
+                std::os::unix::fs::symlink(source.join(name), target.join(name)).unwrap();
+            }
+        }
     }
+    if rustup_source.join("settings.toml").is_file() {
+        std::fs::copy(
+            rustup_source.join("settings.toml"),
+            rustup.join("settings.toml"),
+        )
+        .unwrap();
+    }
+    (cargo, rustup)
 }
 
 /// The file a daemon's output goes to, inside its home, so a request that gets no answer can

@@ -49,6 +49,7 @@ impl App {
                 run_verify_cached(
                     &app,
                     &ctx.task_id,
+                    &ctx.repo,
                     &worktree,
                     &run_dir,
                     &base_sha,

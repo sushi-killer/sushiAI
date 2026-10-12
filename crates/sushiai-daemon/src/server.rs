@@ -382,6 +382,48 @@ impl Conn {
                 }
             }
             method::DAEMON_SHUTDOWN => {
+                let close = request
+                    .params
+                    .get("closeSessions")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if close {
+                    for session in self.registry.list() {
+                        if self.registry.awaiting_actor(&session.id) {
+                            let _ = self.session(&session.id).await;
+                        }
+                    }
+                    let holders: Vec<_> = self
+                        .registry
+                        .list()
+                        .into_iter()
+                        .filter_map(|s| s.holder_pid)
+                        .filter_map(|pid| crate::process::info(pid as i32))
+                        .collect();
+                    let closes: Vec<_> = self
+                        .registry
+                        .handles()
+                        .into_iter()
+                        .map(|h| tokio::spawn(async move { h.close(false).await }))
+                        .collect();
+                    for close in closes {
+                        match close.await {
+                            Ok(Ok(())) | Ok(Err((code::SESSION_NOT_RUNNING, _))) => {}
+                            Ok(Err(e)) => return Err(e),
+                            Err(e) => return Err((code::INTERNAL, e.to_string())),
+                        }
+                    }
+                    timeout(RECOVERY_WAIT, async {
+                        while holders.iter().any(|h| {
+                            crate::process::info(h.pid)
+                                .is_some_and(|p| !p.zombie && p.start_time == h.start_time)
+                        }) {
+                            sleep(Duration::from_millis(25)).await;
+                        }
+                    })
+                    .await
+                    .map_err(|_| (code::INTERNAL, "session holders did not stop".into()))?;
+                }
                 self.registry.request_stop();
                 Ok(json!({}))
             }

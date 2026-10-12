@@ -169,7 +169,7 @@ impl App {
         if attempt.stage != Stage::Implement || !files.raw.exists() {
             return RunFate::Interrupted;
         }
-        let (_, secrets) = run_secrets(self, &task.id);
+        let secrets = run_secrets(self, &task.id).unwrap_or_default().redaction;
         RawTail::rebuild(&files, &events).pump(&secrets, true);
         fate_of_run(&files.exit, || {
             attempt
@@ -227,7 +227,7 @@ pub(super) async fn follow_run(
         .unwrap_or(0);
     let model = (!attempt.model.is_empty()).then(|| attempt.model.clone());
     let mut trip = None;
-    let (_, secrets) = run_secrets(app, &task.id);
+    let secrets = run_secrets(app, &task.id).unwrap_or_default().redaction;
     let mut tail = RawTail::rebuild(&files, &events);
     let mut notes = harness::RunOutcome::default();
     let mut caught_up = false;

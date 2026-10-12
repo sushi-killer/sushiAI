@@ -782,7 +782,16 @@ mod tests {
 
     #[test]
     fn a_task_bridge_offers_only_messaging_and_never_a_sender_choice() {
-        let task = bridge(Some("t1"));
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let task = Bridge {
+            task: Some("t1".into()),
+            read_only: false,
+            call: Box::new(move |method, args| {
+                recorded.lock().unwrap().push((method.to_string(), args));
+                Ok(json!({}))
+            }),
+        };
         let result = dispatch(&task, "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -792,11 +801,28 @@ mod tests {
         }
         let init = dispatch(&task, "initialize", &json!({})).unwrap();
         assert_eq!(init["serverInfo"]["name"], "sushiai-messages");
-        for name in ["task_create", "task_stop", "orchestrator_reply"] {
-            let call = json!({"name": name, "arguments": {}});
+        for name in [
+            "task_create",
+            "task_start",
+            "settings_set",
+            "task_stop",
+            "orchestrator_reply",
+        ] {
+            let call = json!({"name": name, "arguments": {
+                "repo": "/tmp/example-repo", "title": "Example", "goal": "Make a change",
+                "id": "t2", "settings": {"parallel": 2}
+            }});
             let out = dispatch(&task, "tools/call", &call).unwrap();
             assert_eq!(out["isError"], true, "{name}");
+            assert!(
+                out["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown tool"),
+                "{out}"
+            );
         }
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]

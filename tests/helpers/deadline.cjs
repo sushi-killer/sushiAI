@@ -3,6 +3,7 @@
 // raising per-wait numbers, so they pass on a loaded machine.
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
+const { resolveBinary } = require("../../electron/daemon/local.cjs");
 
 const DEFAULT_DEADLINE_MS = 60000;
 const POLL_MS = 25;
@@ -38,13 +39,18 @@ function isAlive(pid) {
   }
 }
 
-/** The start time of a live pid (`ps lstart`), or "" when it is gone. Taken when a
+/** The native start time of a live pid, or "" when it is gone. Taken when a
  * pid is first seen and passed to `stopPid` as `start`, it keeps a cleanup from
  * signalling an unrelated process that reused the pid. */
 function pidStart(pid) {
-  return spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+  const result = spawnSync(resolveBinary(), ["proc", String(pid)], {
     encoding: "utf8",
-  }).stdout.trim();
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0)
+    throw new Error(result.stderr || "process probe failed");
+  const info = JSON.parse(result.stdout);
+  return info && !info.zombie ? info.startTime : "";
 }
 
 async function waitGone(pid, limit) {

@@ -98,6 +98,7 @@ impl App {
         if p.settings.digest_hour.is_some_and(|h| h > 23) {
             return Err("digestHour must be 0-23 or null".to_string());
         }
+        super::owner_notice::quiet_window(&p.settings.quiet_hours)?;
         p.settings.experiments.check()?;
         let mut tool_ids = std::collections::HashSet::new();
         for tool in &p.settings.chat_tools {
@@ -156,5 +157,29 @@ impl App {
         };
         secrets::redact_old_run_mcp(&self.data_dir, &secrets);
         Ok(json!({}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn settings_set_refuses_a_malformed_quiet_hours_and_keeps_a_valid_one() {
+        let (app, _dir) = test_support::test_app();
+        let set = |quiet: &str| {
+            let mut settings = app.settings.read().unwrap().clone();
+            settings.quiet_hours = quiet.to_string();
+            json!({"settings": settings})
+        };
+        for bad in ["25:00-08:00", "23:00", "09:00-09:00", "late"] {
+            let err = app.handle_settings_set(set(bad)).await.unwrap_err();
+            assert!(err.contains("quietHours"), "{bad}: {err}");
+        }
+        let ok = app.handle_settings_set(set("22:30-07:00")).await.unwrap();
+        assert_eq!(ok["quietHours"], "22:30-07:00");
+        app.handle_settings_set(set("")).await.unwrap();
+        assert_eq!(app.settings.read().unwrap().quiet_hours, "");
+        assert_eq!(Settings::default().quiet_hours, "23:00-08:00");
     }
 }

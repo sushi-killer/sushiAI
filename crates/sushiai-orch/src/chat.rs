@@ -741,6 +741,16 @@ fn change_idle(
     Ok(chats)
 }
 
+/// Adds an assistant note to the repo's current chat session; false while a
+/// turn is live (the caller retries later).
+pub(super) fn post_note(app: &App, repo: &str, text: &str) -> bool {
+    change_idle(app, repo, |chats| {
+        push(chats.current_mut(), "assistant", text, ChatMode::Chat);
+        Ok(())
+    })
+    .is_ok()
+}
+
 fn push(session: &mut ChatSession, role: &str, text: &str, mode: ChatMode) {
     if role == "user" && session.title.is_none() {
         session.title = Some(title_for(text));
@@ -1180,6 +1190,9 @@ enum Turn {
         task_id: Option<String>,
         /// The question holds this turn made (task id, hold time).
         held: Vec<(String, i64)>,
+        /// The questions the turn is about (task id, `asked_at`), for the
+        /// owner-notice gate.
+        about: Vec<(String, i64)>,
     },
 }
 
@@ -1604,6 +1617,7 @@ pub(super) fn wake_overseer(
             return false;
         }
     };
+    let about = app.wake_questions(repo, reason, task_id);
     let held = app.hold_for_overseer(repo, reason, task_id);
     app.record_overseer(overseer::Entry::new(
         "woke",
@@ -1636,6 +1650,7 @@ pub(super) fn wake_overseer(
                 reason,
                 task_id,
                 held,
+                about,
             },
         )
         .await;
@@ -2119,10 +2134,14 @@ async fn run_turn(
     // but the owner may have been shown a fresher note: keep this turn's
     // session.
     thread.note = None;
+    // Whether the gate keeps this overseer reply out of the chat, and the
+    // reply cut to a notice's shape when it goes in.
+    let mut blocked = false;
+    let mut notice: Option<String> = None;
     if !owner {
         let timed = matches!(result, Err(RunError::Cancelled))
             && timed_out.load(std::sync::atomic::Ordering::SeqCst);
-        let (cost, end) = match &result {
+        let (cost, mut end) = match &result {
             Ok(o) => (
                 o.cost_usd,
                 match (
@@ -2154,8 +2173,22 @@ async fn run_turn(
             TurnEnd::Silent => "no reply".to_string(),
         };
         overseer_state::add_decision(&app.data_dir, &repo, now_ms(), reason, task_id, &outcome);
-        if let Turn::Overseer { held, .. } = &turn {
-            record_overseer_end(app, &repo, reason, task_id, started, cost, end);
+        if let Turn::Overseer { held, about, .. } = &turn {
+            let gate = match &mut end {
+                TurnEnd::Reply(reply) => {
+                    let gate = app.overseer_gate(&repo, reason, about);
+                    if gate.is_some() && reason != "digest" {
+                        *reply = owner_notice::cap_notice(reply);
+                        notice = Some(reply.clone());
+                    }
+                    blocked = gate
+                        .as_ref()
+                        .is_some_and(|g| g.verdict != owner_notice::Verdict::Notify);
+                    gate
+                }
+                _ => None,
+            };
+            record_overseer_end(app, &repo, reason, task_id, started, cost, end, gate);
             // Still waiting after the turn: it escalated, the owner is asked now.
             app.release_holds(&repo, held);
         }
@@ -2170,7 +2203,9 @@ async fn run_turn(
                 outcome.error,
                 &turn,
             ) {
+                (Some(_), _, Turn::Overseer { .. }) if blocked => {}
                 (Some(reply), _, Turn::Owner(_) | Turn::Overseer { .. }) => {
+                    let reply = notice.unwrap_or(reply);
                     apply_reply(&mut thread, &reply, tools, mode, &|server, tool| {
                         chat_tools::proposable(app, &settings, server, tool)
                     });
@@ -2213,6 +2248,7 @@ pub(super) enum TurnEnd {
 /// Logs how an overseer turn ended: stopped, failed, the digest's first line,
 /// what the agent left for the owner when it did not answer or open a pull
 /// request for the task itself, or a bare `done` that still carries the cost.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_overseer_end(
     app: &App,
     repo: &str,
@@ -2221,7 +2257,9 @@ pub(super) fn record_overseer_end(
     started: i64,
     cost_usd: Option<f64>,
     end: TurnEnd,
+    gate: Option<owner_notice::Gate>,
 ) {
+    use owner_notice::Verdict;
     let acted = || {
         overseer::read(&app.data_dir, Some(repo), None)
             .iter()
@@ -2231,16 +2269,34 @@ pub(super) fn record_overseer_end(
                     && e.task_id.as_deref() == task_id
             })
     };
-    let (kind, text) = match end {
-        TurnEnd::Stopped => ("skipped", "Stopped by you".to_string()),
-        TurnEnd::Failed(error) => ("failed", error),
-        TurnEnd::Reply(reply) if reason == "digest" => ("digest", reply),
-        TurnEnd::Reply(reply) if !acted() => ("asked_owner", reply),
-        TurnEnd::Reply(reply) => ("done", reply),
-        TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string()),
+    // What the entry says, and the full reply behind it when that differs.
+    let verdict = gate.as_ref().map(|g| g.verdict);
+    let (kind, text, detail) = match end {
+        TurnEnd::Stopped => ("skipped", "Stopped by you".to_string(), None),
+        TurnEnd::Failed(error) => ("failed", error, None),
+        TurnEnd::Reply(reply) if reason == "digest" => ("digest", reply, None),
+        TurnEnd::Reply(reply) => match verdict {
+            Some(Verdict::Notify) => ("asked_owner", reply, None),
+            Some(Verdict::Duplicate) => {
+                ("skipped", owner_notice::DUPLICATE.to_string(), Some(reply))
+            }
+            Some(Verdict::Deferred) => ("skipped", owner_notice::DEFERRED.to_string(), Some(reply)),
+            // The turn settled its questions itself: its words stay in the detail.
+            Some(Verdict::Resolved) => ("done", reply, None),
+            None if !acted() => ("asked_owner", reply, None),
+            None => ("done", reply, None),
+        },
+        TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string(), None),
         TurnEnd::Silent => return,
     };
-    let mut entry = overseer::Entry::new(kind, repo, task_id, &text).with_detail(&text);
+    let mut entry = overseer::Entry::new(kind, repo, task_id, &text)
+        .with_detail(detail.as_deref().unwrap_or(&text));
+    // Only a notice (or the held one) remembers its decisions.
+    let tells = matches!(kind, "asked_owner" | "digest")
+        || (kind == "skipped" && verdict == Some(Verdict::Deferred));
+    if let Some(gate) = gate.filter(|_| tells) {
+        entry = entry.with_decision(&gate.keys);
+    }
     entry.cost_usd = cost_usd;
     app.record_overseer(entry);
 }
@@ -2500,6 +2556,17 @@ pub(crate) fn thread_has_text(app: &App, repo: &str, text: &str) -> bool {
         .messages
         .iter()
         .any(|m| m.role == "assistant" && m.text == text)
+}
+
+/// How many assistant messages of the repo's current chat session have this text.
+#[cfg(test)]
+pub(crate) fn thread_text_count(app: &App, repo: &str, text: &str) -> usize {
+    load(app, repo)
+        .current()
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant" && m.text == text)
+        .count()
 }
 
 /// Waits until no chat turn runs in `repo`.

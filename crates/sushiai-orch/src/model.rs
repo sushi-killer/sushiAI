@@ -183,6 +183,11 @@ pub struct Settings {
     /// many hours with a reminder (needs `auto_answer`); 0 = off.
     #[serde(default)]
     pub wait_remind_every_hours: u32,
+    /// Local `HH:MM-HH:MM` window in which the overseer tells the owner
+    /// nothing (a notice waits for the digest or the first tick after it) and
+    /// starts no reminder; `""` turns it off.
+    #[serde(default = "default_quiet_hours")]
+    pub quiet_hours: String,
     /// A question that waited longer than this many hours is answered with
     /// its cautious option, recorded as an assumption the owner can overturn;
     /// 0 = off. Owner-only kinds and questions with no cautious option keep waiting.
@@ -440,6 +445,10 @@ pub struct WorkBuckets {
     pub process: Vec<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+}
+
+fn default_quiet_hours() -> String {
+    "23:00-08:00".to_string()
 }
 
 fn default_answer_policy() -> bool {
@@ -780,6 +789,7 @@ impl Default for Settings {
             auto_answer: false,
             digest_hour: None,
             wait_remind_every_hours: 0,
+            quiet_hours: default_quiet_hours(),
             wait_default_after_hours: 0,
             answer_policy: true,
             experiments: default_experiments(),

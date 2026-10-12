@@ -23,6 +23,8 @@ pub(super) fn test_app() -> (Arc<App>, tempfile::TempDir) {
     )
     .unwrap();
     app.assume_harnesses_installed();
+    // Tests run on a synthetic clock: quiet hours would depend on the machine's zone.
+    app.settings.write().unwrap().quiet_hours = String::new();
     (app, dir)
 }
 

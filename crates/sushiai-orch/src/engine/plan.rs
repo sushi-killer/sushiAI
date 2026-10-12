@@ -332,7 +332,12 @@ pub(super) async fn ask_plan_question(
         None => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 let next = app.cancelled_status(&task.status);
-                if task.status != next {
+                let changed =
+                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
+                if next == TaskStatus::Stopped {
+                    app.close_stopped_task(&mut task);
+                }
+                if changed {
                     task.status = next;
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
@@ -1202,6 +1207,9 @@ pub(super) async fn run_plan_stage(
             } else {
                 TaskStatus::Stopped
             };
+            if t.status == TaskStatus::Stopped {
+                app.close_stopped_task(&mut t);
+            }
             t.updated_at = now_ms();
             let _ = app.store.save_task(&t);
             app.broadcast_task(&t);
@@ -1375,6 +1383,9 @@ async fn split_into_subtasks(
     } else {
         TaskStatus::Stopped
     };
+    if parent.status == TaskStatus::Stopped {
+        app.close_stopped_task(&mut parent);
+    }
     parent.updated_at = now_ms();
     if let Err(e) = app.store.save_task(&parent) {
         discard_children(app, children).await;

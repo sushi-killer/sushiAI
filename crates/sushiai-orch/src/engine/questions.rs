@@ -216,9 +216,8 @@ async fn park_for_answer(
     let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
     let result = reply.map(|r| r.text);
     match &result {
-        // The caller keeps using (and later saves) its own copy, so the
-        // transition is applied to it rather than to a fresh load -- a
-        // stale copy used to overwrite it with the question still set.
+        // Keep the caller's copy in sync with either transition so its
+        // next save cannot restore the open question.
         Some(answer) => {
             // The chat or an MCP client answered: an orchestrator line, which
             // also counts toward the continue cap. Peeked, not taken: the
@@ -238,13 +237,19 @@ async fn park_for_answer(
             app.broadcast_task(task);
         }
         None => {
-            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+            if let Ok(Some(saved)) = app.store.load_task(task_id) {
+                *task = saved;
                 let next = app.cancelled_status(&task.status);
-                if task.status != next {
+                let changed =
+                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
+                if next == TaskStatus::Stopped {
+                    app.close_stopped_task(task);
+                }
+                if changed {
                     task.status = next;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
                 }
             }
         }

@@ -778,6 +778,10 @@ impl App {
             task.status,
             TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
         );
+        if active && live {
+            // The loop saves the closed question in its own cancellation path.
+            self.close_stopped_task(&mut task);
+        }
         let all = self.repo_tasks(&task.repo);
         let parent = is_parent(&task, &all);
         if parent {
@@ -785,6 +789,7 @@ impl App {
         }
         if !live && task.status == TaskStatus::Landing {
             task.status = TaskStatus::Stopped;
+            self.close_stopped_task(&mut task);
             task.updated_at = now_ms();
             self.release_worktree(&mut task, "stopped while waiting to land")
                 .await;
@@ -794,13 +799,16 @@ impl App {
             self.advance_graph(&task.repo);
         }
         if !live
-            && (parent || !task.depends_on.is_empty() || task.queue.queue_reason.is_some())
+            && (parent
+                || !task.depends_on.is_empty()
+                || task.queue.queue_reason.is_some()
+                || task.status == TaskStatus::Waiting)
             && matches!(
                 task.status,
                 TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
             )
         {
-            task.question = None;
+            self.close_stopped_task(&mut task);
             task.queue.queue_reason = None;
             task.status = TaskStatus::Stopped;
             task.updated_at = now_ms();
@@ -973,6 +981,7 @@ impl App {
                 }
             }
             task.status = TaskStatus::Stopped;
+            self.close_stopped_task(&mut task);
             task.updated_at = now_ms();
             self.store.save_task(&task).map_err(|e| e.to_string())?;
             self.broadcast_task(&task);

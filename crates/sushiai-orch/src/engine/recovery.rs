@@ -2,12 +2,10 @@ use super::*;
 use crate::store::RunFate;
 
 impl App {
-    /// spec step 10: attempts left `running` from a previous process
-    /// become `interrupted`; their tasks become `stopped`.
-    /// Every task that was in flight when the daemon stopped gets its loop
-    /// back: interrupted attempts are marked and requeued by the store, and
-    /// queued or drafting tasks simply resume. A `waiting` task needs no loop
-    /// until its answer arrives (`task.answer` relaunches one).
+    /// Restores loops for in-flight work: interrupted attempts are marked
+    /// and requeued by the store, and queued or drafting tasks resume.
+    /// Stopped tasks stay stopped. A `waiting` task needs no loop until
+    /// its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
         // No overseer turn survives a restart: nothing is held any more.
         // First, so a resumed loop never parks beside a stale hold.
@@ -21,6 +19,10 @@ impl App {
             },
         )?;
         for t in recovered {
+            if !t.archived && t.status == TaskStatus::Stopped && t.question.is_some() {
+                // Broadcast below, once the stopped task's question is closed.
+                continue;
+            }
             self.broadcast_task(&t);
         }
         // Spend recorded before per-run cost records existed; a no-op once done.
@@ -34,6 +36,15 @@ impl App {
         tasks.sort_by_key(|t| resumable_attempt(self, t).is_none());
         for mut t in tasks {
             if t.archived {
+                continue;
+            }
+            if t.status == TaskStatus::Stopped {
+                if t.question.is_some() {
+                    self.close_stopped_task(&mut t);
+                    t.updated_at = now_ms();
+                    self.store.save_task(&t)?;
+                    self.broadcast_task(&t);
+                }
                 continue;
             }
             if matches!(

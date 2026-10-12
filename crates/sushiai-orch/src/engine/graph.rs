@@ -260,6 +260,7 @@ async fn parent_base_preflight(
             }
             task.question = None;
             task.status = TaskStatus::Stopped;
+            app.close_stopped_task(task);
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
             app.broadcast_task(task);
@@ -359,6 +360,7 @@ async fn parent_finals_on_base(
         }
         task.question = None;
         task.status = TaskStatus::Stopped;
+        app.close_stopped_task(task);
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
@@ -1411,11 +1413,17 @@ impl App {
             {
                 continue;
             }
-            if let Some(ctrl) = self.controls.lock().unwrap().get(&child.id) {
-                ctrl.cancel.cancel();
+            let live = match self.controls.lock().unwrap().get(&child.id) {
+                Some(ctrl) => {
+                    ctrl.cancel.cancel();
+                    true
+                }
+                None => false,
+            };
+            self.close_stopped_task(&mut child);
+            if live {
                 continue;
             }
-            child.question = None;
             child.status = TaskStatus::Stopped;
             child.updated_at = now_ms();
             let _ = self.store.save_task(&child);
@@ -1489,6 +1497,7 @@ impl App {
                     .to_string(),
             );
             task.status = TaskStatus::Stopped;
+            self.close_stopped_task(&mut task);
             task.updated_at = now_ms();
             self.store.save_task(&task).map_err(|e| e.to_string())?;
             self.broadcast_task(&task);

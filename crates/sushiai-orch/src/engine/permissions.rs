@@ -529,10 +529,25 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
             .as_ref()
             .is_some_and(|q| q.text == question.text)
         {
-            task.question = None;
             if let Some(answer) = &answer {
+                task.question = None;
                 record_answer(&mut task, Some(&question), answer, by_agent);
                 task.status = TaskStatus::Running;
+            } else if app
+                .controls
+                .lock()
+                .unwrap()
+                .get(&ctx.task_id)
+                .is_none_or(|ctrl| ctrl.cancel.is_cancelled())
+            {
+                task.status = app.cancelled_status(&task.status);
+                if task.status == TaskStatus::Stopped {
+                    app.close_stopped_task(&mut task);
+                }
+            } else {
+                // The hook token also fires when a run ends while its task
+                // loop continues; only the expired permission question closes.
+                task.question = None;
             }
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);

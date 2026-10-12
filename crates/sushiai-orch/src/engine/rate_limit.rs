@@ -119,6 +119,9 @@ pub(super) async fn pause_for_rate_limit(
     }
     if !resumed {
         task.status = app.cancelled_status(&task.status);
+        if task.status == TaskStatus::Stopped {
+            app.close_stopped_task(task);
+        }
     }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);

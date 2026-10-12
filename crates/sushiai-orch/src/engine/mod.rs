@@ -674,6 +674,17 @@ impl App {
         }
     }
 
+    pub(super) fn close_stopped_task(&self, task: &mut Task) {
+        if let Some(question) = task.question.take() {
+            task.decisions.push(format!(
+                "Stop: closed the open question \"{}\"",
+                truncate_chars(&question.text, 200)
+            ));
+        }
+        self.leases.lock().unwrap().remove(&task.id);
+        self.permission_waits.lock().unwrap().remove(&task.id);
+    }
+
     /// Registers `token` for a run's Stop hook and keeps it in the run's token
     /// file, so a restarted daemon can register it again for a run it re-adopts.
     fn register_hook(&self, token: &str, ctx: &Arc<HookContext>, run_dir: &Path) {
@@ -846,6 +857,7 @@ mod tests {
     include!("tests/review.rs");
     include!("tests/routing.rs");
     include!("tests/rpc_tasks.rs");
+    include!("tests/stop.rs");
     include!("tests/verify.rs");
     include!("tests/worktrees.rs");
 }

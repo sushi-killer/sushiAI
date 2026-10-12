@@ -1,4 +1,4 @@
-import type { FailureRow, Proposal } from "./types";
+import type { FailureRow, Precedent, Proposal } from "./types";
 
 /** A failure needs to repeat before it counts as recurring. */
 export const MIN_RECURRENCE = 2;
@@ -93,4 +93,56 @@ export function failureNoteDraft(row: FailureRow) {
 /** "REPO NOTES · 3 - standing guidance for the planner". */
 export function sectionLabel(label: string, count: number, hint?: string) {
   return `${label} · ${count}${hint ? ` — ${hint}` : ""}`;
+}
+
+/** The most recent precedents the Improvements view lists. */
+export const MAX_PRECEDENTS = 20;
+
+const KIND_LABELS: Record<string, string> = {
+  attempts_failing: "Attempts failing",
+  review_no_verdict: "Review gave no verdict",
+  dependency_ended: "Dependency ended",
+  impossible: "Task impossible",
+  preexisting_failure: "Base check failing",
+  budget: "Task budget",
+  protected_path: "Protected path",
+  permission: "Permission",
+  review_dispute: "Review dispute",
+  plan_question: "Plan question",
+  daily_budget: "Daily budget",
+  harness_missing: "No agent CLI",
+  agent_question: "Agent question",
+};
+
+/** "Base check failing" for `preexisting_failure`. */
+export function questionKindLabel(kind: string) {
+  if (KIND_LABELS[kind]) return KIND_LABELS[kind];
+  const words = kind.replace(/_/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : "Question";
+}
+
+/** "answered by owner". */
+export function answeredBy(by: string) {
+  return `answered by ${by}`;
+}
+
+/** "×2" for a repeated answer, nothing for a single one. */
+export function countSuffix(count: number) {
+  return count > 1 ? `×${count}` : "";
+}
+
+/** The newest precedents first, at most [MAX_PRECEDENTS]. */
+export function recentPrecedents(rows: Precedent[]) {
+  return [...rows].sort((a, b) => b.lastAt - a.lastAt).slice(0, MAX_PRECEDENTS);
+}
+
+/** The pieces of one precedent row. */
+export function precedentRow(precedent: Precedent) {
+  return {
+    kind: questionKindLabel(precedent.kind),
+    answer: precedent.answer,
+    by: answeredBy(precedent.by),
+    why: precedent.why,
+    count: countSuffix(precedent.count),
+  };
 }

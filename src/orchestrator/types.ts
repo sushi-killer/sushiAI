@@ -832,6 +832,43 @@ export type Note = {
   createdAt: number;
 };
 
+/** One remembered answer to a task question (`precedents.list`). */
+export type Precedent = {
+  id: string;
+  /** The question kind, snake_case as the daemon names it. */
+  kind: string;
+  title: string;
+  signals: string[];
+  commands: string[];
+  answer: string;
+  /** `owner`, `lead`, `overseer`, `chat`, `policy` or `judge`. */
+  by: string;
+  /** One line, may be empty. */
+  why: string;
+  count: number;
+  firstAt: number;
+  lastAt: number;
+};
+
+/** A one-line rule the daemon learned from repeated owner answers; the owner
+ * accepts it (it becomes a repo note) or dismisses it. */
+export type RuleProposal = {
+  id: string;
+  kind: string;
+  answer: string;
+  rule: string;
+  status: "open" | "accepted" | "dismissed";
+  createdAt: number;
+};
+
+export type PrecedentList = {
+  repo: string;
+  /** Newest first. */
+  precedents: Precedent[];
+  /** Open ones only. */
+  proposals: RuleProposal[];
+};
+
 export type Proposal = {
   id: string;
   clusterKey: string;

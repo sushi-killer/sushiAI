@@ -1,0 +1,54 @@
+{
+  "tasks": [
+    {
+      "title": "Fix the login redirect",
+      "status": "done",
+      "goal": "Send a signed-in visitor straight to the page they asked for."
+    }
+  ],
+  "notes": [
+    {
+      "text": "Run the formatter before every commit."
+    }
+  ],
+  "precedents": {
+    "proposals": [
+      {
+        "kind": "preexisting_failure",
+        "answer": "retry after the base is fixed",
+        "rule": "When \"Base check failing\" (cargo test) comes up, answer \"retry after the base is fixed\"."
+      }
+    ],
+    "precedents": [
+      {
+        "kind": "preexisting_failure",
+        "title": "Base check failing",
+        "commands": ["cargo test"],
+        "answer": "retry after the base is fixed",
+        "by": "owner",
+        "why": "the base is flaky and moves daily",
+        "count": 2,
+        "minutesAgo": 5
+      },
+      {
+        "kind": "preexisting_failure",
+        "title": "Base check failing",
+        "commands": ["npm test"],
+        "answer": "retry after the base is fixed",
+        "by": "owner",
+        "why": "the same flake on the web checks",
+        "count": 1,
+        "minutesAgo": 45
+      },
+      {
+        "kind": "agent_question",
+        "title": "Only cargo fmt fails",
+        "answer": "run cargo fmt",
+        "by": "lead",
+        "why": "a formatting-only failure",
+        "count": 1,
+        "minutesAgo": 90
+      }
+    ]
+  }
+}

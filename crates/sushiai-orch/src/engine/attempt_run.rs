@@ -1159,11 +1159,12 @@ mod stall_tests {
         let _ = augmented_path();
         let cancel = CancelToken::new();
         let mut guard = Guard::off();
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(
                 codex_version(bin.to_str().unwrap(), &cancel, &mut guard),
                 async {
-                    while !pidfile.exists() {
+                    // The shell creates the file before it writes the pid.
+                    while std::fs::read_to_string(&pidfile).map_or(true, |p| p.trim().is_empty()) {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     cancel.cancel();

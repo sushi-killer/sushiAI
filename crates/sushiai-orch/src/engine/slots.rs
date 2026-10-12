@@ -132,6 +132,16 @@ pub(super) enum Slot {
 /// the `slot` wait (running and limit), and `cancel` ends the wait.
 pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> Slot {
     if let Ok(permit) = app.slots.clone().try_acquire_owned() {
+        if matches!(task.queue.wait, Some(Wait::Slot { .. })) {
+            task.queue.wait = None;
+            if let Err(e) = app.update_task(&task.id, |t| {
+                if matches!(t.queue.wait, Some(Wait::Slot { .. })) {
+                    t.queue.wait = None;
+                }
+            }) {
+                eprintln!("orch: updating task {} failed: {e}", task.id);
+            }
+        }
         return Slot::Got(permit);
     }
     let (running, limit) = app.slots.usage();
@@ -159,4 +169,31 @@ pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelTo
         eprintln!("orch: updating task {} failed: {e}", task.id);
     }
     got
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn take_slot_fast_path_clears_a_stale_slot_wait() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.queue.wait = Some(Wait::Slot {
+            running: 2,
+            limit: 2,
+        });
+        app.store.save_task(&task).unwrap();
+        let slot = take_slot(&app, &mut task, &CancelToken::new()).await;
+        assert!(matches!(slot, Slot::Got(_)));
+        assert!(task.queue.wait.is_none());
+        assert!(app
+            .store
+            .load_task(&task.id)
+            .unwrap()
+            .unwrap()
+            .queue
+            .wait
+            .is_none());
+    }
 }

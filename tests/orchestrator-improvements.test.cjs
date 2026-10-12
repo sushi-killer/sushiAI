@@ -157,13 +157,21 @@ test("precedent rows name the kind, the answerer, the why and a repeat count", a
   assert.deepEqual(
     precedentRow(precedent({ count: 2, why: "the base moves daily" })),
     {
-      kind: "Base check failing",
+      kind: "Base check failing (cargo test)",
       answer: "retry after the base is fixed",
       by: "answered by owner",
       why: "the base moves daily",
       count: "×2",
     },
   );
+  const kinds = [["cargo test"], ["npm test", "cargo clippy"], []].map(
+    (commands) => precedentRow(precedent({ commands })).kind,
+  );
+  assert.deepEqual(kinds, [
+    "Base check failing (cargo test)",
+    "Base check failing (npm test, cargo clippy)",
+    "Base check failing",
+  ]);
   for (const by of ["lead", "overseer", "policy"]) {
     assert.equal(precedentRow(precedent({ by })).by, `answered by ${by}`);
   }

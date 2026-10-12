@@ -8,6 +8,15 @@
 //! `MAX_DETAIL_CHARS`: the agent's words, plus for an answer the question
 //! prose. A check's raw output tail is never stored (it can hold secrets).
 //! The file stays 0600.
+//!
+//! The optional `decision` ties an entry to the owner decisions it told the
+//! owner about (`asked_owner` and `digest`) or held back (`skipped` deferred to
+//! the morning): one or more decision keys, separated by a newline. A key is
+//! `<task id>|<question kind>|<sorted options joined by US (0x1f)>`, built by
+//! `engine::owner_notice::decision_key`. An entry without `decision` (every
+//! older line) never counts as a notice. `owner_notice::verdict` reads this
+//! field from the whole log, so the "told once" memory survives a daemon
+//! restart and spans overseer sessions.
 
 use crate::model::{Question, QuestionKind};
 use crate::store;
@@ -37,6 +46,10 @@ pub struct Entry {
     /// The full text behind `text` (older entries have none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Decision keys this entry told the owner about, newline separated (see
+    /// the module docs); older entries have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 fn cut(text: &str, max: usize) -> String {
@@ -147,6 +160,19 @@ impl Entry {
         self
     }
 
+    /// Records the decision keys the entry is about (none: left unset).
+    pub fn with_decision(mut self, keys: &[String]) -> Entry {
+        if !keys.is_empty() {
+            self.decision = Some(keys.join("\n"));
+        }
+        self
+    }
+
+    /// The decision keys of the entry; empty for an entry without any.
+    pub fn decision_keys(&self) -> impl Iterator<Item = &str> {
+        self.decision.as_deref().unwrap_or("").lines()
+    }
+
     /// An entry whose text is cut to its first line, at most `MAX_TEXT_CHARS`.
     pub fn new(kind: &str, repo: &str, task_id: Option<&str>, text: &str) -> Entry {
         let line = text.lines().map(str::trim).find(|l| !l.is_empty());
@@ -165,6 +191,7 @@ impl Entry {
             text,
             cost_usd: None,
             detail: None,
+            decision: None,
         }
     }
 }
@@ -299,6 +326,21 @@ mod tests {
             serde_json::from_str(r#"{"ts":1,"repo":"/r","kind":"woke","text":"x"}"#).unwrap();
         assert_eq!(old.detail, None);
         assert!(!serde_json::to_string(&old).unwrap().contains("detail"));
+    }
+
+    #[test]
+    fn an_old_line_without_a_decision_loads_and_has_no_keys() {
+        let old: Entry = serde_json::from_str(
+            r#"{"ts":1,"repo":"/r","kind":"asked_owner","taskId":"t","text":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.decision, None);
+        assert_eq!(old.decision_keys().count(), 0);
+        assert!(!serde_json::to_string(&old).unwrap().contains("decision"));
+        let keys = ["a|b|c".to_string(), "d|e|".to_string()];
+        let e = Entry::new("asked_owner", "/r", None, "x").with_decision(&keys);
+        let back: Entry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.decision_keys().collect::<Vec<_>>(), ["a|b|c", "d|e|"]);
     }
 
     #[test]

@@ -16,8 +16,8 @@ pub(super) fn digest_due(
     digest_hour == Some(local_hour) && last_day != Some(today)
 }
 
-/// Local `("YYYY-MM-DD", hour)` for a Unix time in seconds.
-fn local_day_and_hour(secs: i64) -> Option<(String, u8)> {
+/// Local `("YYYY-MM-DD", hour, minute)` for a Unix time in seconds.
+pub(super) fn local_day_and_time(secs: i64) -> Option<(String, u8, u8)> {
     let t = secs as libc::time_t;
     // SAFETY: `localtime_r` writes only into the zeroed `tm` we pass.
     let tm = unsafe {
@@ -35,6 +35,7 @@ fn local_day_and_hour(secs: i64) -> Option<(String, u8)> {
             tm.tm_mday
         ),
         tm.tm_hour as u8,
+        tm.tm_min as u8,
     ))
 }
 
@@ -50,7 +51,7 @@ impl App {
     /// only once its turn started, so a busy chat is retried on the next
     /// tick while the local hour still matches.
     fn digest_tick(&self, now_secs: i64) {
-        let Some((today, hour)) = local_day_and_hour(now_secs) else {
+        let Some((today, hour, _)) = local_day_and_time(now_secs) else {
             return;
         };
         let digest_hour = self.settings.read().unwrap().digest_hour;
@@ -137,7 +138,7 @@ mod tests {
         task.updated_at = 1;
         app.store.save_task(&task).unwrap();
         let secs = 1_760_000_000;
-        let (_, hour) = local_day_and_hour(secs).unwrap();
+        let (_, hour, _) = local_day_and_time(secs).unwrap();
         app.settings.write().unwrap().digest_hour = Some(hour);
         app.digest_tick(secs);
         chat::wait_idle(&app, &repo_path).await;
@@ -156,7 +157,16 @@ mod tests {
     fn a_turn_end_is_logged_by_what_the_overseer_did() {
         let (app, _dir) = test_app();
         let end = |started: i64, task: &str, end: chat::TurnEnd| {
-            chat::record_overseer_end(&app, "/r", "waiting", Some(task), started, Some(0.25), end)
+            chat::record_overseer_end(
+                &app,
+                "/r",
+                "waiting",
+                Some(task),
+                started,
+                Some(0.25),
+                end,
+                None,
+            )
         };
         // No answer: the reply is for the owner, with the turn's cost.
         end(0, "t1", chat::TurnEnd::Reply("Which branch?\nmore".into()));
@@ -165,6 +175,23 @@ mod tests {
         end(0, "t2", chat::TurnEnd::Reply("Answered.".into()));
         end(0, "t3", chat::TurnEnd::Stopped);
         end(0, "t4", chat::TurnEnd::Failed("harness exploded".into()));
+        // The turn settled its question itself: kept as `done`, never a notice.
+        let gate = |verdict| {
+            Some(owner_notice::Gate {
+                verdict,
+                keys: vec!["t5|agent_question|A".to_string()],
+            })
+        };
+        chat::record_overseer_end(
+            &app,
+            "/r",
+            "waiting",
+            Some("t5"),
+            0,
+            None,
+            chat::TurnEnd::Reply("Retried it.\nSecond line.".into()),
+            gate(owner_notice::Verdict::Resolved),
+        );
         let log = overseer::read(&app.data_dir, None, None);
         let got: Vec<_> = log
             .iter()
@@ -179,8 +206,39 @@ mod tests {
                 ("done", "Answered.", Some(0.25)),
                 ("skipped", "Stopped by you", Some(0.25)),
                 ("failed", "harness exploded", Some(0.25)),
+                ("done", "Retried it.", None),
             ]
         );
+        let resolved = &log[0];
+        assert_eq!(
+            resolved.detail.as_deref(),
+            Some("Retried it.\nSecond line.")
+        );
+        assert_eq!(resolved.decision, None);
+        // A duplicate and a deferred reply are logged as skipped with the reply behind them.
+        for (verdict, text) in [
+            (owner_notice::Verdict::Duplicate, owner_notice::DUPLICATE),
+            (owner_notice::Verdict::Deferred, owner_notice::DEFERRED),
+        ] {
+            chat::record_overseer_end(
+                &app,
+                "/r",
+                "waiting",
+                Some("t5"),
+                0,
+                None,
+                chat::TurnEnd::Reply("Keep going?".into()),
+                gate(verdict),
+            );
+            let last = &overseer::read(&app.data_dir, None, Some(1))[0];
+            assert_eq!((last.kind.as_str(), last.text.as_str()), ("skipped", text));
+            assert_eq!(last.detail.as_deref(), Some("Keep going?"));
+            // Only the held notice remembers its decision.
+            assert_eq!(
+                last.decision.is_some(),
+                verdict == owner_notice::Verdict::Deferred
+            );
+        }
     }
 
     #[tokio::test]

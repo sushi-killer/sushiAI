@@ -32,14 +32,23 @@ impl App {
     /// a `waitRemindEveryHours` interval wakes the overseer with a reminder.
     pub(super) async fn wait_sla_tick(&self, now: i64) {
         self.release_expired_holds(now);
-        let (remind, default, auto_answer) = {
+        let (remind, default, auto_answer, digest_off, notice) = {
             let s = self.settings.read().unwrap();
             (
                 s.wait_remind_every_hours,
                 s.wait_default_after_hours,
                 s.auto_answer,
+                s.digest_hour.is_none(),
+                owner_notice::NoticeSettings::from_settings(&s),
             )
         };
+        let minute = owner_notice::minute_of_day(now);
+        let quiet = owner_notice::in_quiet(notice.quiet, minute);
+        // Without a digest, the notices held overnight go out once quiet hours end.
+        if digest_off && !quiet {
+            self.post_held_notices(now);
+        }
+        let mut log: Option<Vec<crate::overseer::Entry>> = None;
         if remind == 0 && default == 0 {
             return;
         }
@@ -70,6 +79,15 @@ impl App {
                 }
             }
             if auto_answer && reminder_due(asked_at, task.queue.wait_reminded_at, remind, now) {
+                // A reminder that would only repeat a recent notice, or that
+                // quiet hours hold, starts no wake; the next tick asks again.
+                let key = owner_notice::decision_key(&task.id, &question);
+                let log = log.get_or_insert_with(|| self.notice_log());
+                if owner_notice::verdict(log, &key, now, minute, &notice)
+                    != owner_notice::Verdict::Notify
+                {
+                    continue;
+                }
                 // Only a question still waiting, and the same one, is reminded.
                 let mut reminded = false;
                 if let Err(e) = self.update_task(&task.id, |fresh| {
@@ -317,6 +335,199 @@ mod tests {
         chat::wait_idle(&app, &repo.to_string_lossy()).await;
         assert_eq!(chat::fake_overseer_calls(&repo), 1);
         assert_eq!(chat::fake_overseer_calls(&owner_repo), 0);
+    }
+
+    fn kinds(app: &App, repo: &str, kind: &str) -> usize {
+        crate::overseer::read(&app.data_dir, Some(repo), None)
+            .iter()
+            .filter(|e| e.kind == kind)
+            .count()
+    }
+
+    fn told(app: &App, task: &Task, ts: i64) {
+        let key = owner_notice::decision_key(&task.id, task.question.as_ref().unwrap());
+        let mut entry = crate::overseer::Entry::new("asked_owner", &task.repo, Some(&task.id), "Q")
+            .with_decision(&[key]);
+        entry.ts = ts;
+        app.record_overseer(entry);
+    }
+
+    #[tokio::test]
+    async fn a_restart_tells_the_owner_once_and_a_second_restart_says_nothing() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        app.settings.write().unwrap().wait_remind_every_hours = 4;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let mut task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
+        task.question.as_mut().unwrap().asked_at = Some(now_ms());
+        app.store.save_task(&task).unwrap();
+        // The fake overseer answers nothing, so the question is still open: it is told.
+        app.wake_overseer_for_waiting_after_restart();
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &repo_str).await;
+        assert!(chat::thread_has_text(&app, &repo_str, "Overseer note."));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1);
+        // A new daemon reads the same overseer log and tells nothing again.
+        let again = App::new(
+            dir.path().join("data"),
+            dir.path().join("home"),
+            "orchd".to_string(),
+        )
+        .unwrap();
+        again.assume_harnesses_installed();
+        again.settings.write().unwrap().auto_answer = true;
+        again.settings.write().unwrap().quiet_hours = String::new();
+        again.wake_overseer_for_waiting_after_restart();
+        calls_reach(&repo, 2).await;
+        chat::wait_idle(&again, &repo_str).await;
+        let notes = chat::thread_text_count(&again, &repo_str, "Overseer note.");
+        assert_eq!(notes, 1, "no second message");
+        assert_eq!(kinds(&again, &repo_str, "asked_owner"), 1);
+        assert_eq!(kinds(&again, &repo_str, "skipped"), 1);
+        let skipped = crate::overseer::read(&again.data_dir, Some(&repo_str), Some(1));
+        assert_eq!(skipped[0].text, owner_notice::DUPLICATE);
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_only_told_questions_posts_nothing_and_logs_no_asked_owner() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        app.settings.write().unwrap().wait_remind_every_hours = 4;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
+        app.store.save_task(&task).unwrap();
+        told(&app, &task, now_ms() - 1000);
+        let before = kinds(&app, &repo_str, "asked_owner");
+        app.wake_overseer_for_waiting_after_restart();
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &repo_str).await;
+        assert!(!chat::thread_has_text(&app, &repo_str, "Overseer note."));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), before);
+    }
+
+    #[tokio::test]
+    async fn a_turn_whose_question_is_gone_is_done_and_never_reaches_the_chat() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        // The task is not waiting any more when the turn ends: it settled the question.
+        let mut task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        assert!(chat::wake_overseer(
+            &app,
+            &repo_str,
+            "p".into(),
+            false,
+            "waiting",
+            Some(&id)
+        ));
+        task.status = TaskStatus::Running;
+        task.question = None;
+        app.store.save_task(&task).unwrap();
+        chat::wait_idle(&app, &repo_str).await;
+        assert!(!chat::thread_has_text(&app, &repo_str, "Overseer note."));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 0);
+        assert_eq!(kinds(&app, &repo_str, "done"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_digest_restarts_the_reminder_window_and_the_reminder_comes_once_after_it() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        {
+            let mut s = app.settings.write().unwrap();
+            s.auto_answer = true;
+            s.wait_remind_every_hours = 1;
+        }
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
+        app.store.save_task(&task).unwrap();
+        // The owner heard the question 30 minutes after it was asked.
+        let key = owner_notice::decision_key(&task.id, task.question.as_ref().unwrap());
+        let mut digest =
+            crate::overseer::Entry::new("digest", &repo_str, None, "Digest").with_decision(&[key]);
+        digest.ts = T0 + HALF_HOUR;
+        app.record_overseer(digest);
+        // One interval after the question, the notice is only 30 minutes old: no wake.
+        app.wait_sla_tick(T0 + HOUR_MS).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 0);
+        // One interval after the notice: one reminder, and none again at once.
+        app.wait_sla_tick(T0 + HALF_HOUR + HOUR_MS).await;
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &repo_str).await;
+        app.wait_sla_tick(T0 + HALF_HOUR + HOUR_MS + 1000).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_start_no_reminder_and_the_held_notice_is_posted_once_after_them() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        {
+            let mut s = app.settings.write().unwrap();
+            s.auto_answer = true;
+            s.wait_remind_every_hours = 1;
+            // A window that holds the local minute of the tick, in any zone.
+            let m = owner_notice::minute_of_day(T0 + 2 * HOUR_MS);
+            let (from, to) = (m, (m + 120) % 1440);
+            s.quiet_hours = format!(
+                "{:02}:{:02}-{:02}:{:02}",
+                from / 60,
+                from % 60,
+                to / 60,
+                to % 60
+            );
+        }
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
+        app.store.save_task(&task).unwrap();
+        let key = owner_notice::decision_key(&task.id, task.question.as_ref().unwrap());
+        app.wait_sla_tick(T0 + 2 * HOUR_MS).await;
+        assert_eq!(
+            chat::fake_overseer_calls(&repo),
+            0,
+            "no reminder wake in quiet hours"
+        );
+        // A notice held overnight, with the digest off, goes out once the window ends.
+        let mut held = crate::overseer::Entry::new(
+            "skipped",
+            &repo_str,
+            Some(&task.id),
+            owner_notice::DEFERRED,
+        )
+        .with_detail("Which way?\nA or B\nI suggest A.")
+        .with_decision(&[key]);
+        held.ts = T0;
+        app.record_overseer(held);
+        app.wait_sla_tick(T0 + 2 * HOUR_MS).await;
+        assert!(!chat::thread_has_text(
+            &app,
+            &repo_str,
+            "Which way?\nA or B\nI suggest A."
+        ));
+        app.settings.write().unwrap().quiet_hours = String::new();
+        app.wait_sla_tick(T0 + 3 * HOUR_MS).await;
+        assert!(chat::thread_has_text(
+            &app,
+            &repo_str,
+            "Which way?\nA or B\nI suggest A."
+        ));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1);
+        app.wait_sla_tick(T0 + 3 * HOUR_MS + 1000).await;
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1, "once");
     }
 
     /// The `heldForOverseer` flag of each broadcast of task `id`, in order.

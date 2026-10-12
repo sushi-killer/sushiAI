@@ -306,6 +306,23 @@ fn drop_all_removes_the_check_and_the_first_attempt_lands() {
 }
 
 #[test]
+fn drop_all_never_lands_the_attempt_without_a_review_verdict() {
+    let scripts = tempfile::tempdir().unwrap();
+    let daemon = spawn(scripts.path());
+    let repo = init_git_repo();
+    let id = start(&daemon, repo.path(), "false");
+    waiting_with_attempts(&daemon, &id, 1);
+
+    daemon.request("task.answer", json!({"id": id, "answer": "drop all"}));
+    let done = poll_until(&daemon, &id, |s| s == "done");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    assert_eq!(done["attempts"][0]["review"]["verdict"], "PASS", "{done}");
+    assert_eq!(done["attempts"][0]["status"], "passed", "{done}");
+
+    daemon.shutdown_and_wait();
+}
+
+#[test]
 fn retry_after_the_base_is_fixed_moves_to_the_new_base_and_runs_one_more_attempt() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path());

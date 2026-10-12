@@ -3640,6 +3640,17 @@ pub(super) async fn finish_after_review(
             task.updated_at = now_ms();
             app.save_task_logged(task);
             app.broadcast_task(task);
+            // The failing check cost the attempt its review: it is judged
+            // again, never landed without a verdict.
+            if ordinary.is_empty()
+                && task.attempts[idx].review.is_none()
+                && !settings.review.is_empty()
+            {
+                task.decisions.push(format!(
+                    "Orchestrator: attempt {attempt_n} reviewed again because its review was discarded by a check that failed on the base"
+                ));
+                return back_to_review(app, task, idx, permit);
+            }
             if !ordinary.is_empty() {
                 return match fail_and_continue(
                     app,
@@ -3682,6 +3693,27 @@ pub(super) async fn finish_after_review(
         permit,
     )
     .await
+}
+
+/// Sends a passed attempt back to the loop: it follows the finished run
+/// again, so verify and the review judge the tree with no new implement
+/// attempt.
+fn back_to_review(
+    app: &Arc<App>,
+    task: &mut Task,
+    idx: usize,
+    permit: &mut Option<SlotPermit>,
+) -> Tail {
+    let a = &mut task.attempts[idx];
+    a.status = AttemptStatus::Running;
+    a.ended_at = None;
+    a.failure = None;
+    task.status = TaskStatus::Running;
+    task.updated_at = now_ms();
+    app.save_task_logged(task);
+    app.broadcast_task(task);
+    *permit = None;
+    Tail::Continue
 }
 
 /// What follows a passed attempt: the task lands on its parent or its base
@@ -3769,18 +3801,7 @@ pub(super) async fn finish_attempt(
             }
             // The loop follows the finished run again: its verify and review
             // judge the carried tree, with no new implement attempt.
-            Landing::Rereview => {
-                let a = &mut task.attempts[idx];
-                a.status = AttemptStatus::Running;
-                a.ended_at = None;
-                a.failure = None;
-                task.status = TaskStatus::Running;
-                task.updated_at = now_ms();
-                app.save_task_logged(task);
-                app.broadcast_task(task);
-                *permit = None;
-                return Tail::Continue;
-            }
+            Landing::Rereview => return back_to_review(app, task, idx, permit),
             Landing::Cancelled => {
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());

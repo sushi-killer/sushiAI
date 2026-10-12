@@ -392,8 +392,12 @@ impl App {
     }
 
     /// Deletes the unredacted output of every attempt of `task` that is
-    /// settled: a `running` attempt may still be resumed from it.
+    /// settled: a `running` attempt may still be resumed from it, and a
+    /// landing task may go back to review its attempt after a retry.
     pub(super) fn drop_settled_output(&self, task: &Task) {
+        if task.status == TaskStatus::Landing {
+            return;
+        }
         for attempt in &task.attempts {
             if attempt.status != AttemptStatus::Running {
                 remove_raw_output(&self.store.run_dir(&task.id, attempt.n));

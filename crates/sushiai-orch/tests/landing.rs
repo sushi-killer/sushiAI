@@ -887,3 +887,67 @@ fn a_landing_carry_that_rewrites_a_reviewed_file_runs_verify_and_the_review_agai
     assert_eq!(y_done["landedSha"], git_out(root, &["rev-parse", "work"]));
     daemon.shutdown_and_wait();
 }
+
+#[test]
+fn a_rereview_after_the_landing_waited_reviews_the_same_attempt_again() {
+    let gates = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", REREVIEW_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("GATES", gates.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["briefCheckRoute"] = serde_json::json!("claude-sonnet");
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let lines: String = (1..=9).map(|i| format!("l{i}\n")).collect();
+    std::fs::write(root.join("shared.txt"), lines).unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(root, &["commit", "-q", "-m", "shared lines"]);
+
+    let g = gates.path().display();
+    let verify = format!(
+        "case \"$PWD\" in */base-runs/*) exit 1;; esac; echo run >> {g}/verify.log; grep -q Y9 shared.txt"
+    );
+    // A dirty base checkout makes the passed task wait in landing.
+    std::fs::write(root.join("README.md"), "hello\nmy edit\n").unwrap();
+    let y = create(&daemon, root, "y", &verify, true);
+    let id = y["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let waiting = poll_until(&daemon, &id, |s| {
+        matches!(s, "landing" | "done" | "failed" | "stopped")
+    });
+    assert_eq!(waiting["status"], "landing", "{waiting}");
+
+    // The branch moves in a file the review saw, then the checkout is clean.
+    let shared = std::fs::read_to_string(root.join("shared.txt")).unwrap();
+    std::fs::write(root.join("shared.txt"), shared.replace("l1\n", "X1\n")).unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(
+        root,
+        &["commit", "-q", "-m", "owner edit", "--", "shared.txt"],
+    );
+    git_out(root, &["checkout", "--", "README.md"]);
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+
+    let attempts = done["attempts"].as_array().unwrap();
+    let implements = attempts.iter().filter(|a| a["stage"] == "implement");
+    assert_eq!(implements.count(), 1, "{done}");
+    assert!(attempts.iter().all(|a| a["status"] != "running"), "{done}");
+    let count = |name: &str| {
+        std::fs::read_to_string(gates.path().join(name))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.is_empty() && (name == "verify.log" || *l == "y"))
+            .count()
+    };
+    assert_eq!(count("verify.log"), 2);
+    assert_eq!(count("reviews"), 2);
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    daemon.shutdown_and_wait();
+}

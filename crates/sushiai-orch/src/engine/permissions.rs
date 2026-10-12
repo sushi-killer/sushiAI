@@ -516,13 +516,17 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
     task.updated_at = now_ms();
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
-    let answer = tokio::select! {
+    let reply = tokio::select! {
         _ = ctx.cancel.cancelled() => None,
         a = rx => a.ok(),
     };
+    let evidence = reply.as_ref().and_then(|r| r.default_evidence.as_deref());
+    let answer = reply.as_ref().map(|r| r.text.clone());
     app.permission_waits.lock().unwrap().remove(&ctx.task_id);
     // `task.answer` marks an agent's answer (it may only deny here).
-    let by_agent = app.take_agent_answer(&ctx.task_id);
+    let caller = app
+        .take_agent_answer(&ctx.task_id)
+        .unwrap_or(AnsweredBy::Owner);
     if let Ok(Some(mut task)) = app.store.load_task(&ctx.task_id) {
         if task
             .question
@@ -531,7 +535,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         {
             if let Some(answer) = &answer {
                 task.question = None;
-                record_answer(&mut task, Some(&question), answer, by_agent);
+                record_answer_for(&mut task, Some(&question), answer, caller, evidence);
                 task.status = TaskStatus::Running;
             } else if app
                 .controls
@@ -1097,5 +1101,60 @@ mod tests {
         );
         assert!(block.contains("No tool: "), "{block}");
         assert!(!tools_block(&tools, true).contains("No tool: "));
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_held_permission_refusal_keeps_the_caller_and_policy_evidence() {
+        for (source, caller) in [
+            (None, AnsweredBy::Owner),
+            (Some("lead"), AnsweredBy::Lead),
+            (Some("overseer"), AnsweredBy::Overseer),
+            (Some("chat"), AnsweredBy::Orchestrator),
+            (Some("policy"), AnsweredBy::Policy),
+        ] {
+            let (app, _dir) = test_app();
+            let task = task_with_status(TaskStatus::Running);
+            app.store.save_task(&task).unwrap();
+            let ctx = HookContext::new(&task, 1, Path::new(&task.worktree), &task.base_sha);
+            let loop_app = app.clone();
+            let mut events = app.subscribe();
+            let waiter = tokio::spawn(async move {
+                ask(
+                    &loop_app,
+                    &ctx,
+                    &Subject::Tool("mcp__example__write".into()),
+                    "",
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut params = json!({"id": task.id, "answer": "Deny"});
+            if let Some(source) = source {
+                params["source"] = json!(source);
+            }
+            if caller == AnsweredBy::Policy {
+                params["evidence"] = json!("waited");
+            }
+            app.handle_task_answer(params).await.unwrap();
+            assert_eq!(waiter.await.unwrap().as_deref(), Some("Deny"));
+            let task = app.store.load_task(&task.id).unwrap().unwrap();
+            assert_eq!(task.status, TaskStatus::Running);
+            assert!(task.question.is_none());
+            assert_eq!(task.question_history[0].answered_by, caller);
+            if caller == AnsweredBy::Policy {
+                assert_eq!(task.assumptions[0].evidence, "waited");
+                assert!(task.decisions[0].starts_with("Policy:"));
+            }
+            assert!(app.agent_answers.lock().unwrap().is_empty());
+            app.shutdown();
+        }
     }
 }

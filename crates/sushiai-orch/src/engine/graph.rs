@@ -1387,7 +1387,7 @@ impl App {
                     0,
                 );
                 if self
-                    .answer_dependency_question(task.clone(), answer, false)
+                    .answer_dependency_question(task.clone(), answer, None, None)
                     .is_ok()
                 {
                     return;
@@ -1439,7 +1439,8 @@ impl App {
         &self,
         mut task: Task,
         answer: &str,
-        by_owner: bool,
+        caller: Option<AnsweredBy>,
+        default_evidence: Option<&str>,
     ) -> Result<serde_json::Value, String> {
         let all = self.repo_tasks(&task.repo);
         let was_parent = is_parent(&task, &all);
@@ -1449,6 +1450,19 @@ impl App {
             .cloned()
             .collect();
         let choice = answer.trim().to_ascii_lowercase();
+        if !choice.starts_with("retry") && !choice.starts_with("drop") {
+            return Err("answer retry the dependency, drop the dependency, or stop".to_string());
+        }
+        if let Some(caller) = caller {
+            let question = task.question.clone();
+            record_answer_for(
+                &mut task,
+                question.as_ref(),
+                answer.trim(),
+                caller,
+                default_evidence,
+            );
+        }
         if choice.starts_with("retry") {
             for dep in ended.iter().filter(|t| !t.archived) {
                 if self.controls.lock().unwrap().contains_key(&dep.id) {
@@ -1472,20 +1486,14 @@ impl App {
                 .filter(|t| t.parent.as_deref() == Some(task.id.as_str()))
             {
                 child.parent = None;
-                child
-                    .decisions
-                    .push(format!("Owner: dropped from \"{}\"", task.title));
+                child.decisions.push(format!(
+                    "{}: dropped from \"{}\"",
+                    answerer_label(&task).unwrap_or("Policy"),
+                    task.title
+                ));
                 child.updated_at = now_ms();
                 self.store.save_task(&child).map_err(|e| e.to_string())?;
                 self.broadcast_task(&child);
-            }
-        } else {
-            return Err("answer retry the dependency, drop the dependency, or stop".to_string());
-        }
-        if by_owner {
-            task.decisions.push(format!("Owner: {}", answer.trim()));
-            if let Some(question) = task.question.clone() {
-                record_answered_question(&mut task, &question, answer.trim(), AnsweredBy::Owner);
             }
         }
         task.question = None;

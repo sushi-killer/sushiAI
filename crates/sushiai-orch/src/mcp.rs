@@ -519,12 +519,9 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
     let args = with_task_mcp(method, args, task_mcp);
-    let chat = if std::env::var("ORCHD_BRIDGE_SOURCE").as_deref() == Ok("overseer") {
-        "overseer"
-    } else {
-        "chat"
-    };
-    let args = with_source(method, args, bridge.task.is_some(), chat);
+    let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
+    let source = bridge_source(declared_source.as_deref());
+    let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match (bridge.call)(method, args) {
         Ok(result) => tool_ok(result),
@@ -552,17 +549,24 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
     args
 }
 
+fn bridge_source(source: Option<&str>) -> &'static str {
+    match source {
+        Some("overseer") => "overseer",
+        Some("chat") => "chat",
+        _ => "lead",
+    }
+}
+
 /// Records where a task created through this bridge started: the
 /// orchestrator chat agent (no task id) is `chat`, a task's own agent is
 /// `handoff`. A source the caller set itself is kept.
-/// `chat` names the source of a call made outside a task: `chat` for the
-/// owner's own chat turns, `overseer` for a turn orchd woke by itself.
-fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Value {
+/// `source` names the caller outside a task: a lead, chat, or overseer turn.
+fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> Value {
     if method == "task.answer" || method == "task.amend" {
         // Never trusted from the caller: it marks the answer as not the
         // owner's, so orchd refuses an allow on an owner-only question.
         if let Some(obj) = args.as_object_mut() {
-            let source = if from_task { "mcp" } else { chat };
+            let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
         }
     }
@@ -571,7 +575,7 @@ fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Va
         // call so the backend refuses one too.
         if let Some(obj) = args.as_object_mut() {
             obj.remove("branch");
-            let source = if from_task { "mcp" } else { chat };
+            let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
         }
     }
@@ -721,7 +725,7 @@ mod tests {
         assert_eq!(method, "task.pr");
         assert!(args.get("branch").is_none());
         assert_eq!(args["id"], "t1");
-        assert_eq!(args["source"], "chat");
+        assert_eq!(args["source"], "lead");
     }
 
     #[test]
@@ -999,6 +1003,37 @@ mod tests {
 #[cfg(test)]
 mod answer_source_tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_source_defaults_to_lead_and_only_recognizes_chat_and_overseer() {
+        for (declared, expected) in [
+            (None, "lead"),
+            (Some(""), "lead"),
+            (Some("unknown"), "lead"),
+            (Some("lead"), "lead"),
+            (Some("chat"), "chat"),
+            (Some("overseer"), "overseer"),
+        ] {
+            let source = bridge_source(declared);
+            assert_eq!(source, expected);
+            for forged in ["owner", "policy", "lead", "chat", "overseer"] {
+                let args = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    false,
+                    source,
+                );
+                assert_eq!(args["source"], expected);
+                let task = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    true,
+                    source,
+                );
+                assert_eq!(task["source"], "mcp");
+            }
+        }
+    }
 
     #[test]
     fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {

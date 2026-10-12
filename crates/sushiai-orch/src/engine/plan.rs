@@ -224,7 +224,9 @@ pub(super) fn subtask_request(parent: &Task, part: &str) -> String {
     let decided: Vec<&String> = parent
         .decisions
         .iter()
-        .filter(|d| d.starts_with("Owner:") || d.starts_with("Orchestrator:"))
+        .filter(|d| {
+            d.starts_with("Owner:") || d.starts_with("Lead:") || d.starts_with("Orchestrator:")
+        })
         .collect();
     if !decided.is_empty() {
         out.push_str("\n\nAlready decided for the whole task:\n");
@@ -306,14 +308,20 @@ pub(super) async fn ask_plan_question(
         Some(answer) => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 // Peeked: the caller reads the mark again for its own wording.
-                let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
-                if by_agent || evidence.is_some() {
+                let caller = app
+                    .agent_answers
+                    .lock()
+                    .unwrap()
+                    .get(task_id)
+                    .copied()
+                    .unwrap_or(AnsweredBy::Owner);
+                if caller != AnsweredBy::Owner || evidence.is_some() {
                     let question = task.question.take();
                     record_answer_for(
                         &mut task,
                         question.as_ref(),
                         answer,
-                        true,
+                        caller,
                         evidence.as_deref(),
                     );
                 } else {
@@ -988,10 +996,11 @@ pub(super) async fn run_plan_stage(
             .await
             {
                 Some(answer) => {
-                    let who = if app.take_agent_answer(task_id) {
-                        "Orchestrator"
-                    } else {
-                        "Owner"
+                    let who = match app.take_agent_answer(task_id) {
+                        Some(AnsweredBy::Lead) => "Lead",
+                        Some(AnsweredBy::Policy | AnsweredBy::Judge) => "Policy",
+                        Some(_) => "Orchestrator",
+                        None => "Owner",
                     };
                     if let Ok(Some(mut t)) = app.store.load_task(task_id) {
                         let combined = format!(

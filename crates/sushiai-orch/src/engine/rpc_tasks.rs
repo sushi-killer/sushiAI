@@ -887,7 +887,7 @@ impl App {
         struct P {
             id: String,
             answer: String,
-            /// Set by the MCP bridge (`chat`, `mcp`); the app sends none.
+            /// Declared by an agent or set by the MCP bridge; the app sends none.
             #[serde(default)]
             source: Option<String>,
             /// With source `policy` (the waiting SLA): why this answer was given.
@@ -896,6 +896,14 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
+        let caller = match p.source.as_deref() {
+            None | Some("") => AnsweredBy::Owner,
+            Some("lead" | "mcp") => AnsweredBy::Lead,
+            Some("overseer") => AnsweredBy::Overseer,
+            Some("chat") => AnsweredBy::Orchestrator,
+            Some("policy") => AnsweredBy::Policy,
+            Some(source) => return Err(format!("unknown answer source: {source}")),
+        };
         let default_evidence = match (p.source.as_deref(), &p.evidence) {
             (Some("policy"), Some(e)) => Some(e.clone()),
             (Some("policy"), None) => return Err("a policy answer needs its evidence".to_string()),
@@ -909,7 +917,7 @@ impl App {
         if task.status != TaskStatus::Waiting || task.question.is_none() {
             return Err("task is not waiting for an answer".to_string());
         }
-        if p.source.as_deref().is_some_and(|s| !s.is_empty()) {
+        if caller != AnsweredBy::Owner {
             if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
                 if !is_refusal(q, &p.answer) {
                     return Err(format!(
@@ -920,7 +928,7 @@ impl App {
             }
         }
 
-        let by_agent = p.source.as_deref().is_some_and(|s| !s.is_empty());
+        let by_agent = caller != AnsweredBy::Owner;
         if by_agent {
             if let Some(q) = task.question.as_ref() {
                 let settings = self.settings.read().unwrap();
@@ -938,11 +946,7 @@ impl App {
                 .question
                 .as_ref()
                 .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing);
-            let continues = task
-                .decisions
-                .iter()
-                .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-                .count();
+            let continues = non_owner_continues(&task);
             if exhausted
                 && continues >= MAX_ORCHESTRATOR_CONTINUES
                 && !p.answer.trim().eq_ignore_ascii_case("stop")
@@ -952,7 +956,22 @@ impl App {
                         .to_string(),
                 );
             }
-            self.agent_answers.lock().unwrap().insert(p.id.clone());
+            if let Some(q) = task.question.as_ref().filter(|q| {
+                q.kind == QuestionKind::PreexistingFailure
+                    && !q.commands.is_empty()
+                    && is_option(&p.answer, PRE_EXISTING_RETRY)
+            }) {
+                if q.commands
+                    .iter()
+                    .all(|command| non_owner_base_retry(&task, command, Some(&task.base_sha)))
+                {
+                    return Err("these checks already got a non-owner retry on this base: the owner decides now".to_string());
+                }
+            }
+            self.agent_answers
+                .lock()
+                .unwrap()
+                .insert(p.id.clone(), caller);
             // Only a turn orchd woke is the overseer; the owner's chat is not.
             if p.source.as_deref() == Some("overseer") {
                 self.record_overseer(overseer::Entry::answered(
@@ -972,14 +991,13 @@ impl App {
             }
             self.agent_answers.lock().unwrap().remove(&p.id);
             let question = task.question.take();
-            if by_agent {
-                record_answer(&mut task, question.as_ref(), "stop", true);
-            } else {
-                task.decisions.push("Owner: stop".to_string());
-                if let Some(question) = question {
-                    record_answered_question(&mut task, &question, "stop", AnsweredBy::Owner);
-                }
-            }
+            record_answer_for(
+                &mut task,
+                question.as_ref(),
+                "stop",
+                caller,
+                default_evidence.as_deref(),
+            );
             task.status = TaskStatus::Stopped;
             self.close_stopped_task(&mut task);
             task.updated_at = now_ms();
@@ -995,12 +1013,24 @@ impl App {
             .as_ref()
             .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
         {
-            return self.answer_dependency_question(task, &p.answer, true);
+            self.agent_answers.lock().unwrap().remove(&p.id);
+            return self.answer_dependency_question(
+                task,
+                &p.answer,
+                Some(caller),
+                default_evidence.as_deref(),
+            );
         }
 
         // A tool call held for this question: the run goes on with the answer.
         if let Some(tx) = self.permission_waits.lock().unwrap().remove(&p.id) {
-            if tx.send(p.answer.clone()).is_ok() {
+            if tx
+                .send(Reply {
+                    text: p.answer.clone(),
+                    default_evidence: default_evidence.clone(),
+                })
+                .is_ok()
+            {
                 return serde_json::to_value(&task).map_err(|e| e.to_string());
             }
         }
@@ -1034,7 +1064,7 @@ impl App {
                 &mut task,
                 question.as_ref(),
                 &p.answer,
-                by_agent,
+                caller,
                 default_evidence.as_deref(),
             );
             self.agent_answers.lock().unwrap().remove(&p.id);
@@ -1470,7 +1500,7 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod answer_source_tests {
+mod answer_caller_tests {
     use super::*;
 
     fn waiting(app: &App, kind: QuestionKind, options: &[&str]) -> String {
@@ -1485,7 +1515,7 @@ mod answer_source_tests {
         task.id
     }
 
-    fn park_permission(app: &App, id: &str) -> oneshot::Receiver<String> {
+    fn park_permission(app: &App, id: &str) -> oneshot::Receiver<Reply> {
         let (tx, rx) = oneshot::channel();
         app.permission_waits
             .lock()
@@ -1498,6 +1528,9 @@ mod answer_source_tests {
         let mut params = json!({"id": id, "answer": text});
         if let Some(s) = source {
             params["source"] = json!(s);
+            if s == "policy" {
+                params["evidence"] = json!("waiting SLA elapsed");
+            }
         }
         app.handle_task_answer(params).await.map(|_| ())
     }
@@ -1526,7 +1559,7 @@ mod answer_source_tests {
         ] {
             let id = waiting(&app, kind, options);
             let mut rx = park_permission(&app, &id);
-            for source in ["mcp", "chat"] {
+            for source in ["lead", "overseer", "mcp", "chat"] {
                 let err = answer(&app, &id, allow, Some(source)).await.unwrap_err();
                 assert!(err.contains("owner's to allow"), "{kind:?}: {err}");
             }
@@ -1576,7 +1609,7 @@ mod answer_source_tests {
                 Some("Fix the bug; run ./scripts/gate.sh --strict at the end"),
             ),
         ] {
-            for source in ["overseer", "mcp", "chat"] {
+            for source in ["lead", "overseer", "mcp", "chat"] {
                 let id = waiting_base_check(&app, command, request);
                 let err = answer(&app, &id, &format!("{drop}."), Some(source))
                     .await
@@ -1684,7 +1717,7 @@ mod answer_source_tests {
     #[tokio::test]
     async fn dropping_a_criterion_that_carries_a_shared_check_is_the_owners() {
         let (app, _dir) = test_app();
-        for source in ["overseer", "mcp", "chat"] {
+        for source in ["lead", "overseer", "mcp", "chat"] {
             let id = waiting_impossible(&app);
             let err = answer(&app, &id, "drop criterion", Some(source))
                 .await
@@ -1860,12 +1893,12 @@ mod answer_source_tests {
         let id = waiting(&app, QuestionKind::Permission, &["Allow once", "Deny"]);
         let rx = park_permission(&app, &id);
         answer(&app, &id, "Deny", Some("mcp")).await.unwrap();
-        assert_eq!(rx.await.unwrap(), "Deny");
+        assert_eq!(rx.await.unwrap().text, "Deny");
 
         let id = waiting(&app, QuestionKind::ProtectedPath, &["approve", "reject"]);
         let rx = park_permission(&app, &id);
         answer(&app, &id, "reject", Some("chat")).await.unwrap();
-        assert_eq!(rx.await.unwrap(), "reject");
+        assert_eq!(rx.await.unwrap().text, "reject");
 
         let id = waiting(&app, QuestionKind::Budget, &["raise", "stop"]);
         answer(&app, &id, "stop", Some("mcp")).await.unwrap();
@@ -1909,7 +1942,7 @@ mod answer_source_tests {
         let id = waiting(&app, QuestionKind::Permission, &["Allow once", "Deny"]);
         let rx = park_permission(&app, &id);
         answer(&app, &id, "Allow once", None).await.unwrap();
-        assert_eq!(rx.await.unwrap(), "Allow once");
+        assert_eq!(rx.await.unwrap().text, "Allow once");
     }
 
     #[tokio::test]
@@ -1930,6 +1963,340 @@ mod answer_source_tests {
             .await
             .unwrap();
         assert_eq!(rx.await.unwrap().text, "use the second design");
+    }
+
+    async fn recorded_caller(source: Option<&str>, caller: &str, line: &str) {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::AgentQuestion, &["use B"]);
+        answer(&app, &id, "use B", source).await.unwrap();
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert!(
+            task.decisions.iter().any(|d| d == line),
+            "{:?}",
+            task.decisions
+        );
+        let value = serde_json::to_value(&task).unwrap();
+        assert_eq!(value["questionHistory"][0]["answeredBy"], caller);
+        assert_eq!(value["questionHistory"][0]["answer"], "use B");
+        assert_eq!(task.question_history.len(), 1);
+        if caller != "owner" {
+            assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        }
+        app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_lead_answer_records_a_lead_line_and_history_without_owner_lines() {
+        recorded_caller(
+            Some("lead"),
+            "lead",
+            "Lead: Allow it? -> use B (answered by a lead session)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_answer_stays_the_owners() {
+        recorded_caller(None, "owner", "Owner: use B").await;
+        recorded_caller(Some(""), "owner", "Owner: use B").await;
+    }
+
+    #[tokio::test]
+    async fn an_overseer_answer_records_the_overseer() {
+        recorded_caller(
+            Some("overseer"),
+            "overseer",
+            "Orchestrator: Allow it? -> use B (answered by the overseer)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_answer_keeps_the_orchestrator_line_and_history() {
+        recorded_caller(
+            Some("chat"),
+            "orchestrator",
+            "Orchestrator: Allow it? -> use B (answered by the orchestrator agent)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_policy_answer_keeps_its_evidence_and_policy_history() {
+        recorded_caller(
+            Some("policy"),
+            "policy",
+            "Policy: Allow it? -> use B (policy: waiting SLA elapsed)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_tasks_mcp_answer_is_recorded_as_a_lead() {
+        recorded_caller(
+            Some("mcp"),
+            "lead",
+            "Lead: Allow it? -> use B (answered by a lead session)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_caller_and_a_policy_without_evidence_are_rejected() {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::AgentQuestion, &[]);
+        for source in ["owner", "judge", "other", " "] {
+            let err = answer(&app, &id, "use B", Some(source)).await.unwrap_err();
+            assert!(err.contains("unknown answer source"), "{err}");
+        }
+        let err = app
+            .handle_task_answer(json!({"id": id, "answer": "use B", "source": "policy"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("needs its evidence"), "{err}");
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Waiting);
+        assert!(task.question.is_some());
+        assert!(task.question_history.is_empty());
+        assert!(task.decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lead_stop_records_a_lead_stop_and_closes_the_task() {
+        let (app, _dir) = test_app();
+        let id = waiting(&app, QuestionKind::AgentQuestion, &[]);
+        answer(&app, &id, " STOP ", Some("lead")).await.unwrap();
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Stopped);
+        assert!(task.question.is_none());
+        assert_eq!(task.decisions, ["Lead: stop"]);
+        assert_eq!(task.question_history[0].answered_by, AnsweredBy::Lead);
+    }
+
+    #[tokio::test]
+    async fn a_lead_base_check_answer_names_the_lead() {
+        let (app, _dir) = test_app();
+        let id = waiting_base_check(&app, "npm run ci", None);
+        answer(&app, &id, PRE_EXISTING_RETRY, Some("lead"))
+            .await
+            .unwrap();
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert!(task.decisions.contains(&format!(
+            "Lead: base check npm run ci on deadbee -> {PRE_EXISTING_RETRY}"
+        )));
+        assert_eq!(answerer_label(&task), Some("Lead"));
+        assert!(base_check_answered(&task, "npm run ci", &task.base_sha));
+        assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn lead_acceptance_is_refused_and_mixed_non_owner_continues_hit_the_cap() {
+        let (app, _dir) = test_app();
+        for callers in [
+            [AnsweredBy::Lead, AnsweredBy::Overseer],
+            [AnsweredBy::Orchestrator, AnsweredBy::Lead],
+            [AnsweredBy::Overseer, AnsweredBy::Orchestrator],
+        ] {
+            let id = waiting(
+                &app,
+                QuestionKind::AttemptsFailing,
+                &["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"],
+            );
+            let err = answer(&app, &id, brief::ACCEPT_LAST_ATTEMPT, Some("lead"))
+                .await
+                .unwrap_err();
+            assert!(err.contains("owner's to pick"), "{err}");
+            let mut task = app.store.load_task(&id).unwrap().unwrap();
+            let question = task.question.clone().unwrap();
+            record_answer(&mut task, Some(&question), "continue", AnsweredBy::Owner);
+            assert_eq!(non_owner_continues(&task), 0);
+            for caller in callers {
+                record_answer(&mut task, Some(&question), "continue", caller);
+            }
+            assert_eq!(non_owner_continues(&task), MAX_ORCHESTRATOR_CONTINUES);
+            app.store.save_task(&task).unwrap();
+            for source in ["lead", "overseer", "chat"] {
+                let err = answer(&app, &id, "continue", Some(source))
+                    .await
+                    .unwrap_err();
+                assert!(err.contains("the owner decides now"), "{err}");
+            }
+            let saved = app.store.load_task(&id).unwrap().unwrap();
+            assert_eq!(saved.status, TaskStatus::Waiting);
+            assert_eq!(
+                saved.question.as_ref().unwrap().text,
+                task.question.as_ref().unwrap().text
+            );
+            assert_eq!(saved.decisions, task.decisions);
+            answer(&app, &id, "continue", None).await.unwrap();
+            let saved = app.store.load_task(&id).unwrap().unwrap();
+            assert_eq!(
+                saved.question_history.last().unwrap().answered_by,
+                AnsweredBy::Owner
+            );
+            let mut task = saved;
+            task.question = Some(question);
+            task.status = TaskStatus::Waiting;
+            app.store.save_task(&task).unwrap();
+            answer(&app, &id, "stop", Some("lead")).await.unwrap();
+            assert_eq!(
+                app.store.load_task(&id).unwrap().unwrap().status,
+                TaskStatus::Stopped
+            );
+        }
+        app.shutdown();
+    }
+
+    fn base_retry_task(commands: &[&str]) -> Task {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        let failed: Vec<VerifyOutcome> = commands
+            .iter()
+            .map(|command| VerifyOutcome {
+                command: (*command).into(),
+                code: Some(1),
+                tail: "fails".into(),
+                ..Default::default()
+            })
+            .collect();
+        task.question = Some(pre_existing_question(&failed, &task.base_sha));
+        task
+    }
+
+    fn record_base_retry(task: &mut Task, commands: &[&str], caller: AnsweredBy) {
+        let mut question = task.question.clone().unwrap();
+        question.commands = commands.iter().map(|c| (*c).to_string()).collect();
+        if matches!(caller, AnsweredBy::Policy | AnsweredBy::Judge) {
+            let by = if caller == AnsweredBy::Policy {
+                "policy"
+            } else {
+                "judge"
+            };
+            record_policy_answer(task, &question, PRE_EXISTING_RETRY, by, "fails on base", 1);
+        } else {
+            record_answer(task, Some(&question), PRE_EXISTING_RETRY, caller);
+            let sha = task.base_sha.clone();
+            record_owner_base_check(task, &question.commands, &sha, PRE_EXISTING_RETRY, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_non_owner_retry_counts_on_the_same_base_but_the_owner_can_retry() {
+        let (app, _dir) = test_app();
+        for caller in [
+            AnsweredBy::Policy,
+            AnsweredBy::Judge,
+            AnsweredBy::Orchestrator,
+            AnsweredBy::Overseer,
+            AnsweredBy::Lead,
+        ] {
+            for commands in [&["a.sh"][..], &["a.sh", "b.sh"][..]] {
+                let mut task = base_retry_task(commands);
+                record_base_retry(&mut task, &["a.sh"], caller);
+                if commands.len() > 1 {
+                    record_base_retry(&mut task, &["b.sh"], AnsweredBy::Lead);
+                }
+                app.store.save_task(&task).unwrap();
+                for source in ["lead", "overseer", "chat", "mcp", "policy"] {
+                    let err = answer(&app, &task.id, PRE_EXISTING_RETRY, Some(source))
+                        .await
+                        .unwrap_err();
+                    assert!(err.contains("the owner decides now"), "{caller:?}: {err}");
+                }
+                let saved = app.store.load_task(&task.id).unwrap().unwrap();
+                assert_eq!(saved.status, TaskStatus::Waiting);
+                assert_eq!(saved.question_history, task.question_history);
+                assert!(saved.question.is_some());
+                answer(&app, &task.id, PRE_EXISTING_RETRY, None)
+                    .await
+                    .unwrap();
+                let saved = app.store.load_task(&task.id).unwrap().unwrap();
+                assert_eq!(
+                    saved.question_history.last().unwrap().answered_by,
+                    AnsweredBy::Owner
+                );
+            }
+        }
+        app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn an_uncovered_command_or_a_new_base_can_still_get_a_non_owner_retry() {
+        let (app, _dir) = test_app();
+        for caller in [
+            AnsweredBy::Policy,
+            AnsweredBy::Judge,
+            AnsweredBy::Orchestrator,
+            AnsweredBy::Overseer,
+            AnsweredBy::Lead,
+            AnsweredBy::Owner,
+        ] {
+            for changed_base in [false, true] {
+                let mut task = base_retry_task(&["a.sh", "b.sh"]);
+                record_base_retry(&mut task, &["a.sh"], caller);
+                if changed_base {
+                    record_base_retry(&mut task, &["b.sh"], caller);
+                    task.base_sha = "1234567890".into();
+                    task.question = Some(pre_existing_question(
+                        &[
+                            VerifyOutcome {
+                                command: "a.sh".into(),
+                                code: Some(1),
+                                ..Default::default()
+                            },
+                            VerifyOutcome {
+                                command: "b.sh".into(),
+                                code: Some(1),
+                                ..Default::default()
+                            },
+                        ],
+                        &task.base_sha,
+                    ));
+                }
+                app.store.save_task(&task).unwrap();
+                answer(&app, &task.id, PRE_EXISTING_RETRY, Some("lead"))
+                    .await
+                    .unwrap();
+                let saved = app.store.load_task(&task.id).unwrap().unwrap();
+                assert_eq!(
+                    saved.question_history.last().unwrap().answered_by,
+                    AnsweredBy::Lead
+                );
+            }
+        }
+        app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_lead_dependency_answer_and_child_decision_name_the_lead() {
+        let (app, _dir) = test_app();
+        let mut parent = task_with_status(TaskStatus::Waiting);
+        let mut child = task_with_status(TaskStatus::Failed);
+        child.parent = Some(parent.id.clone());
+        parent.question = Some(Question::new(
+            format!("{DEPENDENCY_QUESTION}: child failed"),
+            vec!["drop the dependency".into()],
+            QuestionKind::DependencyEnded,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&child).unwrap();
+        app.store.save_task(&parent).unwrap();
+        answer(&app, &parent.id, "drop the dependency", Some("lead"))
+            .await
+            .unwrap();
+        let parent = app.store.load_task(&parent.id).unwrap().unwrap();
+        let child = app.store.load_task(&child.id).unwrap().unwrap();
+        assert_eq!(parent.question_history[0].answered_by, AnsweredBy::Lead);
+        assert!(parent
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Lead:") && d.contains(" -> drop the dependency")));
+        assert!(parent.decisions.iter().all(|d| !d.starts_with("Owner:")));
+        assert!(child
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Lead: dropped from")));
+        assert!(child.parent.is_none());
     }
 }
 

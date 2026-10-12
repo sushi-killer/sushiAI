@@ -129,7 +129,13 @@ async fn a_stopped_task_without_a_loop_is_stopped_and_its_question_closed() {
 #[tokio::test]
 async fn a_stopped_task_by_answer_releases_its_leases() {
     let (app, _dir) = test_app();
-    for source in [None, Some("orchestrator"), Some("overseer")] {
+    for (source, answered_by) in [
+        (None, AnsweredBy::Owner),
+        (Some("lead"), AnsweredBy::Lead),
+        (Some("mcp"), AnsweredBy::Lead),
+        (Some("chat"), AnsweredBy::Orchestrator),
+        (Some("overseer"), AnsweredBy::Overseer),
+    ] {
         let mut task = stop_waiting_task();
         task.paths = vec!["src/declared.rs".into()];
         app.store.save_task(&task).unwrap();
@@ -163,11 +169,7 @@ async fn a_stopped_task_by_answer_releases_its_leases() {
             assert_eq!(task.question_history[0].answer, "stop");
             assert_eq!(
                 task.question_history[0].answered_by,
-                if source.is_some() {
-                    AnsweredBy::Orchestrator
-                } else {
-                    AnsweredBy::Owner
-                }
+                answered_by
             );
         }
     }

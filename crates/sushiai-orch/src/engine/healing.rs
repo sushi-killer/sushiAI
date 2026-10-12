@@ -998,7 +998,7 @@ pub(super) fn add_follow_ups(task: &mut Task, findings: Vec<String>) {
 
 const ANSWER_PROMPT: &str = "You judge whether the owner's answers to a coding task's questions contradict any of its acceptance criteria. An answer contradicts a criterion when following the answer makes the criterion, as written, wrong or unmeetable. An answer that only adds detail, or that a criterion already agrees with, does not. Reply with only JSON: {\"amend\": [{\"criterion\": <index>, \"text\": \"<the criterion rewritten to agree with the answer, keeping its -- check: part>\"}], \"reason\": \"<one sentence>\"}. Use an empty list when nothing contradicts.";
 
-/// The decisions after the first `seen` that record an owner or policy answer.
+/// The decisions after the first `seen` that record an owner, lead or policy answer.
 pub(super) fn new_answers(task: &Task) -> Vec<String> {
     task.decisions
         .iter()
@@ -1007,6 +1007,7 @@ pub(super) fn new_answers(task: &Task) -> Vec<String> {
             (d.starts_with("Owner: ")
                 && !d.starts_with("Owner: stop")
                 && !d.starts_with("Owner: dropped"))
+                || (d.starts_with("Lead: ") && d.contains(" -> "))
                 || d.starts_with("Policy: ")
         })
         .cloned()
@@ -1303,6 +1304,35 @@ mod tests {
         assert_eq!(
             own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
             vec!["Button.tsx".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn new_answers_feed_lead_answers_but_not_lead_stops_to_the_criteria_check() {
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.decisions = vec![
+            "Lead: old question -> old answer (answered by a lead session)".into(),
+            "Lead: q -> a (answered by a lead session)".into(),
+            "Lead: stop the service? -> yes (answered by a lead session)".into(),
+            "Lead: stop".into(),
+            "Lead: dropped from parent".into(),
+            "Owner: B".into(),
+            "Policy: q -> a (policy: e)".into(),
+        ];
+        task.brief_check.answers_seen = 1;
+        assert_eq!(
+            new_answers(&task),
+            [
+                task.decisions[1].clone(),
+                task.decisions[2].clone(),
+                task.decisions[5].clone(),
+                task.decisions[6].clone()
+            ]
         );
     }
 }

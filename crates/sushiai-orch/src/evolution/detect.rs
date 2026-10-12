@@ -1084,3 +1084,34 @@ mod tests {
         assert_eq!((p[0].attempt, p[0].wasted_calls), (0, 0));
     }
 }
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+    use crate::engine::test_support::task_with_status;
+
+    #[test]
+    fn evolution_counts_owner_questions_without_lead_answers() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.decisions = vec![
+            "Owner: B".into(),
+            "Lead: q -> a (answered by a lead session)".into(),
+            "Lead: stop".into(),
+        ];
+        let signals = detect(
+            &task,
+            std::slice::from_ref(&task),
+            &AttemptEvents::new(),
+            &[],
+            &Settings::default(),
+            &[],
+        );
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|s| s.kind == SignalKind::OwnerQuestion)
+                .count(),
+            1
+        );
+    }
+}

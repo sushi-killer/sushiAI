@@ -1332,6 +1332,8 @@ pub enum AnsweredBy {
     Policy,
     Judge,
     Orchestrator,
+    Lead,
+    Overseer,
 }
 
 /// An answered question, kept in `Task.questionHistory`.

@@ -224,24 +224,58 @@ fn base_check_prefix(who: &str, command: &str, base_sha: &str) -> String {
 }
 
 /// The decision line recording an answer to a base-check question, by `who`
-/// (`Owner` or `Orchestrator`).
+/// (`Owner`, `Lead` or `Orchestrator`).
 pub(super) fn base_check_line(who: &str, command: &str, base_sha: &str, answer: &str) -> String {
     format!("{}{answer}", base_check_prefix(who, command, base_sha))
 }
 
-/// Whether the owner or the orchestrator agent already answered the
+/// Whether the owner, lead or orchestrator agent already answered the
 /// base-check question for this command on this base.
 pub(super) fn base_check_answered(task: &Task, command: &str, base_sha: &str) -> bool {
-    let prefixes = ["Owner", "Orchestrator"].map(|who| base_check_prefix(who, command, base_sha));
+    let prefixes =
+        ["Owner", "Orchestrator", "Lead"].map(|who| base_check_prefix(who, command, base_sha));
     task.decisions
         .iter()
         .any(|d| prefixes.iter().any(|p| d.starts_with(p)))
 }
 
+/// Whether a non-owner already retried this command. The RPC gate passes a
+/// base SHA; the answer policy checks the command across bases, as its rules do.
+pub(super) fn non_owner_base_retry(task: &Task, command: &str, base_sha: Option<&str>) -> bool {
+    let decision = task.decisions.iter().any(|d| {
+        ["Orchestrator", "Lead"].iter().any(|who| {
+            let answer = if let Some(sha) = base_sha {
+                d.strip_prefix(&base_check_prefix(who, command, sha))
+            } else {
+                d.strip_prefix(&format!("{who}: base check {command} on "))
+                    .and_then(|rest| rest.split_once(" -> "))
+                    .filter(|(sha, _)| {
+                        !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+                    .map(|(_, answer)| answer)
+            };
+            answer.is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
+        })
+    });
+    decision
+        || task.assumptions.iter().any(|a| {
+            matches!(a.by.as_str(), "policy" | "judge")
+                && a.kind == Some(QuestionKind::PreexistingFailure)
+                && is_option(&a.answer, PRE_EXISTING_RETRY)
+                && a.commands.iter().any(|c| c == command)
+                && base_sha.is_none_or(|sha| {
+                    let sha: String = sha.chars().take(7).collect();
+                    let first_line = a.question.lines().next().unwrap_or_default();
+                    first_line.contains(&format!(" already fails on base {sha}:"))
+                        || first_line.contains(&format!(" already fail on base {sha}:"))
+                })
+        })
+}
+
 /// Records an answer to a base-check question about `commands`, asked on
 /// `base_sha`, one line per command, unless the answer policy gave it (`policy_answered`). The line
 /// says who answered, read from the question history entry the wait just
-/// wrote: `Orchestrator:` for the agent, `Owner:` otherwise.
+/// wrote: `Owner:`, `Lead:` or `Orchestrator:`.
 pub(super) fn record_owner_base_check(
     task: &mut Task,
     commands: &[String],
@@ -260,11 +294,12 @@ pub(super) fn record_owner_base_check(
 }
 
 /// Who gave the answer the wait just recorded: `Owner` (also when nothing
-/// was recorded), `Orchestrator` for the agent, `None` for a rule or judge,
+/// was recorded), `Lead` or `Orchestrator` for an agent, `None` for a rule or judge,
 /// whose own line already says so.
 pub(super) fn answerer_label(task: &Task) -> Option<&'static str> {
     match task.question_history.last().map(|h| h.answered_by) {
-        Some(AnsweredBy::Orchestrator) => Some("Orchestrator"),
+        Some(AnsweredBy::Orchestrator | AnsweredBy::Overseer) => Some("Orchestrator"),
+        Some(AnsweredBy::Lead) => Some("Lead"),
         Some(AnsweredBy::Policy | AnsweredBy::Judge) => None,
         Some(AnsweredBy::Owner) | None => Some("Owner"),
     }
@@ -1202,7 +1237,10 @@ mod tests {
             loop {
                 let tx = pending.lock().unwrap().take();
                 if let Some(tx) = tx {
-                    app.agent_answers.lock().unwrap().insert(id.clone());
+                    app.agent_answers
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), AnsweredBy::Orchestrator);
                     tx.send(Reply {
                         text: PRE_EXISTING_DROP.to_string(),
                         default_evidence: None,
@@ -1365,5 +1403,24 @@ mod tests {
         assert!(target_in_plan_path("src/new/a.rs", "src/**"));
         assert!(target_in_plan_path("src/new/*.rs", "src/new/a.rs"));
         assert!(!target_in_plan_path("tests/a.rs", "src/new"));
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn a_retry_of_a_longer_command_does_not_cover_its_prefix_command() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.decisions.push(base_check_line(
+            "Lead",
+            "check on target",
+            &task.base_sha,
+            PRE_EXISTING_RETRY,
+        ));
+        assert!(non_owner_base_retry(&task, "check on target", None));
+        assert!(!non_owner_base_retry(&task, "check", None));
+        assert!(!non_owner_base_retry(&task, "check", Some(&task.base_sha)));
     }
 }

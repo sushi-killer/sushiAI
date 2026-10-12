@@ -1627,10 +1627,7 @@ fn mcp_server(
         "args": ["mcp"],
         "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     });
-    if overseer {
-        // Lets the bridge tell a turn orchd woke from the owner's own chat.
-        server["env"]["ORCHD_BRIDGE_SOURCE"] = json!("overseer");
-    }
+    server["env"]["ORCHD_BRIDGE_SOURCE"] = json!(if overseer { "overseer" } else { "chat" });
     if read_only {
         server["args"]
             .as_array_mut()
@@ -3499,5 +3496,26 @@ mod tests {
         assert_eq!(brainstorm.mode, ChatMode::Chat);
         let thread = chats.thread_json();
         assert!(thread.get("kind").is_none());
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+    use crate::engine::test_support::test_app;
+
+    #[test]
+    fn the_chat_mcp_config_declares_chat_or_overseer() {
+        let (app, _dir) = test_app();
+        for read_only in [false, true] {
+            assert_eq!(
+                mcp_server(&app, None, read_only, false)["env"]["ORCHD_BRIDGE_SOURCE"],
+                "chat"
+            );
+            assert_eq!(
+                mcp_server(&app, None, read_only, true)["env"]["ORCHD_BRIDGE_SOURCE"],
+                "overseer"
+            );
+        }
     }
 }

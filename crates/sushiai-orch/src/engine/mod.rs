@@ -335,11 +335,11 @@ pub struct App {
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the held tool call a `task.answer` resolves.
-    permission_waits: StdMutex<HashMap<String, oneshot::Sender<String>>>,
-    /// Tasks whose parked question the chat or an MCP client just answered
+    permission_waits: StdMutex<HashMap<String, oneshot::Sender<Reply>>>,
+    /// Callers who just answered a task's parked question
     /// (`task.answer` with a source): the loop reads and clears it when the
     /// answer arrives, so such an answer is never recorded as the owner's.
-    agent_answers: StdMutex<std::collections::HashSet<String>>,
+    agent_answers: StdMutex<HashMap<String, AnsweredBy>>,
     /// Keyed by repo: overseer wakes skipped while its chat was busy; each
     /// fires when that repo's turn ends.
     deferred_wakes: StdMutex<HashMap<String, Vec<chat::DeferredWake>>>,

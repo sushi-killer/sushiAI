@@ -100,3 +100,58 @@ test("needsOwner counts waiting, failed, landing and engine stops, never owner s
     ["engine", "wait", "fail", "land", "crashed"],
   );
 });
+
+test("a question held for the orchestrator agent raises no attention until it is released", async () => {
+  const { needsOwner, needsOwnerNow, ownerTasks } = await load();
+  const held = task({
+    id: "held",
+    status: "waiting",
+    question: {
+      text: "Which?",
+      options: [],
+      kind: "agent_question",
+      heldForOverseer: true,
+      heldAt: Date.now(),
+    },
+  });
+  const open = task({
+    id: "open",
+    status: "waiting",
+    question: { text: "Which?", options: [], kind: "agent_question" },
+  });
+  assert.equal(needsOwner(held), true, "the rail still lists it");
+  assert.equal(needsOwnerNow(held), false);
+  assert.deepEqual(
+    ownerTasks([held, open]).map((t) => t.id),
+    ["open"],
+  );
+  // The overseer's turn ended without an answer: the flag is gone.
+  const released = {
+    ...held,
+    question: { ...held.question, heldForOverseer: undefined },
+  };
+  assert.deepEqual(
+    ownerTasks([released, open])
+      .map((t) => t.id)
+      .sort(),
+    ["held", "open"],
+  );
+});
+
+test("a hold older than ten minutes no longer hides the question", async () => {
+  const { needsOwnerNow, ownerTasks } = await load();
+  const held = task({
+    id: "held",
+    status: "waiting",
+    question: {
+      text: "Which?",
+      options: [],
+      kind: "agent_question",
+      heldForOverseer: true,
+      heldAt: 1_000_000,
+    },
+  });
+  assert.equal(needsOwnerNow(held, 1_000_000 + 599_000), false);
+  assert.equal(needsOwnerNow(held, 1_000_000 + 600_000), true);
+  assert.equal(ownerTasks([held]).length, 1, "the real clock is far past it");
+});

@@ -23,6 +23,7 @@ impl App {
     /// loop: the only kind that may enter, move within or leave the backlog.
     pub(super) fn unstarted(&self, task: &Task) -> bool {
         !task.archived
+            && task.queue.park.is_none()
             && task.parent.is_none()
             && implement_attempt_count(task) == 0
             && !self.controls.lock().unwrap().contains_key(&task.id)
@@ -84,7 +85,7 @@ impl App {
         let task = {
             // Held so a start cannot slip in between the check and the save.
             let _admit = self.autopilot_admission.lock().unwrap();
-            let mut task = self
+            let task = self
                 .store
                 .load_task(&id)
                 .map_err(|e| e.to_string())?
@@ -104,14 +105,11 @@ impl App {
                         .unwrap_or_default()
                 ));
             }
-            task.queue.backlog = match bucket {
+            let backlog = match bucket {
                 Some(bucket) => Some(self.backlog_slot(&task.repo, Some(&id), bucket, order)?),
                 None => None,
             };
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
-            task
+            self.update_task(&id, |task| task.queue.backlog = backlog)?
         };
         let value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         self.advance_autopilot();
@@ -121,7 +119,34 @@ impl App {
     /// The one start path of `task.start` and the autopilot: a backlog task
     /// leaves the backlog with a decision line saying who started it.
     pub(super) fn start_task(&self, id: &str, by: Starter) {
+        let mut cancellations = self.cancellations.lock().unwrap();
         if let Ok(Some(mut task)) = self.store.load_task(id) {
+            if by == Starter::Autopilot
+                && (task.queue.park.is_some() || task.queue.stopped_explicitly)
+            {
+                return;
+            }
+            if by == Starter::Owner
+                && task.status != TaskStatus::Landing
+                && is_parent(&task, &self.repo_tasks(&task.repo))
+            {
+                task.queue.restart_children = true;
+                task.question = None;
+            }
+            if matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed)
+                || task.queue.restart_children
+            {
+                task.status = TaskStatus::Queued;
+            }
+            let resumed = task.queue.park.take().is_some();
+            task.queue.stopped_explicitly = false;
+            if let Some(end) = cancellations.get_mut(id) {
+                end.restart = true;
+                end.restart_children = task.queue.restart_children;
+            }
+            if resumed {
+                task.decisions.push("Owner: resumed a parked task".into());
+            }
             if task.queue.backlog.take().is_some() {
                 task.decisions.push(
                     match by {
@@ -130,12 +155,12 @@ impl App {
                     }
                     .to_string(),
                 );
-                task.updated_at = now_ms();
-                if self.store.save_task(&task).is_ok() {
-                    self.broadcast_task(&task);
-                }
             }
+            task.updated_at = now_ms();
+            self.save_task_logged(&task);
+            self.broadcast_task(&task);
         }
+        drop(cancellations);
         self.spawn_task_loop(id.to_string(), true);
     }
 
@@ -152,7 +177,7 @@ impl App {
         if !enabled {
             return;
         }
-        let limit = parallel.max(1).min(self.parallel_limit) as usize;
+        let limit = parallel.max(1) as usize;
         let _admit = self.autopilot_admission.lock().unwrap();
         let all = self.store.list_tasks().unwrap_or_default();
         let mut next: Vec<&Task> = all
@@ -161,6 +186,7 @@ impl App {
                 t.queue
                     .backlog
                     .is_some_and(|b| b.bucket == BacklogBucket::Next)
+                    && !t.queue.stopped_explicitly
                     && self.unstarted(t)
             })
             .collect();
@@ -180,5 +206,29 @@ impl App {
             }
             self.start_task(&task.id, Starter::Autopilot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn graph_control_autopilot_does_not_restart_an_explicit_stop() {
+        let (app, _dir) = test_app();
+        app.settings.write().unwrap().autopilot = true;
+        let mut task = task_with_status(TaskStatus::Stopped);
+        task.queue.backlog = Some(Backlog {
+            bucket: BacklogBucket::Next,
+            order: 0,
+        });
+        task.queue.stopped_explicitly = true;
+        app.store.save_task(&task).unwrap();
+        app.advance_autopilot();
+        assert!(!app.controls.lock().unwrap().contains_key(&task.id));
+        assert_eq!(
+            app.store.load_task(&task.id).unwrap().unwrap().status,
+            TaskStatus::Stopped
+        );
     }
 }

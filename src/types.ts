@@ -961,6 +961,12 @@ export interface Bridge {
     host: string,
     withheld: boolean,
   ): Promise<{ withheld: boolean }>;
+  /** Built-in modules only; not part of the extension contract. */
+  moduleInvoke(
+    moduleId: string,
+    method: string,
+    ...args: unknown[]
+  ): Promise<unknown>;
   projectHostOverrides(
     id: string,
     host: string,

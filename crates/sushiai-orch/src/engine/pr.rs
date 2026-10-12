@@ -1,6 +1,7 @@
-//! `task.pr`: the owner pushes a finished task's branch to `origin` and opens
-//! a GitHub pull request against the repo's default branch. An owner action
-//! only: it is deliberately not an MCP tool, so an agent never pushes.
+//! `task.pr`: pushes a finished task's branch to `origin` and opens a GitHub
+//! pull request against the repo's default branch. The owner starts it from the
+//! app; the orchestrator agent may call it as the `task_pr` MCP tool. It pushes
+//! the task's own branch only, never the default branch, and never merges.
 
 use super::*;
 use std::collections::HashSet;
@@ -123,8 +124,16 @@ impl App {
             id: String,
             title: Option<String>,
             branch: Option<String>,
+            /// Set by the MCP bridge; the app sends none.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        if p.source.as_deref().is_some_and(|s| !s.is_empty()) && p.branch.is_some() {
+            return Err(
+                "an agent opens the pull request for the task's own branch only".to_string(),
+            );
+        }
         validate_task_id(&self.store, &p.id)?;
         let _guard = InFlight::take(&p.id)?;
         let task = self
@@ -329,6 +338,11 @@ impl App {
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
+        if p.source.as_deref() == Some("overseer") {
+            self.record_overseer(
+                overseer::Entry::new("pr", &task.repo, Some(&task.id), &url).with_detail(&url),
+            );
+        }
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 }

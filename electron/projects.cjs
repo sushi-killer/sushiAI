@@ -55,8 +55,9 @@ function hint(value) {
 }
 
 class Projects {
-  constructor({ userDataDir, safeStorage }) {
+  constructor({ userDataDir, safeStorage, providerTimeoutMs = 30000 }) {
     this.userDataDir = userDataDir;
+    this.providerTimeoutMs = providerTimeoutMs;
     this.safeStorage = safeStorage;
     this.lock = Promise.resolve();
     // `onSendChange(host)` lets whoever holds values for a host replace them
@@ -64,6 +65,44 @@ class Projects {
     this.onSendChange = null;
     // Anything a project holds was written: the daemons' copies are refreshed.
     this.onChange = null;
+    // Environment providers, in registration order: modules add values to a
+    // project's environment without this store knowing who they are.
+    this.providers = [];
+  }
+
+  /** Adds a source of environment values: `values({ project, stage, host })`
+   * resolves to a name -> value map. A later provider wins over an earlier
+   * one; hand-entered values win over all of them. */
+  addEnvironmentProvider(provider) {
+    if (typeof provider?.values !== "function")
+      throw new Error("An environment provider needs a values function.");
+    this.providers.push(provider);
+  }
+
+  /** A module changed what its provider returns: the daemons' copies are
+   * refreshed soon. */
+  environmentChanged() {
+    this.#changed();
+  }
+
+  /** Field names a module is moving out; an upsert keeps them until then. */
+  #retiring = new Set();
+
+  /** Hands the value of a stored project field to `receive({ [id]: value })`
+   * once, then drops the field. The field goes only after `receive`
+   * resolved, so a failed hand-over keeps it for the next start. */
+  retireField(name, receive) {
+    this.#retiring.add(name);
+    return this.#locked(async () => {
+      const projects = this.#load();
+      const values = {};
+      for (const [id, project] of Object.entries(projects))
+        if (project[name] !== undefined) values[id] = project[name];
+      if (!Object.keys(values).length) return;
+      await receive(values);
+      for (const id of Object.keys(values)) delete projects[id][name];
+      this.#save(projects);
+    });
   }
 
   /** Every SSH host the owner added gets a project's values: adding the host
@@ -405,6 +444,9 @@ class Projects {
         : uniqueSlug(projectSlug(input.name), projects),
       dismissed: existing?.dismissed ?? { env: [], mcp: [] },
     };
+    // A field still waiting for its module to take it stays on the row.
+    for (const name of this.#retiring)
+      if (existing?.[name] !== undefined) project[name] = existing[name];
     const previousNames = new Set(
       (existing?.env || []).map((entry) => entry.name),
     );
@@ -947,7 +989,16 @@ class Projects {
   async environmentFor(id, stage = "agent", host = "local") {
     const project = await this.get(id);
     if (!project) return {};
+    // Provider values come first: a hand-entered variable with a stored
+    // value overrides one, one without leaves it. A host the owner withheld
+    // asks no provider.
     const env = {};
+    if (await this.sendsValues(id, host))
+      for (const provider of this.providers)
+        Object.assign(
+          env,
+          await this.#providerValues(provider, project, stage, host),
+        );
     for (const entry of project.env) {
       const availableTo = entry.availableTo || ["setup", "agent"];
       if (!availableTo.includes(stage)) continue;
@@ -955,6 +1006,27 @@ class Projects {
       if (value !== null) env[entry.name] = value;
     }
     return env;
+  }
+
+  /** One provider's values, {} when it throws, rejects or is too slow. */
+  async #providerValues(provider, project, stage, host) {
+    let timer;
+    try {
+      const values = await Promise.race([
+        Promise.resolve().then(() => provider.values({ project, stage, host })),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Environment provider timed out.")),
+            this.providerTimeoutMs,
+          );
+        }),
+      ]);
+      return values && typeof values === "object" ? { ...values } : {};
+    } catch {
+      return {};
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async resolveDirectory(directory) {

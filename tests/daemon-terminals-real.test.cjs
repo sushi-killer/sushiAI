@@ -8,17 +8,15 @@ const { connectDaemon } = require("../electron/daemon/client.cjs");
 const { createTerminalHandlers } = require("../electron/daemon/terminals.cjs");
 
 const { realDaemon } = require("./helpers/real-daemon.cjs");
+const {
+  DEADLINE_MS,
+  until,
+  pidStart,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 const { binary, skip } = realDaemon();
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check, what, ms = 10000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await wait(25);
-  }
-}
 
 test(
   "terminals stream a real shell session through the daemon",
@@ -37,6 +35,8 @@ test(
       stdio: "ignore",
     });
     const exited = new Promise((resolve) => daemon.once("exit", resolve));
+    const timeout = { timeoutMs: DEADLINE_MS };
+    const holders = new Map();
     let client;
     try {
       const socketPath = path.join(home, "daemon.sock");
@@ -45,11 +45,13 @@ test(
         return connectDaemon({
           socketPath,
           clientName: "terminals-test",
+          helloTimeoutMs: DEADLINE_MS,
         }).catch(() => undefined);
       }, "the daemon socket");
       // Minimal manager: one host, no reconnect, no scrollback option.
       const manager = {
-        request: (_host, method, params) => client.request(method, params),
+        request: (_host, method, params) =>
+          client.request(method, params, timeout),
         attach: (_host, id, _options, onBytes) => client.attach(id, onBytes),
       };
       const sent = [];
@@ -63,14 +65,21 @@ test(
             handlers.ack(value.panelId, Buffer.byteLength(text));
         },
       });
-      const created = await client.request("session.create", {
-        cmd: ["/bin/sh"],
-        cwd: home,
-        cols: 80,
-        rows: 24,
-        idempotencyKey: "terminals-real-1",
-      });
+      const created = await client.request(
+        "session.create",
+        {
+          cmd: ["/bin/sh"],
+          cwd: home,
+          cols: 80,
+          rows: 24,
+          idempotencyKey: "terminals-real-1",
+        },
+        timeout,
+      );
       const id = created.id;
+      for (const entry of await client.request("session.list", {}, timeout))
+        if (entry.holderPid)
+          holders.set(entry.holderPid, pidStart(entry.holderPid));
       assert.ok(id, "session id");
       const text = () => sent.map((m) => m.snapshot ?? m.data ?? "").join("");
 
@@ -93,23 +102,24 @@ test(
 
       await handlers.detach("panel-1");
       const count = sent.length;
-      await client.request("session.input", { id, data: "echo late\r" });
+      await client.request(
+        "session.input",
+        { id, data: "echo late\r" },
+        timeout,
+      );
+      // Gives a forbidden delivery after detach time to happen.
       await wait(200);
       assert.equal(sent.length, count, "nothing is delivered after detach");
 
-      await client.request("session.close", { id, graceful: false });
+      await client.request("session.close", { id, graceful: false }, timeout);
     } finally {
-      await client?.request("daemon.shutdown", {}).catch(() => {});
+      // One ordered step: close the client, stop the daemon and the session
+      // holders seen, wait for their exit, then remove the home.
       client?.close();
-      const stopped = await Promise.race([
-        exited,
-        wait(5000).then(() => false),
-      ]);
-      if (stopped === false) {
-        daemon.kill("SIGTERM");
-        await exited;
-      }
-      fs.rmSync(home, { recursive: true, force: true });
+      await stopPid(daemon.pid);
+      for (const [holder, start] of holders) await stopPid(holder, { start });
+      await exited;
+      removeDir(home);
     }
   },
 );

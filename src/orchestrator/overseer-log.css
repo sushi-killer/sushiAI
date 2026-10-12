@@ -1,0 +1,133 @@
+/* Log (overseer actions): project filter, today's spend, one line per action. */
+.log-view {
+  gap: var(--gap-md);
+  container-type: inline-size;
+}
+.log-day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+.log-day > .orch-eyebrow {
+  margin: 0;
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+}
+.log-spent {
+  margin: 0 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.log-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.log-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 64px 16px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--gap-md);
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 16px;
+  text-align: left;
+}
+.log-row.clickable {
+  cursor: pointer;
+}
+button.log-row:hover {
+  background: var(--bg-hover);
+}
+.log-time {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-kind {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.log-kind-woke,
+.log-kind-skipped {
+  color: var(--text-faint);
+}
+.log-kind-digest {
+  color: var(--text);
+}
+.log-kind-pr,
+.log-kind-answered {
+  color: var(--tone-ok);
+}
+.log-kind-asked_owner {
+  color: var(--tone-warning);
+}
+.log-kind-failed {
+  color: var(--tone-danger);
+}
+.log-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* An opened row: the full text under it, wrapped and selectable. */
+.log-row[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+.log-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  margin: 2px 10px 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.log-meta {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.log-full {
+  max-height: 320px;
+  margin: 0;
+  overflow-y: auto;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+.log-actions {
+  display: flex;
+  gap: var(--gap-md);
+}
+.log-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.log-link:hover {
+  color: var(--text);
+}

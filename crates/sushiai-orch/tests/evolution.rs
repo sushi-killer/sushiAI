@@ -8,7 +8,7 @@ use common::*;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const EVENTS: &str = "tasks/seed/runs/1/events.jsonl";
 
@@ -122,18 +122,10 @@ fn seed_signals(daemon: &Daemon, repo: &str, detail: &str, tasks: &[&str], calls
 }
 
 fn wait_for_proposals(daemon: &Daemon, want: usize) -> Value {
-    let start = Instant::now();
-    loop {
+    wait_until("the proposals to arrive", || {
         let list = daemon.request("evolution.list", json!({}));
-        if list.as_array().unwrap().len() >= want {
-            return list;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "proposals did not arrive: {list}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        (list.as_array().unwrap().len() >= want).then_some(list)
+    })
 }
 
 /// Runs `evolution.run` until every started run has stored its proposal.
@@ -330,8 +322,7 @@ fn evolution_run_starts_at_most_max_proposals_and_never_reproposes() {
     assert_eq!(first["started"].as_array().unwrap().len(), 2, "{first}");
     assert_eq!(list.as_array().unwrap().len(), 2);
 
-    let (second, list) = run_and_wait(&daemon, 3);
-    assert_eq!(second["started"].as_array().unwrap().len(), 1, "{second}");
+    let (_, list) = run_and_wait(&daemon, 3);
     assert_eq!(list.as_array().unwrap().len(), 3);
     let keys: std::collections::HashSet<&str> = list
         .as_array()
@@ -343,6 +334,7 @@ fn evolution_run_starts_at_most_max_proposals_and_never_reproposes() {
 
     let third = daemon.request("evolution.run", json!({}));
     assert!(third["started"].as_array().unwrap().is_empty(), "{third}");
+    // Absence check: this window gives a forbidden extra proposal time to happen.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         daemon
@@ -375,26 +367,23 @@ fn evolution_reply_without_a_block_stores_nothing_and_is_retried() {
     assert_eq!(first["started"].as_array().unwrap().len(), 1);
     // Wait until the run has returned (the brief file was written by it).
     poll_until_file(&scripts.path().join("brief.md"));
-    std::thread::sleep(Duration::from_millis(500));
+    // A new run starts only once the first has finished, so this also waits for it.
+    wait_until("the unsuccessful run to be retried", || {
+        let run = daemon.request("evolution.run", json!({}));
+        (run["started"].as_array().unwrap().len() == 1).then_some(run)
+    });
     assert!(daemon
         .request("evolution.list", json!({}))
         .as_array()
         .unwrap()
         .is_empty());
-    let second = daemon.request("evolution.run", json!({}));
-    assert_eq!(second["started"].as_array().unwrap().len(), 1, "{second}");
     daemon.shutdown_and_wait();
 }
 
 fn poll_until_file(path: &Path) {
-    let start = Instant::now();
-    while !path.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "{path:?} never appeared"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(&format!("{path:?} to appear"), || {
+        path.exists().then_some(())
+    });
 }
 
 fn rejected_case(overrides: Value) -> Value {
@@ -459,7 +448,7 @@ fn evolution_approve_creates_a_task_and_adopts_it_once_done() {
     let task_id = approved["taskId"].as_str().unwrap().to_string();
     let task = daemon.request("task.get", json!({"id": task_id}));
     assert_eq!(task["id"], task_id.as_str());
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(20), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "{settled}");

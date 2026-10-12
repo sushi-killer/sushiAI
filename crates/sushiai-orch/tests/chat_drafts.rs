@@ -4,7 +4,6 @@
 mod common;
 use common::*;
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 const FAKE: &str = r##"#!/bin/sh
 p=$(cat)
@@ -33,24 +32,16 @@ fn spawn() -> (Daemon, tempfile::TempDir, tempfile::TempDir, String) {
 
 fn say(daemon: &Daemon, repo: &str, text: &str) -> serde_json::Value {
     daemon.request("chat.send", json!({"repo": repo, "text": text}));
-    let start = Instant::now();
-    loop {
+    wait_until("the chat turn to end", || {
         let thread = daemon.request("chat.get", json!({"repo": repo}));
-        if thread["busy"] == json!(false)
+        (thread["busy"] == json!(false)
             && thread["messages"]
                 .as_array()
                 .unwrap()
                 .len()
-                .is_multiple_of(2)
-        {
-            return thread;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "turn never ended"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+                .is_multiple_of(2))
+        .then_some(thread)
+    })
 }
 
 fn last(thread: &serde_json::Value) -> &serde_json::Value {

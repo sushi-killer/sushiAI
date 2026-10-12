@@ -8,13 +8,14 @@ mod mcp;
 mod open;
 mod orch_cli;
 mod orch_module;
+mod proc;
 
 use anyhow::{bail, Context, Result};
 use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -41,6 +42,7 @@ fn main() -> Result<()> {
     match command.as_deref() {
         Some("hooks") => hooks_file::run(args.next().as_deref())?,
         Some("daemon") => {
+            leave_background_priority();
             let home = sushiai_daemon::Home::from_env();
             let modules = orch_module::slots(&home);
             sushiai_daemon::run_blocking(home, modules)?;
@@ -49,6 +51,17 @@ fn main() -> Result<()> {
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?
         ),
+        Some("proc") => proc::run(args)?,
+        Some("shutdown") => {
+            let mut conn =
+                daemon_client::Conn::direct(&sushiai_daemon::Home::from_env().socket(), "shutdown")
+                    .map_err(anyhow::Error::msg)?;
+            conn.call(
+                "daemon.shutdown",
+                serde_json::json!({"closeSessions": true}),
+            )
+            .map_err(|e| anyhow::Error::msg(e.message()))?;
+        }
         Some("mcp") => std::process::exit(mcp::run(args)),
         Some("orch") => std::process::exit(orch_cli::run(args)),
         Some("proxy") => proxy::run(&sushiai_daemon::Home::from_env())?,
@@ -63,6 +76,20 @@ fn main() -> Result<()> {
         _ => bail!(USAGE),
     }
     Ok(())
+}
+
+/// A daemon started by a background launchd job (the link) inherits macOS
+/// background priority, and so does every agent and check it runs: they get
+/// only the efficiency cores and run several times slower under load.
+fn leave_background_priority() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: setpriority(2) on the calling process touches no memory.
+    if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0) } != 0 {
+        eprintln!(
+            "cannot leave background priority: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 fn hold_config(mut args: impl Iterator<Item = String>) -> Result<sushiai_hold::Config> {

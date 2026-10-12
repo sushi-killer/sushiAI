@@ -58,6 +58,8 @@ For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` 
 - `task_list {repo}` / `task_get {id}` for status; `task_report {id}` once done.
 - A `waiting` task asks a question: answer it with `task_answer` when the repo or the task's
   context answers it; bring the owner only what only the owner can decide, with options.
+- A session calling the raw `orch.task.answer` RPC through `sushiai proxy` must pass
+  `"source": "lead"` to identify itself. The app UI sends no source and is recorded as the owner.
 - Never answer a permission question with Allow, never approve a protected path or an
   unreviewed commit, never stop or delete a task on the owner's behalf.
 - Tasks message you through `ask_orchestrator`; reply with `orchestrator_reply`, read

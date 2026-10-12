@@ -14,6 +14,7 @@ const {
   stopLegacyOrchd,
 } = require("../electron/orchestrator.cjs");
 const { closeAppDb } = require("../electron/app-db.cjs");
+const { until: untilReal, removeDir } = require("./helpers/deadline.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
 
 const cleanups = [];
@@ -29,19 +30,12 @@ const alive = (pid) => {
     return false;
   }
 };
-const until = async (check, ms = 5000) => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("timed out");
-};
+const until = (check) => untilReal(check, "the condition");
 
 /** A legacy data dir: pid, socket and token files plus a task that must stay. */
 function legacyDir(pid) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-orchd-"));
-  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(() => removeDir(dir));
   if (pid !== undefined)
     fs.writeFileSync(path.join(dir, "orchd.pid"), `${pid}`);
   fs.writeFileSync(path.join(dir, "orchd.sock"), "");
@@ -56,20 +50,28 @@ function legacyDir(pid) {
 
 /** A detached process that stands in for the old daemon: its own process
  * group, like the one the app spawned. */
-function standIn({ ignoreTerm = false } = {}) {
-  const script = ignoreTerm
-    ? 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'
-    : 'process.on("SIGTERM",()=>process.exit(0));setInterval(()=>{},1000)';
+async function standIn({ ignoreTerm = false } = {}) {
+  const handler = ignoreTerm ? "()=>{}" : "()=>process.exit(0)";
+  // It prints once the SIGTERM handler is installed, so a test never signals
+  // a process that still has the default (fatal) disposition.
+  const script = `process.on("SIGTERM",${handler});process.stdout.write("ready");setInterval(()=>{},1000)`;
   const child = spawn(process.execPath, ["-e", script], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "ignore"],
   });
   child.unref();
-  cleanups.push(() => {
+  cleanups.push(async () => {
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {}
+    await untilReal(() => !alive(child.pid), "the stand-in to exit");
   });
+  let seen = "";
+  child.stdout.on("data", (chunk) => {
+    seen += chunk;
+  });
+  await untilReal(() => seen.includes("ready"), "the stand-in to be ready");
+  child.stdout.destroy();
   return child;
 }
 
@@ -87,7 +89,7 @@ test("no pid file means nothing to stop", async () => {
 });
 
 test("a pid file of a dead process is cleaned up and nothing is signalled", async () => {
-  const child = standIn();
+  const child = await standIn();
   const pid = child.pid;
   process.kill(-pid, "SIGKILL");
   await until(() => !alive(pid));
@@ -106,7 +108,7 @@ test("a pid file of a dead process is cleaned up and nothing is signalled", asyn
 });
 
 test("a pid that now belongs to another program is never signalled", async () => {
-  const child = standIn();
+  const child = await standIn();
   const dir = legacyDir(child.pid);
   const result = await stopLegacyOrchd(dir, { comm: () => "/usr/bin/vim" });
   assert.equal(result, "foreign");
@@ -116,7 +118,7 @@ test("a pid that now belongs to another program is never signalled", async () =>
 });
 
 test("a running orchd gets SIGTERM, its files go and its tasks stay", async () => {
-  const child = standIn();
+  const child = await standIn();
   const dir = legacyDir(child.pid);
   const result = await stopLegacyOrchd(dir, {
     comm: () => "/old/bin/orchd",
@@ -129,10 +131,8 @@ test("a running orchd gets SIGTERM, its files go and its tasks stay", async () =
 });
 
 test("an orchd that ignores SIGTERM is killed with its process group after the timeout", async () => {
-  const child = standIn({ ignoreTerm: true });
+  const child = await standIn({ ignoreTerm: true });
   const dir = legacyDir(child.pid);
-  // Give the stand-in time to install its SIGTERM handler.
-  await new Promise((resolve) => setTimeout(resolve, 300));
   const signals = [];
   const result = await stopLegacyOrchd(dir, {
     comm: () => "orchd",
@@ -167,7 +167,7 @@ function wire({
   fs.mkdirSync(homeDir);
   cleanups.push(() => {
     closeAppDb(userDataDir);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeDir(root);
   });
   const calls = [];
   const extensions = {
@@ -282,7 +282,7 @@ test("the first launch turns the Orchestrator on for a legacy MCP entry in Claud
 
 test("another MCP entry is not a legacy Orchestrator", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "no-legacy-"));
-  cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+  cleanups.push(() => removeDir(root));
   fs.writeFileSync(
     path.join(root, ".claude.json"),
     JSON.stringify({ mcpServers: { other: { command: "o" } } }),

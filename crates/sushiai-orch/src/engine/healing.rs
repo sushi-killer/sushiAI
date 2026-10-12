@@ -11,8 +11,8 @@ const MAX_FOLLOW_UPS: usize = 12;
 const MAX_REASON_CHARS: usize = 300;
 
 /// The route of the cheap judge runs; `None` when they are off.
-pub(super) fn judge_route(app: &App) -> Option<Route> {
-    check_route(app)?.1
+pub(super) fn judge_route(app: &App, variant: &Variant) -> Option<Route> {
+    check_route_for(app, variant)?.1
 }
 
 /// The outermost JSON object of a judge's reply, whatever surrounds it.
@@ -53,25 +53,48 @@ fn overturnable(task: &mut Task, question: String, answer: String, evidence: Str
         by: "orchd".to_string(),
         kind: None,
         attempt: None,
+        commands: Vec::new(),
         overturned: false,
         owner_answer: None,
     });
 }
 
-/// Replaces criterion `i` with `text`, keeping its visual mark.
-fn amend_criterion(task: &mut Task, i: usize, text: &str) {
+/// Replaces criterion `i` with `text`, keeping its visual mark. A judge may
+/// not take a shared check out of the criterion's `-- check:` part
+/// (`removal_refusal`): then nothing changes and the reason comes back.
+fn amend_criterion(
+    settings: &Settings,
+    task: &mut Task,
+    i: usize,
+    text: &str,
+) -> Result<(), String> {
+    if let Some(why) = criterion_text_refusal(settings, task, i, text) {
+        return Err(why);
+    }
     let old = std::mem::replace(&mut task.criteria[i], text.to_string());
     for v in task.visual_criteria.iter_mut().filter(|v| **v == old) {
         *v = text.to_string();
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 1. Feasibility of a check on the base
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+pub(super) fn amend_criterion_for_test(
+    settings: &Settings,
+    task: &mut Task,
+    i: usize,
+    text: &str,
+) -> Result<(), String> {
+    amend_criterion(settings, task, i, text)
+}
+
 const FEASIBILITY_PROMPT: &str = "You judge whether a check command of a coding task can work in this repository. The command was run on the repository as it is before any work and exited non-zero. You may read files in the working directory but change nothing.\n\nAnswer with one verdict:\n- `feasible`: it fails as it should, because the task is meant to make it pass (for example a test for the new behaviour).\n- `rewrite`: the repository cannot run this kind of check (the test runner, harness, script or tool it needs does not exist here). Give `command`, the nearest check this repository can really run and that exits 0 only when the criterion holds, and `criterionText` when the criterion's own `-- check:` wording must change with it.\n- `unrelated`: it fails for a reason that has nothing to do with the task (a broken environment, a flaky or already broken test, a missing credential).\n\nReply with only JSON: {\"verdict\": \"feasible|rewrite|unrelated\", \"command\": \"\", \"criterion\": <index or null>, \"criterionText\": \"\", \"reason\": \"<one sentence>\"}";
 
+#[derive(Clone)]
 pub(super) enum Feasibility {
     /// Fails as it should.
     AsWritten,
@@ -133,8 +156,126 @@ pub(super) fn parse_feasibility(text: &str, criteria: usize) -> Option<Feasibili
     }
 }
 
+/// `grep` reads a pattern that starts with `-` as an option, so such a check
+/// cannot run. Returns `command` with `--` inserted before each such
+/// pattern, or `None` when nothing needs it. Quote-aware, and it leaves
+/// `-e`/`-f` forms alone (their next word is already an argument).
+pub(super) fn fix_grep_dashes(command: &str) -> Option<String> {
+    // Words with their byte offsets; quotes keep a word whole.
+    let mut words: Vec<(usize, String, bool)> = Vec::new();
+    let mut cur: Option<(usize, String, bool)> = None;
+    let mut quote: Option<char> = None;
+    for (i, c) in command.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.get_or_insert((i, String::new(), false)).1.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                cur.get_or_insert((i, String::new(), true)).2 = true;
+            }
+            (None, c) if c.is_whitespace() => words.extend(cur.take()),
+            (None, c) => cur.get_or_insert((i, String::new(), false)).1.push(c),
+        }
+    }
+    words.extend(cur);
+    let mut inserts: Vec<usize> = Vec::new();
+    let mut at_start = true;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].1.as_str();
+        if matches!(w, "&&" | "||" | ";" | "|" | "(") {
+            at_start = true;
+            i += 1;
+            continue;
+        }
+        if !(at_start && matches!(w, "grep" | "egrep" | "fgrep")) {
+            at_start = false;
+            i += 1;
+            continue;
+        }
+        at_start = false;
+        i += 1;
+        let mut takes_arg = false;
+        while i < words.len() {
+            let o = words[i].1.as_str();
+            // `--long` is an option quoted or not; a quoted word with one
+            // dash is the pattern.
+            if words[i].2 && !o.starts_with("--") {
+                break;
+            }
+            if o == "--" {
+                i = words.len();
+                takes_arg = true;
+                break;
+            }
+            let short_cluster = o.starts_with('-') && !o.starts_with("--") && o.len() > 1;
+            if short_cluster && o[1..].contains(['e', 'f']) {
+                takes_arg = true;
+                break;
+            }
+            if o.starts_with('-') && o.len() > 1 {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        if !takes_arg && i < words.len() && words[i].1.starts_with('-') && words[i].1.len() > 1 {
+            inserts.push(words[i].0);
+            i += 1;
+        }
+    }
+    if inserts.is_empty() {
+        return None;
+    }
+    let mut out = command.to_string();
+    for at in inserts.into_iter().rev() {
+        out.insert_str(at, "-- ");
+    }
+    Some(out)
+}
+
+/// Fixes, before any check runs, each grep check whose pattern starts with
+/// `-`; one decision line per command. Returns whether anything changed.
+pub(super) fn heal_grep_dashes(task: &mut Task) -> bool {
+    let mut changed: Vec<(String, String)> = Vec::new();
+    for c in task
+        .verify
+        .iter_mut()
+        .chain(task.final_verify.iter_mut())
+        .chain(task.checks.iter_mut().map(|c| &mut c.run))
+    {
+        if let Some(fixed) = fix_grep_dashes(c) {
+            if !changed.iter().any(|(old, _)| old == c) {
+                changed.push((c.clone(), fixed.clone()));
+            }
+            *c = fixed;
+        }
+    }
+    for (old, new) in &changed {
+        task.decisions.push(format!(
+            "Orchestrator: check {old} could not run (grep reads a pattern starting with `-` as an option); rewritten to {new}"
+        ));
+    }
+    !changed.is_empty()
+}
+
 /// Applies a ruling about `command`; `false` when it changed nothing.
-pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibility) -> bool {
+pub(super) fn apply_feasibility(
+    settings: &Settings,
+    task: &mut Task,
+    command: &str,
+    ruling: Feasibility,
+) -> bool {
+    // A ruling is never the owner's: a shared check keeps gating as written
+    // and reaches the twice-on-base question.
+    if !matches!(ruling, Feasibility::AsWritten) {
+        if let Some(why) = removal_refusal(settings, task, &[command.to_string()], Origin::Other) {
+            task.decisions.push(format!(
+                "Orchestrator: check {command} keeps gating as written: {why}"
+            ));
+            return true;
+        }
+    }
     match ruling {
         Feasibility::AsWritten => false,
         Feasibility::Rewrite {
@@ -144,6 +285,14 @@ pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibil
         } => {
             if new == command {
                 return false;
+            }
+            if let Some((i, text)) = &criterion {
+                if let Some(why) = criterion_text_refusal(settings, task, *i, text) {
+                    task.decisions.push(format!(
+                        "Orchestrator: check {command} keeps gating as written: {why}"
+                    ));
+                    return true;
+                }
             }
             for c in task
                 .verify
@@ -159,7 +308,7 @@ pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibil
             );
             if let Some((i, text)) = criterion {
                 line.push_str(&format!("; criterion amended to: {text}"));
-                amend_criterion(task, i, &text);
+                let _ = amend_criterion(settings, task, i, &text);
             }
             task.decisions.push(line);
             overturnable(
@@ -191,85 +340,264 @@ pub(super) fn apply_feasibility(task: &mut Task, command: &str, ruling: Feasibil
     }
 }
 
-/// Runs every check command of the task on its base once (`base_check`);
-/// each one that fails there goes to the judge, which leaves it (the task is
-/// meant to make it pass), rewrites it to a check the repository can run, or
-/// marks it non-gating. Settles for good, once per task. `false`: cancelled.
-pub(super) async fn heal_feasibility(
-    app: &Arc<App>,
-    task_id: &str,
-    attempt_n: u32,
-    cancel: &CancelToken,
-) -> bool {
-    let Ok(Some(task)) = app.store.load_task(task_id) else {
-        return true;
-    };
-    if task.brief_check.feasibility_done {
-        return true;
+/// What the background base preflight found; the loop applies it to its own
+/// task (`apply_base_preflight`), the job itself writes no task state.
+#[derive(Clone, Default)]
+pub(super) struct BasePreflight {
+    /// The base could be checked out and the judge ran over every failure:
+    /// feasibility is settled for good.
+    settled: bool,
+    rulings: Vec<(VerifyOutcome, Feasibility)>,
+    /// Decision lines the plan-kept rule wrote (`keep_planned_checks`).
+    decisions: Vec<String>,
+    cost: f64,
+}
+
+/// One task's base preflight: its result arrives on `result`; the channel
+/// closes without a value when the job was cancelled.
+pub(super) struct PreflightJob {
+    result: tokio::sync::watch::Receiver<Option<Arc<BasePreflight>>>,
+    applied: std::sync::atomic::AtomicBool,
+    /// The commands the job runs on the base; a job for other commands is
+    /// replaced, not reused.
+    commands: Vec<String>,
+    cancel: CancelToken,
+}
+
+impl PreflightJob {
+    /// The result, waiting for the job when it still runs; `None` when it
+    /// was cancelled.
+    async fn wait(&self) -> Option<Arc<BasePreflight>> {
+        let mut rx = self.result.clone();
+        let seen = rx.wait_for(|v| v.is_some()).await.ok()?;
+        seen.clone()
     }
-    let Some(route) = judge_route(app) else {
-        return true;
-    };
+
+    fn running(&self) -> bool {
+        self.result.borrow().is_none() && self.result.has_changed().is_ok()
+    }
+
+    fn finished(&self) -> bool {
+        self.result.borrow().is_some()
+    }
+}
+
+/// The commands the base preflight runs for `task`: every `verify` and
+/// `checks` command, once each (`finalVerify` has its own base jobs).
+fn preflight_commands(task: &Task) -> Vec<String> {
     let mut commands: Vec<String> = Vec::new();
-    for c in task
-        .verify
-        .iter()
-        .chain(task.final_verify.iter())
-        .chain(task.checks.iter().map(|c| &c.run))
-    {
+    for c in task.verify.iter().chain(task.checks.iter().map(|c| &c.run)) {
         if !c.trim().is_empty() && !commands.contains(c) {
             commands.push(c.clone());
         }
     }
-    let run_dir = app
-        .store
-        .run_dir(task_id, attempt_n)
-        .join("feasibility-base");
-    let ran = run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await;
-    if cancel.is_cancelled() {
-        return false;
+    commands
+}
+
+/// Starts the base preflight of `task` in the background, holding no slot:
+/// every `verify` and `checks` command runs on the base once (`run_on_base`)
+/// and each failure goes to the feasibility judge. The result only goes into
+/// the app's map; nothing is saved here. A no-op while a job of this task
+/// for the same commands is running or finished; a job for other commands
+/// (the draft or the brief check rewrote them) is cancelled and started
+/// again. `loop_cancel` stops the job.
+pub(super) fn spawn_base_preflight(app: &Arc<App>, task: &Task, loop_cancel: &CancelToken) {
+    let commands = preflight_commands(task);
+    let mut jobs = app.base_preflights.lock().unwrap();
+    if let Some(job) = jobs.get(&task.id) {
+        if job.commands == commands && (job.running() || job.finished()) {
+            return;
+        }
+        job.cancel.cancel();
     }
-    // A base that could not be checked out says nothing: try again later.
-    let Ok(results) = ran else {
-        return true;
-    };
-    let mut rulings: Vec<(VerifyOutcome, Feasibility)> = Vec::new();
-    for (i, failed) in results.iter().filter(|r| r.code != Some(0)).enumerate() {
-        let Ok(Some(current)) = app.store.load_task(task_id) else {
-            return true;
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    // The loop's cancel reaches the job through the job's own token, which
+    // the base runs watch, so their scratch checkout is cleaned up.
+    let cancel = CancelToken::new();
+    jobs.insert(
+        task.id.clone(),
+        Arc::new(PreflightJob {
+            result: rx,
+            applied: std::sync::atomic::AtomicBool::new(false),
+            commands,
+            cancel: cancel.clone(),
+        }),
+    );
+    drop(jobs);
+    let (app, task, loop_cancel) = (app.clone(), task.clone(), loop_cancel.clone());
+    tokio::spawn(async move {
+        let watcher = {
+            let job_cancel = cancel.clone();
+            tokio::spawn(async move {
+                loop_cancel.cancelled().await;
+                job_cancel.cancel();
+            })
         };
-        let prompt = feasibility_prompt(&current, failed);
-        let name = format!("feasibility-{i}");
+        let result = run_base_preflight(&app, &task, &cancel).await;
+        watcher.abort();
+        if let Some(result) = result {
+            let _ = tx.send(Some(Arc::new(result)));
+        }
+    });
+}
+
+/// Starts the base jobs of `task` that its brief check does not need to
+/// wait for: the preflight of its `verify` and `checks` and the base runs of
+/// its `finalVerify`. Called as soon as the commands exist and again after a
+/// rewrite; a job for commands that did not change is not started twice.
+pub(super) fn start_base_checks(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) {
+    if task.brief_check.feasibility_done {
+        return;
+    }
+    if heal_grep_dashes(task) {
+        app.verify_cache.lock().unwrap().remove(&task.id);
+        task.updated_at = now_ms();
+        app.save_task_logged(task);
+        app.broadcast_task(task);
+    }
+    spawn_base_preflight(app, task, cancel);
+    start_final_base_jobs(app, task);
+}
+
+/// The job body. `None`: cancelled.
+async fn run_base_preflight(
+    app: &Arc<App>,
+    task: &Task,
+    cancel: &CancelToken,
+) -> Option<BasePreflight> {
+    let mut out = BasePreflight::default();
+    // No judge: nothing is ruled and nothing is settled.
+    let Some(route) = judge_route(app, &task.variant()) else {
+        return Some(out);
+    };
+    // `finalVerify` is not judged here: its base runs are the background
+    // jobs of `start_final_base_jobs` and the finals gate after review. A
+    // command that is in `verify` as well is still judged.
+    let commands = preflight_commands(task);
+    let run_dir = match app
+        .store
+        .claim_helper_run_dir(&task.id, "feasibility-base", None)
+    {
+        Ok(dir) => dir,
+        Err(_) => return Some(out),
+    };
+    let ran = run_on_base(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &run_dir,
+        cancel,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        return None;
+    }
+    // A base that could not be checked out says nothing: not settled.
+    let Ok(results) = ran else {
+        return Some(out);
+    };
+    // A check that names files the plan creates is feasible by rule: no
+    // judge run, only the kept decision.
+    let failing: Vec<String> = results
+        .iter()
+        .filter(|r| r.code != Some(0) && !timed_out_under_load(r))
+        .map(|r| r.command.clone())
+        .collect();
+    let mut scratch = task.clone();
+    record_check_outcomes(app, &mut scratch, &results);
+    let kept = keep_planned_checks(app, &mut scratch, &failing);
+    out.decisions = scratch.decisions[task.decisions.len()..].to_vec();
+    for failed in results
+        .iter()
+        .filter(|r| r.code != Some(0) && !timed_out_under_load(r) && !kept.contains(&r.command))
+    {
+        let prompt = feasibility_prompt(task, failed);
         let reply = run_judge(
             app,
-            &current,
+            task,
             &route,
-            attempt_n,
+            None,
             "brief_check",
-            &name,
+            "feasibility",
             &prompt,
             cancel,
         )
         .await;
         match reply {
-            Err(RunError::Cancelled) => return false,
-            Ok((reply, cost)) => {
-                add_task_cost(app, task_id, cost);
+            Err(RunError::Cancelled) => return None,
+            Ok(JudgeRun {
+                reply,
+                cost,
+                timeout_note,
+            }) => {
+                out.decisions.extend(timeout_note);
+                out.cost += cost;
                 if let Some(r) = reply
                     .ok()
-                    .and_then(|text| parse_feasibility(&text, current.criteria.len()))
+                    .and_then(|text| parse_feasibility(&text, task.criteria.len()))
                 {
-                    rulings.push((failed.clone(), r));
+                    out.rulings.push((failed.clone(), r));
                 }
             }
             Err(RunError::Io(_) | RunError::NotFound(_)) => {}
         }
     }
-    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+    out.settled = true;
+    Some(out)
+}
+
+/// Waits for the task's base preflight (a running one is awaited and the wait
+/// is a decision line) and applies it to the loop's own `task`: the judge's
+/// cost, the rulings (`apply_feasibility`'s exceptions hold: exit 127 keeps
+/// gating, a shared check is never switched off) and, when the judge settled,
+/// `feasibility_done`. Saves and broadcasts. A no-op without a job or after
+/// it was applied. `false`: cancelled while waiting.
+pub(super) async fn settle_base_preflight(
+    app: &Arc<App>,
+    task: &mut Task,
+    cancel: &CancelToken,
+) -> bool {
+    let Some(job) = app.base_preflights.lock().unwrap().get(&task.id).cloned() else {
         return true;
     };
+    if job.applied.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let waited = job.running();
+    let result = tokio::select! {
+        r = job.wait() => r,
+        _ = cancel.cancelled() => return false,
+    };
+    if job.applied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let Some(result) = result else {
+        // A cancelled job: forget it, a later start may spawn a new one.
+        app.base_preflights.lock().unwrap().remove(&task.id);
+        return true;
+    };
+    if waited {
+        task.decisions.push(
+            "Orchestrator: waited for the base preflight before the final checks".to_string(),
+        );
+    }
+    apply_base_preflight(app, task, &result);
+    app.save_task_logged(task);
+    app.broadcast_task(task);
+    true
+}
+
+fn apply_base_preflight(app: &Arc<App>, task: &mut Task, result: &BasePreflight) {
+    task.cost_usd += result.cost;
+    for line in &result.decisions {
+        if !task.decisions.contains(line) {
+            task.decisions.push(line.clone());
+        }
+    }
     let mut changed = false;
-    for (failed, ruling) in rulings {
+    for (failed, ruling) in &result.rulings {
         // 127: the shell could not find a program. A rewrite to a check the
         // repo can run is fine, but "unrelated" would be this host's PATH or
         // toolchain quietly switching the check off: it keeps gating.
@@ -281,16 +609,16 @@ pub(super) async fn heal_feasibility(
             changed = true;
             continue;
         }
-        changed |= apply_feasibility(&mut task, &failed.command, ruling);
+        let settings = app.settings.read().unwrap().clone();
+        changed |= apply_feasibility(&settings, task, &failed.command, ruling.clone());
     }
     if changed {
-        app.verify_cache.lock().unwrap().remove(task_id);
+        app.verify_cache.lock().unwrap().remove(&task.id);
     }
-    task.brief_check.feasibility_done = true;
+    if result.settled {
+        task.brief_check.feasibility_done = true;
+    }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -421,24 +749,28 @@ pub(super) async fn heal_repeated_unmet(
     let Some(rep) = repeated_unmet(task, idx, attempt_n, review) else {
         return Ok(false);
     };
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         return Ok(false);
     };
     let old = task.criteria[rep.criterion].clone();
     let prompt = ruling_prompt(task, &rep);
-    let name = format!("criterion-judge-{}", task.brief_check.judged.len());
     let reply = run_judge(
         app,
         task,
         &route,
-        attempt_n,
+        Some(attempt_n),
         "brief_check",
-        &name,
+        "criterion-judge",
         &prompt,
         cancel,
     )
     .await?;
-    let (reply, cost) = reply;
+    let JudgeRun {
+        reply,
+        cost,
+        timeout_note,
+    } = reply;
+    task.decisions.extend(timeout_note);
     task.cost_usd += cost;
     let ruling = match reply {
         Ok(text) => parse_ruling(&text),
@@ -449,7 +781,13 @@ pub(super) async fn heal_repeated_unmet(
     let (a, b) = (rep.earlier.0, rep.current.0);
     match ruling {
         Some(Ruling::Infeasible { criterion, reason }) => {
-            amend_criterion(task, rep.criterion, &criterion);
+            let settings = app.settings.read().unwrap().clone();
+            if let Err(why) = amend_criterion(&settings, task, rep.criterion, &criterion) {
+                task.decisions.push(format!(
+                    "Orchestrator: criterion \"{old}\" stays as written: {why}"
+                ));
+                return Ok(false);
+            }
             task.decisions.push(format!(
                 "Orchestrator: criterion \"{old}\" was unmet in attempts {a} and {b} and is infeasible as written ({reason}); amended to \"{criterion}\""
             ));
@@ -526,17 +864,19 @@ pub(super) fn is_ui_path(path: &str) -> bool {
 /// images the attempt left under `artifacts/`. A failing command is a
 /// decision line, never a failed attempt.
 pub(super) async fn capture_screenshots(
+    app: &App,
     task: &mut Task,
     idx: usize,
     worktree: &Path,
     run_dir: &Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) {
     let Some(cmd) = task.brief_check.screenshot.clone() else {
         return;
     };
     let ran = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)),
         worktree,
         &run_dir.join("screenshot"),
         std::slice::from_ref(&cmd),
@@ -545,6 +885,7 @@ pub(super) async fn capture_screenshots(
         cancel,
     )
     .await;
+    record_check_outcomes(app, task, &ran);
     if cancel.is_cancelled() {
         return;
     }
@@ -695,7 +1036,7 @@ pub(super) fn add_follow_ups(task: &mut Task, findings: Vec<String>) {
 
 const ANSWER_PROMPT: &str = "You judge whether the owner's answers to a coding task's questions contradict any of its acceptance criteria. An answer contradicts a criterion when following the answer makes the criterion, as written, wrong or unmeetable. An answer that only adds detail, or that a criterion already agrees with, does not. Reply with only JSON: {\"amend\": [{\"criterion\": <index>, \"text\": \"<the criterion rewritten to agree with the answer, keeping its -- check: part>\"}], \"reason\": \"<one sentence>\"}. Use an empty list when nothing contradicts.";
 
-/// The decisions after the first `seen` that record an owner or policy answer.
+/// The decisions after the first `seen` that record an owner, lead or policy answer.
 pub(super) fn new_answers(task: &Task) -> Vec<String> {
     task.decisions
         .iter()
@@ -704,6 +1045,7 @@ pub(super) fn new_answers(task: &Task) -> Vec<String> {
             (d.starts_with("Owner: ")
                 && !d.starts_with("Owner: stop")
                 && !d.starts_with("Owner: dropped"))
+                || (d.starts_with("Lead: ") && d.contains(" -> "))
                 || d.starts_with("Policy: ")
         })
         .cloned()
@@ -755,24 +1097,28 @@ pub(super) async fn heal_answers(
         task.brief_check.answers_seen = seen;
         return Ok(false);
     }
-    let Some(route) = judge_route(app) else {
+    let Some(route) = judge_route(app, &task.variant()) else {
         // Not looked at: a later run with the judge on still reads them.
         return Ok(false);
     };
     let prompt = answer_prompt(task, &answers);
-    let name = format!("answer-check-{seen}");
     let reply = run_judge(
         app,
         task,
         &route,
-        attempt_n,
+        Some(attempt_n),
         "brief_check",
-        &name,
+        "answer-check",
         &prompt,
         cancel,
     )
     .await?;
-    let (reply, cost) = reply;
+    let JudgeRun {
+        reply,
+        cost,
+        timeout_note,
+    } = reply;
+    task.decisions.extend(timeout_note);
     task.cost_usd += cost;
     let amendments = match reply {
         Ok(text) => parse_amendments(&text, task.criteria.len()),
@@ -784,7 +1130,13 @@ pub(super) async fn heal_answers(
         if old == text {
             continue;
         }
-        amend_criterion(task, i, &text);
+        let settings = app.settings.read().unwrap().clone();
+        if let Err(why) = amend_criterion(&settings, task, i, &text) {
+            task.decisions.push(format!(
+                "Orchestrator: criterion \"{old}\" stays as written: {why}"
+            ));
+            continue;
+        }
         task.decisions.push(format!(
             "Orchestrator: criterion \"{old}\" contradicts the owner's answer; amended to \"{text}\""
         ));
@@ -803,6 +1155,74 @@ pub(super) async fn heal_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_rewritten_verify_starts_the_preflight_again_for_the_new_commands() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.verify = vec!["echo one".into()];
+        let cancel = CancelToken::new();
+        let job = |app: &Arc<App>| app.base_preflights.lock().unwrap()[&task.id].clone();
+        spawn_base_preflight(&app, &task, &cancel);
+        let first = job(&app);
+        // The same commands again: the job is not started twice.
+        spawn_base_preflight(&app, &task, &cancel);
+        assert!(Arc::ptr_eq(&first, &job(&app)));
+        // A rewrite replaces the job and stops the old one.
+        task.verify = vec!["echo two".into()];
+        spawn_base_preflight(&app, &task, &cancel);
+        let second = job(&app);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.commands, vec!["echo two".to_string()]);
+        assert!(first.cancel.is_cancelled());
+        assert!(!second.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn grep_patterns_starting_with_a_dash_get_a_double_dash() {
+        assert_eq!(
+            fix_grep_dashes("grep -qF '- `formatDuration` x' README.md").unwrap(),
+            "grep -qF -- '- `formatDuration` x' README.md"
+        );
+        assert_eq!(
+            fix_grep_dashes("test -f a && grep -q \"-x\" a | grep -c -v '-y' b").unwrap(),
+            "test -f a && grep -q -- \"-x\" a | grep -c -v -- '-y' b"
+        );
+        for fine in [
+            "grep -qF -- '- x' README.md",
+            "grep -qF 'x' README.md",
+            "grep -e '-x' a",
+            "grep -qe '-x' a",
+            "echo grep '-x'",
+            "grep -rn foo src",
+            "grep -rn --include='*.ts' foo src",
+            "grep --regexp='-x' src",
+            "grep --include='*.ts' --regexp=foo a",
+        ] {
+            assert_eq!(fix_grep_dashes(fine), None, "{fine}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_after_quoted_long_options_still_gets_the_double_dash() {
+        assert_eq!(
+            fix_grep_dashes("grep -rn --include='*.ts' '- x' src").unwrap(),
+            "grep -rn --include='*.ts' -- '- x' src"
+        );
+    }
+
+    #[test]
+    fn a_broken_grep_check_is_fixed_everywhere_with_one_decision_line() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Queued);
+        task.verify = vec!["grep -qF '- x' R.md".into(), "npm test".into()];
+        task.final_verify = vec!["grep -qF '- x' R.md".into()];
+        task.decisions.clear();
+        assert!(heal_grep_dashes(&mut task));
+        assert_eq!(task.verify, ["grep -qF -- '- x' R.md", "npm test"]);
+        assert_eq!(task.final_verify, ["grep -qF -- '- x' R.md"]);
+        assert_eq!(task.decisions.len(), 1);
+        assert!(!heal_grep_dashes(&mut task));
+    }
 
     #[test]
     fn ui_paths_are_told_by_extension_or_directory() {
@@ -949,5 +1369,89 @@ mod tests {
             own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
             vec!["Button.tsx".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn new_answers_feed_lead_answers_but_not_lead_stops_to_the_criteria_check() {
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.decisions = vec![
+            "Lead: old question -> old answer (answered by a lead session)".into(),
+            "Lead: q -> a (answered by a lead session)".into(),
+            "Lead: stop the service? -> yes (answered by a lead session)".into(),
+            "Lead: stop".into(),
+            "Lead: dropped from parent".into(),
+            "Owner: B".into(),
+            "Policy: q -> a (policy: e)".into(),
+        ];
+        task.brief_check.answers_seen = 1;
+        assert_eq!(
+            new_answers(&task),
+            [
+                task.decisions[1].clone(),
+                task.decisions[2].clone(),
+                task.decisions[5].clone(),
+                task.decisions[6].clone()
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn feasibility_timed_out_keeps_the_command_unchanged() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        task.verify = vec!["false".into()];
+        let result = run_base_preflight(&app, &task, &CancelToken::new())
+            .await
+            .unwrap();
+        assert!(result.settled);
+        assert!(result.rulings.is_empty());
+        task.decisions.extend(result.decisions);
+        assert_eq!(task.verify, ["false"]);
+        assert_helper_timeout(&task, "feasibility");
+        let costs = crate::costs::read_all(&app.data_dir);
+        assert_eq!(costs.len(), 1);
+        assert!(costs[0].attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn criterion_judge_timed_out_keeps_the_criterion() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        let review: ReviewResult = serde_json::from_value(
+            json!({"verdict":"FAIL", "findings":["Unmet criterion: Keep the API (missing)"]}),
+        )
+        .unwrap();
+        task.attempts[0].review = Some(review.clone());
+        task.attempts.push(attempt_with_failure(2, "failure"));
+        let criteria = task.criteria.clone();
+        assert!(matches!(
+            heal_repeated_unmet(&app, &mut task, 1, &review, &CancelToken::new()).await,
+            Ok(false)
+        ));
+        assert_eq!(task.criteria, criteria);
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "criterion-judge");
+    }
+
+    #[tokio::test]
+    async fn answer_check_timed_out_keeps_the_criteria() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        task.decisions.push("Owner: Which API? -> Remove it".into());
+        let criteria = task.criteria.clone();
+        assert!(matches!(
+            heal_answers(&app, &mut task, 1, &CancelToken::new()).await,
+            Ok(false)
+        ));
+        assert_eq!(task.criteria, criteria);
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "answer-check");
     }
 }

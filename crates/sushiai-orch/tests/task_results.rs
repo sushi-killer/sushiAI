@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake plays every role. `$LOG_DIR` counts implement runs
 /// (`implement.<n>`) and review runs (`review.<n>`). The implement body sees
@@ -105,7 +104,7 @@ fn cleanup(s: Setup, tasks: &[&Value]) {
         .collect();
     s.daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt);
+        remove_dir_retrying(wt);
     }
 }
 
@@ -144,7 +143,6 @@ fn criteria_results_follow_checks_and_review_rulings_and_diff_stats_are_exact() 
             "repo": repo.path().to_str().unwrap(),
             "title": "Grounded",
             "goal": "Make the checks pass",
-            "variant": {"groundedChecks": true},
             "criteria": [
                 "Alpha file exists -- check: test -f alpha.txt",
                 "Beta file exists -- check: test -f beta.txt",
@@ -405,7 +403,7 @@ fn a_task_that_lands_on_its_base_branch_gets_landed_at_and_the_landing_diff_stat
         json!({"files": 1, "added": 1, "removed": 0})
     );
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(done["worktree"].as_str().unwrap());
+    remove_dir_retrying(done["worktree"].as_str().unwrap());
 }
 
 const GRAPH_SCRIPT: &str = r#"#!/bin/sh
@@ -420,7 +418,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt next to a.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;
@@ -443,13 +441,8 @@ fn subtasks_that_land_on_their_parent_get_landed_at_and_their_own_diff_stat() {
         json!({"repo": repo.path().to_str().unwrap(), "request": "build both parts", "start": true}),
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
-    let asked = settle(&daemon, &parent_id);
-    assert_eq!(asked["question"]["kind"], "preexisting_failure", "{asked}");
-    daemon.request(
-        "task.answer",
-        json!({"id": parent_id, "answer": "keep this check"}),
-    );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    // The parent's verify names files the subtasks create: kept by rule.
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -475,6 +468,6 @@ fn subtasks_that_land_on_their_parent_get_landed_at_and_their_own_diff_stat() {
     }
     daemon.shutdown_and_wait();
     for t in std::iter::once(&parent).chain(children.iter().copied()) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }

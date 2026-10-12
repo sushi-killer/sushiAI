@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { until, removeDir, stopPid } = require("./helpers/deadline.cjs");
 const { spawn, spawnSync } = require("node:child_process");
 const {
   createSessionLauncher,
@@ -19,7 +20,7 @@ const CODEX_HOME = "/tmp/codex-account-home";
 function tempDir(t, prefix = "l4a-") {
   // Short path under /tmp: unix socket paths are limited on macOS.
   const dir = fs.mkdtempSync(path.join("/tmp", prefix));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeDir(dir));
   return dir;
 }
 
@@ -556,16 +557,6 @@ const timer = setInterval(() => {
 }, 50);
 `;
 
-async function until(label, check, seconds = 15) {
-  const end = Date.now() + seconds * 1000;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
-
 test(
   "real daemon: a launched fake claude is listed and goes working then idle without leaking the token",
   { skip: !fs.existsSync(DAEMON) && "debug daemon is not built" },
@@ -602,19 +593,16 @@ test(
           client.close();
         }
       } finally {
-        await new Promise((resolve) => {
-          if (daemon.exitCode !== null) return resolve();
-          daemon.once("exit", resolve);
-          daemon.kill("SIGTERM");
-          setTimeout(resolve, 3000);
-        });
+        if (daemon.exitCode === null) await stopPid(daemon.pid);
         // Holders are their own sessions; stop any left under this home.
         spawnSync("pkill", ["-f", home]);
       }
     });
     const { connectDaemon } = require("../electron/daemon/client.cjs");
-    client = await until("daemon socket", () =>
-      connectDaemon({ socketPath, clientName: "l4a-test" }).catch(() => null),
+    client = await until(
+      () =>
+        connectDaemon({ socketPath, clientName: "l4a-test" }).catch(() => null),
+      "daemon socket",
     );
     const manager = {
       request: (host, method, params) => client.request(method, params),
@@ -641,17 +629,16 @@ test(
       );
     assert.equal((await find()).group, "ws-smoke");
     await until(
-      "working",
       async () => (await find())?.agentStatus === "working",
+      "working",
     );
     assert.equal(fs.readFileSync(path.join(out, "token"), "utf8"), TOKEN);
     fs.writeFileSync(path.join(out, "go"), "x");
-    await until("idle", async () => (await find())?.agentStatus === "idle");
+    await until(async () => (await find())?.agentStatus === "idle", "idle");
     await client.request("daemon.shutdown", {}).catch(() => {});
     await until(
-      "daemon exit",
       () => daemon.exitCode !== null || daemon.signalCode,
-      10,
+      "daemon exit",
     );
     const leaked = [];
     const walk = (dir) => {

@@ -2,35 +2,59 @@ use super::*;
 use crate::store::RunFate;
 
 impl App {
-    /// spec step 10: attempts left `running` from a previous process
-    /// become `interrupted`; their tasks become `stopped`.
-    /// Every task that was in flight when the daemon stopped gets its loop
-    /// back: interrupted attempts are marked and requeued by the store, and
-    /// queued or drafting tasks simply resume. A `waiting` task needs no loop
-    /// until its answer arrives (`task.answer` relaunches one).
+    /// Restores loops for in-flight work: interrupted attempts are marked
+    /// and requeued by the store, and queued or drafting tasks resume.
+    /// Stopped tasks stay stopped. A `waiting` task needs no loop until
+    /// its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
+        // No overseer turn survives a restart: nothing is held any more.
+        // First, so a resumed loop never parks beside a stale hold.
+        self.release_stale_holds();
         let prices = self.settings.read().unwrap().prices.clone();
-        let recovered = self.store.recover_interrupted_with(
+        match self.store.recover_interrupted_with(
             |task, idx| self.run_fate(task, idx),
             |task, idx| {
-                let run_dir = self.store.run_dir(&task.id, task.attempts[idx].n);
-                settle_unfinished_cost(task, idx, &run_dir, &prices);
+                settle_unfinished_cost(task, idx, &self.store, &prices);
             },
-        )?;
-        for t in recovered {
-            self.broadcast_task(&t);
+        ) {
+            Ok(recovered) => {
+                for t in recovered {
+                    if !t.archived && t.status == TaskStatus::Stopped && t.question.is_some() {
+                        continue;
+                    }
+                    self.broadcast_task(&t);
+                }
+            }
+            Err(e) => eprintln!("orch: recovering interrupted tasks failed: {e}"),
         }
         // Spend recorded before per-run cost records existed; a no-op once done.
         crate::costs::backfill(&self.data_dir);
-        for a in self.store.recover_interrupted_audits()? {
-            audit::broadcast(self, &a);
+        match self.store.recover_interrupted_audits() {
+            Ok(audits) => {
+                for a in audits {
+                    audit::broadcast(self, &a);
+                }
+            }
+            Err(e) => eprintln!("orch: recovering interrupted audits failed: {e}"),
         }
         // A run that is still going holds its concurrency slot already: its
         // loop starts before the queued ones compete for the rest.
-        let mut tasks = self.store.list_tasks()?;
+        let mut tasks = self.store.list_tasks().unwrap_or_else(|e| {
+            eprintln!("orch: listing tasks for recovery failed: {e}");
+            Vec::new()
+        });
         tasks.sort_by_key(|t| resumable_attempt(self, t).is_none());
         for mut t in tasks {
-            if t.archived {
+            if t.archived || t.queue.park.is_some() || t.queue.stopped_explicitly {
+                continue;
+            }
+            if t.status == TaskStatus::Stopped {
+                if t.question.is_some() {
+                    self.close_stopped_task(&mut t);
+                    t.updated_at = now_ms();
+                    self.save_task_logged(&t);
+                    self.broadcast_task(&t);
+                }
                 continue;
             }
             if matches!(
@@ -40,10 +64,9 @@ impl App {
                     | TaskStatus::Drafting
                     | TaskStatus::Landing
             ) {
-                let id = t.id.clone();
-                if settle_interrupted_advisor(&mut t, |n| self.store.run_dir(&id, n), &prices) {
+                if settle_interrupted_advisor(&mut t, &self.store, &prices) {
                     t.updated_at = now_ms();
-                    self.store.save_task(&t)?;
+                    self.save_task_logged(&t);
                     self.broadcast_task(&t);
                 }
                 if t.status == TaskStatus::Drafting && t.queue.backlog.is_some() {
@@ -55,12 +78,20 @@ impl App {
             }
         }
         self.spawn_landing_retries();
+        self.spawn_digest_timer();
+        self.spawn_wait_sla_timer();
+        self.wake_overseer_for_waiting_after_restart();
         self.spawn_lead_touch_check();
+        self.recovery_timers_started.store(true, Ordering::SeqCst);
         // A dependency question can have become moot while the daemon was
         // down; the graph clears it now, not at the next graph event.
         let mut repos: Vec<String> = self
             .store
-            .list_tasks()?
+            .list_tasks()
+            .unwrap_or_else(|e| {
+                eprintln!("orch: listing tasks for graph recovery failed: {e}");
+                Vec::new()
+            })
             .into_iter()
             .filter(|t| !t.archived)
             .map(|t| t.repo)
@@ -157,13 +188,21 @@ impl App {
     /// whose process group lives is resumed: the task's loop follows it and
     /// carries on with review and verify like after any other pass.
     pub(super) fn run_fate(&self, task: &Task, idx: usize) -> RunFate {
+        if task.queue.park.is_some()
+            || matches!(
+                task.status,
+                TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
+            )
+        {
+            return RunFate::Interrupted;
+        }
         let attempt = &task.attempts[idx];
         let events = self.store.run_dir(&task.id, attempt.n).join("events.jsonl");
         let files = RunFiles::of(&events);
         if attempt.stage != Stage::Implement || !files.raw.exists() {
             return RunFate::Interrupted;
         }
-        let (_, secrets) = run_secrets(self, &task.id);
+        let secrets = run_secrets(self, &task.id).unwrap_or_default().redaction;
         RawTail::rebuild(&files, &events).pump(&secrets, true);
         fate_of_run(&files.exit, || {
             attempt
@@ -221,10 +260,11 @@ pub(super) async fn follow_run(
         .unwrap_or(0);
     let model = (!attempt.model.is_empty()).then(|| attempt.model.clone());
     let mut trip = None;
-    let (_, secrets) = run_secrets(app, &task.id);
+    let secrets = run_secrets(app, &task.id).unwrap_or_default().redaction;
     let mut tail = RawTail::rebuild(&files, &events);
     let mut notes = harness::RunOutcome::default();
     let mut caught_up = false;
+    let mut edit_seen = attempt.first_edit_at.is_some();
     let mut stderr_len = 0u64;
     loop {
         let over = files.exit.exists() || !group_alive(pgid);
@@ -238,6 +278,10 @@ pub(super) async fn follow_run(
             let note = harness::feed_stream_line(attempt.harness, &line, &mut notes);
             if let (true, Some(note)) = (caught_up, note) {
                 app.broadcast_log(&task.id, n, note);
+            }
+            // Replayed lines have no real arrival time: only live ones count.
+            if caught_up && !edit_seen {
+                edit_seen = note_first_edit(app, &task.id, n, &line).await;
             }
             if trip.is_none() {
                 let run = (attempt.harness, model.as_deref());
@@ -305,6 +349,17 @@ pub(super) async fn follow_run(
         .get("argv")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let resume = match attempt.harness {
+        Harness::Claude => argv
+            .windows(2)
+            .find(|w| w[0] == "--resume")
+            .map(|w| w[1].as_str()),
+        Harness::Codex => argv
+            .get(2)
+            .filter(|_| argv.get(1).is_some_and(|a| a == "resume"))
+            .map(String::as_str),
+    };
+    price_resumed_attempt(app, &task.id, n, attempt.harness, resume, &mut outcome);
     let codex_version = meta
         .get("codexVersion")
         .and_then(|v| v.as_str())
@@ -321,7 +376,7 @@ pub(super) async fn follow_run(
             &task.id,
             n,
             &CostTag::task("implement", &attempt.route_id),
-            (attempt.harness, model.as_deref(), false),
+            (attempt.harness, model.as_deref(), resume.is_some()),
             &outcome,
             attempt.started_at,
         );
@@ -337,8 +392,12 @@ impl App {
     }
 
     /// Deletes the unredacted output of every attempt of `task` that is
-    /// settled: a `running` attempt may still be resumed from it.
+    /// settled: a `running` attempt may still be resumed from it, and a
+    /// landing task may go back to review its attempt after a retry.
     pub(super) fn drop_settled_output(&self, task: &Task) {
+        if task.status == TaskStatus::Landing {
+            return;
+        }
         for attempt in &task.attempts {
             if attempt.status != AttemptStatus::Running {
                 remove_raw_output(&self.store.run_dir(&task.id, attempt.n));

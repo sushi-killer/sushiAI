@@ -10,6 +10,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const childProcess = require("node:child_process");
+const { resolveBinary } = require("./daemon/local.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
 const { appDb, readStore, transaction, writeStore } = require("./app-db.cjs");
 const { posixCommand, REMOTE_PATH, REMOTE_BIN } = require("./host-install.cjs");
@@ -66,8 +67,11 @@ const ALLOWED_METHODS = new Set([
   "task.openDeliverable",
   "task.report",
   "task.backlog",
+  "task.preset",
+  "pipeline.describe",
   "failures.catalogue",
   "costs.summary",
+  "overseer.log",
   "chat.get",
   "chat.send",
   "chat.edit",
@@ -91,6 +95,10 @@ const ALLOWED_METHODS = new Set([
   "repo.notes.list",
   "repo.notes.add",
   "repo.notes.remove",
+  "precedents.list",
+  "precedents.remove",
+  "precedents.rule.accept",
+  "precedents.rule.dismiss",
 ]);
 
 // Results that are one task or a list of them: a remote host's are tagged
@@ -109,6 +117,7 @@ const TASK_RESULT_METHODS = new Set([
   "task.overturn",
   "task.leadTouch",
   "task.backlog",
+  "task.preset",
 ]);
 
 function tagTasks(result, host) {
@@ -393,7 +402,6 @@ class OrchestratorService {
     send,
     notify,
     onTask,
-    getClaudeMcp,
     getModelProviders,
     getProjects,
     moduleSwitch,
@@ -412,7 +420,6 @@ class OrchestratorService {
       : send;
     this.notify = notify;
     this.onTask = onTask;
-    this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
     this.getProjects = getProjects;
     this.readyTimeoutMs = readyTimeoutMs;
@@ -542,27 +549,12 @@ class OrchestratorService {
               ([name]) => !off.has(name),
             ),
           );
-          if (Object.keys(own).length) {
-            const current = params.mcp?.mcpServers || params.mcp || {};
-            params.mcp = { mcpServers: { ...own, ...current } };
-          }
+          const current = params.mcp?.mcpServers || params.mcp || {};
+          params.mcp = { mcpServers: { ...own, ...current } };
         }
       } catch {}
     }
-    if (!this.getClaudeMcp) return params;
-    try {
-      const mcp = await this.getClaudeMcp().launchConfig(params.repo);
-      const project = params.mcp?.mcpServers || params.mcp || {};
-      const local = mcp?.mcpServers || mcp || {};
-      return {
-        ...params,
-        mcp: { mcpServers: { ...local, ...project } },
-      };
-    } catch {
-      // No .mcp.json / no readable project: the task still starts, just
-      // without MCP servers wired into the Claude run.
-      return params;
-    }
+    return params;
   }
 
   /** Replaces what the daemon holds with what is allowed now (a host switched
@@ -725,6 +717,14 @@ class OrchestratorService {
     if (!this.notify) return;
     if (!task || typeof task !== "object" || task.archived) return;
     const changed = previous !== undefined && previous !== task.status;
+    // The overseer is on it: the notice comes only if it hands the question on.
+    // A hold older than ten minutes no longer counts (HOLD_TTL_MS in model.rs).
+    if (
+      task.status === "waiting" &&
+      task.question?.heldForOverseer &&
+      Date.now() - Number(task.question.heldAt || 0) < 10 * 60 * 1000
+    )
+      return;
     let key;
     if (task.status === "waiting")
       key = `input:${task.id}:${task.question?.text || ""}`;
@@ -1039,7 +1039,6 @@ function createOrchestratorHosts({
   send,
   notify,
   onTask,
-  getClaudeMcp,
   getModelProviders,
   getProjects,
   getConnections,
@@ -1060,7 +1059,6 @@ function createOrchestratorHosts({
       send,
       notify,
       onTask,
-      getClaudeMcp,
       getModelProviders,
       getProjects,
       moduleSwitch,
@@ -1149,12 +1147,15 @@ async function stopLegacyOrchd(
 
 function commOf(pid) {
   try {
-    return childProcess
-      .execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+    const result = childProcess.execFileSync(
+      resolveBinary(),
+      ["proc", String(pid)],
+      {
         encoding: "utf8",
         timeout: 5000,
-      })
-      .trim();
+      },
+    );
+    return JSON.parse(result)?.executable ?? "";
   } catch {
     return "";
   }

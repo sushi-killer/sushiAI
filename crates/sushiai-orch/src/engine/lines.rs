@@ -10,15 +10,25 @@ pub(super) fn policy_answer_line(question: &str, answer: &str, by: &str, evidenc
     format!("Policy: {question} -> {answer} ({by}: {evidence})")
 }
 
+/// The start of an overseer decision line made like an earlier answer.
+pub(super) const LIKE_PREFIX: &str = "Overseer: answered like ";
+
+/// The decision line for an overseer answer given like an earlier one: `like`
+/// names the precedent or repo note it followed.
+pub(super) fn overseer_like_line(like: &str, question: &str, answer: &str) -> String {
+    format!("{LIKE_PREFIX}{like} -- {question} -> {answer}")
+}
+
 pub(super) fn orchestrator_escalate_line(reason: &str) -> String {
     format!("Orchestrator: escalated ({reason})")
 }
 
-/// A decision line produced by [`orchestrator_answer_line`] specifically --
-/// `false` for an escalation line, an owner/agent line, or anything else.
+/// An orchestrator or lead answer line, excluding escalations and owner/agent lines.
 /// Used to cap triage to one *answer* in a row (P1-2).
 pub(super) fn is_orchestrator_answer_decision(line: &str) -> bool {
-    line.starts_with("Orchestrator: ")
+    (line.starts_with("Orchestrator: ")
+        || line.starts_with("Lead: ")
+        || line.starts_with(LIKE_PREFIX))
         && line.contains(" -> ")
         && !line.starts_with(NO_PLANNER_TIER_PREFIX)
 }

@@ -16,11 +16,19 @@ pub mod legacy;
 pub mod loop_detect;
 pub mod mcp;
 pub mod model;
+pub mod overseer;
+pub mod overseer_state;
+pub mod precedents;
+#[path = "../../process.rs"]
+pub mod process;
+pub mod procs;
 pub mod prompts;
 pub mod report;
+pub mod sandbox;
 pub mod skill;
 pub mod store;
 pub mod timeline;
+pub mod worktree_env;
 
 use std::future::Future;
 use std::io;
@@ -134,7 +142,7 @@ impl Orch {
         })
     }
 
-    /// Cancels task loops, chat turns and audits, waits up to 10 s for them to end, then stops
+    /// Cancels task loops, chat turns, audits and background base runs, waits up to 10 s for them to end, then stops
     /// the runtime. Agent runs the pipeline may re-adopt after a restart are not killed here.
     pub async fn shutdown(&self) {
         self.shutdown_with(false).await;
@@ -149,7 +157,8 @@ impl Orch {
             let deadline = tokio::time::Instant::now() + DRAIN;
             while (app.any_task_loop_running()
                 || app.any_chat_turn_running()
-                || app.any_audit_running())
+                || app.any_audit_running()
+                || app.any_base_job_running())
                 && tokio::time::Instant::now() < deadline
             {
                 tokio::time::sleep(Duration::from_millis(50)).await;

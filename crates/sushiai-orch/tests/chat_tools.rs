@@ -5,7 +5,6 @@
 mod common;
 use common::*;
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 const FAKE_CLAUDE: &str = r##"#!/bin/sh
 printf '%s\n' "$@" > "$ARGV_OUT"
@@ -116,18 +115,20 @@ impl Env {
                "server": {"ref": "claude-json:fake"}})
     }
 
+    fn messages_len(&self) -> usize {
+        let thread = self
+            .daemon
+            .request("chat.get", json!({"repo": self.path()}));
+        thread["messages"].as_array().map_or(0, Vec::len)
+    }
+
     fn wait_idle(&self) -> serde_json::Value {
-        let start = Instant::now();
-        loop {
+        wait_until("the chat to be idle", || {
             let thread = self
                 .daemon
                 .request("chat.get", json!({"repo": self.path()}));
-            if thread["busy"] == json!(false) {
-                return thread;
-            }
-            assert!(start.elapsed() < Duration::from_secs(30), "never idle");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            (thread["busy"] == json!(false)).then_some(thread)
+        })
     }
 
     fn say(&self, text: &str, mode: Option<&str>) -> serde_json::Value {
@@ -135,9 +136,17 @@ impl Env {
         if let Some(mode) = mode {
             params["mode"] = json!(mode);
         }
+        let before = self.messages_len();
         self.daemon.request("chat.send", params);
-        std::thread::sleep(Duration::from_millis(100));
-        self.wait_idle()
+        // The turn has added its reply once the thread grew by a user and an assistant message.
+        wait_until("the chat turn to end", || {
+            let thread = self
+                .daemon
+                .request("chat.get", json!({"repo": self.path()}));
+            (thread["busy"] == json!(false)
+                && thread["messages"].as_array().unwrap().len() >= before + 2)
+                .then_some(thread)
+        })
     }
 
     fn read(&self, name: &str) -> String {

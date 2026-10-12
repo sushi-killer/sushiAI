@@ -4,7 +4,6 @@
 mod common;
 use common::*;
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 /// Answers by prompt, numbers its harness sessions and logs each call's argv
 /// and prompt.
@@ -66,20 +65,12 @@ impl Env {
     }
 
     fn settle(&self, messages: usize) -> serde_json::Value {
-        let start = Instant::now();
-        loop {
+        wait_until("the chat turn to end", || {
             let thread = self.thread();
-            if thread["busy"] == json!(false)
-                && thread["messages"].as_array().unwrap().len() == messages
-            {
-                return thread;
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(20),
-                "turn never ended"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            (thread["busy"] == json!(false)
+                && thread["messages"].as_array().unwrap().len() == messages)
+                .then_some(thread)
+        })
     }
 
     fn say(&self, text: &str, messages: usize) -> serde_json::Value {

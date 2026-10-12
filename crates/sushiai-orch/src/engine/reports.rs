@@ -55,11 +55,9 @@ fn follow_up_request(task: &Task, note: &str) -> String {
     text
 }
 
-/// Git facts about the work of a finished task: its landing commit, else the
-/// commits its branch holds over the base it started from.
 /// What the task changed: the landing commit against its parent once landed,
 /// else its branch against its base.
-fn task_range(task: &Task) -> (String, String) {
+pub(super) fn task_range(task: &Task) -> (String, String) {
     match &task.landed_sha {
         Some(sha) => (format!("{sha}^"), sha.clone()),
         None => (task.base_sha.clone(), task.branch.clone()),
@@ -85,13 +83,46 @@ pub(super) async fn record_landing(task: &mut Task) {
     refresh_diff_stat(task).await;
 }
 
-fn gather_facts(task: &Task) -> Facts {
+/// Per implement attempt of every task in `graph`: its exploration calls
+/// (the timeline's `explore` bucket) and the time to its first edit.
+fn attempt_facts(
+    store: &crate::store::Store,
+    graph: &[&Task],
+    rules: &crate::model::WorkBuckets,
+) -> Vec<report::AttemptFact> {
+    let mut out = Vec::new();
+    for task in graph {
+        let segments = crate::timeline::task_timeline(store, task, rules, now_ms());
+        for a in task.attempts.iter().filter(|a| a.stage == Stage::Implement) {
+            let explore = segments
+                .iter()
+                .find(|s| s.stage == "implement" && s.attempt == a.n)
+                .and_then(|s| s.buckets.as_ref())
+                .map(|b| b.explore);
+            out.push(report::AttemptFact {
+                task_id: task.id.clone(),
+                n: a.n,
+                explore,
+                first_edit_ms: a.first_edit_at.map(|at| at - a.started_at),
+            });
+        }
+    }
+    out
+}
+
+fn gather_facts(
+    task: &Task,
+    store: &crate::store::Store,
+    graph: &[&Task],
+    rules: &crate::model::WorkBuckets,
+) -> Facts {
     let repo = Path::new(&task.repo);
     let (from, to) = task_range(task);
     let mut facts = Facts {
         commits: git::log_subjects(repo, &from, &to).unwrap_or_default(),
         files: git::numstat(repo, &from, &to).unwrap_or_default(),
         images: Vec::new(),
+        attempts: attempt_facts(store, graph, rules),
     };
     let wt = Path::new(&task.worktree);
     if wt.join("artifacts").is_dir() {
@@ -105,6 +136,26 @@ fn gather_facts(task: &Task) -> Facts {
         }
     }
     facts
+}
+
+/// Refreshes the patch-aware count of commits on a completed top-level task
+/// that are absent from its base branch.
+fn refresh_unlanded(task: &mut Task) {
+    if task.parent.is_some() || task.status != TaskStatus::Done || task.landed_sha.is_some() {
+        task.unlanded = None;
+        return;
+    }
+    let Some(base) = task.base_ref.as_deref() else {
+        task.unlanded = None;
+        return;
+    };
+    task.unlanded = git::cherry_count(Path::new(&task.repo), base, &task.branch)
+        .ok()
+        .filter(|commits| *commits > 0)
+        .map(|commits| crate::model::Unlanded {
+            commits,
+            base: base.to_string(),
+        });
 }
 
 /// Why a landed task counts as touched, when it does: its landing is no
@@ -171,18 +222,22 @@ impl App {
         self.collect_deliverables(task).await;
         let all = self.repo_tasks(&task.repo);
         let data = self.data_dir.clone();
+        let rules = self
+            .store
+            .load_settings()
+            .map(|s| s.work_buckets)
+            .unwrap_or_default();
         let snapshot = task.clone();
-        let (text, touched) = tokio::task::spawn_blocking(move || {
+        let (text, touched, unlanded) = tokio::task::spawn_blocking(move || {
             let mut t = snapshot;
             Self::apply_auto_touch(&mut t);
+            refresh_unlanded(&mut t);
             let graph = report::graph_of(&t, &all);
-            let text = report::build(
-                &t,
-                &graph,
-                &crate::costs::read_all(&data),
-                &gather_facts(&t),
-            );
-            (text, t.lead_touch)
+            let facts = crate::store::Store::new(&data)
+                .map(|store| gather_facts(&t, &store, &graph, &rules))
+                .unwrap_or_default();
+            let text = report::build(&t, &graph, &crate::costs::read_all(&data), &facts);
+            (text, t.lead_touch, t.unlanded)
         })
         .await
         .unwrap_or_default();
@@ -190,6 +245,7 @@ impl App {
             return;
         }
         task.lead_touch = touched;
+        task.unlanded = unlanded;
         let dir = self.store.task_dir(&task.id);
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("report.md"), &text);
@@ -216,10 +272,10 @@ impl App {
         if task.status != TaskStatus::Done {
             return Err("the task is not done".to_string());
         }
-        let before = task.lead_touch.clone();
+        let before = (task.lead_touch.clone(), task.unlanded.clone());
         self.write_report(&mut task).await;
         self.store.save_task(&task).map_err(|e| e.to_string())?;
-        if task.lead_touch != before {
+        if (task.lead_touch.clone(), task.unlanded.clone()) != before {
             self.broadcast_task(&task);
         }
         Ok(json!({"id": task.id, "report": task.report}))
@@ -366,6 +422,7 @@ impl App {
             depends_on: vec![],
             parent: None,
             paths: vec![],
+            checklist: vec![],
             relay_of: None,
             eval_set: None,
             eval_name: None,
@@ -383,19 +440,32 @@ impl App {
         tokio::spawn(async move {
             let tasks = tokio::task::spawn_blocking({
                 let app = app.clone();
-                move || app.store.list_tasks().unwrap_or_default()
+                move || {
+                    app.store.list_tasks().unwrap_or_else(|e| {
+                        eprintln!("orch: listing tasks for lead touch check failed: {e}");
+                        Vec::new()
+                    })
+                }
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                eprintln!("orch: starting lead touch check failed: {e}");
+                Vec::new()
+            });
             for mut task in tasks {
                 if app.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
-                if task.landed_sha.is_none() || task.status != TaskStatus::Done {
+                if task.status != TaskStatus::Done || task.parent.is_some() {
                     continue;
                 }
                 let checked = tokio::task::spawn_blocking(move || {
-                    let changed = App::apply_auto_touch(&mut task);
+                    let before = (task.lead_touch.clone(), task.unlanded.clone());
+                    if task.landed_sha.is_some() {
+                        App::apply_auto_touch(&mut task);
+                    }
+                    refresh_unlanded(&mut task);
+                    let changed = before != (task.lead_touch.clone(), task.unlanded.clone());
                     (changed, task)
                 })
                 .await;
@@ -406,7 +476,7 @@ impl App {
                     app.write_report(&mut task).await;
                 }
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
         });

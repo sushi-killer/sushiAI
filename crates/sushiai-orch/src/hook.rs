@@ -98,6 +98,7 @@ mod tests {
             code: Some(1),
             tail: "FAIL src/x.test.ts".into(),
             ms: 100,
+            ..Default::default()
         }];
         let d = decide_stop(&facts(0, true, true, &verify));
         match d {
@@ -116,6 +117,7 @@ mod tests {
             code: Some(0),
             tail: "ok".into(),
             ms: 100,
+            ..Default::default()
         }];
         let d = decide_stop(&facts(0, true, true, &verify));
         assert_eq!(d, StopDecision::Allow);
@@ -131,6 +133,7 @@ mod tests {
             code: Some(1),
             tail: long_tail,
             ms: 100,
+            ..Default::default()
         }];
         let d = decide_stop(&facts(0, true, true, &verify));
         match d {

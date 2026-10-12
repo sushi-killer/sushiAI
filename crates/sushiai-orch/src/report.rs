@@ -17,6 +17,18 @@ pub struct Facts {
     pub files: Vec<(String, Option<u64>, Option<u64>)>,
     /// Evidence images: screenshots the runs left and images the work added.
     pub images: Vec<String>,
+    /// Exploration calls and time to first edit of each implement attempt.
+    pub attempts: Vec<AttemptFact>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttemptFact {
+    pub task_id: String,
+    pub n: u32,
+    /// `None` when the run left no top-level tool calls to count.
+    pub explore: Option<u32>,
+    /// Milliseconds from the attempt's start to its first edit.
+    pub first_edit_ms: Option<i64>,
 }
 
 pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
@@ -166,7 +178,7 @@ fn owner_prefix(task: &Task, many: bool) -> String {
     }
 }
 
-fn attempts_line(task: &Task, many: bool) -> String {
+fn attempts_line(task: &Task, many: bool, facts: &Facts) -> String {
     let attempts: Vec<_> = task
         .attempts
         .iter()
@@ -193,6 +205,24 @@ fn attempts_line(task: &Task, many: bool) -> String {
         line.push_str(&format!(", {failed} failed ({})", list.join(", ")));
     }
     line.push('\n');
+    for a in &attempts {
+        let Some(fact) = facts
+            .attempts
+            .iter()
+            .find(|f| f.task_id == task.id && f.n == a.n)
+        else {
+            continue;
+        };
+        let explore = match fact.explore {
+            Some(k) => format!("{k} exploration calls"),
+            None => "exploration calls unknown".to_string(),
+        };
+        let edit = match fact.first_edit_ms {
+            Some(ms) => format!("first edit after {}", minutes(ms)),
+            None => "no edit".to_string(),
+        };
+        line.push_str(&format!("  - attempt {}: {explore}, {edit}\n", a.n));
+    }
     line
 }
 
@@ -242,6 +272,15 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         )),
         None => out.push_str(&format!("- {status}, on branch `{}`\n", top.branch)),
     }
+    if let Some(unlanded) = &top.unlanded {
+        out.push_str(&format!(
+            "- Not landed: {} commit(s) on `{}` are not on `{}`\n",
+            unlanded.commits, top.branch, unlanded.base
+        ));
+    }
+    let done_at = top.report_at.or(top.landed_at).unwrap_or(top.updated_at);
+    let wall = minutes(done_at - top.created_at);
+    out.push_str(&format!("- Total time: {wall} from creation to done\n"));
     match &top.lead_touch {
         Some(t) => out.push_str(&format!(
             "- Lead touch: {} (by {}){}\n",
@@ -348,9 +387,8 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         .collect();
     let total: f64 = mine.iter().map(|r| r.cost_usd).sum();
     out.push_str(&format!(
-        "Total {} over {} wall time.\n\n",
-        money(total),
-        minutes(top.updated_at - top.created_at)
+        "Total {} over {wall} wall time.\n\n",
+        money(total)
     ));
     if mine.is_empty() {
         out.push_str("No cost records.\n");
@@ -360,7 +398,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
 
     out.push_str("\n## Attempts\n\n");
     for task in graph {
-        out.push_str(&attempts_line(task, many));
+        out.push_str(&attempts_line(task, many, facts));
     }
 
     out.push_str("\n## Follow-ups\n\n");
@@ -404,5 +442,29 @@ mod tests {
     fn minutes_reads_seconds_then_minutes() {
         assert_eq!(minutes(12_000), "12s");
         assert_eq!(minutes(600_000), "10 min");
+    }
+
+    #[test]
+    fn unlanded_work_is_reported_and_absent_when_not_set() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
+        task.branch = "task/feature".into();
+        task.base_ref = Some("work".into());
+        task.unlanded = Some(crate::model::Unlanded {
+            commits: 2,
+            base: "work".into(),
+        });
+        let report = build(&task, &[&task], &[], &Facts::default());
+        assert!(report.contains("- Not landed: 2 commit(s) on `task/feature` are not on `work`"));
+        let serialized = serde_json::to_value(&task).unwrap();
+        assert_eq!(serialized["unlanded"]["commits"], 2);
+        assert_eq!(serialized["unlanded"]["base"], "work");
+
+        task.unlanded = None;
+        let report = build(&task, &[&task], &[], &Facts::default());
+        assert!(!report.contains("Not landed:"));
+        assert!(serde_json::to_value(&task)
+            .unwrap()
+            .get("unlanded")
+            .is_none());
     }
 }

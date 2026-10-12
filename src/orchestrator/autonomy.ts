@@ -1,4 +1,52 @@
-import type { Settings } from "./types";
+import { clock } from "./taskDetailModel.ts";
+import type { Settings, Task } from "./types";
+
+type AutonomySummary = {
+  items: { label: string; on: boolean }[];
+  pause?: { until: number; label: string };
+};
+
+export function autonomySummary(
+  settings: Settings | null,
+  tasks: Task[],
+  repo: string,
+  now: number,
+): AutonomySummary | null {
+  if (!settings) return null;
+  const reminder = settings.waitRemindEveryHours ?? 0;
+  const defaultAnswer = settings.waitDefaultAfterHours ?? 0;
+  let until = now;
+  for (const task of tasks) {
+    const end = task.pausedUntil;
+    if (task.repo === repo && end !== undefined && end > until) until = end;
+  }
+  return {
+    items: [
+      {
+        label: `Autopilot ${settings.autopilot ? "on" : "off"}`,
+        on: settings.autopilot,
+      },
+      {
+        label: `Auto-answer ${settings.autoAnswer ? "on" : "off"}`,
+        on: settings.autoAnswer,
+      },
+      {
+        label: reminder > 0 ? `Reminder every ${reminder} h` : "Reminder off",
+        on: reminder > 0,
+      },
+      {
+        label:
+          defaultAnswer > 0
+            ? `Default answer after ${defaultAnswer} h`
+            : "Default answer off",
+        on: defaultAnswer > 0,
+      },
+    ],
+    ...(until > now
+      ? { pause: { until, label: `Usage-limit pause until ${clock(until)}` } }
+      : {}),
+  };
+}
 
 /** One choice for how often the orchestrator stops to ask the owner. Each is
  * a fixed combination of three daemon settings; `custom` is any other

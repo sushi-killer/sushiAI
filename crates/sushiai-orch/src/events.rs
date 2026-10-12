@@ -36,6 +36,9 @@ pub enum Event {
     /// is stored or changes.
     #[serde(rename = "proposal")]
     Proposal { proposal: Box<serde_json::Value> },
+    /// One new `overseer.log` entry, when the overseer acts.
+    #[serde(rename = "overseer")]
+    Overseer { entry: Box<crate::overseer::Entry> },
 }
 
 #[cfg(test)]
@@ -53,6 +56,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/r".into(),
             project_id: None,
@@ -62,6 +66,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -85,9 +90,12 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -96,6 +104,9 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            metrics: None,
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -128,6 +139,8 @@ mod tests {
             answer: "yes".into(),
             answered_at: 9,
             answered_by: AnsweredBy::Owner,
+            failure_signature: None,
+            commands: Vec::new(),
         });
         task.question = Some(q);
         let v = serde_json::to_value(Event::Task {

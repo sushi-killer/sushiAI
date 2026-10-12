@@ -33,25 +33,12 @@ const DAEMON_CPU_BUDGET_PERCENT: f64 = 1.0;
 const SHELL: &str = "i=0; while [ $i -lt 2000 ]; do printf 'shell-%04d %0190d\\n' $i 0; \
                      i=$((i+1)); done; echo shell-flood-done; exec sleep 100000";
 
-fn ps_field(pid: u32, field: &str) -> String {
-    let out = Command::new("ps")
-        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
-        .output()
-        .expect("ps");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 fn rss_kb(pid: u32) -> u64 {
-    ps_field(pid, "rss").parse().unwrap_or(0)
+    sushiai_daemon::process::info(pid as i32).map_or(0, |p| p.rss_bytes / 1024)
 }
 
-/// CPU seconds a process has used: `[[dd-]hh:]mm:ss[.cc]`.
 fn cpu_secs(pid: u32) -> f64 {
-    let text = ps_field(pid, "cputime");
-    let text = text.split('-').next_back().unwrap_or_default();
-    text.split(':')
-        .try_fold(0.0, |acc, part| part.parse::<f64>().map(|n| acc * 60.0 + n))
-        .unwrap_or(0.0)
+    sushiai_daemon::process::info(pid as i32).map_or(0.0, |p| p.cpu_ms as f64 / 1000.0)
 }
 
 fn open_fds(pid: u32) -> usize {
@@ -192,14 +179,9 @@ fn thirty_sessions_awake_asleep_and_after_a_hard_restart() {
     wait_status(&mut client, first, "running");
 
     // A reboot: every holder, its child and the daemon die at once.
-    let all = processes();
     let holders = sandbox.holders();
     for holder in &holders {
-        for (child, ppid, _) in &all {
-            if ppid == holder {
-                kill(*child, "-KILL");
-            }
-        }
+        kill(child_of(*holder), "-KILL");
         kill(*holder, "-KILL");
     }
     kill(daemon, "-KILL");

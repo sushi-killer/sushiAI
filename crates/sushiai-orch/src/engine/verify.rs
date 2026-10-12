@@ -1,7 +1,55 @@
 use super::*;
+use compiler_cache::{CacheRun, CompilerCache};
 
-/// `settings.verifyTimeoutSecs`, set when the daemon starts and on every
-/// `settings.set`; the verify runners are free functions with no `App`.
+/// PATH and compiler-cache inputs shared by a verify command and its stats.
+pub struct VerifyEnvironment {
+    pub path: String,
+    pub compiler_cache: Option<CompilerCache>,
+}
+
+impl VerifyEnvironment {
+    pub fn for_worktree(worktree: &Path) -> Self {
+        let path = augmented_path();
+        let compiler_cache = CompilerCache::for_worktree(worktree, &path);
+        Self {
+            path,
+            compiler_cache,
+        }
+    }
+
+    pub fn with_cache(
+        worktree: &Path,
+        path: String,
+        dir: PathBuf,
+        port: u16,
+        owner_set_wrapper: bool,
+    ) -> Self {
+        let compiler_cache = CompilerCache::discover(
+            &path,
+            crate::worktree_env::compiler_cache_enabled(worktree).unwrap_or(false),
+            owner_set_wrapper,
+            dir,
+            port,
+        );
+        Self {
+            path,
+            compiler_cache,
+        }
+    }
+
+    pub fn build_command(
+        &self,
+        cwd: &Path,
+        cmd: &str,
+        sandbox: Option<&TaskSandbox>,
+        base_sha: &str,
+    ) -> tokio::process::Command {
+        build_verify_command_in(cwd, cmd, sandbox, base_sha, self)
+    }
+}
+
+/// Worktree setup uses this timeout; check runners read their App settings.
+/// Updated at daemon start and on every `settings.set`.
 static VERIFY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1200);
 
 /// The most the Stop hook waits for verify: under Claude's 600 s hook limit.
@@ -16,68 +64,67 @@ pub(super) fn set_verify_timeout_secs(secs: u64) {
     VERIFY_TIMEOUT_SECS.store(secs.max(1), Ordering::SeqCst);
 }
 
-fn verify_timeout() -> Duration {
+pub(super) fn verify_timeout() -> Duration {
     Duration::from_secs(VERIFY_TIMEOUT_SECS.load(Ordering::SeqCst))
 }
 
-/// Every path a verify command is allowed to write under when sandboxed:
-/// the worktree and its own run dir, plus the usual OS/package-manager temp
-/// and cache locations a build/test command routinely touches. Network is
-/// deliberately left open (verify commands may need to hit a registry, run
-/// a dev server, etc.) -- only the filesystem is restricted.
-fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let tmp_dir = std::env::var("TMPDIR").unwrap_or_default();
-    let mut paths = vec![
-        worktree.to_path_buf(),
-        run_dir.to_path_buf(),
-        PathBuf::from("/dev"),
-        PathBuf::from(format!("{home}/.npm")),
-        PathBuf::from(format!("{home}/.cache")),
-        PathBuf::from(format!("{home}/.cargo/registry")),
-    ];
-    #[cfg(target_os = "macos")]
-    paths.extend([
-        PathBuf::from("/private/var/folders"),
-        PathBuf::from("/private/tmp"),
-        PathBuf::from(format!("{home}/Library/Caches")),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    paths.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
-    if !tmp_dir.is_empty() {
-        paths.push(PathBuf::from(tmp_dir));
+/// Seatbelt's later rules reopen this run and worktree under denied roots.
+pub fn to_sbpl(sandbox: &TaskSandbox) -> String {
+    let quoted = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    for path in &sandbox.denied_read_roots {
+        profile.push_str(&format!("(deny file-read* (subpath {}))\n", quoted(path)));
     }
-    paths
-}
-
-#[cfg(target_os = "macos")]
-fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
-    let mut profile =
-        String::from("(version 1)\n(allow default)\n(deny file-write* (subpath \"/\"))\n");
-    for p in allow_write {
+    for path in &sandbox.read_exceptions {
+        profile.push_str(&format!("(allow file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_metadata_paths {
         profile.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            p.to_string_lossy().replace('"', "")
+            "(allow file-read-metadata (literal {}))\n",
+            quoted(path)
         ));
     }
+    for path in &sandbox.read_metadata_subpaths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (subpath {}))\n",
+            quoted(path)
+        ));
+    }
+    profile.push_str("(deny file-write* (subpath \"/\"))\n");
+    for path in &sandbox.write_roots {
+        profile.push_str(&format!("(allow file-write* (subpath {}))\n", quoted(path)));
+    }
+    profile.push_str(&format!(
+        "(deny network-outbound (remote unix-socket (path-literal {})))\n",
+        quoted(&sandbox.daemon_socket),
+    ));
     profile
 }
 
 /// `sandbox-exec`-wraps the command on macOS when `sandbox == Native`;
 /// plain `/bin/sh -c` for `Host`, and on non-macOS (`sandbox-exec` doesn't
 /// exist there -- a documented limitation, not a bug).
-fn build_verify_command(
+pub(super) fn build_verify_command(
     cwd: &Path,
     cmd: &str,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
+) -> tokio::process::Command {
+    VerifyEnvironment::for_worktree(cwd).build_command(cwd, cmd, sandbox, base_sha)
+}
+
+fn build_verify_command_in(
+    cwd: &Path,
+    cmd: &str,
+    sandbox: Option<&TaskSandbox>,
+    base_sha: &str,
+    environment: &VerifyEnvironment,
 ) -> tokio::process::Command {
     let mut command;
     #[cfg(target_os = "macos")]
     {
-        if sandbox == SandboxMode::Native {
-            let profile = build_verify_sandbox_profile(allow_write);
+        if let Some(sandbox) = sandbox {
+            let profile = to_sbpl(sandbox);
             command = tokio::process::Command::new("sandbox-exec");
             command
                 .arg("-p")
@@ -92,13 +139,19 @@ fn build_verify_command(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (sandbox, allow_write);
+        let _ = sandbox;
         command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(cmd);
     }
+    if let Some(sandbox) = sandbox {
+        // The sandbox policy owns the sandboxed-check variables.
+        sandbox.apply_check_env(command.as_std_mut());
+    } else if let Some(cache) = &environment.compiler_cache {
+        cache.apply(&mut command);
+    }
     command
         .current_dir(cwd)
-        .env("PATH", augmented_path())
+        .env("PATH", &environment.path)
         .env("ORCHD_BASE_SHA", base_sha)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -111,6 +164,17 @@ fn build_verify_command(
         });
     }
     command
+}
+
+/// One merged policy for diff checks, base checks, briefs and shared checks.
+pub(super) fn scoped_checks_for(settings: &Settings, task: &Task) -> Vec<ScopedCheck> {
+    let mut scoped = settings.scoped_checks.clone();
+    if let Ok(entries) =
+        crate::worktree_env::scoped_checks_at(Path::new(&task.repo), &task.base_sha)
+    {
+        scoped.extend(entries);
+    }
+    scoped
 }
 
 /// The entries that scope `command` in `repo`.
@@ -170,12 +234,12 @@ pub(super) fn filter_scoped(
 /// diff cannot be read every command runs.
 pub(super) async fn scope_to_diff(
     app: &Arc<App>,
-    repo: &str,
+    task: &Task,
     worktree: &Path,
     base: &str,
     commands: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let scoped = app.settings.read().unwrap().scoped_checks.clone();
+    let scoped = scoped_checks_for(&app.settings.read().unwrap(), task);
     if !commands
         .iter()
         .any(|c| scoped.iter().any(|e| glob_match(&e.command, c.trim())))
@@ -187,13 +251,127 @@ pub(super) async fn scope_to_diff(
         .await
         .unwrap_or(None);
     match changed {
-        Some(changed) => filter_scoped(&scoped, repo, commands, &changed),
+        Some(changed) => filter_scoped(&scoped, &task.repo, commands, &changed),
         None => (commands.to_vec(), Vec::new()),
     }
 }
 
-/// Adds each skip line once.
-pub(super) fn record_skips(task: &mut Task, lines: Vec<String>) {
+/// Path policy first, then package/test checks for subtasks gated at their parent.
+pub(super) async fn scope_task_checks(
+    app: &Arc<App>,
+    task: &Task,
+    worktree: &Path,
+    base: &str,
+    commands: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let (path_commands, mut lines) = scope_to_diff(app, task, worktree, base, commands).await;
+    let enabled = task.parent.is_some() && app.settings.read().unwrap().gates_at_parent(&task.repo);
+    if !enabled {
+        return (path_commands, lines);
+    }
+    let (wt, b, remaining) = (
+        worktree.to_path_buf(),
+        base.to_string(),
+        path_commands.clone(),
+    );
+    let narrowed = tokio::task::spawn_blocking(move || {
+        git::changed_files(&wt, &b)
+            .map(|changed| subtask_checks::scope(&wt, &changed, &remaining, true))
+    })
+    .await;
+    let Ok(Ok(mut narrowed)) = narrowed else {
+        return (commands.to_vec(), Vec::new());
+    };
+    // Path-scoped shared checks also remain the parent's responsibility.
+    narrowed.deferred.extend(
+        commands
+            .iter()
+            .filter(|c| !path_commands.contains(c))
+            .cloned(),
+    );
+    if !narrowed.deferred.is_empty() && !add_parent_checks(app, task, &narrowed.deferred) {
+        return (commands.to_vec(), Vec::new());
+    }
+    lines.extend(narrowed.decisions);
+    (narrowed.commands, lines)
+}
+
+fn add_parent_checks(app: &App, task: &Task, commands: &[String]) -> bool {
+    let Some(parent_id) = task.parent.as_deref() else {
+        return false;
+    };
+    let Ok(Some(mut parent)) = app.store.load_task(parent_id) else {
+        return false;
+    };
+    let mut changed = false;
+    for command in commands {
+        if parent
+            .verify
+            .iter()
+            .chain(&parent.final_verify)
+            .any(|c| c.trim() == command.trim())
+        {
+            continue;
+        }
+        parent.final_verify.push(command.trim().to_string());
+        parent.decisions.push(format!(
+            "Orchestrator: added {} to finalVerify for subtask {}",
+            command.trim(),
+            short_sha(&task.id)
+        ));
+        changed = true;
+    }
+    if changed {
+        parent.updated_at = now_ms();
+        if app.store.save_task(&parent).is_err() {
+            return false;
+        }
+        app.broadcast_task(&parent);
+    }
+    true
+}
+
+/// Splits a subtask's `finalVerify` into the commands it runs and those its
+/// parent runs anyway (exact match after trim, against the parent's `verify`
+/// and `finalVerify`). Nothing is deferred for a top-level task, a parent that
+/// cannot be loaded, or a repo with `gateAt` "every". The stored list is
+/// never changed.
+pub(super) fn split_deferred(
+    app: &App,
+    settings: &Settings,
+    task: &Task,
+) -> (Vec<String>, Vec<String>) {
+    let all = || (task.final_verify.clone(), Vec::new());
+    let Some(parent_id) = task.parent.as_deref() else {
+        return all();
+    };
+    if !settings.gates_at_parent(&task.repo) {
+        return all();
+    }
+    let Ok(Some(parent)) = app.store.load_task(parent_id) else {
+        return all();
+    };
+    let at_parent: Vec<&str> = parent
+        .verify
+        .iter()
+        .chain(&parent.final_verify)
+        .map(|c| c.trim())
+        .collect();
+    let (deferred, run) = task
+        .final_verify
+        .iter()
+        .cloned()
+        .partition(|c| at_parent.contains(&c.trim()));
+    (run, deferred)
+}
+
+/// The decision line for a command deferred to the parent.
+pub(super) fn deferred_line(command: &str) -> String {
+    format!("Orchestrator: Deferred to parent: {command}")
+}
+
+/// Adds each check decision line once.
+pub(super) fn record_check_decisions(task: &mut Task, lines: Vec<String>) {
     for line in lines {
         if !task.decisions.contains(&line) {
             task.decisions.push(line);
@@ -239,29 +417,119 @@ pub(super) fn filter_scoped_planned(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CheckContext<'a> {
+    pub(super) app: &'a App,
+    task_id: Option<&'a str>,
+    pub(super) label: Option<&'a str>,
+    gate: &'a str,
+}
+
+impl<'a> CheckContext<'a> {
+    pub(super) fn new(app: &'a App, task_id: Option<&'a str>) -> Self {
+        Self {
+            app,
+            task_id,
+            label: None,
+            gate: "verify",
+        }
+    }
+
+    pub(super) fn with_gate(self, gate: &'a str) -> Self {
+        Self { gate, ..self }
+    }
+
+    pub(super) fn with_label(self, label: &'a str) -> Self {
+        Self {
+            label: Some(label),
+            ..self
+        }
+    }
+
+    pub(super) fn decision(&self, mut line: String, lines: &mut Vec<String>) {
+        let mut stored = self
+            .task_id
+            .and_then(|id| self.app.store.load_task(id).ok().flatten());
+        if let Some(held) = stored
+            .as_ref()
+            .and_then(|task| task.held_out.as_ref())
+            .filter(|held| !held.run.is_empty())
+        {
+            line = line.replace(&held.run, &brief::held_out_label(held.criterion));
+        }
+        lines.push(line.clone());
+        if let Some(id) = self.task_id {
+            {
+                let controls = self.app.controls.lock().unwrap();
+                if controls.contains_key(id) {
+                    self.app
+                        .check_decisions
+                        .lock()
+                        .unwrap()
+                        .entry(id.to_string())
+                        .or_default()
+                        .push(line.clone());
+                }
+            }
+            if let Some(task) = stored.as_mut() {
+                record_check_decisions(task, vec![line]);
+                task.updated_at = now_ms();
+                self.app.save_task_logged(task);
+                self.app.broadcast_task(task);
+            }
+        }
+    }
+}
+
+pub(super) fn record_check_outcomes(app: &App, task: &mut Task, results: &[VerifyOutcome]) {
+    let mut lines = app
+        .check_decisions
+        .lock()
+        .unwrap()
+        .remove(&task.id)
+        .unwrap_or_default();
+    lines.extend(results.iter().flat_map(|r| r.decisions.iter().cloned()));
+    record_check_decisions(task, lines);
+}
+
+pub(super) fn machine_load() -> (f64, u32) {
+    let mut load = 0.0;
+    // getloadavg writes at most one double into this buffer.
+    unsafe {
+        libc::getloadavg(&mut load, 1);
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    (load, cores)
+}
+
+pub(super) fn timed_out_under_load(outcome: &VerifyOutcome) -> bool {
+    outcome.load_timeout
+        || (outcome.code.is_none()
+            && outcome.tail.starts_with("timed out after ")
+            && outcome.cores > 0
+            && outcome.load >= f64::from(outcome.cores))
+}
+
 pub(super) async fn run_verify_commands(
+    ctx: CheckContext<'_>,
     cwd: &Path,
-    run_dir: &Path,
+    _run_dir: &Path,
     commands: &[String],
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     cancel: &CancelToken,
 ) -> Vec<VerifyOutcome> {
-    let allow_write = verify_allow_write_paths(cwd, run_dir);
+    let cache_run = CacheRun::for_commands(cwd, commands).await;
     let mut results = Vec::new();
     for cmd in commands {
-        results.push(
-            run_one_verify_command(
-                cwd,
-                cmd,
-                verify_timeout(),
-                sandbox,
-                &allow_write,
-                base_sha,
-                cancel,
-            )
-            .await,
-        );
+        let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
+        results
+            .push(run_one_verify_command(ctx, cwd, cmd, timeout, sandbox, base_sha, cancel).await);
+    }
+    if let Some(line) = cache_run.finish(ctx.gate).await {
+        if let Some(result) = results.last_mut() {
+            ctx.decision(line, &mut result.decisions);
+        }
     }
     results
 }
@@ -269,15 +537,20 @@ pub(super) async fn run_verify_commands(
 /// Grades an eval task: runs its set's `check` from the root of a throwaway
 /// detached worktree at `sha` (never the task's own), with the verify timeout.
 pub(super) async fn run_eval_check(
+    ctx: CheckContext<'_>,
     repo: &Path,
     run_dir: &Path,
     sha: &str,
     cmd: &str,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
-) -> EvalCheck {
+) -> VerifyOutcome {
     let path = run_dir.join("eval-check");
-    let failed = |tail: String| EvalCheck { code: None, tail };
+    let failed = |tail: String| VerifyOutcome {
+        command: cmd.into(),
+        tail,
+        ..Default::default()
+    };
     let (r, p, s) = (repo.to_path_buf(), path.clone(), sha.to_string());
     let made = tokio::task::spawn_blocking(move || {
         git::remove_worktree(&r, &p);
@@ -291,57 +564,69 @@ pub(super) async fn run_eval_check(
         Ok(Err(e)) => return failed(format!("could not check out {sha}: {e}")),
         Err(e) => return failed(format!("check checkout panicked: {e}")),
     }
-    let allow_write = verify_allow_write_paths(&path, run_dir);
-    let out = run_one_verify_command(
-        &path,
-        cmd,
-        verify_timeout(),
-        sandbox,
-        &allow_write,
-        sha,
-        cancel,
-    )
-    .await;
+    if let Err(e) = super::worktrees::setup_worktree(repo, &path, sandbox, cancel).await {
+        return failed(e);
+    }
+    let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
+    let cache_run = CacheRun::for_commands(&path, &[cmd.to_string()]).await;
+    let mut out = run_one_verify_command(ctx, &path, cmd, timeout, sandbox, sha, cancel).await;
+    if let Some(line) = cache_run.finish("eval checks").await {
+        ctx.decision(line, &mut out.decisions);
+    }
     let (r, p) = (repo.to_path_buf(), path);
     let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
-    EvalCheck {
-        code: out.code,
-        tail: out.tail,
-    }
+    out
 }
 
 /// Cached by a hash of `git diff <base>` + the untracked-file list: if
-/// nothing has changed since the last run (by the hook or the previous
-/// gate check), reuse its result instead of re-running the commands.
+/// nothing has changed since the last run, reuse completed failures. Passes
+/// come from the bounded tree cache; interrupted result sets are not stored.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_verify_cached(
     app: &Arc<App>,
     task_id: &str,
+    repo: &str,
     worktree: &Path,
     run_dir: &Path,
     base: &str,
     commands: &[String],
     cancel: &CancelToken,
-) -> Vec<VerifyOutcome> {
+) -> (Vec<VerifyOutcome>, Vec<String>) {
     let wt = worktree.to_path_buf();
     let b = base.to_string();
     let hash = tokio::task::spawn_blocking(move || diff_hash(&wt, &b))
         .await
         .unwrap_or_default();
-    {
-        let cache = app.verify_cache.lock().unwrap();
-        if let Some((h, results)) = cache.get(task_id) {
-            if *h == hash {
-                return results.clone();
-            }
-        }
-    }
-    let sandbox = app.settings.read().unwrap().sandbox;
-    let results = run_verify_commands(worktree, run_dir, commands, sandbox, base, cancel).await;
-    app.verify_cache
+    let cached = app
+        .verify_cache
         .lock()
         .unwrap()
-        .insert(task_id.to_string(), (hash, results.clone()));
-    results
+        .get(task_id)
+        .filter(|(h, results)| *h == hash && results.iter().map(|r| &r.command).eq(commands.iter()))
+        .map(|(_, results)| results.clone());
+    let sandbox = app.task_sandbox(repo, worktree, run_dir);
+    let cache_run = CacheRun::for_commands(worktree, commands).await;
+    let runner = CheckRunner::new(app, worktree, sandbox.as_ref(), base, cancel).for_task(task_id);
+    let mut results = Vec::new();
+    let mut lines = Vec::new();
+    for (i, command) in commands.iter().enumerate() {
+        let previous = cached.as_ref().and_then(|r| r.get(i));
+        let (result, decisions) = runner.run_one(command, command, previous).await;
+        results.push(result);
+        lines.extend(decisions);
+    }
+    lines.extend(cache_run.finish("verify").await);
+    let mut cache = app.verify_cache.lock().unwrap();
+    if !cancel.is_cancelled()
+        && results
+            .iter()
+            .all(|r| r.code.is_some() && !is_interrupted(r))
+    {
+        cache.insert(task_id.to_string(), (hash, results.clone()));
+    } else {
+        cache.remove(task_id);
+    }
+    (results, lines)
 }
 
 /// Regular files only (a symlink could point at `/dev/zero` or outside the
@@ -380,21 +665,6 @@ pub(super) fn diff_hash(worktree: &Path, base: &str) -> String {
         input.push('\u{0}');
     }
     simple_hash(&input)
-}
-
-/// Shared by verify commands and the harness: SIGTERM the process group,
-/// give it 5s, then SIGKILL, then reap it.
-pub(super) async fn kill_group(pgid: Option<i32>, child: &mut tokio::process::Child) {
-    if let Some(pgid) = pgid {
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.wait().await;
 }
 
 /// Concurrently drain a child's stdout/stderr and wait for it to exit,
@@ -450,6 +720,85 @@ pub(super) fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<Str
             }
             _ => true,
         }
+    })
+}
+
+/// Whether `command` runs a whole repository's suite: `npm run ci`, `cargo
+/// test --workspace`, `make test`, a bare `pytest`, `go test ./...`, or an
+/// `npm|pnpm|yarn run <script>` whose `<cwd>/package.json` script body is one
+/// of these (one level, no further script expansion). Such a check is
+/// finalVerify's job, not a per-attempt verify command. The command is split
+/// on `&&`, `||` and `;`; one such segment is enough.
+pub(super) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
+    let segments = |text: &str| -> Vec<String> {
+        text.replace("&&", ";")
+            .replace("||", ";")
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let words_of = |segment: &str| -> Vec<String> {
+        segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .map(String::from)
+            .collect()
+    };
+    let direct = |words: &[String]| -> bool {
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let is_suite_word = |x: &str| matches!(x, "ci" | "test" | "check");
+        match w.as_slice() {
+            ["npm", "test"] => true,
+            ["npm", "run", x] => is_suite_word(x),
+            ["pnpm" | "yarn", x] => is_suite_word(x),
+            ["pnpm" | "yarn", "run", x] => is_suite_word(x),
+            ["make", x] => is_suite_word(x),
+            ["pytest"] => true,
+            ["go", "test", rest @ ..] => {
+                rest.contains(&"./...")
+                    && rest.iter().all(|a| *a == "./..." || a.starts_with('-'))
+                    && !rest.contains(&"-run")
+            }
+            ["cargo", "test", rest @ ..] => {
+                if rest.contains(&"--workspace") {
+                    return true;
+                }
+                let before_args = rest.iter().take_while(|a| **a != "--");
+                let mut scoped_or_filtered = false;
+                for a in before_args {
+                    let flag = a.split('=').next().unwrap_or(a);
+                    if matches!(flag, "-p" | "--package" | "--test" | "--lib" | "--bin")
+                        || !a.starts_with('-')
+                    {
+                        scoped_or_filtered = true;
+                    }
+                }
+                !scoped_or_filtered
+            }
+            _ => false,
+        }
+    };
+    segments(command).iter().any(|segment| {
+        let words = words_of(segment);
+        if direct(&words) {
+            return true;
+        }
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let script = match w.as_slice() {
+            ["npm" | "pnpm" | "yarn", "run", name] => *name,
+            _ => return false,
+        };
+        let Ok(text) = std::fs::read_to_string(cwd.join("package.json")) else {
+            return false;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        json.get("scripts")
+            .and_then(|s| s.get(script))
+            .and_then(|b| b.as_str())
+            .is_some_and(|body| segments(body).iter().any(|s| direct(&words_of(s))))
     })
 }
 
@@ -556,13 +905,19 @@ pub(super) fn timed_out_tail(timeout: Duration) -> String {
         format!("timed out after {secs} seconds")
     }
 }
-const CANCELLED_TAIL: &str = "cancelled";
-const SPAWN_FAILED_PREFIX: &str = "failed to run: ";
-const INTERNAL_ERROR_PREFIX: &str = "internal error: ";
+pub(super) const CANCELLED_TAIL: &str = "cancelled";
+pub(super) const SPAWN_FAILED_PREFIX: &str = "failed to run: ";
+pub(super) const INTERNAL_ERROR_PREFIX: &str = "internal error: ";
 
 /// How a check ran on the base checkout. `None` for a cancel, which aborts
 /// the baseline instead of classifying anything.
 pub(super) fn classify_baseline(outcome: &VerifyOutcome) -> Option<Baseline> {
+    if outcome.tail == CANCELLED_TAIL {
+        return None;
+    }
+    if outcome.code != Some(0) && timed_out_under_load(outcome) {
+        return Some(Baseline::Env);
+    }
     match outcome.code {
         Some(0) => Some(Baseline::Pass),
         Some(126 | 127) => Some(Baseline::Env),
@@ -598,21 +953,27 @@ pub(super) async fn baseline_checks(
         .await
         .unwrap_or_default();
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
-    let sandbox = app.settings.read().unwrap().sandbox;
-    let results = run_verify_commands(
-        worktree,
-        &app.store.task_dir(task_id),
-        &commands,
-        sandbox,
-        &task.base_sha,
-        cancel,
-    )
-    .await;
+    let run_dir = app.store.task_dir(task_id).join("runs/baseline");
+    let sandbox = app.task_sandbox(&task.repo, worktree, &run_dir);
+    let cache_run = CacheRun::for_commands(worktree, &commands).await;
+    let runner =
+        CheckRunner::new(app, worktree, sandbox.as_ref(), &task.base_sha, cancel).for_task(task_id);
+    let mut results = Vec::new();
+    let mut decisions = Vec::new();
+    for ((slot, criterion, _), command) in todo.iter().zip(&commands) {
+        let label = slot.map_or_else(|| brief::held_out_label(*criterion), |_| command.clone());
+        let (result, lines) = runner.run_one(command, &label, None).await;
+        results.push(result);
+        decisions.extend(lines);
+    }
+    decisions.extend(cache_run.finish("baseline checks").await);
+    record_check_decisions(task, decisions);
     let wt = worktree.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || git::restore_status(&wt, &before)).await;
     if cancel.is_cancelled() {
         return false;
     }
+    record_check_outcomes(app, task, &results);
     record_baselines(task, &todo, &results)
 }
 
@@ -625,7 +986,11 @@ pub(super) fn baseline_todo(task: &Task) -> Vec<(Option<usize>, usize, String)> 
             todo.push((Some(i), c.criterion, c.run.clone()));
         }
     }
-    if let Some(h) = task.held_out.as_ref().filter(|h| h.baseline.is_none()) {
+    if let Some(h) = task
+        .held_out
+        .as_ref()
+        .filter(|h| task.variant().held_out && h.baseline.is_none())
+    {
         todo.push((None, h.criterion, h.run.clone()));
     }
     todo
@@ -678,7 +1043,7 @@ pub(super) fn record_baselines(
 /// Some check (or the held-out one) has not run on the base yet.
 pub(super) fn needs_baseline(task: &Task) -> bool {
     task.checks.iter().any(|c| c.baseline.is_none())
-        || task.held_out.as_ref().is_some_and(|h| h.baseline.is_none())
+        || (task.variant().held_out && task.held_out.as_ref().is_some_and(|h| h.baseline.is_none()))
 }
 
 /// The gated checks of `task`: visible ones that fail on the base, then the
@@ -694,21 +1059,29 @@ pub(super) fn gated_checks(task: &Task) -> Vec<Check> {
 pub(super) fn gated_held_out(task: &Task) -> Option<Check> {
     task.held_out
         .clone()
-        .filter(|h| h.baseline == Some(Baseline::Fail))
+        .filter(|h| task.variant().held_out && h.baseline == Some(Baseline::Fail))
 }
 
 /// Runs the held-out check and returns its outcome with the command scrubbed
 /// out of the command field and the tail, plus the failure detail when it
 /// did not exit 0.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_held_out(
+    ctx: CheckContext<'_>,
     task: &Task,
     check: &Check,
     worktree: &Path,
     run_dir: &Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) -> (VerifyOutcome, Option<String>) {
-    let mut result = run_verify_commands(
+    let label = brief::held_out_label(check.criterion);
+    let ctx = CheckContext {
+        label: Some(&label),
+        ..ctx
+    };
+    let result = run_verify_commands(
+        ctx,
         worktree,
         run_dir,
         std::slice::from_ref(&check.run),
@@ -718,6 +1091,28 @@ pub(super) async fn run_held_out(
     )
     .await
     .remove(0);
+    held_out_result(task, check, result)
+}
+
+/// Runs a held-out gate using its real command as the key and its label in decisions.
+#[cfg(test)]
+pub(super) async fn run_held_out_cached(
+    runner: &CheckRunner<'_>,
+    task: &Task,
+    check: &Check,
+) -> (VerifyOutcome, Option<String>, Vec<String>) {
+    let (result, lines) = runner
+        .run_one(&check.run, &brief::held_out_label(check.criterion), None)
+        .await;
+    let (result, detail) = held_out_result(task, check, result);
+    (result, detail, lines)
+}
+
+fn held_out_result(
+    task: &Task,
+    check: &Check,
+    mut result: VerifyOutcome,
+) -> (VerifyOutcome, Option<String>) {
     result.command = brief::held_out_label(check.criterion);
     result.tail = result.tail.replace(&check.run, "<held-out check>");
     let detail = (result.code != Some(0)).then(|| {
@@ -740,21 +1135,165 @@ pub(super) async fn run_held_out(
 }
 
 /// Run one verify command in its own process group (`setsid`, like the
-/// harness). On timeout *or* cancellation, SIGTERM the whole group, SIGKILL
-/// 5s later -- a bare `tokio::time::timeout` around `Command::output()`
+/// harness). After every outcome the group is stopped (SIGTERM, SIGKILL 5s
+/// later); on timeout *or* cancellation processes that left the group but
+/// run from `cwd` are stopped too -- a bare `tokio::time::timeout` around `Command::output()`
 /// only stops *waiting*, it never touches the still-running process (or any
 /// children it spawned), which is the bug this replaces.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_one_verify_command(
+    ctx: CheckContext<'_>,
     cwd: &Path,
     cmd: &str,
     timeout: Duration,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
+    if !cancel.is_cancelled() {
+        if let Some(result) = passed_on_tree(ctx, cwd, cmd, base_sha).await {
+            return result;
+        }
+    }
+    let mut decisions = Vec::new();
+    let mut load_detail = None;
+    let mut interrupted: Option<VerifyOutcome> = None;
+    for attempt in 0..2 {
+        // The only check-slot acquire site: every retry queues afresh, and
+        // waiting never spends the command's execution timeout.
+        let permit = match ctx.app.check_slots.clone().try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                let (running, limit) = ctx.app.check_slots.usage();
+                ctx.decision(
+                    format!(
+                        "Orchestrator: waiting for a check slot ({running} of {limit}): {}",
+                        ctx.label.unwrap_or(cmd)
+                    ),
+                    &mut decisions,
+                );
+                tokio::select! {
+                    p = ctx.app.check_slots.clone().acquire_owned() => p.ok(),
+                    _ = cancel.cancelled() => None,
+                }
+            }
+        };
+        let Some(permit) = permit else {
+            return VerifyOutcome {
+                command: cmd.into(),
+                tail: CANCELLED_TAIL.into(),
+                decisions,
+                ..Default::default()
+            };
+        };
+        if cancel.is_cancelled() {
+            return VerifyOutcome {
+                command: cmd.into(),
+                tail: CANCELLED_TAIL.into(),
+                decisions,
+                ..Default::default()
+            };
+        }
+        let tree = check_tree(cwd).await;
+        let mut result =
+            execute_verify_command(ctx, cwd, cmd, timeout, sandbox, base_sha, cancel).await;
+        drop(permit);
+        if attempt == 0 && is_interrupted(&result) && !cancel.is_cancelled() {
+            if timed_out_under_load(&result) {
+                let detail = format!(
+                    "{}: {} ms, timed out under load {:.2} on {} cores",
+                    ctx.label.unwrap_or(cmd),
+                    result.ms,
+                    result.load,
+                    result.cores
+                );
+                ctx.decision(
+                    format!("Orchestrator: {detail} (environment); rerun once on the same tree"),
+                    &mut decisions,
+                );
+                load_detail = Some(detail);
+            }
+            interrupted = Some(result);
+            continue;
+        }
+        if let Some(first) = interrupted {
+            let reason = first
+                .tail
+                .lines()
+                .next()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    first
+                        .code
+                        .map_or_else(|| "interrupted".into(), |code| format!("exit {code}"))
+                });
+            let reason = if ctx.label.is_some_and(|label| label != cmd) {
+                reason.replace(cmd, "<held-out check>")
+            } else {
+                reason
+            };
+            let rerun = match result.code {
+                Some(code) if !is_interrupted(&result) => format!("exit {code}"),
+                _ => "interrupted".to_string(),
+            };
+            ctx.decision(format!(
+                "Orchestrator: {} was interrupted after {:.1} s ({reason}); ran it again at once: {rerun} after {:.1} s",
+                ctx.label.unwrap_or(cmd), first.ms as f64 / 1000.0, result.ms as f64 / 1000.0,
+            ), &mut decisions);
+        }
+        if let Some(detail) = load_detail {
+            result.load_timeout = true;
+            if result.code != Some(0) && result.tail != CANCELLED_TAIL {
+                result.tail = format!("{detail}\nRerun: {}", result.tail);
+            }
+        }
+        if result.code == Some(0) && !cancel.is_cancelled() {
+            if let Some(tree) = tree {
+                // A mutating check neither validates the resulting tree nor
+                // supplies its side effects when reused on the original tree.
+                if check_tree(cwd).await.as_deref() == Some(tree.as_str()) {
+                    ctx.app
+                        .gate_passes
+                        .lock()
+                        .unwrap()
+                        .insert(&tree, base_sha, &result);
+                }
+            }
+        }
+        result.decisions = decisions;
+        return result;
+    }
+    unreachable!("one initial run and at most one retry")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_verify_command(
+    ctx: CheckContext<'_>,
+    cwd: &Path,
+    cmd: &str,
+    timeout: Duration,
+    sandbox: Option<&TaskSandbox>,
+    base_sha: &str,
+    cancel: &CancelToken,
+) -> VerifyOutcome {
+    let (load, cores) = (ctx.app.check_load.read().unwrap())();
+    let command = build_verify_command(cwd, cmd, sandbox, base_sha);
+    let mut result = run_verify_command(cwd, cmd, command, timeout, cancel.cancelled()).await;
+    result.load = load;
+    result.cores = cores;
+    result
+}
+
+/// Runs an already-built check with the same timeout and process cleanup.
+pub async fn run_verify_command(
+    cwd: &Path,
+    cmd: &str,
+    mut command: tokio::process::Command,
+    timeout: Duration,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> VerifyOutcome {
     let start = std::time::Instant::now();
-    let mut command = build_verify_command(cwd, cmd, sandbox, allow_write, base_sha);
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -763,6 +1302,7 @@ pub(super) async fn run_one_verify_command(
                 code: None,
                 tail: format!("{SPAWN_FAILED_PREFIX}{e}"),
                 ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
             };
         }
     };
@@ -776,39 +1316,29 @@ pub(super) async fn run_one_verify_command(
     let outcome = tokio::select! {
         r = read_and_wait(&mut child) => Outcome::Done(r),
         _ = tokio::time::sleep(timeout) => Outcome::TimedOut,
-        _ = cancel.cancelled() => Outcome::Cancelled,
+        _ = cancelled => Outcome::Cancelled,
     };
-    match outcome {
-        Outcome::Done(Ok((status, out_buf, err_buf))) => VerifyOutcome {
-            command: cmd.to_string(),
-            code: status.code(),
-            tail: verify_tail(&out_buf, &err_buf),
-            ms: start.elapsed().as_millis() as u64,
-        },
-        Outcome::Done(Err(e)) => VerifyOutcome {
-            command: cmd.to_string(),
-            code: None,
-            tail: format!("{INTERNAL_ERROR_PREFIX}{e}"),
-            ms: start.elapsed().as_millis() as u64,
-        },
-        Outcome::TimedOut => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: timed_out_tail(timeout),
-                ms: start.elapsed().as_millis() as u64,
-            }
+    // Whatever the outcome, nothing the command left in its group outlives it.
+    crate::procs::kill_group(pgid, &mut child).await;
+    if matches!(outcome, Outcome::TimedOut | Outcome::Cancelled) {
+        // Processes that left the group (`setsid`) but run from this directory.
+        let dir = cwd.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
+    }
+    let (code, tail) = match outcome {
+        Outcome::Done(Ok((status, out_buf, err_buf))) => {
+            (status.code(), verify_tail(&out_buf, &err_buf))
         }
-        Outcome::Cancelled => {
-            kill_group(pgid, &mut child).await;
-            VerifyOutcome {
-                command: cmd.to_string(),
-                code: None,
-                tail: CANCELLED_TAIL.to_string(),
-                ms: start.elapsed().as_millis() as u64,
-            }
-        }
+        Outcome::Done(Err(e)) => (None, format!("{INTERNAL_ERROR_PREFIX}{e}")),
+        Outcome::TimedOut => (None, timed_out_tail(timeout)),
+        Outcome::Cancelled => (None, CANCELLED_TAIL.to_string()),
+    };
+    VerifyOutcome {
+        command: cmd.to_string(),
+        code,
+        tail,
+        ms: start.elapsed().as_millis() as u64,
+        ..Default::default()
     }
 }
 
@@ -879,13 +1409,98 @@ pub(super) fn verify_options(worktree: &Path) -> Vec<String> {
 mod grounded_checks_tests {
     use super::*;
 
+    #[test]
+    fn disabling_held_out_keeps_regular_baselines_and_gated_checks() {
+        let mut task = task_with_status(TaskStatus::Running);
+        let check = |run: &str| Check {
+            criterion: 0,
+            run: run.into(),
+            baseline: None,
+        };
+        task.checks = vec![check("regular")];
+        task.held_out = Some(check("hidden"));
+        assert!(task.variant().held_out);
+        assert_eq!(
+            baseline_todo(&task),
+            vec![(Some(0), 0, "regular".into()), (None, 0, "hidden".into())]
+        );
+        task.variant = Some(Variant {
+            held_out: false,
+            ..Variant::default()
+        });
+        assert!(needs_baseline(&task));
+        assert_eq!(baseline_todo(&task), vec![(Some(0), 0, "regular".into())]);
+        task.checks[0].baseline = Some(Baseline::Fail);
+        assert!(!needs_baseline(&task));
+        assert_eq!(gated_checks(&task), task.checks);
+        task.held_out.as_mut().unwrap().baseline = Some(Baseline::Fail);
+        assert!(gated_held_out(&task).is_none());
+        task.variant.as_mut().unwrap().held_out = true;
+        assert_eq!(gated_held_out(&task), task.held_out);
+    }
+
     fn outcome(code: Option<i32>, tail: &str) -> VerifyOutcome {
         VerifyOutcome {
             command: "c".into(),
             code,
             tail: tail.into(),
             ms: 0,
+            ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_verify_result_is_not_cached() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let base = git_in(&repo, &["rev-parse", "HEAD"]);
+        let counter = dir.path().join("counter");
+        let commands = vec![format!(
+            "echo run >> '{}'; n=$(wc -l < '{}'); if [ \"$n\" -le 2 ]; then exit 143; fi",
+            counter.display(),
+            counter.display()
+        )];
+        let cancel = CancelToken::new();
+        let repo_name = repo.to_string_lossy().into_owned();
+        let run = || {
+            run_verify_cached(
+                &app,
+                "task",
+                &repo_name,
+                &repo,
+                dir.path(),
+                &base,
+                &commands,
+                &cancel,
+            )
+        };
+        let (first, lines) = run().await;
+        assert_eq!(first[0].code, Some(143));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            2
+        );
+        assert!(app.verify_cache.lock().unwrap().is_empty());
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("was interrupted") && l.contains("interrupted after")));
+        let (second, _) = run().await;
+        assert_eq!(second[0].code, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            3
+        );
+        let (third, lines) = run().await;
+        assert_eq!(third[0].code, Some(0));
+        assert_eq!(third[0].ms, 0);
+        assert!(lines.iter().any(|l| l.contains("already passed on tree")));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            3
+        );
     }
 
     #[test]
@@ -921,6 +1536,12 @@ mod grounded_checks_tests {
             classify_baseline(&outcome(None, &timed_out_tail(Duration::from_secs(1200)))),
             Some(Baseline::Fail)
         );
+        for code in [124, 137, 143] {
+            assert_eq!(
+                classify_baseline(&outcome(Some(code), "")),
+                Some(Baseline::Fail)
+            );
+        }
         assert_eq!(classify_baseline(&outcome(None, CANCELLED_TAIL)), None);
     }
 
@@ -939,12 +1560,14 @@ mod grounded_checks_tests {
             run: command.into(),
             baseline: Some(Baseline::Fail),
         };
+        let (app, _app_dir) = test_app();
         let (result, detail) = run_held_out(
+            CheckContext::new(&app, None),
             &task,
             &check,
             dir.path(),
             dir.path(),
-            SandboxMode::Host,
+            None,
             &CancelToken::new(),
         )
         .await;
@@ -976,7 +1599,7 @@ mod grounded_checks_tests {
         std::fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
         sh(&["add", "."]);
         sh(&["commit", "-q", "-m", "init"]);
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app_fitting_sandbox();
         let mut task = task_with_status(TaskStatus::Running);
         task.criteria = vec!["a".into(), "b".into(), "c".into()];
         let check = |criterion, run: &str| Check {
@@ -985,7 +1608,10 @@ mod grounded_checks_tests {
             baseline: None,
         };
         task.checks = vec![
-            check(0, "echo x > made.txt; mkdir -p d/e; echo y > d/e/f.txt; echo more >> tracked.txt; false"),
+            check(
+                0,
+                "echo x > made.txt; mkdir -p d/e; echo y > d/e/f.txt; echo more >> tracked.txt; false",
+            ),
             check(1, "true"),
             check(2, "no-such-command-anywhere"),
         ];
@@ -1023,5 +1649,182 @@ mod grounded_checks_tests {
             "Orchestrator: check for criterion 2 could not run on base (exit 127), left out: no-such"
         )));
         assert!(!needs_baseline(&task));
+    }
+}
+
+#[cfg(test)]
+mod scoped_task_tests {
+    use super::*;
+
+    fn repo() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".sushiai")).unwrap();
+        std::fs::write(
+            dir.path().join(".sushiai/setup.json"),
+            r#"{"scopedChecks":[{"command":"repo-check","paths":["src/**"]}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("a/src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = ['a']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("a/Cargo.toml"),
+            "[package]\nname = 'package-a'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a/src/lib.rs"), "// base\n").unwrap();
+        init_git_repo(dir.path());
+        let base = git_in(dir.path(), &["rev-parse", "HEAD"]);
+        (dir, base)
+    }
+
+    #[test]
+    fn merged_base_policy_is_shared_and_uses_the_existing_filters() {
+        let (dir, base) = repo();
+        let task = Task {
+            repo: dir.path().to_string_lossy().into_owned(),
+            base_sha: base,
+            ..task_with_status(TaskStatus::Running)
+        };
+        let mut settings = Settings::default();
+        settings.scoped_checks.push(ScopedCheck {
+            repo: None,
+            command: "repo-check".into(),
+            paths: vec!["electron/**".into()],
+        });
+        std::fs::write(
+            dir.path().join(".sushiai/setup.json"),
+            r#"{"scopedChecks":[{"command":"new-check","paths":["never/**"]}]}"#,
+        )
+        .unwrap();
+        let scoped = scoped_checks_for(&settings, &task);
+        assert_eq!(scoped.len(), 2);
+        assert_eq!(scoped[1].repo.as_deref(), Some(task.repo.as_str()));
+        assert_eq!(scoped[1].paths, ["src/**"]);
+        assert!(is_shared_check(&Settings::default(), &task, "repo-check"));
+        assert!(!is_shared_check(&Settings::default(), &task, "new-check"));
+        let commands = vec!["repo-check".into()];
+        for file in ["src/a.ts", "electron/main.cjs"] {
+            assert_eq!(
+                filter_scoped(&scoped, &task.repo, &commands, &[file.into()]).0,
+                commands
+            );
+            assert_eq!(
+                filter_scoped_planned(&scoped, &task.repo, &commands, &[file.into()]),
+                commands
+            );
+        }
+        assert!(
+            filter_scoped(&scoped, &task.repo, &commands, &["other/file".into()])
+                .0
+                .is_empty()
+        );
+        assert!(
+            filter_scoped_planned(&scoped, &task.repo, &commands, &["other".into()]).is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_checks_are_persisted_to_the_parent_once_and_never_lost() {
+        let (app, _app_dir) = test_app();
+        let (dir, base) = repo();
+        std::fs::write(dir.path().join("a/src/lib.rs"), "// changed\n").unwrap();
+        let parent = task_with_status(TaskStatus::Running);
+        app.store.save_task(&parent).unwrap();
+        let mut child = Task {
+            repo: dir.path().to_string_lossy().into_owned(),
+            base_sha: base.clone(),
+            parent: Some(parent.id.clone()),
+            ..task_with_status(TaskStatus::Running)
+        };
+        let commands = vec!["cargo test --workspace".into(), "repo-check".into()];
+        let (run, lines) = scope_task_checks(&app, &child, dir.path(), &base, &commands).await;
+        assert_eq!(run, ["cargo test -p package-a"]);
+        assert!(lines.contains(&"Orchestrator: subtask ran cargo test -p package-a instead of cargo test --workspace; the parent runs cargo test --workspace on the combined tree".into()));
+        let saved = app.store.load_task(&parent.id).unwrap().unwrap();
+        assert_eq!(saved.final_verify, commands);
+        assert_eq!(saved.decisions.len(), 2);
+        assert!(saved.decisions.contains(&format!(
+            "Orchestrator: added cargo test --workspace to finalVerify for subtask {}",
+            short_sha(&child.id)
+        )));
+        scope_task_checks(&app, &child, dir.path(), &base, &commands).await;
+        let saved_again = app.store.load_task(&parent.id).unwrap().unwrap();
+        assert_eq!(saved_again.final_verify, saved.final_verify);
+        assert_eq!(saved_again.decisions, saved.decisions);
+        child.parent = Some("missing-parent".into());
+        assert_eq!(
+            scope_task_checks(&app, &child, dir.path(), &base, &commands).await,
+            (commands.clone(), Vec::new())
+        );
+        child.parent = None;
+        assert_eq!(
+            scope_task_checks(&app, &child, dir.path(), &base, &commands)
+                .await
+                .0,
+            ["cargo test --workspace"]
+        );
+    }
+
+    #[test]
+    fn a_native_sandbox_check_overrides_a_configured_rustc_wrapper() {
+        let root = Path::new("/");
+        let policy = TaskSandbox::build(SandboxInputs {
+            repo_root: root,
+            worktree: root,
+            run_dir: &root.join("run"),
+            data_dir: &root.join("data"),
+            sushiai_home: &root.join("sushiai"),
+            worktree_root: "",
+            home: &root.join("home"),
+            daemon_socket: &root.join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        let wrapper = |sandbox: Option<&TaskSandbox>| {
+            let environment = VerifyEnvironment {
+                path: "/usr/bin:/bin".into(),
+                compiler_cache: None,
+            };
+            let command = build_verify_command_in(root, "true", sandbox, "base", &environment);
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "RUSTC_WRAPPER")
+                .map(|(_, value)| value.map(|v| v.to_os_string()))
+        };
+        assert_eq!(wrapper(Some(&policy)), Some(Some("".into())));
+        assert_eq!(wrapper(None), None);
+    }
+
+    #[tokio::test]
+    async fn every_gate_disables_subtask_narrowing() {
+        let (app, _app_dir) = test_app();
+        let (dir, base) = repo();
+        std::fs::write(dir.path().join("a/src/lib.rs"), "// changed\n").unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        app.settings
+            .write()
+            .unwrap()
+            .gate_at
+            .insert(repo.clone(), GateAt::Every);
+        let child = Task {
+            repo,
+            base_sha: base.clone(),
+            parent: Some("parent".into()),
+            ..task_with_status(TaskStatus::Running)
+        };
+        let commands = vec!["cargo test --workspace".into()];
+        assert_eq!(
+            scope_task_checks(&app, &child, dir.path(), &base, &commands).await,
+            (commands, Vec::new())
+        );
     }
 }

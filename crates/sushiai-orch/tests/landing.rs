@@ -56,9 +56,7 @@ fn create(daemon: &Daemon, repo: &Path, name: &str, verify: &str, land: bool) ->
 }
 
 fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
-    poll_until(daemon, id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    })
+    poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
 fn decisions(task: &serde_json::Value) -> String {
@@ -162,7 +160,7 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     let task = create(&daemon, root, "one", "test -f one.txt", true);
     let id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": id}));
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(60), |s| {
+    let waiting = poll_until(&daemon, &id, |s| {
         matches!(s, "landing" | "done" | "failed" | "stopped")
     });
     assert_eq!(waiting["status"], "landing", "{waiting}");
@@ -178,6 +176,7 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
 
     // A retry with the checkout still dirty changes nothing.
     daemon.request("task.start", serde_json::json!({"id": id}));
+    // Absence check: this window gives a forbidden landing time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let still = daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(still["status"], "landing", "{still}");
@@ -240,6 +239,156 @@ fn create_on(daemon: &Daemon, repo: &Path, name: &str, base: &str) -> serde_json
             "start": false,
         }),
     )
+}
+
+fn create_from(
+    daemon: &Daemon,
+    repo: &Path,
+    name: &str,
+    base: &str,
+    land: bool,
+) -> serde_json::Value {
+    daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.to_str().unwrap(),
+            "title": format!("Add {name}"),
+            "goal": format!("FILE_{name}: write the file"),
+            "verify": [format!("test -f {name}.txt")],
+            "land": land,
+            "base": base,
+            "start": false,
+        }),
+    )
+}
+
+#[test]
+fn a_task_started_from_a_landed_done_tasks_branch_lands_on_its_base() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let first = create(&daemon, root, "first", "test -f first.txt", true);
+    let first_id = first["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": first_id}));
+    let first = until_done(&daemon, &first_id);
+    let first_branch = first["branch"].as_str().unwrap();
+    let first_branch_head = git_out(root, &["rev-parse", first_branch]);
+
+    let next = create_from(&daemon, root, "next", first_branch, true);
+    let next_id = next["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": next_id}));
+    let next = until_done(&daemon, &next_id);
+    assert_eq!(
+        next["landedSha"],
+        git_out(root, &["rev-parse", "work"]),
+        "{next}"
+    );
+    assert_eq!(
+        git_out(root, &["rev-parse", first_branch]),
+        first_branch_head
+    );
+    assert!(root.join("first.txt").exists() && root.join("next.txt").exists());
+    let lines = decisions(&next);
+    assert!(
+        lines.contains("Add first") && lines.contains(first_branch) && lines.contains("work"),
+        "{lines}"
+    );
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_task_started_from_an_unlanded_done_tasks_branch_lands_both_on_its_base() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let first = create(&daemon, root, "first", "test -f first.txt", false);
+    let first_id = first["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": first_id}));
+    let first = until_done(&daemon, &first_id);
+    let first_branch = first["branch"].as_str().unwrap();
+    let first_branch_head = git_out(root, &["rev-parse", first_branch]);
+
+    let next = create_from(&daemon, root, "next", first_branch, true);
+    let next_id = next["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": next_id}));
+    let next = until_done(&daemon, &next_id);
+    let landed = git_out(root, &["rev-parse", "work"]);
+    assert_eq!(next["landedSha"], landed, "{next}");
+    assert_eq!(
+        git_out(root, &["rev-parse", first_branch]),
+        first_branch_head
+    );
+    assert!(root.join("first.txt").exists() && root.join("next.txt").exists());
+    let first = daemon.request("task.get", serde_json::json!({"id": first_id}));
+    assert_eq!(first["landedSha"], landed, "{first}");
+    assert!(decisions(&first).contains("Add next"), "{first}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_done_tasks_branch_whose_base_is_refused_is_never_landed_on() {
+    let (daemon, _scripts) = daemon();
+    let repo = init_git_repo();
+    let root = repo.path();
+    let default = git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let first = create_from(&daemon, root, "first", &default, false);
+    let first_id = first["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": first_id}));
+    let first = until_done(&daemon, &first_id);
+    let first_branch = first["branch"].as_str().unwrap();
+    let first_branch_head = git_out(root, &["rev-parse", first_branch]);
+
+    let next = create_from(&daemon, root, "next", first_branch, true);
+    let next_id = next["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": next_id}));
+    let next = until_done(&daemon, &next_id);
+    assert!(next.get("landedSha").is_none(), "{next}");
+    assert_eq!(next["status"], "done", "{next}");
+    assert!(
+        decisions(&next).contains("refused") && decisions(&next).contains(&default),
+        "{next}"
+    );
+    assert_eq!(
+        git_out(root, &["rev-parse", first_branch]),
+        first_branch_head
+    );
+    let next_branch = next["branch"].as_str().unwrap();
+    assert_ne!(git_out(root, &["rev-parse", next_branch]), next["baseSha"]);
+    assert_eq!(
+        git_out(root, &["show", &format!("{next_branch}:next.txt")]),
+        "next"
+    );
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn task_land_on_a_done_tasks_branch_lands_on_its_base() {
+    let (daemon, _scripts) = daemon();
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let first = create(&daemon, root, "first", "test -f first.txt", false);
+    let first_id = first["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": first_id}));
+    let first = until_done(&daemon, &first_id);
+    let first_branch = first["branch"].as_str().unwrap();
+    let first_branch_head = git_out(root, &["rev-parse", first_branch]);
+
+    let next = create_from(&daemon, root, "next", first_branch, false);
+    let next_id = next["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": next_id}));
+    until_done(&daemon, &next_id);
+    daemon.request("task.land", serde_json::json!({"id": next_id}));
+    let next = poll_until(&daemon, &next_id, |s| matches!(s, "done" | "failed"));
+    let landed = git_out(root, &["rev-parse", "work"]);
+    assert_eq!(next["landedSha"], landed, "{next}");
+    assert_eq!(
+        git_out(root, &["rev-parse", first_branch]),
+        first_branch_head
+    );
+    assert!(root.join("first.txt").exists() && root.join("next.txt").exists());
+    let first = daemon.request("task.get", serde_json::json!({"id": first_id}));
+    assert_eq!(first["landedSha"], landed, "{first}");
+    daemon.shutdown_and_wait();
 }
 
 #[test]
@@ -468,15 +617,13 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert!(!root.join("one.txt").exists());
 
     // The task's control is dropped a moment after `done` shows.
-    let start = std::time::Instant::now();
-    while daemon
-        .request_error("task.land", serde_json::json!({"id": id}))
-        .contains("busy")
-        && start.elapsed() < Duration::from_secs(10)
-    {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let landed = poll_until(&daemon, &id, Duration::from_secs(60), |s| s == "done");
+    wait_until("the task's control to be dropped", || {
+        (!daemon
+            .request_error("task.land", serde_json::json!({"id": id}))
+            .contains("busy"))
+        .then_some(())
+    });
+    let landed = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(
         landed["landedSha"],
         git_out(root, &["rev-parse", "work"]),
@@ -628,6 +775,179 @@ fn a_branch_that_moves_during_the_final_checks_onto_a_conflict_still_fails_an_at
         "{done}"
     );
     assert!(decisions(&done).contains("moved while landing"), "{done}");
+    assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    daemon.shutdown_and_wait();
+}
+
+/// One fake for every role. The implementer of the task whose goal names
+/// `FILE_x` changes line 1 of `shared.txt`, the one named `FILE_y` changes line
+/// 9; the reviewer (brief opens with "## Review") passes and logs one line per
+/// review of the task to `$GATES/reviews`.
+const REREVIEW_SCRIPT: &str = r###"#!/bin/sh
+input="$(cat)"
+emit() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+name=$(printf '%s' "$input" | grep -o 'FILE_[a-z]*' | head -1 | sed 's/FILE_//')
+case "$input" in
+"## Review"*)
+  echo "$name" >> "$GATES/reviews"
+  emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
+*"You check a coding task brief"*)
+  emit '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+*"You judge"*)
+  emit '"{\"verdict\": \"feasible\", \"reason\": \"ok\"}"' ;;
+*)
+  case "$name" in
+    x) sed 's/^l1$/X1/' shared.txt > shared.tmp && mv shared.tmp shared.txt ;;
+    y) sed 's/^l9$/Y9/' shared.txt > shared.tmp && mv shared.tmp shared.txt ;;
+  esac
+  emit '"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"' ;;
+esac
+"###;
+
+#[test]
+fn a_landing_carry_that_rewrites_a_reviewed_file_runs_verify_and_the_review_again() {
+    let gates = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", REREVIEW_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("GATES", gates.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["briefCheckRoute"] = serde_json::json!("claude-sonnet");
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let lines: String = (1..=9).map(|i| format!("l{i}\n")).collect();
+    std::fs::write(root.join("shared.txt"), lines).unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(root, &["commit", "-q", "-m", "shared lines"]);
+
+    // y's verify waits on a gate and counts its runs; on the base it fails.
+    let g = gates.path().display();
+    let y_verify = format!(
+        "case \"$PWD\" in */base-runs/*) exit 1;; esac; echo run >> {g}/verify.log; while [ -e {g}/hold_verify ]; do sleep 0.1; done; grep -q Y9 shared.txt"
+    );
+    std::fs::write(gates.path().join("hold_verify"), "").unwrap();
+    let y = create(&daemon, root, "y", &y_verify, true);
+    let x = create(&daemon, root, "x", "grep -q X1 shared.txt", true);
+    let (x_id, y_id) = (
+        x["id"].as_str().unwrap().to_string(),
+        y["id"].as_str().unwrap().to_string(),
+    );
+    let lines_of = |name: &str| {
+        std::fs::read_to_string(gates.path().join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    daemon.request("task.start", serde_json::json!({"id": y_id}));
+    wait_until("y's verify to run on its own tree", || {
+        (lines_of("verify.log").len() == 1).then_some(())
+    });
+    // x lands while y's verify holds: the branch moves under y's review.
+    daemon.request("task.start", serde_json::json!({"id": x_id}));
+    let x_done = until_done(&daemon, &x_id);
+    assert_eq!(x_done["status"], "done", "{x_done}");
+    std::fs::remove_file(gates.path().join("hold_verify")).unwrap();
+    let y_done = until_done(&daemon, &y_id);
+    assert_eq!(y_done["status"], "done", "{y_done}");
+
+    // One implement attempt, no conflict: the carry merged cleanly but
+    // rewrote shared.txt, so verify and the review ran on the carried tree.
+    let implements = y_done["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count();
+    assert_eq!(implements, 1, "{y_done}");
+    assert!(
+        decisions(&y_done).contains("Land: the carry onto work changed shared.txt"),
+        "{y_done}"
+    );
+    assert_eq!(
+        lines_of("verify.log").len(),
+        2,
+        "{:?}",
+        lines_of("verify.log")
+    );
+    let reviews: Vec<String> = lines_of("reviews")
+        .into_iter()
+        .filter(|n| n == "y")
+        .collect();
+    assert_eq!(reviews.len(), 2, "{reviews:?}");
+    let shared = std::fs::read_to_string(root.join("shared.txt")).unwrap();
+    assert!(shared.contains("X1") && shared.contains("Y9"), "{shared}");
+    assert_eq!(y_done["landedSha"], git_out(root, &["rev-parse", "work"]));
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_rereview_after_the_landing_waited_reviews_the_same_attempt_again() {
+    let gates = tempfile::tempdir().unwrap();
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", REREVIEW_SCRIPT);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("GATES", gates.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["briefCheckRoute"] = serde_json::json!("claude-sonnet");
+    settings["review"] = serde_json::json!("claude-opus");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = repo_on_work_branch();
+    let root = repo.path();
+    let lines: String = (1..=9).map(|i| format!("l{i}\n")).collect();
+    std::fs::write(root.join("shared.txt"), lines).unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(root, &["commit", "-q", "-m", "shared lines"]);
+
+    let g = gates.path().display();
+    let verify = format!(
+        "case \"$PWD\" in */base-runs/*) exit 1;; esac; echo run >> {g}/verify.log; grep -q Y9 shared.txt"
+    );
+    // A dirty base checkout makes the passed task wait in landing.
+    std::fs::write(root.join("README.md"), "hello\nmy edit\n").unwrap();
+    let y = create(&daemon, root, "y", &verify, true);
+    let id = y["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let waiting = poll_until(&daemon, &id, |s| {
+        matches!(s, "landing" | "done" | "failed" | "stopped")
+    });
+    assert_eq!(waiting["status"], "landing", "{waiting}");
+
+    // The branch moves in a file the review saw, then the checkout is clean.
+    let shared = std::fs::read_to_string(root.join("shared.txt")).unwrap();
+    std::fs::write(root.join("shared.txt"), shared.replace("l1\n", "X1\n")).unwrap();
+    git_out(root, &["add", "shared.txt"]);
+    git_out(
+        root,
+        &["commit", "-q", "-m", "owner edit", "--", "shared.txt"],
+    );
+    git_out(root, &["checkout", "--", "README.md"]);
+    daemon.request("task.start", serde_json::json!({"id": id}));
+    let done = until_done(&daemon, &id);
+    assert_eq!(done["status"], "done", "{done}");
+
+    let attempts = done["attempts"].as_array().unwrap();
+    let implements = attempts.iter().filter(|a| a["stage"] == "implement");
+    assert_eq!(implements.count(), 1, "{done}");
+    assert!(attempts.iter().all(|a| a["status"] != "running"), "{done}");
+    let count = |name: &str| {
+        std::fs::read_to_string(gates.path().join(name))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.is_empty() && (name == "verify.log" || *l == "y"))
+            .count()
+    };
+    assert_eq!(count("verify.log"), 2);
+    assert_eq!(count("reviews"), 2);
     assert_eq!(done["landedSha"], git_out(root, &["rev-parse", "work"]));
     daemon.shutdown_and_wait();
 }

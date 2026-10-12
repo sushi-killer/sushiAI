@@ -8,7 +8,6 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
 
 const GRAPH_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
@@ -22,7 +21,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"criteria\":[\"a.txt exists\",\"a.txt is documented\"],\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt and b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\"}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt and b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\"}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;
@@ -138,6 +137,96 @@ printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,
     (daemon, scripts)
 }
 
+#[test]
+fn a_done_task_report_lists_patch_aware_unlanded_commits() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts.path(),
+        "fake-claude.sh",
+        r#"#!/bin/sh
+input="$(cat)"
+name=$(printf '%s' "$input" | grep -o 'FILE_[a-z]*' | head -1 | sed 's/FILE_//')
+echo "$name" > "$name.txt"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+"#,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Add report",
+            "goal": "FILE_report: create the file",
+            "verify": ["test -f report.txt"],
+            "base": "work",
+            "land": false,
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", json!({"id": id}));
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["unlanded"]["commits"], 1, "{done}");
+    assert_eq!(done["unlanded"]["base"], "work", "{done}");
+    let expected = format!(
+        "- Not landed: 1 commit(s) on `{}` are not on `work`",
+        done["branch"].as_str().unwrap()
+    );
+    assert!(
+        done["report"].as_str().unwrap().contains(&expected),
+        "{done}"
+    );
+    let report = daemon.request("task.report", json!({"id": id}));
+    let text = report["report"].as_str().unwrap();
+    assert!(text.contains(&expected), "{text}");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn the_report_counts_exploration_calls_and_time_to_first_edit_per_implement_attempt() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts.path(),
+        "fake-claude.sh",
+        r#"#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"README.md"}}]}}'
+sleep 1
+echo landed > landed.txt
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"landed.txt"}}]}}'
+printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+"#,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Add landed",
+            "goal": "create landed.txt",
+            "verify": ["test -f landed.txt"],
+            "start": true,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
+    assert_eq!(done["status"], "done", "{done}");
+    let report = daemon.request("task.report", json!({"id": id}));
+    let text = report["report"].as_str().unwrap();
+    assert!(text.contains("1 exploration calls"), "{text}");
+    assert!(text.contains("first edit after"), "{text}");
+    assert!(text.contains("Total time:"), "{text}");
+    daemon.shutdown_and_wait();
+}
+
 fn land_one(daemon: &Daemon, repo: &Path) -> serde_json::Value {
     let task = daemon.request(
         "task.create",
@@ -152,9 +241,7 @@ fn land_one(daemon: &Daemon, repo: &Path) -> serde_json::Value {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let done = poll_until(daemon, &id, Duration::from_secs(60), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(done["status"], "done", "{done}");
     assert!(done["landedSha"].is_string(), "{done}");
     done

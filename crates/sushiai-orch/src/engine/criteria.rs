@@ -106,6 +106,7 @@ mod tests {
             code: Some(code),
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         }
     }
 
@@ -174,6 +175,7 @@ mod tests {
             findings: vec![],
             repeated: vec![],
             severities: vec![],
+            details: Vec::new(),
             criteria: vec![
                 ruling("Alpha works", Some(false)),
                 ruling("Beta works", Some(true)),
@@ -196,6 +198,7 @@ mod tests {
             findings: vec![],
             repeated: vec![],
             severities: vec![],
+            details: Vec::new(),
             criteria: vec![
                 ruling("Alpha works -- check: read it", Some(true)),
                 ruling("Beta works", None),

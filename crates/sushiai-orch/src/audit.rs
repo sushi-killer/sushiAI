@@ -137,6 +137,7 @@ pub(super) fn audit_request<'a>(
 ) -> harness::RunRequest<'a> {
     harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(route, repo, mcp, settings_path, &[])
     }
 }
@@ -312,12 +313,15 @@ mod tests {
                 effort: Some("high"),
                 max_budget_usd: None,
                 review: true,
+                task_run: false,
+                task_sandbox: None,
                 mcp_config: Some(&mcp),
                 settings_path: Some(&settings_path),
                 network_allowed: false,
                 codex_mcp: &[],
                 images: &[],
                 repo_settings: false,
+                resume: None,
             });
             assert_eq!(argv, review, "{harness:?}");
             assert!(!argv.iter().any(|a| a == "acceptEdits"

@@ -1,0 +1,117 @@
+/* Vault token: its own Settings tab; the field never shows the token. */
+.vault-token {
+  display: grid;
+  gap: 8px;
+}
+.vault-token-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.vault-token-state {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.vault-token-row {
+  display: flex;
+  gap: 8px;
+}
+.vault-token-row input {
+  flex: 1;
+  min-width: 0;
+}
+.vault-token .muted {
+  margin: 0;
+}
+
+/* Vault block, below the variables table on the Environment page. */
+.pd-vault {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.pd-vault-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.pd-vault-hint {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+}
+.pd-vault-fields {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+.pd-vault-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.pd-vault-field > span,
+.pd-vault-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.pd-vault-paths {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+.pd-vault-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pd-vault-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.pd-vault-icon:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-selected);
+}
+.pd-vault-icon:disabled {
+  opacity: 0.35;
+}
+.pd-vault-add {
+  justify-self: start;
+}
+.pd-vault-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.pd-vault-result {
+  margin-top: 14px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.pd-vault-result p {
+  margin: 0 0 8px;
+}
+.pd-vault-result ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pd-vault-result li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}

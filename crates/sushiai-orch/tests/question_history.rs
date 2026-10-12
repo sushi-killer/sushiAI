@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 /// One fake plays every role, told apart by the brief. `$LOG_DIR` counts the
 /// implement runs (`implement.<n>`, the body sees `$n`, the runs before this
@@ -124,7 +123,7 @@ fn create(s: &Setup, extra: Value) -> String {
 }
 
 fn finished(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     })
 }
@@ -139,11 +138,11 @@ fn history(task: &Value) -> Vec<Value> {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 fn settled(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped")
     })
 }
@@ -234,17 +233,20 @@ fn a_question_dropped_by_task_stop_is_not_history() {
 
 #[test]
 fn a_policy_answer_is_recorded_as_policy() {
-    let s = setup(&[("PASS_REVIEW_FROM", "2")], |settings| {
-        settings["review"] = json!("claude-sonnet");
+    // A review that may not run again offers no `retry` (two runs per attempt),
+    // so the policy answer here is the "attempts keep failing" one.
+    let s = setup(&[], |settings| {
+        settings["review"] = json!("");
+        settings["planReview"] = json!("");
     });
-    let id = create(&s, json!({}));
+    let id = create(&s, json!({"verify": ["false"]}));
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "done", "{task}");
+    assert_eq!(task["status"], "waiting", "{task}");
     let h = history(&task);
     assert_eq!(h.len(), 1, "{task}");
     assert_eq!(h[0]["answeredBy"], "policy");
-    assert_eq!(h[0]["answer"], "retry");
-    assert_eq!(h[0]["askedBy"], "review");
+    assert_eq!(h[0]["answer"], "continue");
+    assert_eq!(h[0]["kind"], "attempts_failing");
     assert!(h[0]["askedAt"].is_i64(), "{task}");
     cleanup(s, &task);
 }
@@ -262,12 +264,12 @@ fn a_judged_impossible_claim_is_recorded_as_judge() {
         |settings| {
             settings["review"] = json!("");
             settings["briefCheckRoute"] = json!("claude-sonnet");
+            settings["planReview"] = serde_json::json!("");
         },
     );
     let id = create(
         &s,
         json!({
-            "variant": {"groundedChecks": true},
             "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
         }),
     );
@@ -303,6 +305,7 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
     let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("");
     settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
     request_on(&socket1, "settings.set", json!({"settings": settings}));
@@ -321,20 +324,15 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start = std::time::Instant::now();
-    let waiting = loop {
+    let waiting = wait_until("the task to wait for the budget answer", || {
         let t = request_on(&socket1, "task.get", json!({"id": id}));
-        if t["status"] == "waiting" {
-            break t;
-        }
-        assert!(start.elapsed() < Duration::from_secs(30), "{t}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "waiting").then_some(t)
+    });
     assert_eq!(waiting["question"]["kind"], "budget", "{waiting}");
     assert_eq!(waiting["question"]["askedBy"], "implement", "{waiting}");
     assert!(waiting["question"]["askedAt"].is_i64(), "{waiting}");
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(15));
+    let _ = wait_for_exit(first);
 
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &env);
@@ -355,8 +353,8 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
     assert!(h[0]["answeredAt"].is_i64(), "{answered}");
     assert_eq!(h[0]["answeredBy"], "owner");
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -378,7 +376,7 @@ fn a_planner_question_is_asked_by_plan_and_recorded_when_answered() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(30), |s| {
+    let waiting = poll_until(&daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     assert_eq!(waiting["status"], "waiting", "{waiting}");
@@ -386,9 +384,7 @@ fn a_planner_question_is_asked_by_plan_and_recorded_when_answered() {
     assert!(waiting["question"]["askedAt"].is_i64(), "{waiting}");
     assert!(history(&waiting).is_empty(), "{waiting}");
     daemon.request("task.answer", json!({"id": id, "answer": "dark"}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     let h = history(&done);
     assert_eq!(h.len(), 1, "{done}");
     assert_eq!(h[0]["question"], "Which default theme?");
@@ -397,5 +393,5 @@ fn a_planner_question_is_asked_by_plan_and_recorded_when_answered() {
     assert_eq!(h[0]["answer"], "dark");
     assert_eq!(h[0]["answeredBy"], "owner");
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }

@@ -56,11 +56,70 @@ fn review_auto_mechanical_luna_is_reviewed_by_sonnet() {
 }
 
 #[test]
-fn review_auto_standard_sonnet_is_reviewed_by_sonnet() {
-    let settings = Settings::default();
+fn review_auto_standard_sonnet_is_reviewed_by_another_harness() {
+    let mut settings = Settings::default();
+    settings.prices.insert(
+        "gpt-pricey".into(),
+        Price { input: 10.0, cached_input: 1.0, output: 50.0, cache_write: None },
+    );
+    with_route(&mut settings, "codex-pricey", Harness::Codex, "gpt-pricey", Some(2));
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, reason) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
+    assert_eq!(route.id, "codex-pricey", "another harness beats cheaper opus");
+    assert_eq!(reason, "standard tier, strength 2");
+}
+
+#[test]
+fn review_auto_hard_codex_and_opus_review_each_other() {
+    let mut settings = Settings::default();
+    with_route(&mut settings, "codex-sol", Harness::Codex, "sol", Some(3));
+    let sol = find(&settings, "codex-sol");
+    let (route, reason) = select_review_route(&settings, sol, Tier::Hard).unwrap();
+    assert_eq!(route.id, "claude-opus");
+    assert_eq!(reason, "hard tier, strength 3");
+    let opus = find(&settings, "claude-opus");
+    let (route, _) = select_review_route(&settings, opus, Tier::Hard).unwrap();
+    assert_eq!(route.id, "codex-sol");
+}
+
+#[test]
+fn review_auto_with_only_the_implementers_route_is_a_logged_self_review() {
+    let mut settings = Settings::default();
+    settings.routes.retain(|r| r.id == "claude-sonnet");
+    let sonnet = find(&settings, "claude-sonnet").clone();
+    let (route, reason) = select_review_route(&settings, &sonnet, Tier::Standard).unwrap();
+    assert_eq!(route.id, "claude-sonnet");
+    assert_eq!(reason, "self-review: no other route");
+}
+
+#[test]
+fn review_auto_skips_a_route_with_the_implementers_model() {
+    let mut settings = Settings::default();
+    with_route(&mut settings, "claude-sonnet-b", Harness::Claude, "sonnet", None);
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
-    assert_eq!(route.id, "claude-sonnet");
+    assert_ne!(route.id, "claude-sonnet-b");
+    assert_ne!(route.id, "claude-sonnet");
+    settings.routes.retain(|r| r.id != "claude-opus" && r.id != "codex");
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, reason) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
+    assert_eq!(route.id, "claude-sonnet", "only same-model routes remain");
+    assert_eq!(reason, "self-review: no other route");
+}
+
+#[test]
+fn a_route_with_no_model_and_no_strength_never_meets_the_floor() {
+    let mut settings = Settings::default();
+    settings.routes.retain(|r| r.id == "claude-sonnet" || r.id == "codex");
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, reason) = select_review_route(&settings, sonnet, Tier::Mechanical).unwrap();
+    assert_eq!(route.id, "codex");
+    assert!(reason.contains("codex") && reason.contains("set strength"), "{reason}");
+    settings.routes.iter_mut().find(|r| r.id == "codex").unwrap().strength = Some(2);
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, reason) = select_review_route(&settings, sonnet, Tier::Mechanical).unwrap();
+    assert_eq!(route.id, "codex");
+    assert_eq!(reason, "mechanical tier, strength 2");
 }
 
 #[test]
@@ -73,9 +132,9 @@ fn review_auto_prefers_a_cheaper_route_and_the_other_harness_on_a_tie() {
     with_route(&mut settings, "codex-mid", Harness::Codex, "gpt-mid", Some(2));
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
-    assert_eq!(route.id, "codex-mid", "cheaper at strength 2");
+    assert_eq!(route.id, "codex-mid", "other harness at strength 2");
 
-    // Exactly equal price: the other harness beats the implementer's own.
+    // Priced higher, it still wins: another harness sorts before price.
     settings.prices.insert(
         "gpt-mid".into(),
         Price { input: 2.0, cached_input: 0.1, output: 10.0, cache_write: None },
@@ -83,6 +142,16 @@ fn review_auto_prefers_a_cheaper_route_and_the_other_harness_on_a_tie() {
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
     assert_eq!(route.id, "codex-mid");
+
+    // Two priced routes on the other harness: the cheaper one wins.
+    settings.prices.insert(
+        "gpt-cheap".into(),
+        Price { input: 0.5, cached_input: 0.1, output: 2.0, cache_write: None },
+    );
+    with_route(&mut settings, "codex-cheap", Harness::Codex, "gpt-cheap", Some(2));
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
+    assert_eq!(route.id, "codex-cheap");
 }
 
 #[test]
@@ -100,7 +169,21 @@ fn review_auto_without_a_strong_route_uses_the_strongest() {
     settings.routes.retain(|r| r.id != "claude-opus");
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Hard).unwrap();
-    assert_eq!(route.id, "claude-sonnet");
+    assert_eq!(route.id, "codex");
+    assert_eq!(
+        reason,
+        "no route at strength 3; codex has no model and no strength: set strength on it"
+    );
+}
+
+#[test]
+fn review_auto_fallback_ranks_a_known_weaker_route_above_an_unknown_one() {
+    let mut settings = Settings::default();
+    settings.routes.retain(|r| r.id == "claude-sonnet" || r.id == "codex");
+    with_route(&mut settings, "codex-mid", Harness::Codex, "gpt-mid", Some(2));
+    let sonnet = find(&settings, "claude-sonnet");
+    let (route, reason) = select_review_route(&settings, sonnet, Tier::Hard).unwrap();
+    assert_eq!(route.id, "codex-mid", "known strength 2 beats a route with no model");
     assert_eq!(reason, "no route at strength 3; strongest available");
 }
 

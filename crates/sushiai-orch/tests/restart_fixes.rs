@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::{Duration, Instant};
 
 const PASS_SCRIPT: &str = "#!/bin/sh\ninput=\"$(cat)\"\ncase \"$input\" in *SLOW*) sleep 30 ;; esac\necho changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 
@@ -16,6 +15,7 @@ fn first_daemon(home: &std::path::Path, env: &[(&str, &str)]) -> (DaemonChild, s
     let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
     request_on(
@@ -26,19 +26,11 @@ fn first_daemon(home: &std::path::Path, env: &[(&str, &str)]) -> (DaemonChild, s
     (child, socket)
 }
 
-fn wait_status(socket: &std::path::Path, id: &str, want: &str, secs: u64) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
+fn wait_status(socket: &std::path::Path, id: &str, want: &str) -> serde_json::Value {
+    wait_until(&format!("task {id} to be {want}"), || {
         let t = request_on(socket, "task.get", serde_json::json!({"id": id}));
-        if t["status"] == want {
-            return t;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(secs),
-            "never {want}: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        (t["status"] == want).then_some(t)
+    })
 }
 
 #[test]
@@ -46,8 +38,11 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PASS_SCRIPT);
     let marker = scripts_dir.path().join("final-started");
+    // The daemon also runs every check on the base commit in the background,
+    // in a scratch checkout under `base-runs`. Only the task's own run may
+    // touch the marker, or the test would stop the daemon at the wrong moment.
     let final_check = format!(
-        "if [ ! -f {m} ]; then touch {m}; sleep 60; fi",
+        "case \"$PWD\" in */base-runs/*) exit 0 ;; esac; if [ ! -f {m} ]; then touch {m}; sleep 60; fi",
         m = marker.display()
     );
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
@@ -69,16 +64,9 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while !marker.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "final check never ran"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the final check to run", || marker.exists().then_some(()));
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(15));
+    let _ = wait_for_exit(first);
 
     let stopped: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(data.join("tasks").join(&id).join("task.json")).unwrap(),
@@ -97,13 +85,13 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let done = wait_status(&socket2, &id, "done", 30);
+    let done = wait_status(&socket2, &id, "done");
     for a in done["attempts"].as_array().unwrap() {
         assert!(a.get("failure").is_none_or(|f| f.is_null()), "{done}");
     }
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -129,15 +117,15 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
         "goal": "g", "verify": ["true"], "dependsOn": [dep_id]}),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    wait_status(&socket1, &dep_id, "running", 10);
+    wait_status(&socket1, &dep_id, "running");
     call1("task.stop", serde_json::json!({"id": dep_id}));
-    let asked = wait_status(&socket1, &dependent_id, "waiting", 15);
+    let asked = wait_status(&socket1, &dependent_id, "waiting");
     assert!(asked["question"]["text"]
         .as_str()
         .unwrap()
         .contains("stopped"));
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(15));
+    let _ = wait_for_exit(first);
 
     // While the daemon is down the dependency ends up done.
     let path = data.join("tasks").join(&dep_id).join("task.json");
@@ -149,12 +137,12 @@ fn a_dependency_question_that_became_moot_while_down_clears_on_start() {
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let done = wait_status(&socket2, &dependent_id, "done", 30);
+    let done = wait_status(&socket2, &dependent_id, "done");
     assert!(done.get("question").is_none_or(|q| q.is_null()), "{done}");
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
+    let _ = wait_for_exit(second);
     for w in [&dep, &dependent] {
-        let _ = std::fs::remove_dir_all(w["worktree"].as_str().unwrap());
+        remove_dir_retrying(w["worktree"].as_str().unwrap());
     }
 }
 
@@ -180,14 +168,14 @@ fn verify_and_final_checks_see_the_tasks_base_commit_in_orchd_base_sha() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let done = poll_task_status(&daemon, &id, Duration::from_secs(30));
+    let done = poll_task_status(&daemon, &id);
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(
         done["baseSha"],
         git_out(repo.path(), &["rev-parse", "HEAD"]).trim()
     );
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -227,24 +215,24 @@ fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = wait_status(&socket1, &id, "waiting", 20);
+    let waiting = wait_status(&socket1, &id, "waiting");
     assert!(waiting["question"]["options"]
         .to_string()
         .contains("accept the last attempt as done"));
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(15));
+    let _ = wait_for_exit(first);
 
     let socket2 = socket_of(&home);
     let second = spawn_daemon(&home, &env);
     wait_for_socket(&socket2);
-    let still = wait_status(&socket2, &id, "waiting", 15);
+    let still = wait_status(&socket2, &id, "waiting");
     assert!(still["question"].is_object(), "{still}");
     request_on(
         &socket2,
         "task.answer",
         serde_json::json!({"id": id, "answer": "Accept the last attempt as done"}),
     );
-    let done = wait_status(&socket2, &id, "done", 30);
+    let done = wait_status(&socket2, &id, "done");
     let implement = done["attempts"]
         .as_array()
         .unwrap()
@@ -264,6 +252,6 @@ fn an_accept_answer_after_a_restart_commits_the_last_attempt() {
         "{done}"
     );
     stop_daemon(&socket2);
-    let _ = wait_for_exit(second, Duration::from_secs(15));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }

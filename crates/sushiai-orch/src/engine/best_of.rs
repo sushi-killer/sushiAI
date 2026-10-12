@@ -9,6 +9,7 @@ pub(super) struct PreparedRun {
     pub key_path: PathBuf,
     pub messages_server: serde_json::Value,
     pub registered: Option<(String, Arc<HookContext>)>,
+    pub sandbox: Option<TaskSandbox>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19,17 +20,16 @@ pub(super) fn prepare_run(
     route: &Route,
     settings: &Settings,
     worktree: &Path,
-    base_sha: &str,
     attempt_n: u32,
     run_dir: &Path,
-    deny_read: &[String],
     tools: &permissions::TaskTools,
 ) -> PreparedRun {
+    let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let mcp_path = run_dir.join("mcp.json");
     // The repo's project servers, the connected tools and the task's own,
     // plus orchd's messaging bridge scoped to this task.
     let messages_server = messages::task_server(app, task_id);
-    let _ = store::write_json_atomic(&mcp_path, &tools.mcp_config(&messages_server));
+    let _ = store::write_json_private(&mcp_path, &tools.mcp_config(&messages_server));
 
     let token = uuid::Uuid::new_v4().to_string();
     let settings_path = run_dir.join("settings.json");
@@ -98,11 +98,10 @@ pub(super) fn prepare_run(
             home: &home_str,
             token: &token,
         };
-        let mut claude_settings = harness::build_claude_settings(
+        let mut claude_settings = harness::build_claude_task_settings(
             profile_value.as_ref(),
-            settings.sandbox,
+            sandbox.as_ref(),
             &settings.allowed_domains,
-            deny_read,
             Some(stop_hook),
         );
         // A headless run answers no prompts, so the messaging tools and the
@@ -114,8 +113,17 @@ pub(super) fn prepare_run(
             }
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
+        // The planner's tests and the files the checks name: no edit tool
+        // may touch them (a Bash write is caught by the post-attempt guard).
+        if let Some(deny) = claude_settings["permissions"]["deny"].as_array_mut() {
+            for abs in protected_abs_paths(task, worktree) {
+                for tool in ["Edit", "Write"] {
+                    deny.push(json!(format!("{tool}(/{abs})")));
+                }
+            }
+        }
         let _ = store::write_json_private(&settings_path, &claude_settings);
-        let ctx = HookContext::new(task, attempt_n, worktree, base_sha);
+        let ctx = HookContext::new(task, attempt_n, worktree, task.work_base());
         app.register_hook(&token, &ctx, run_dir);
         registered = Some((token.clone(), ctx));
     }
@@ -125,6 +133,7 @@ pub(super) fn prepare_run(
         key_path,
         messages_server,
         registered,
+        sandbox,
     }
 }
 
@@ -143,14 +152,15 @@ pub(super) struct BestOfExtra {
 /// The second candidate's route when best-of applies to this attempt (the
 /// first implement attempt of a hard task with `bestOf` 2), `Err` with a
 /// decision line when it applies but there is no route to run it on.
+/// `first_attempt` is true when no implement attempt exists yet.
 pub(super) fn second_route(
     task: &Task,
     settings: &Settings,
     route: &Route,
-    attempt_n: u32,
+    first_attempt: bool,
 ) -> Result<Option<Route>, String> {
     let variant = task.variant();
-    if variant.best_of < 2 || task.tier != Tier::Hard || attempt_n != 1 {
+    if variant.best_of < 2 || task.tier != Tier::Hard || !first_attempt {
         return Ok(None);
     }
     let other = match variant.best_of_route.as_deref() {
@@ -175,7 +185,7 @@ struct Eval {
 }
 
 fn run_finished(res: &Result<harness::RunOutcome, RunError>) -> bool {
-    matches!(res, Ok(o) if !o.stalled && !o.over_budget && o.looped.is_none())
+    matches!(res, Ok(o) if !o.stalled && !o.over_budget && !o.time_budget && o.looped.is_none())
 }
 
 fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Path) -> f64 {
@@ -193,16 +203,18 @@ fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Pat
 /// compared by how many fail.
 #[allow(clippy::too_many_arguments)]
 async fn evaluate(
+    app: &App,
     task: &Task,
     worktree: &Path,
     base_sha: &str,
+    own_base: &str,
     dir: &Path,
     finished: bool,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
-    let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
+    let (wt, base) = (worktree.to_path_buf(), own_base.to_string());
     let changed = tokio::task::spawn_blocking(move || {
         let _ = git::stage_all(&wt);
         git::changed_files(&wt, &base).unwrap_or_default()
@@ -222,6 +234,7 @@ async fn evaluate(
     // attempt records the skip.
     let (verify_commands, _) = filter_scoped(scoped_checks, &task.repo, &task.verify, &changed);
     let mut verify = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)),
         worktree,
         &dir.join("verify"),
         &verify_commands,
@@ -231,27 +244,36 @@ async fn evaluate(
     )
     .await;
     let plain = verify.len();
-    if task.variant().grounded_checks {
-        let commands: Vec<String> = gated_checks(task).into_iter().map(|c| c.run).collect();
-        if !commands.is_empty() {
-            verify.extend(
-                run_verify_commands(
-                    worktree,
-                    &dir.join("checks"),
-                    &commands,
-                    sandbox,
-                    base_sha,
-                    cancel,
-                )
-                .await,
-            );
-        }
-        if let Some(held) = gated_held_out(task) {
-            let (result, _) =
-                run_held_out(task, &held, worktree, &dir.join("checks"), sandbox, cancel).await;
-            verify.push(result);
-        }
+
+    let commands: Vec<String> = gated_checks(task).into_iter().map(|c| c.run).collect();
+    if !commands.is_empty() {
+        verify.extend(
+            run_verify_commands(
+                CheckContext::new(app, Some(&task.id)),
+                worktree,
+                &dir.join("checks"),
+                &commands,
+                sandbox,
+                base_sha,
+                cancel,
+            )
+            .await,
+        );
     }
+    if let Some(held) = gated_held_out(task) {
+        let (result, _) = run_held_out(
+            CheckContext::new(app, Some(&task.id)),
+            task,
+            &held,
+            worktree,
+            &dir.join("checks"),
+            sandbox,
+            cancel,
+        )
+        .await;
+        verify.push(result);
+    }
+
     let failed = |v: &[VerifyOutcome]| v.iter().filter(|o| o.code != Some(0)).count() as u32;
     let tally = CheckTally {
         passed: (verify.len() - plain) as u32 - failed(&verify[plain..]),
@@ -293,15 +315,19 @@ where
     F: std::future::Future<Output = Result<harness::RunOutcome, RunError>>,
 {
     let mut extra = BestOfExtra::default();
+    // The implementer's own work is measured from the tests commit when the
+    // task has one; `base_sha` stays what checks and the pick see as base.
+    let own_base = task.work_base().to_string();
     let repo = PathBuf::from(&task.repo);
     let wt_b = PathBuf::from(format!("{}-b", task.worktree));
     let branch_b = format!("{}-b", task.branch);
+    let run_dir_b = run_dir.join("b");
     let made = {
         let (r, p, b, s) = (
             repo.clone(),
             wt_b.clone(),
             branch_b.clone(),
-            base_sha.to_string(),
+            own_base.clone(),
         );
         tokio::task::spawn_blocking(move || {
             git::create_worktree(&r, &b, &p, &s)?;
@@ -314,6 +340,24 @@ where
         .await
         .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
     };
+    let made = match made {
+        Ok(()) => {
+            let setup = super::worktrees::setup_worktree(
+                &repo,
+                &wt_b,
+                app.task_sandbox(&task.repo, &wt_b, &run_dir_b).as_ref(),
+                cancel,
+            )
+            .await;
+            if setup.is_err() {
+                let (r, p, b) = (repo.clone(), wt_b.clone(), branch_b.clone());
+                let _ =
+                    tokio::task::spawn_blocking(move || git::discard_worktree(&r, &p, &b)).await;
+            }
+            setup.map_err(git::GitError)
+        }
+        err => err,
+    };
     if let Err(e) = made {
         extra.decisions.push(format!(
             "Best-of: could not create the sibling worktree ({e}); ran a single candidate"
@@ -321,18 +365,28 @@ where
         return (a_run.await, extra);
     }
 
-    let run_dir_b = run_dir.join("b");
     let _ = std::fs::create_dir_all(&run_dir_b);
     let tools_b = permissions::task_tools(app, settings, task, &wt_b);
+    for line in &tools_b.notes {
+        if !task.decisions.contains(line) && !extra.decisions.contains(line) {
+            extra.decisions.push(line.clone());
+        }
+    }
     let prep = prepare_run(
-        app, task, task_id, b_route, settings, &wt_b, base_sha, attempt_n, &run_dir_b, deny_read,
-        &tools_b,
+        app, task, task_id, b_route, settings, &wt_b, attempt_n, &run_dir_b, &tools_b,
     );
     let _ = std::fs::write(run_dir_b.join("brief.md"), brief_text);
     let events_a = run_dir.join("events.jsonl");
     let events_b = run_dir_b.join("events.jsonl");
     let variant = task.variant();
-    let codex_mcp_b = tools_b.codex_servers(&prep.messages_server);
+    let started_at = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|a| a.n == attempt_n)
+        .map_or_else(now_ms, |a| a.started_at);
+    let codex_mcp_b =
+        tools_b.codex_servers((prep.sandbox.is_none()).then_some(&prep.messages_server));
     let req_b = harness::RunRequest {
         harness: b_route.harness,
         worktree: &wt_b,
@@ -341,12 +395,15 @@ where
         max_budget_usd: (variant.max_attempt_cost_usd > 0.0)
             .then_some(variant.max_attempt_cost_usd),
         review: false,
+        task_run: true,
+        task_sandbox: prep.sandbox.as_ref(),
         mcp_config: Some(&prep.mcp_path),
         settings_path: Some(&prep.settings_path),
         network_allowed: settings.codex_network,
         codex_mcp: &codex_mcp_b,
         images: &[],
         repo_settings: true,
+        resume: None,
     };
     let b_run = run_harness(
         app,
@@ -364,7 +421,8 @@ where
             prep.registered
                 .as_ref()
                 .map(|(_, ctx)| ctx.hook_running.clone()),
-        ),
+        )
+        .with_time_budget(settings.implement_budget_mins, started_at),
     );
     let (a_res, b_res) = tokio::join!(a_run, b_run);
     if let Some((token, ctx)) = &prep.registered {
@@ -373,6 +431,7 @@ where
         permissions::finish_staging(ctx);
     }
     let _ = std::fs::remove_file(&prep.key_path);
+    let _ = std::fs::remove_file(&prep.mcp_path);
 
     let cost_a = run_cost(app, &a_res, &events_a);
     let cost_b = run_cost(app, &b_res, &events_b);
@@ -386,38 +445,64 @@ where
         return (Err(RunError::Cancelled), extra);
     }
 
-    let sandbox = settings.sandbox;
+    let scoped = scoped_checks_for(settings, task);
+    let sandbox_a = app.task_sandbox(&task.repo, worktree, run_dir);
+    let sandbox_b = app.task_sandbox(&task.repo, &wt_b, &run_dir_b);
     let (eval_a, eval_b) = tokio::join!(
         evaluate(
+            app,
             task,
             worktree,
             base_sha,
+            &own_base,
             run_dir,
             run_finished(&a_res),
-            sandbox,
-            &settings.scoped_checks,
+            sandbox_a.as_ref(),
+            &scoped,
             cancel
         ),
         evaluate(
+            app,
             task,
             &wt_b,
             base_sha,
+            &own_base,
             &run_dir_b,
             run_finished(&b_res),
-            sandbox,
-            &settings.scoped_checks,
+            sandbox_b.as_ref(),
+            &scoped,
             cancel
         ),
     );
 
+    extra.decisions.extend(
+        eval_a
+            .verify
+            .iter()
+            .chain(&eval_b.verify)
+            .flat_map(|r| r.decisions.iter().cloned()),
+    );
     let (id_a, id_b) = (a_route.id.as_str(), b_route.id.as_str());
     let mut pick_b;
     let decision;
     match (eval_a.passed, eval_b.passed) {
         (true, true) => {
             match run_pick(
-                app, task, task_id, attempt_n, settings, a_route, b_route, worktree, &wt_b,
-                base_sha, run_dir, &eval_a, &eval_b, deny_read, cancel,
+                app,
+                task,
+                task_id,
+                attempt_n,
+                settings,
+                a_route,
+                b_route,
+                worktree,
+                &wt_b,
+                &own_base,
+                &mut extra.decisions,
+                &eval_a,
+                &eval_b,
+                deny_read,
+                cancel,
             )
             .await
             {
@@ -486,7 +571,7 @@ where
     if pick_b {
         // Carry the winner into the task's worktree; if that fails the task
         // worktree still holds candidate a, put back as it was.
-        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), base_sha.to_string());
+        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), own_base.clone());
         let carried = tokio::task::spawn_blocking(move || {
             let mine = git::patch_since(&wa, &base)?;
             let theirs = git::patch_since(&wb, &base)?;
@@ -545,7 +630,7 @@ async fn run_pick(
     worktree: &Path,
     wt_b: &Path,
     base_sha: &str,
-    run_dir: &Path,
+    decisions: &mut Vec<String>,
     eval_a: &Eval,
     eval_b: &Eval,
     deny_read: &[String],
@@ -553,11 +638,16 @@ async fn run_pick(
 ) -> Result<(Option<(bool, String)>, f64), RunError> {
     // The reviewer on the other family; without a review route, whichever
     // family candidate a was not.
-    let route = select_review_route(settings, a_route, task.tier)
-        .map(|(r, _)| r)
-        .filter(|r| r.harness != a_route.harness)
-        .unwrap_or(b_route)
-        .clone();
+    let route = select_review_route_with(
+        settings,
+        task.variant().review_route_id(settings),
+        a_route,
+        task.tier,
+    )
+    .map(|(r, _)| r)
+    .filter(|r| r.harness != a_route.harness)
+    .unwrap_or(b_route)
+    .clone();
     let (wa, wb, base) = (
         worktree.to_path_buf(),
         wt_b.to_path_buf(),
@@ -582,8 +672,12 @@ async fn run_pick(
             diff: &diff_b,
         },
     );
-    let dir = run_dir.join("pick");
-    let _ = std::fs::create_dir_all(&dir);
+    let Ok(dir) = app
+        .store
+        .claim_helper_run_dir(task_id, "pick", Some(attempt_n))
+    else {
+        return Ok((None, 0.0));
+    };
     let mcp_path = dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let _ = std::fs::write(dir.join("brief.md"), &brief_text);
@@ -601,6 +695,7 @@ async fn run_pick(
     }
     let events = dir.join("events.jsonl");
     let req = review_request(&route, worktree, &mcp_path, &settings_path, &[]);
+    let limit = app.helper_timeout();
     let res = run_harness(
         app,
         task_id,
@@ -612,17 +707,105 @@ async fn run_pick(
         &brief_text,
         &events,
         cancel,
-        Guard::off(),
+        Guard::helper("best-of pick", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     match res {
         Ok(outcome) => {
             let cost = outcome.cost_usd.unwrap_or(0.0);
+            if outcome.timed_out {
+                decisions.push(helper_timeout_message("best-of pick", limit));
+                return Ok((None, cost));
+            }
             let text = outcome.final_text.unwrap_or_default();
             Ok((brief::parse_pick(&text), cost))
         }
         Err(RunError::Cancelled) => Err(RunError::Cancelled),
         Err(RunError::Io(_) | RunError::NotFound(_)) => Ok((None, 0.0)),
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn best_of_pick_timed_out_keeps_the_normal_no_answer_path() {
+        let (app, _dir, task, route) = slow_helper_task();
+        let mut settings = app.settings.read().unwrap().clone();
+        settings.review = route.id.clone();
+        let worktree = PathBuf::from(&task.worktree);
+        let eval = Eval {
+            passed: true,
+            verify_ok: true,
+            failing: 0,
+            verify: vec![],
+            tally: CheckTally::default(),
+        };
+        let mut decisions = Vec::new();
+        let (pick, _) = run_pick(
+            &app,
+            &task,
+            &task.id,
+            1,
+            &settings,
+            &route,
+            &route,
+            &worktree,
+            &worktree,
+            &task.base_sha,
+            &mut decisions,
+            &eval,
+            &eval,
+            &[],
+            &CancelToken::new(),
+        )
+        .await
+        .ok()
+        .expect("the picker must start");
+        assert!(pick.is_none());
+        assert_eq!(decisions, ["best-of pick timed out after 0.25s"]);
+        assert_eq!(
+            app.store.helper_run_dirs(&task.id, "pick", Some(1)).len(),
+            1
+        );
+        assert!(!app.store.run_dir(&task.id, 1).join("pick").exists());
+    }
+
+    #[test]
+    fn best_of_first_implement_attempt_ignores_plan_numbers() {
+        let settings = Settings::default();
+        let route = settings
+            .routes
+            .iter()
+            .find(|r| r.harness == Harness::Claude)
+            .unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.tier = Tier::Hard;
+        task.variant = Some(Variant {
+            best_of: 2,
+            ..Default::default()
+        });
+        task.attempts = vec![Attempt {
+            stage: Stage::Plan,
+            ..attempt_with_failure(1, "plan")
+        }];
+        task.attempts
+            .push(attempt_with_failure(2, "first implement"));
+        assert_eq!(
+            second_route(&task, &settings, route, implement_attempt_count(&task) == 1)
+                .unwrap()
+                .unwrap()
+                .harness,
+            Harness::Codex
+        );
+        task.attempts
+            .push(attempt_with_failure(3, "second implement"));
+        assert!(
+            second_route(&task, &settings, route, implement_attempt_count(&task) == 1)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -130,7 +130,7 @@ fn decisions(task: &serde_json::Value) -> Vec<String> {
 }
 
 fn settle(s: &Setup, id: &str) -> serde_json::Value {
-    poll_until(&s.daemon, id, Duration::from_secs(30), |st| {
+    poll_until(&s.daemon, id, |st| {
         st == "done" || st == "failed" || st == "stopped" || st == "waiting"
     })
 }
@@ -141,6 +141,7 @@ fn a_task_routed_to_a_missing_codex_runs_on_claude_and_says_so() {
         // Standard work goes to codex; the brief check is on.
         settings["tiers"]["standard"] = json!("codex");
         settings["briefCheckRoute"] = json!("auto");
+        settings["planReview"] = serde_json::json!("");
     });
     let id = create(&s, &repo, json!({}));
     let task = settle(&s, &id);
@@ -165,6 +166,7 @@ fn a_deleted_codex_route_is_not_resurrected_by_the_brief_check() {
         routes.retain(|r| r["id"] != "codex");
         settings["tiers"]["mechanical"] = json!("claude-sonnet");
         settings["briefCheckRoute"] = json!("codex");
+        settings["planReview"] = serde_json::json!("");
     });
     let id = create(&s, &repo, json!({}));
     let task = settle(&s, &id);
@@ -194,7 +196,9 @@ fn a_missing_claude_sends_the_planner_and_the_attempt_to_codex() {
     assert_eq!(calls(&s.log), ["codex-plan", "codex-implement"]);
     assert_eq!(task["attempts"].as_array().unwrap().len(), 2);
     let lines = decisions(&task);
-    let swap = format!("Orchestrator: claude-opus unavailable ({MISSING} not found), using codex");
+    // A small request plans on the standard tier route.
+    let swap =
+        format!("Orchestrator: claude-sonnet unavailable ({MISSING} not found), using codex");
     assert!(lines.contains(&swap), "{lines:?}");
     s.daemon.shutdown_and_wait();
 }
@@ -212,6 +216,7 @@ fn with_no_harness_the_task_waits_with_an_install_question_and_spends_no_attempt
     // Answering while nothing is installed asks again; still no attempt.
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "retry"}));
+    // Absence check: this window gives a forbidden attempt time to start.
     std::thread::sleep(Duration::from_millis(500));
     let again = s.daemon.request("task.get", json!({"id": id}));
     assert_eq!(again["status"], "waiting", "{again}");
@@ -251,12 +256,43 @@ fn verify_timeout_secs_bounds_a_verify_command_and_names_the_limit() {
     let (s, repo) = setup(Some(FAKE_CLAUDE), None, |settings| {
         settings["verifyTimeoutSecs"] = json!(1);
         settings["briefCheckRoute"] = json!("");
+        settings["planReview"] = serde_json::json!("");
         settings["maxAttempts"] = json!(1);
     });
     let id = create(&s, &repo, json!({"verify": ["sleep 30"]}));
     let task = settle(&s, &id);
     let verify = &task["attempts"][0]["verify"][0];
-    assert_eq!(verify["tail"], "timed out after 1 seconds", "{task}");
+    let timeout = "timed out after 1 seconds";
+    let tail = verify["tail"].as_str().unwrap();
+    let lines = decisions(&task);
+    let load_retries: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("timed out under load"))
+        .map(String::as_str)
+        .collect();
+    // The daemon samples real machine load. A high-load timeout adds its
+    // environment detail and retries; the one-second execution budget stays.
+    if verify["loadTimeout"] == true {
+        assert_eq!(load_retries.len(), 1, "{task}");
+        let detail = load_retries[0]
+            .strip_prefix("Orchestrator: sleep 30: ")
+            .and_then(|line| line.strip_suffix(" (environment); rerun once on the same tree"))
+            .expect("load retry names the command and environment reason");
+        assert!(detail.contains(" ms, timed out under load "), "{task}");
+        assert!(detail.ends_with(" cores"), "{task}");
+        assert_eq!(
+            tail,
+            format!("sleep 30: {detail}\nRerun: {timeout}"),
+            "{task}"
+        );
+    } else {
+        assert!(load_retries.is_empty(), "{task}");
+        assert_eq!(tail, timeout, "{task}");
+    }
+    assert!(verify["ms"].as_u64().unwrap() >= 1000, "{task}");
+    assert!(verify["load"].as_f64().unwrap() >= 0.0, "{task}");
+    assert!(verify["cores"].as_u64().unwrap() > 0, "{task}");
+    assert_eq!(task["attempts"].as_array().unwrap().len(), 1, "{task}");
     assert!(verify["code"].is_null());
     s.daemon.shutdown_and_wait();
 }

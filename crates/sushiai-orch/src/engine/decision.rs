@@ -66,26 +66,31 @@ fn find_error_line(text: &str) -> Option<&str> {
         })
 }
 
-/// Strips digits and absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
+/// Strips digits, ids and hashes (long tokens with a digit, hex) and
+/// absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
 /// across two runs still normalizes to the same signature) and collapses
 /// whitespace.
 pub(crate) fn normalize_signature_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '/' {
-            while let Some(&next) = chars.peek() {
-                if next.is_whitespace() {
-                    break;
-                }
-                chars.next();
-            }
+    for word in line.split_whitespace() {
+        // A path is cut at its first slash.
+        let word = word.split('/').next().unwrap_or("");
+        if word.is_empty() {
             continue;
         }
-        if c.is_ascii_digit() {
+        let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let ident = core.len() >= 8
+            && core
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        let hex = core.len() >= 7 && core.chars().all(|c| c.is_ascii_hexdigit());
+        // A request id, hash or token differs on every run of one failure.
+        if hex || (ident && core.chars().any(|c| c.is_ascii_digit())) {
+            out.push_str(" ID ");
             continue;
         }
-        out.push(c);
+        out.extend(word.chars().filter(|c| !c.is_ascii_digit()));
+        out.push(' ');
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -106,7 +111,11 @@ pub fn failure_signature(kind: FailureKind, detail: &str) -> String {
 /// happened.
 pub fn consecutive_same_signature(attempts: &[Attempt], signature: &str) -> u32 {
     let mut count = 0;
-    for a in attempts.iter().rev() {
+    for a in attempts
+        .iter()
+        .rev()
+        .filter(|a| a.status != AttemptStatus::Interrupted)
+    {
         match &a.failure {
             Some(f) if f.signature == signature => count += 1,
             _ => break,
@@ -209,6 +218,15 @@ pub(super) fn implement_attempt_count(task: &Task) -> u32 {
         .count() as u32
 }
 
+/// Implement attempts that ran to an end: an interrupted one (a restart, a
+/// limit pause) is no attempt for "has this task started implementing".
+pub(super) fn completed_implement_attempts(task: &Task) -> u32 {
+    task.attempts
+        .iter()
+        .filter(|a| a.stage == Stage::Implement && a.status != AttemptStatus::Interrupted)
+        .count() as u32
+}
+
 /// Whether the latest implement attempt failed on a landing conflict: the
 /// next one only resolves it.
 pub(super) fn last_failure_is_conflict(task: &Task) -> bool {
@@ -264,6 +282,14 @@ pub(super) fn accept_offered(last: &Attempt, protected_paths: &[String]) -> bool
     }
 }
 
+/// The hard bound behind the relaxed `maxAttempts` count: every implement
+/// attempt, however it ended, except those a usage or rate limit paused, stops
+/// the task at twice the budget.
+fn ceiling_hit(task: &Task, max_attempts: u32) -> bool {
+    implement_attempt_count(task).saturating_sub(task.queue.paused_attempts)
+        >= max_attempts.saturating_mul(2)
+}
+
 pub(super) fn advance_after_failure(
     task: &mut Task,
     max_attempts: u32,
@@ -275,7 +301,29 @@ pub(super) fn advance_after_failure(
         .as_ref()
         .map(|f| f.signature.clone())
         .unwrap_or_default();
-    let consecutive = consecutive_same_signature(&task.attempts, &signature);
+    let mut consecutive = consecutive_same_signature(&task.attempts, &signature);
+    // A finding that was turned into a check or sent to the judge gets
+    // another attempt within the budget, not the owner.
+    if task
+        .findings
+        .iter()
+        .any(|f| f.handled && f.status == FindingStatus::Open && f.attempt == last.n)
+    {
+        consecutive = consecutive.min(2);
+    }
+    if task.queue.carry_conflict_attempt == Some(last.n) {
+        let reason =
+            "the base carry conflict attempt failed; fix the conflicts, then start it".to_string();
+        task.queue.park = Some(ParkRecord {
+            reason: reason.clone(),
+            until: None,
+            by: AnswerSource::Policy,
+        });
+        task.decisions.push(format!("Park: {reason} (by policy)"));
+        task.question = None;
+        task.status = TaskStatus::Queued;
+        return false;
+    }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]
             .failure
@@ -295,7 +343,11 @@ pub(super) fn advance_after_failure(
             .filter(|a| a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Loop))
             .count() as u32,
         repeated_reviews: repeated_review_count(task),
-        attempt_n: implement_attempt_count(task),
+        attempt_n: if ceiling_hit(task, max_attempts) {
+            max_attempts.max(counted_attempts(task))
+        } else {
+            counted_attempts(task)
+        },
         max_attempts,
     };
     match decide_after_failure(&input) {
@@ -315,6 +367,30 @@ pub(super) fn advance_after_failure(
             true
         }
         FailureDecision::Waiting { question } => {
+            let retries = task
+                .question_history
+                .iter()
+                .filter(|q| {
+                    q.failure_signature.as_deref() == Some(signature.as_str())
+                        && !is_option(&q.answer, "stop")
+                        && !is_accept_option(&q.answer)
+                })
+                .count();
+            if retries >= 3 {
+                let reason = format!(
+                    "{} failed again after 3 retries; fix the cause, then start it",
+                    signature_phrase(&signature)
+                );
+                task.queue.park = Some(ParkRecord {
+                    reason: reason.clone(),
+                    until: None,
+                    by: AnswerSource::Policy,
+                });
+                task.decisions.push(format!("Park: {reason} (by policy)"));
+                task.question = None;
+                task.status = TaskStatus::Queued;
+                return false;
+            }
             let mut options: Vec<String> = vec!["continue".into(), "change approach".into()];
             if accept_offered(&task.attempts[task.attempts.len() - 1], protected_paths) {
                 options.push(brief::ACCEPT_LAST_ATTEMPT.into());
@@ -326,6 +402,7 @@ pub(super) fn advance_after_failure(
                 QuestionKind::AttemptsFailing,
                 AskedBy::Implement,
             ));
+            task.question.as_mut().unwrap().failure_signature = Some(signature);
             task.status = TaskStatus::Waiting;
             false
         }
@@ -374,6 +451,7 @@ pub(super) fn record_owner_accept(
         by: "owner".to_string(),
         kind: Some(QuestionKind::AttemptsFailing),
         attempt: Some(attempt_n),
+        commands: Vec::new(),
         overturned: false,
         owner_answer: None,
     });
@@ -425,9 +503,9 @@ pub(super) async fn fail_and_continue(
     kind: FailureKind,
     detail: String,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> LoopSignal {
     match fail_or_accept(
         app,
@@ -464,15 +542,15 @@ pub(super) async fn fail_or_accept(
     kind: FailureKind,
     detail: String,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> FailSignal {
     record_failure(task, idx, kind, detail);
     let protected = app.settings.read().unwrap().protected_paths.clone();
     let should_continue = advance_after_failure(task, *attempt_budget, &protected);
     if should_continue {
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return FailSignal::Continue;
     }
@@ -493,7 +571,7 @@ pub(super) async fn fail_or_accept(
         a.failure = None;
         task.status = TaskStatus::Running;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return FailSignal::Accept;
     }
@@ -520,9 +598,19 @@ pub(super) fn pending_acceptance(task: &Task) -> Option<usize> {
 /// Owner answer `drop criterion`: removes criterion `n`, its checks and a
 /// held-out check on it, and shifts the later checks down by one. Shared by
 /// the live loop and the post-restart branch of `task.answer`.
-pub(super) fn drop_criterion(task: &mut Task, n: usize) {
+pub(super) fn drop_criterion(
+    settings: &Settings,
+    task: &mut Task,
+    n: usize,
+    origin: Origin,
+) -> Result<(), String> {
     if n >= task.criteria.len() {
-        return;
+        return Ok(());
+    }
+    if let Some(why) = removal_refusal(settings, task, &criterion_commands(task, n), origin) {
+        task.decisions
+            .push(format!("Orchestrator: criterion {n} stays: {why}"));
+        return Err(why);
     }
     let text = task.criteria.remove(n);
     task.checks.retain(|c| c.criterion != n);
@@ -537,6 +625,7 @@ pub(super) fn drop_criterion(task: &mut Task, n: usize) {
     task.decisions.push(format!(
         "Orchestrator: dropped criterion {n} ({text}) as the owner answered"
     ));
+    Ok(())
 }
 
 const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
@@ -587,7 +676,7 @@ mod grounded_checks_tests {
         task.criteria = vec!["zero".into(), "one".into(), "two".into()];
         task.checks = vec![check(0, "a"), check(1, "b"), check(2, "c"), check(1, "b2")];
         task.held_out = Some(check(2, "h"));
-        drop_criterion(&mut task, 1);
+        let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Owner);
         assert_eq!(task.criteria, vec!["zero", "two"]);
         assert_eq!(task.checks, vec![check(0, "a"), check(1, "c")]);
         assert_eq!(task.held_out, Some(check(1, "h")));
@@ -596,12 +685,12 @@ mod grounded_checks_tests {
             vec!["Orchestrator: dropped criterion 1 (one) as the owner answered"]
         );
         // The held-out check goes with its own criterion.
-        drop_criterion(&mut task, 1);
+        let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Owner);
         assert_eq!(task.held_out, None);
         assert_eq!(task.checks, vec![check(0, "a")]);
         // Out of range: nothing happens.
         let before = task.decisions.len();
-        drop_criterion(&mut task, 9);
+        let _ = drop_criterion(&Settings::default(), &mut task, 9, Origin::Owner);
         assert_eq!(task.decisions.len(), before);
     }
 

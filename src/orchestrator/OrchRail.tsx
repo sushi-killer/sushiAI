@@ -7,6 +7,8 @@ import {
   LayoutList,
   ListTodo,
   MessageSquare,
+  Workflow,
+  ScrollText,
   Sparkles,
 } from "lucide-react";
 import type { OrchestratorView } from "./types";
@@ -214,6 +216,18 @@ export function OrchRail({
           label="Analytics"
           selected={is("analytics")}
           onClick={() => onOpen({ kind: "analytics" })}
+        />
+        <NavRow
+          icon={<Workflow size={14} />}
+          label="Pipeline"
+          selected={is("pipeline")}
+          onClick={() => onOpen({ kind: "pipeline" })}
+        />
+        <NavRow
+          icon={<ScrollText size={14} />}
+          label="Log"
+          selected={is("log")}
+          onClick={() => onOpen({ kind: "log" })}
         />
         {bare ? null : empty ? (
           <div className="orch-rail-empty">

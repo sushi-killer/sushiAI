@@ -43,14 +43,17 @@ fn waits_state_reads_dependencies_and_children() {
 
 #[tokio::test]
 async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_check() {
-    let (app, dir) = test_app();
+    let (app, dir) = test_app_fitting_sandbox();
     let repo = dir.path().join("repo");
     let worktree = dir.path().join("worktree");
     std::fs::create_dir_all(&repo).unwrap();
-    std::fs::create_dir_all(&worktree).unwrap();
+    init_git_repo(&repo);
     let mut parent = graph_task("p", TaskStatus::Running, &[], None);
+    let created = git::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
     parent.repo = repo.to_string_lossy().into();
     parent.worktree = worktree.to_string_lossy().into();
+    parent.base_sha = created.base_sha;
+    parent.base_ref = git::branch_of(&repo, "HEAD");
     parent.verify = vec!["exit 1".into()];
     let mut child = graph_task("c", TaskStatus::Done, &[], Some("p"));
     child.repo = parent.repo.clone();
@@ -67,8 +70,13 @@ async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_che
     // The old command would have failed the parent into an agent attempt.
     assert!(matches!(end, ParentEnd::Finished));
     assert!(pending.lock().unwrap().is_none());
-    assert!(worktree.join("amended-ran").exists(), "the amended command ran");
     let saved = app.store.load_task("p").unwrap().unwrap();
+    assert!(
+        git::tree_files(&repo, &saved.branch)
+            .unwrap()
+            .contains(&"amended-ran".to_string()),
+        "the amended command ran and its result was committed"
+    );
     assert_eq!(saved.verify, vec!["touch amended-ran"]);
     assert!(
         saved.decisions.contains(&"Amended: verify".to_string()),
@@ -80,14 +88,17 @@ async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_che
 
 #[tokio::test]
 async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_command() {
-    let (app, dir) = test_app();
+    let (app, dir) = test_app_fitting_sandbox();
     let repo = dir.path().join("repo");
     let worktree = dir.path().join("worktree");
     std::fs::create_dir_all(&repo).unwrap();
-    std::fs::create_dir_all(&worktree).unwrap();
+    init_git_repo(&repo);
     let mut parent = graph_task("p", TaskStatus::Running, &[], None);
+    let created = git::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
     parent.repo = repo.to_string_lossy().into();
     parent.worktree = worktree.to_string_lossy().into();
+    parent.base_sha = created.base_sha;
+    parent.base_ref = git::branch_of(&repo, "HEAD");
     parent.verify = vec!["exit 1".into()];
     app.store.save_task(&parent).unwrap();
 
@@ -107,6 +118,13 @@ async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_com
         saved.decisions.contains(&"Amended: verify".to_string()),
         "{:?}",
         saved.decisions
+    );
+    assert_eq!(saved.status, TaskStatus::Done);
+    assert!(
+        git::tree_files(&repo, &saved.branch)
+            .unwrap()
+            .contains(&"amended-ran".to_string()),
+        "the amended command ran and its result was committed"
     );
 }
 

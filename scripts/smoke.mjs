@@ -131,12 +131,25 @@ async function assertHiddenWindow(page) {
         .length,
       focused: BrowserWindow.getFocusedWindow() !== null,
       dockVisible: process.platform === "darwin" ? app.dock.isVisible() : false,
+      mockKeychain: app.commandLine.hasSwitch("use-mock-keychain"),
+      paths: {
+        desktop: app.getPath("desktop"),
+        documents: app.getPath("documents"),
+        downloads: app.getPath("downloads"),
+      },
       content: { width, height },
     };
   });
   assert.equal(state.visible, 0, "no BrowserWindow may be visible");
   assert.equal(state.focused, false, "no BrowserWindow may be focused");
   assert.equal(state.dockVisible, false, "the dock icon must be hidden");
+  assert.equal(state.mockKeychain, true, "the mock keychain must be enabled");
+  for (const name of ["desktop", "documents", "downloads"]) {
+    assert.ok(
+      state.paths[name].startsWith(profile),
+      `${name} path must be inside the smoke profile`,
+    );
+  }
   const viewport = await page.evaluate(() => ({
     width: window.innerWidth,
     height: window.innerHeight,

@@ -864,7 +864,7 @@ pub(super) async fn run_plan_stage(
             let brief_text = brief::with_block_before_report(
                 &brief_text,
                 &brief::scoped_checks_block(
-                    &app.settings.read().unwrap().scoped_checks,
+                    &scoped_checks_for(&app.settings.read().unwrap(), &task),
                     &task.repo,
                 ),
             );

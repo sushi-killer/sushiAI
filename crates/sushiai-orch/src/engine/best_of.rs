@@ -419,6 +419,7 @@ where
     }
 
     let sandbox = settings.sandbox;
+    let scoped = scoped_checks_for(settings, task);
     let (eval_a, eval_b) = tokio::join!(
         evaluate(
             app,
@@ -428,7 +429,7 @@ where
             run_dir,
             run_finished(&a_res),
             sandbox,
-            &settings.scoped_checks,
+            &scoped,
             cancel
         ),
         evaluate(
@@ -439,7 +440,7 @@ where
             &run_dir_b,
             run_finished(&b_res),
             sandbox,
-            &settings.scoped_checks,
+            &scoped,
             cancel
         ),
     );

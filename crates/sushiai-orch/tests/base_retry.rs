@@ -195,8 +195,7 @@ fn a_final_that_only_timed_out_is_rerun_once_without_a_new_attempt() {
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
     assert_eq!(lines(&runs), 2, "one initial worktree run and one retry");
     assert!(done["question"].is_null(), "{done}");
-    // Real machine load selects either the final-check retry or the runner's
-    // load-aware retry. Both must record the command and environment reason.
+    // The shared runner retries an interruption once at either load level.
     assert_eq!(
         done["decisions"]
             .as_array()
@@ -205,9 +204,8 @@ fn a_final_that_only_timed_out_is_rerun_once_without_a_new_attempt() {
             .filter(|d| {
                 let line = d.as_str().unwrap();
                 line.contains(&check)
-                    && line.contains("timed out")
-                    && line.contains("(environment)")
-                    && line.contains("rerun once on the same tree")
+                    && line.contains("was interrupted after")
+                    && line.contains("ran it again at once: exit 0 after")
             })
             .count(),
         1,

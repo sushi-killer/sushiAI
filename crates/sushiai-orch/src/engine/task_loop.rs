@@ -1014,7 +1014,7 @@ pub(super) async fn run_task_loop(
         // top of the winner's (added below with the attempt's own).
         task.cost_usd += best_of.cost;
         task.attempts[idx].candidates = best_of.candidates;
-        record_skips(&mut task, best_of.decisions);
+        record_check_decisions(&mut task, best_of.decisions);
         let b_won = best_of.winner.is_some();
         let route = match best_of.winner {
             Some(winner) => {
@@ -1728,9 +1728,9 @@ pub(super) async fn run_task_loop(
         }
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
         let (verify_commands, skipped) =
-            scope_to_diff(&app, &task.repo, &worktree, &base_sha, &task.verify).await;
-        record_skips(&mut task, skipped);
-        let mut verify_results = run_verify_cached(
+            scope_task_checks(&app, &task, &worktree, &base_sha, &task.verify).await;
+        record_check_decisions(&mut task, skipped);
+        let (mut verify_results, cache_line) = run_verify_cached(
             &app,
             &task_id,
             &worktree,
@@ -1740,6 +1740,7 @@ pub(super) async fn run_task_loop(
             &cancel,
         )
         .await;
+        record_check_decisions(&mut task, cache_line);
         if cancel.is_cancelled() {
             // Killed by the shutdown, not failed: the next daemon re-runs it.
             interrupt_attempt(&app, &mut task, idx);
@@ -1766,9 +1767,9 @@ pub(super) async fn run_task_loop(
                 }
                 if task.verify != before {
                     let (verify_commands, skipped) =
-                        scope_to_diff(&app, &task.repo, &worktree, &base_sha, &task.verify).await;
-                    record_skips(&mut task, skipped);
-                    verify_results = run_verify_cached(
+                        scope_task_checks(&app, &task, &worktree, &base_sha, &task.verify).await;
+                    record_check_decisions(&mut task, skipped);
+                    let (results, cache_line) = run_verify_cached(
                         &app,
                         &task_id,
                         &worktree,
@@ -1778,6 +1779,8 @@ pub(super) async fn run_task_loop(
                         &cancel,
                     )
                     .await;
+                    verify_results = results;
+                    record_check_decisions(&mut task, cache_line);
                     if cancel.is_cancelled() {
                         interrupt_attempt(&app, &mut task, idx);
                         drop(permit);
@@ -2893,15 +2896,6 @@ pub(super) enum Tail {
     Return,
 }
 
-/// Remembers the commands that exited 0 on `tree` under `base_sha`. A run
-/// with no exit code (timed out, cancelled, killed) is never a pass.
-pub(super) fn record_gate_passes(app: &App, tree: &str, base_sha: &str, results: &[VerifyOutcome]) {
-    let mut passes = app.gate_passes.lock().unwrap();
-    for r in results.iter().filter(|r| r.code == Some(0)) {
-        passes.insert((tree.to_string(), base_sha.to_string(), r.command.clone()));
-    }
-}
-
 /// A passed review (or an accepted attempt): the task's final checks run on
 /// the worktree, then `finish_attempt` commits or lands it. A failing final
 /// check is a `Verify` failure -- or, when it already failed on the base, a
@@ -2932,24 +2926,15 @@ pub(super) async fn finish_after_review(
     // The commands the parent runs anyway are left out of this run; the
     // stored `finalVerify` is not changed.
     let (to_run, deferred) = split_deferred(app, settings, task);
-    record_skips(task, deferred.iter().map(|c| deferred_line(c)).collect());
+    record_check_decisions(task, deferred.iter().map(|c| deferred_line(c)).collect());
     if !to_run.is_empty() {
         // Not through the verify cache: it keys on the diff alone and
         // would hand back the fast checks' results.
         let (final_commands, skipped) =
-            scope_to_diff(app, &task.repo, worktree, &task.base_sha, &to_run).await;
-        record_skips(task, skipped);
-        // The tree the finals run on, taken before they run: a parent whose
-        // final tree is the same one does not run a passed command again.
-        let tree = {
-            let wt = worktree.to_path_buf();
-            tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-        };
-        let mut final_results = run_verify_commands(
-            CheckContext::new(app, Some(&task.id)),
+            scope_task_checks(app, task, worktree, &task.base_sha, &to_run).await;
+        record_check_decisions(task, skipped);
+        let final_results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
             worktree,
             &run_dir.join("final"),
             &final_commands,
@@ -2965,48 +2950,6 @@ pub(super) async fn finish_after_review(
             app.finish_task_loop(task_id);
             return Tail::Return;
         }
-        // A final that ended without an exit code (timed out) says nothing
-        // about the work: it runs once more on the kept worktree, as an
-        // environment failure, and no implement session is spent on it.
-        let timed_out: Vec<String> = final_results
-            .iter()
-            .filter(|v| v.code.is_none() && !timed_out_under_load(v))
-            .map(|v| v.command.clone())
-            .collect();
-        if !timed_out.is_empty() {
-            task.decisions.push(format!(
-                "Orchestrator: final check timed out (environment): {}; rerun once on the same tree",
-                timed_out.join(", ")
-            ));
-            let rerun = run_verify_commands(
-                CheckContext::new(app, Some(&task.id)),
-                worktree,
-                &run_dir.join("final-rerun"),
-                &timed_out,
-                settings.sandbox,
-                &task.base_sha,
-                cancel,
-            )
-            .await;
-            if cancel.is_cancelled() {
-                interrupt_attempt(app, task, idx);
-                *permit = None;
-                app.finish_task_loop(task_id);
-                return Tail::Return;
-            }
-            record_check_outcomes(app, task, &rerun);
-            for again in rerun {
-                if let Some(slot) = final_results
-                    .iter_mut()
-                    .find(|v| v.command == again.command)
-                {
-                    *slot = again;
-                }
-            }
-        }
-        if let Some(tree) = &tree {
-            record_gate_passes(app, tree, &task.base_sha, &final_results);
-        }
         task.attempts[idx]
             .verify
             .extend(final_results.iter().cloned());
@@ -3015,7 +2958,6 @@ pub(super) async fn finish_after_review(
             .filter(|v| v.code != Some(0))
             .cloned()
             .collect();
-        note_flaky_base_checks(app, task, &to_run);
         // Every failing final goes through the base lookup (cache, else the
         // in-flight job, else a job started now), never a second run.
         let base_dir = run_dir.join("final-base");
@@ -3037,6 +2979,7 @@ pub(super) async fn finish_after_review(
             app.finish_task_loop(task_id);
             return Tail::Return;
         }
+        note_flaky_base_checks(app, task, &to_run);
         // A base failure the plan explains (the files it names are created
         // by the plan) or the owner kept is an ordinary failure.
         let names: Vec<String> = on_base.iter().map(|(f, _)| f.command.clone()).collect();

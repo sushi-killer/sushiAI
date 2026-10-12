@@ -679,23 +679,17 @@ pub(super) async fn run_parent(
             .chain(&task.final_verify)
             .cloned()
             .collect();
-        let (checks, skipped) = scope_to_diff(
+        let (checks, skipped) = scope_task_checks(
             app,
-            &task.repo,
+            &task,
             Path::new(&task.worktree),
             &task.base_sha,
             &checks,
         )
         .await;
-        // A command that already passed on exactly this tree in a subtask
-        // is not run again; it counts as passed.
-        let (checks, passed_before) =
-            drop_passed_on_tree(app, Path::new(&task.worktree), &task.base_sha, checks).await;
-        let mut skipped = skipped;
-        skipped.extend(passed_before);
         let sandbox = app.settings.read().unwrap().sandbox;
         let results = run_verify_commands(
-            CheckContext::new(app, Some(&task.id)),
+            CheckContext::new(app, Some(&task.id)).with_gate("parent gate"),
             Path::new(&task.worktree),
             &app.store.task_dir(task_id).join("runs").join("parent"),
             &checks,
@@ -793,9 +787,9 @@ pub(super) async fn run_parent(
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return ParentEnd::Finished;
     };
-    record_skips(&mut task, decisions);
+    record_check_decisions(&mut task, decisions);
     task.cost_usd = parent_cost(&task, &app.repo_tasks(&task.repo));
-    record_skips(&mut task, skipped);
+    record_check_decisions(&mut task, skipped);
     let failure = match results.iter().find(|v| v.code != Some(0)) {
         Some(failed) => {
             let code = failed
@@ -835,35 +829,6 @@ pub(super) async fn run_parent(
     ));
     remove_chain_branches(app, &mut task).await;
     land_parent(app, &mut task, cancel).await
-}
-
-/// Splits `checks` into those still to run and one decision line per command
-/// that passed on this worktree's exact tree under the same `base_sha` in a
-/// subtask's final run (a pass under another base does not count). Every
-/// command runs when the tree cannot be read.
-async fn drop_passed_on_tree(
-    app: &Arc<App>,
-    worktree: &Path,
-    base_sha: &str,
-    checks: Vec<String>,
-) -> (Vec<String>, Vec<String>) {
-    let wt = worktree.to_path_buf();
-    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
-        .await
-        .ok()
-        .and_then(|r| r.ok());
-    let Some(tree) = tree else {
-        return (checks, Vec::new());
-    };
-    let passes = app.gate_passes.lock().unwrap();
-    let (passed, rest): (Vec<String>, Vec<String>) = checks
-        .into_iter()
-        .partition(|c| passes.contains(&(tree.clone(), base_sha.to_string(), c.clone())));
-    let lines = passed
-        .iter()
-        .map(|c| format!("Orchestrator: {c} passed on this tree in a subtask; not run again"))
-        .collect();
-    (rest, lines)
 }
 
 /// Once a parent holds every subtask, the subtasks' own branches are only
@@ -1178,9 +1143,9 @@ pub(super) async fn carry_and_check(
                 return Ok(true);
             }
             let (verify_commands, skipped) =
-                scope_to_diff(app, &task.repo, worktree, &new_sha, &task.verify).await;
-            record_skips(task, skipped);
-            let results = run_verify_cached(
+                scope_task_checks(app, task, worktree, &new_sha, &task.verify).await;
+            record_check_decisions(task, skipped);
+            let (results, cache_line) = run_verify_cached(
                 app,
                 &task.id,
                 worktree,
@@ -1190,6 +1155,7 @@ pub(super) async fn carry_and_check(
                 cancel,
             )
             .await;
+            record_check_decisions(task, cache_line);
             if cancel.is_cancelled() {
                 return Err(Landing::Cancelled);
             }
@@ -1211,12 +1177,12 @@ pub(super) async fn carry_and_check(
                 );
             }
             let (extra_final, skipped) =
-                scope_to_diff(app, &task.repo, worktree, &task.base_sha, extra_final).await;
-            record_skips(task, skipped);
+                scope_task_checks(app, task, worktree, &task.base_sha, extra_final).await;
+            record_check_decisions(task, skipped);
             if !extra_final.is_empty() {
                 let sandbox = app.settings.read().unwrap().sandbox;
                 let finals = run_verify_commands(
-                    CheckContext::new(app, Some(&task.id)),
+                    CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
                     worktree,
                     &run_dir.join("final-land"),
                     &extra_final,
@@ -1607,37 +1573,42 @@ mod tests {
     use super::*;
     use crate::engine::test_support::{init_git_repo, test_app};
 
-    fn outcome(command: &str, code: Option<i32>) -> VerifyOutcome {
-        VerifyOutcome {
-            command: command.to_string(),
-            code,
-            tail: String::new(),
-            ms: 1,
-            ..Default::default()
-        }
-    }
-
     #[tokio::test]
     async fn a_pass_under_one_base_is_not_reused_under_another() {
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
-        let tree = git::worktree_tree(&repo).unwrap();
-        crate::engine::task_loop::record_gate_passes(
-            &app,
-            &tree,
-            "base-a",
-            &[outcome("npm run ci", Some(0))],
-        );
-        let cmds = vec!["npm run ci".to_string()];
-
-        let (rest, lines) = drop_passed_on_tree(&app, &repo, "base-a", cmds.clone()).await;
-        assert!(rest.is_empty(), "{rest:?}");
-        assert_eq!(lines.len(), 1);
-        let (rest, lines) = drop_passed_on_tree(&app, &repo, "base-b", cmds.clone()).await;
-        assert_eq!(rest, cmds);
+        let counter = dir.path().join("counter");
+        let commands = vec![format!(
+            "echo \"$ORCHD_BASE_SHA\" >> '{}'",
+            counter.display()
+        )];
+        let cancel = CancelToken::new();
+        let run = |base| {
+            run_checks(
+                &app,
+                &repo,
+                dir.path(),
+                &commands,
+                SandboxMode::Host,
+                base,
+                &cancel,
+            )
+        };
+        let (outcomes, lines) = run("base-a").await;
+        assert_eq!(outcomes[0].code, Some(0));
         assert!(lines.is_empty());
+        let (outcomes, lines) = run("base-a").await;
+        assert_eq!(outcomes[0].ms, 0);
+        assert_eq!(lines.len(), 1);
+        let (outcomes, lines) = run("base-b").await;
+        assert_eq!(outcomes[0].code, Some(0));
+        assert!(lines.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(counter).unwrap(),
+            "base-a\nbase-b\n"
+        );
     }
 
     #[tokio::test]
@@ -1646,22 +1617,28 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
-        let tree = git::worktree_tree(&repo).unwrap();
-        crate::engine::task_loop::record_gate_passes(
-            &app,
-            &tree,
-            "base-a",
-            &[
-                outcome("timed out", None),
-                outcome("failed", Some(1)),
-                outcome("passed", Some(0)),
-            ],
-        );
-        let cmds: Vec<String> = ["timed out", "failed", "passed"]
-            .iter()
-            .map(|c| c.to_string())
-            .collect();
-        let (rest, _) = drop_passed_on_tree(&app, &repo, "base-a", cmds).await;
-        assert_eq!(rest, ["timed out", "failed"]);
+        let commands = vec!["exit 137".into(), "false".into(), "true".into()];
+        let cancel = CancelToken::new();
+        let run = || {
+            run_checks(
+                &app,
+                &repo,
+                dir.path(),
+                &commands,
+                SandboxMode::Host,
+                "base",
+                &cancel,
+            )
+        };
+        let (first, lines) = run().await;
+        assert_eq!(first[0].code, Some(137));
+        assert_eq!(first[1].code, Some(1));
+        assert_eq!(first[2].code, Some(0));
+        assert_eq!(lines.len(), 1);
+        let (second, lines) = run().await;
+        assert_eq!(second[0].code, Some(137));
+        assert_eq!(second[1].code, Some(1));
+        assert_eq!(second[2].ms, 0);
+        assert_eq!(lines.len(), 2);
     }
 }

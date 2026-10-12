@@ -586,10 +586,16 @@ fn a_failing_parent_held_out_check_fails_the_parent_without_naming_the_command()
         .filter(|a| a["stage"] == "implement")
         .count();
     assert!(attempts >= 1, "{parent}");
-    // One parent check, then one run per agent attempt.
-    assert_eq!(log_lines(&s, "checks.log"), 1 + attempts);
+    // The passing parent check is reused on the unchanged tree.
+    assert_eq!(log_lines(&s, "checks.log"), 1);
     assert_eq!(log_lines(&s, "held.log"), 1 + attempts);
     let decisions = parent["decisions"].to_string();
+    assert!(
+        decisions.contains(
+            "Orchestrator: test -f b.txt && echo x >> $LOG_DIR/checks.log already passed on tree "
+        ),
+        "{decisions}"
+    );
     assert!(
         decisions.contains("the held-out check for criterion 0 failed (heldout)"),
         "{decisions}"

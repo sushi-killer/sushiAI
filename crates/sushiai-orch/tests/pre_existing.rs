@@ -566,12 +566,14 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
 fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
     let scripts = tempfile::tempdir().unwrap();
     let count = scripts.path().join("count");
+    let release = scripts.path().join("release-base-rerun");
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
-    // Exit 1 on its first run anywhere, 0 on every later one: load-flaky.
+    // The worktree passes while the base's second run waits for the test.
     let check = format!(
-        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; [ \"$n\" -ge 1 ]",
-        c = count.display()
+        "if [ -f CHANGED_MARKER.txt ]; then exit 0; fi; n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; [ \"$n\" -ge 1 ] || exit 1; while [ ! -f {release} ]; do sleep 0.05; done",
+        c = count.display(),
+        release = release.display()
     );
     let id = start(&daemon, repo.path(), &check);
     let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
@@ -583,6 +585,19 @@ fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
         "Orchestrator: base check {check} flaky on {}: passed on rerun",
         &base[..8]
     );
+    wait_until("the background base rerun to start", || {
+        (std::fs::read_to_string(&count).unwrap_or_default().trim() == "2").then_some(())
+    });
+    std::fs::write(release, "go").unwrap();
+    let done = wait_until("the late flaky base-check decision", || {
+        let task = daemon.request("task.get", json!({"id": id}));
+        task["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == &json!(flaky))
+            .then_some(task)
+    });
     assert!(
         done["decisions"]
             .as_array()
@@ -591,6 +606,9 @@ fn a_check_that_fails_once_on_the_base_and_then_passes_is_not_asked_about() {
             .any(|d| d == &json!(flaky)),
         "{done}"
     );
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
+    assert!(done["question"].is_null(), "{done}");
     let worktree = done["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);

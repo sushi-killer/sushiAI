@@ -840,7 +840,7 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
             .unwrap()
             .lines()
             .count(),
-        1
+        2
     );
     assert!(!low.load_timeout);
     assert_eq!(classify_baseline(&low), Some(Baseline::Fail));
@@ -974,7 +974,7 @@ async fn check_slots_environment_retry_results_never_count_as_base_failures() {
             .is_empty()
     );
     assert!(
-        failing_on_base(&app, &task, &ordinary, dir.path(), &CancelToken::new())
+        failing_on_base(&app, &mut task, &ordinary, dir.path(), &CancelToken::new())
             .await
             .is_none()
     );

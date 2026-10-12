@@ -16,6 +16,10 @@ impl std::fmt::Display for GitError {
 impl std::error::Error for GitError {}
 
 fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_bytes(cwd, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
+}
+
+fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -28,7 +32,22 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
+}
+
+/// Reads a committed file; absence is distinct from an unreadable revision.
+pub fn show_file(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>, GitError> {
+    let tree = run(cwd, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])?;
+    let object = format!("{}:{path}", tree.trim());
+    let exists = Command::new("git")
+        .args(["cat-file", "-e", &object])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| GitError(format!("git cat-file: {e}")))?;
+    if !exists.status.success() {
+        return Ok(None);
+    }
+    run(cwd, &["show", &object]).map(Some)
 }
 
 /// lowercase, [a-z0-9-], collapsed, max 40 chars, no leading/trailing '-'.
@@ -796,12 +815,6 @@ pub fn replace_work_with_patch(
 /// untracked non-ignored files. Built through a temporary index, so the real
 /// index and `git status` are left as they were.
 pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
-    let real = run(
-        worktree,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    )
-    .ok()
-    .map(|p| PathBuf::from(p.trim()));
     static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = std::env::temp_dir().join(format!(
         "orchd-index-{}-{}-{}",
@@ -811,18 +824,34 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    if let Some(real) = real.filter(|p| p.is_file()) {
-        let _ = std::fs::copy(real, &tmp);
-    }
     let result = (|| {
+        use std::io::Write;
+        use std::process::Stdio;
+
         let tmp_str = tmp.to_string_lossy().to_string();
-        let git = |args: &[&str]| -> Result<String, GitError> {
-            let out = Command::new("git")
+        let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
+            let mut child = Command::new("git")
                 .args(args)
                 .current_dir(worktree)
                 .env("GIT_INDEX_FILE", &tmp_str)
-                .output()
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
                 .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            let written = if let Some(input) = input {
+                child.stdin.take().expect("piped stdin").write_all(input)
+            } else {
+                Ok(())
+            };
+            let out = child
+                .wait_with_output()
+                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            written.map_err(|e| GitError(format!("git {} stdin: {e}", args.join(" "))))?;
             if !out.status.success() {
                 return Err(GitError(format!(
                     "git {} failed: {}",
@@ -832,8 +861,12 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
             }
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         };
-        git(&["add", "-A"])?;
-        git(&["write-tree"])
+        // Keep tracked paths (including staged ignored files), but rehash
+        // their content without trusting the real index's cached file stats.
+        let entries = run_bytes(worktree, &["ls-files", "--stage", "-z"])?;
+        git(&["update-index", "-z", "--index-info"], Some(&entries))?;
+        git(&["add", "-A"], None)?;
+        git(&["write-tree"], None)
     })();
     let _ = std::fs::remove_file(&tmp);
     result
@@ -1330,6 +1363,77 @@ mod tests {
         std::fs::remove_dir_all(repo.join("tests")).unwrap();
         std::fs::remove_dir_all(repo.join("artifacts")).unwrap();
         assert_eq!(status_short(&repo).unwrap(), before_status);
+    }
+
+    #[test]
+    fn worktree_tree_rehashes_same_size_edits_with_unchanged_stat_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        run(repo, &["config", "core.checkStat", "minimal"]).unwrap();
+        run(repo, &["config", "core.trustctime", "false"]).unwrap();
+        let file = repo.join("README.md");
+        let times = std::fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800));
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        run(repo, &["add", "README.md"]).unwrap();
+        let index = repo.join(".git/index");
+        let original_index = std::fs::read(&index).unwrap();
+        let before = worktree_tree(repo).unwrap();
+
+        std::fs::write(&file, "world\n").unwrap();
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let after = worktree_tree(repo).unwrap();
+        assert_ne!(after, before);
+        assert_eq!(
+            run(repo, &["show", &format!("{after}:README.md")]).unwrap(),
+            "world\n"
+        );
+        assert_eq!(std::fs::read(index).unwrap(), original_index);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_tree_preserves_staged_ignored_paths_with_unusual_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        std::fs::write(repo.join(".gitignore"), "ignored-*\n").unwrap();
+        let name = std::ffi::OsString::from("ignored- space\nfile.txt");
+        #[cfg(target_os = "linux")]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            let mut bytes = name.into_vec();
+            bytes.push(0xff);
+            std::ffi::OsString::from_vec(bytes)
+        };
+        let file = repo.join(&name);
+        std::fs::write(&file, "one\n").unwrap();
+        run(repo, &["add", "-f", "."]).unwrap();
+        let index = repo.join(".git/index");
+        let original_index = std::fs::read(&index).unwrap();
+        let before = worktree_tree(repo).unwrap();
+
+        std::fs::write(file, "two\n").unwrap();
+        let after = worktree_tree(repo).unwrap();
+        assert_ne!(after, before);
+        let mut object = std::ffi::OsString::from(format!("{after}:"));
+        object.push(name);
+        let content = StdCommand::new("git")
+            .arg("show")
+            .arg(object)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(content.status.success(), "{content:?}");
+        assert_eq!(content.stdout, b"two\n");
+        assert_eq!(std::fs::read(index).unwrap(), original_index);
     }
 
     #[test]

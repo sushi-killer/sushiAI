@@ -5,7 +5,7 @@
 //! hands it the verify sandbox wrapper, so setup has the same filesystem
 //! limits as a check), with the daemon's own environment plus `PATH`,
 //! `ORCHD_ROOT_PATH`, `ORCHD_WORKTREE_PATH`, the file's `env`,
-//! `npm_config_cache` on macOS and `RUSTC_WRAPPER=sccache` when that is
+//! `npm_config_cache` on macOS and the shared compiler cache when that is
 //! installed. No project secret is added.
 
 use std::collections::BTreeMap;
@@ -27,11 +27,23 @@ enum Step {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetupFile {
     #[serde(default)]
     setup: Option<Step>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default, rename = "compilerCache")]
+    compiler_cache: Option<bool>,
+    #[serde(default, rename = "scopedChecks")]
+    scoped_checks: Vec<RepoScopedCheck>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoScopedCheck {
+    command: String,
+    paths: Vec<String>,
 }
 
 struct Plan {
@@ -41,17 +53,12 @@ struct Plan {
 
 /// What to run in `worktree`: its `setup.json`, else the default install.
 fn plan(worktree: &Path) -> Result<Option<Plan>, String> {
-    let file = worktree.join(SETUP_FILE);
-    if !file.is_file() {
+    let Some(parsed) = read_setup(worktree)? else {
         return Ok(default_install(worktree).map(|step| Plan {
             step,
             env: BTreeMap::new(),
         }));
-    }
-    let text =
-        std::fs::read_to_string(&file).map_err(|e| format!("cannot read {SETUP_FILE}: {e}"))?;
-    let parsed: SetupFile =
-        serde_json::from_str(&text).map_err(|e| format!("{SETUP_FILE} is not valid: {e}"))?;
+    };
     match parsed.setup {
         Some(Step::Argv(argv)) if argv.is_empty() => {
             Err(format!("{SETUP_FILE}: \"setup\" is an empty list"))
@@ -62,6 +69,42 @@ fn plan(worktree: &Path) -> Result<Option<Plan>, String> {
         })),
         None => Ok(None),
     }
+}
+
+fn read_setup(worktree: &Path) -> Result<Option<SetupFile>, String> {
+    let file = worktree.join(SETUP_FILE);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&file).map_err(|e| format!("cannot read {SETUP_FILE}: {e}"))?;
+    parse_setup(&text).map(Some)
+}
+
+fn parse_setup(text: &str) -> Result<SetupFile, String> {
+    serde_json::from_str(text).map_err(|e| format!("{SETUP_FILE} is not valid: {e}"))
+}
+
+/// Check policy comes from the base commit, never the task's edited file.
+pub fn scoped_checks_at(repo: &Path, rev: &str) -> Result<Vec<crate::model::ScopedCheck>, String> {
+    let Some(text) = crate::git::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_setup(&text)?
+        .scoped_checks
+        .into_iter()
+        .map(|entry| crate::model::ScopedCheck {
+            repo: Some(repo.to_string_lossy().into_owned()),
+            command: entry.command,
+            paths: entry.paths,
+        })
+        .collect())
+}
+
+/// Uses the same reader as setup, including files that have no setup step.
+pub fn compiler_cache_enabled(worktree: &Path) -> Result<bool, String> {
+    Ok(read_setup(worktree)?.is_none_or(|s| s.compiler_cache != Some(false)))
 }
 
 /// The install for the lockfile found, when `node_modules` is missing.
@@ -79,52 +122,6 @@ fn default_install(worktree: &Path) -> Option<Step> {
         return None;
     };
     Some(Step::Argv(argv.iter().map(|a| a.to_string()).collect()))
-}
-
-/// `"sccache"` when it is on `path` and the owner left `RUSTC_WRAPPER` alone.
-/// Applied to setup, verify and agent processes; `CARGO_TARGET_DIR` is never set.
-pub fn rustc_wrapper(path: &str) -> Option<&'static str> {
-    let wrapper = rustc_wrapper_in(path, std::env::var_os("RUSTC_WRAPPER").is_some())?;
-    start_sccache_server(path);
-    Some(wrapper)
-}
-
-/// Starts the sccache server from the daemon, outside any sandbox, once. The
-/// first wrapped compile would otherwise start it inside one task's sandbox,
-/// and later worktrees' writes could be denied. "Already running" is ignored.
-fn start_sccache_server(path: &str) {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    STARTED.get_or_init(|| {
-        let _ = std::process::Command::new("sccache")
-            .arg("--start-server")
-            .env("PATH", path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
-}
-
-fn rustc_wrapper_in(path: &str, owner_set: bool) -> Option<&'static str> {
-    if owner_set {
-        return None;
-    }
-    std::env::split_paths(path)
-        .any(|dir| is_executable(&dir.join("sccache")))
-        .then_some("sccache")
-}
-
-fn is_executable(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
 }
 
 fn tail(text: &str) -> String {
@@ -169,11 +166,15 @@ pub async fn run_setup(
             Path::new(&home).join("Library/Caches/sushiai/npm"),
         );
     }
-    if let Some(wrapper) = rustc_wrapper(path) {
-        cmd.env("RUSTC_WRAPPER", wrapper);
+    cmd.envs(&plan.env);
+    if !plan.env.contains_key("RUSTC_WRAPPER") {
+        if let Some(cache) =
+            crate::engine::compiler_cache::CompilerCache::for_worktree(worktree, path)
+        {
+            cache.apply(&mut cmd);
+        }
     }
-    cmd.envs(&plan.env)
-        .env("PATH", path)
+    cmd.env("PATH", path)
         .env("ORCHD_ROOT_PATH", main_root)
         .env("ORCHD_WORKTREE_PATH", worktree)
         .current_dir(worktree)
@@ -318,6 +319,14 @@ mod tests {
         assert!(plan(&wt).is_err());
         write(r#"{"env": {}}"#);
         assert!(plan(&wt).unwrap().is_none(), "no setup key, nothing to run");
+        assert!(compiler_cache_enabled(&wt).unwrap());
+        write(r#"{"compilerCache": false}"#);
+        assert!(plan(&wt).unwrap().is_none());
+        assert!(!compiler_cache_enabled(&wt).unwrap());
+        write(r#"{"compilerCache": true}"#);
+        assert!(compiler_cache_enabled(&wt).unwrap());
+        write(r#"{"compilerCache": "false"}"#);
+        assert!(plan(&wt).is_err(), "compilerCache must be a boolean");
     }
 
     #[test]
@@ -404,41 +413,6 @@ mod tests {
         write_script(&bin, "npm", "exit 9");
         let path = format!("{}:{SYSTEM_PATH}", bin.display());
         run(tmp.path(), &wt, &path).unwrap();
-    }
-
-    #[test]
-    fn sccache_is_used_only_when_installed_and_the_owner_set_no_wrapper() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = format!("{}:{SYSTEM_PATH}", tmp.path().display());
-        assert_eq!(rustc_wrapper_in(&path, false), None, "not installed");
-        write_script(tmp.path(), "sccache", "exit 0");
-        assert_eq!(rustc_wrapper_in(&path, false), Some("sccache"));
-        assert_eq!(
-            rustc_wrapper_in(&path, true),
-            None,
-            "owner set RUSTC_WRAPPER"
-        );
-    }
-
-    #[test]
-    fn setup_sees_sccache_and_never_a_target_dir() {
-        let (tmp, wt) = worktree();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        write_script(&bin, "sccache", "exit 0");
-        std::fs::write(
-            wt.join(SETUP_FILE),
-            r#"{"setup": "echo \"[$RUSTC_WRAPPER][$CARGO_TARGET_DIR]\" > out.txt"}"#,
-        )
-        .unwrap();
-        let path = format!("{}:{SYSTEM_PATH}", bin.display());
-        run(tmp.path(), &wt, &path).unwrap();
-        let got = std::fs::read_to_string(wt.join("out.txt")).unwrap();
-        // The test process may itself have RUSTC_WRAPPER set; then it is kept.
-        match std::env::var("RUSTC_WRAPPER") {
-            Ok(own) => assert_eq!(got.trim(), format!("[{own}][]")),
-            Err(_) => assert_eq!(got.trim(), "[sccache][]"),
-        }
     }
 
     #[test]

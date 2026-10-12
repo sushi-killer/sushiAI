@@ -381,16 +381,22 @@ fn is_environment_result(outcome: &VerifyOutcome) -> bool {
 
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
 /// A missing or unreadable file is an empty cache; an entry without an exit
-/// code or with an environment result is skipped.
+/// code or with an interrupted or environment result is skipped.
 pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), VerifyOutcome> {
     let rows: Vec<StoredBaseRun> = std::fs::read_to_string(data_dir.join(BASE_RUNS_FILE))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let poisoned = rows.iter().any(|r| is_environment_result(&r.outcome));
+    let poisoned = rows
+        .iter()
+        .any(|r| is_interrupted(&r.outcome) || is_environment_result(&r.outcome));
     let cache = rows
         .into_iter()
-        .filter(|r| r.outcome.code.is_some() && !is_environment_result(&r.outcome))
+        .filter(|r| {
+            r.outcome.code.is_some()
+                && !is_interrupted(&r.outcome)
+                && !is_environment_result(&r.outcome)
+        })
         .map(|r| ((r.base_sha, r.outcome.command.clone()), r.outcome))
         .collect();
     if poisoned {
@@ -403,7 +409,7 @@ pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), Verif
 fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutcome>) {
     let rows: Vec<StoredBaseRun> = cache
         .iter()
-        .filter(|(_, o)| o.code.is_some() && !timed_out_under_load(o) && !is_environment_result(o))
+        .filter(|(_, o)| o.code.is_some() && !is_interrupted(o) && !is_environment_result(o))
         .take(BASE_RUNS_KEPT)
         .map(|((sha, _), o)| StoredBaseRun {
             base_sha: sha.clone(),
@@ -480,16 +486,27 @@ pub(super) async fn run_on_base(
             err => err,
         };
         let ran = match setup {
-            Ok(()) => Ok(run_verify_commands(
-                CheckContext::new(app, task_id),
-                &wt,
-                run_dir,
-                &missing,
-                sandbox,
-                base_sha,
-                cancel,
-            )
-            .await),
+            Ok(()) => {
+                let results = run_verify_commands(
+                    CheckContext::new(app, task_id).with_gate("base checks"),
+                    &wt,
+                    run_dir,
+                    &missing,
+                    sandbox,
+                    base_sha,
+                    cancel,
+                )
+                .await;
+                for result in &results {
+                    app.base_run_decisions
+                        .lock()
+                        .unwrap()
+                        .entry((base_sha.to_string(), result.command.clone()))
+                        .or_default()
+                        .extend(result.decisions.iter().cloned());
+                }
+                Ok(results)
+            }
             Err(e) => Err(format!("could not check out {base_sha}: {e}")),
         };
         let (repo_path, wt3) = (PathBuf::from(repo), wt.clone());
@@ -512,8 +529,8 @@ pub(super) async fn run_on_base(
                 retry.push(c.clone());
                 continue;
             }
-            // A timeout says nothing about the commit: never stored.
-            if !cancelled && r.code.is_some() && !timed_out_under_load(&r) {
+            // An interrupted run says nothing about the commit.
+            if !cancelled && r.code.is_some() && !is_interrupted(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
             }
             known.insert(c.clone(), r);
@@ -561,12 +578,12 @@ pub(super) async fn base_result(
 /// here runs in the background lane.
 pub(super) async fn failing_on_base(
     app: &Arc<App>,
-    task: &Task,
+    task: &mut Task,
     failed: &VerifyOutcome,
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
-    if timed_out_under_load(failed) {
+    if is_interrupted(failed) {
         return None;
     }
     let key = (task.base_sha.clone(), failed.command.clone());
@@ -594,8 +611,9 @@ pub(super) async fn failing_on_base(
             .or_default()
             .extend(jobs);
     }
-    let base = wait_for_base_job(app, &task.base_sha, &failed.command, job, cancel).await?;
-    (base.code.is_some_and(|c| c != 0) && !timed_out_under_load(&base)).then_some(base)
+    let base = wait_for_base_job(app, &task.base_sha, &failed.command, job, cancel).await;
+    record_base_run_decisions(app, task, std::slice::from_ref(&failed.command));
+    base.filter(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
 }
 
 /// A `verify` command that failed after the work was carried onto a moved
@@ -612,7 +630,7 @@ pub(super) async fn broken_by_the_new_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
-    if timed_out_under_load(failed) {
+    if is_interrupted(failed) {
         return None;
     }
     // A `verify` command: its lookups use the blocking lane, so a slow
@@ -628,7 +646,7 @@ pub(super) async fn broken_by_the_new_base(
         false,
     )
     .await
-    .filter(|b| b.code.is_some_and(|c| c != 0) && !timed_out_under_load(b))?;
+    .filter(|b| b.code.is_some_and(|c| c != 0) && !is_interrupted(b))?;
     let on_old = base_result(
         app,
         Some(&task.id),
@@ -899,7 +917,7 @@ async fn run_base_job(
     let Some(_alone) = lock_base_checks(app, repo, background, &cancel).await else {
         return;
     };
-    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0) && !timed_out_under_load(r);
+    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0) && !is_interrupted(r);
     let Ok(first) = run_on_base(
         app,
         task_id,
@@ -941,10 +959,23 @@ async fn run_base_job(
     else {
         return;
     };
-    let mut flaky = app.base_flaky.lock().unwrap();
     for c in &failed {
-        if second.iter().any(|r| &r.command == c && r.code == Some(0)) {
-            flaky.insert((base_sha.to_string(), c.clone()));
+        if second
+            .iter()
+            .any(|r| &r.command == c && r.code == Some(0) && !is_interrupted(r))
+        {
+            app.base_flaky
+                .lock()
+                .unwrap()
+                .insert((base_sha.to_string(), c.clone()));
+            let line = flaky_base_check_line(c, base_sha);
+            app.base_run_decisions
+                .lock()
+                .unwrap()
+                .entry((base_sha.to_string(), c.clone()))
+                .or_default()
+                .push(line.clone());
+            CheckContext::new(app, task_id).decision(line, &mut Vec::new());
         }
     }
 }
@@ -992,14 +1023,18 @@ pub(super) fn note_flaky_base_checks(app: &App, task: &mut Task, commands: &[Str
         if !flaky.contains(&(task.base_sha.clone(), c.clone())) {
             continue;
         }
-        let line = format!(
-            "Orchestrator: base check {c} flaky on {}: passed on rerun",
-            short_sha(&task.base_sha)
-        );
+        let line = flaky_base_check_line(c, &task.base_sha);
         if !task.decisions.contains(&line) {
             task.decisions.push(line);
         }
     }
+}
+
+fn flaky_base_check_line(command: &str, base_sha: &str) -> String {
+    format!(
+        "Orchestrator: base check {command} flaky on {}: passed on rerun",
+        short_sha(base_sha)
+    )
 }
 
 /// Runs `checks` on the task's base, waiting for the result: every command
@@ -1036,7 +1071,7 @@ pub(super) async fn failing_twice_on_base(
     for c in &commands {
         if let Some(r) = wait_for_base(app, &task.base_sha, c, cancel).await {
             record_check_outcomes(app, task, std::slice::from_ref(&r));
-            if r.code.is_some_and(|code| code != 0) && !timed_out_under_load(&r) {
+            if r.code.is_some_and(|code| code != 0) && !is_interrupted(&r) {
                 failing.push(r);
             }
         }
@@ -1044,8 +1079,28 @@ pub(super) async fn failing_twice_on_base(
     if cancel.is_cancelled() {
         return Vec::new();
     }
+    record_base_run_decisions(app, task, &commands);
     note_flaky_base_checks(app, task, &commands);
     failing
+}
+
+fn record_base_run_decisions(app: &App, task: &mut Task, commands: &[String]) {
+    let decisions = app.base_run_decisions.lock().unwrap();
+    let mut lines = Vec::new();
+    for command in commands {
+        if let Some(recorded) = decisions.get(&(task.base_sha.clone(), command.clone())) {
+            for line in recorded {
+                let line = if let Some(held) = task.held_out.as_ref().filter(|h| &h.run == command)
+                {
+                    line.replace(command, &brief::held_out_label(held.criterion))
+                } else {
+                    line.clone()
+                };
+                lines.push(line);
+            }
+        }
+    }
+    record_check_decisions(task, lines);
 }
 
 /// `checks` without duplicates, minus what the scoped-checks policy skips
@@ -1058,7 +1113,7 @@ fn planned_base_commands(app: &App, task: &Task, checks: &[String]) -> Vec<Strin
         }
     }
     filter_scoped_planned(
-        &app.settings.read().unwrap().scoped_checks,
+        &scoped_checks_for(&app.settings.read().unwrap(), task),
         &task.repo,
         &commands,
         &task.paths,
@@ -1127,6 +1182,7 @@ pub(super) async fn baseline_on_base(
     {
         Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
             record_check_outcomes(app, task, &results);
+            record_base_run_decisions(app, task, &commands);
             record_baselines(task, &todo, &results)
         }
         _ => false,
@@ -1277,6 +1333,125 @@ mod tests {
             ms: 1,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_flaky_background_base_check_records_its_decision_after_the_task_finishes() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let mut task = task_with_status(TaskStatus::Done);
+        task.repo = repo.to_str().unwrap().into();
+        task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+        let counter = dir.path().join("counter");
+        let command = format!(
+            "echo run >> '{}'; test \"$(wc -l < '{}')\" -ge 2",
+            counter.display(),
+            counter.display()
+        );
+        app.store.save_task(&task).unwrap();
+
+        run_base_job(
+            &app,
+            Some(&task.id),
+            &task.repo,
+            &task.base_sha,
+            std::slice::from_ref(&command),
+            &dir.path().join("runs"),
+            true,
+        )
+        .await;
+
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Done);
+        assert!(saved.decisions.contains(&format!(
+            "Orchestrator: base check {command} flaky on {}: passed on rerun",
+            short_sha(&task.base_sha)
+        )));
+        assert_eq!(std::fs::read_to_string(counter).unwrap().lines().count(), 2);
+        assert_eq!(
+            app.base_runs.lock().unwrap()[&(task.base_sha.clone(), command)].code,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_base_run_is_not_cached() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let base = git_in(&repo, &["rev-parse", "HEAD"]);
+        let counter = dir.path().join("counter");
+        let command = format!(
+            "echo run >> '{}'; n=$(wc -l < '{}'); if [ \"$n\" -le 2 ]; then exit 137; fi",
+            counter.display(),
+            counter.display()
+        );
+        let commands = vec![command.clone()];
+        let cancel = CancelToken::new();
+        let run_dir = dir.path().join("runs");
+        let first = run_on_base(
+            &app,
+            None,
+            repo.to_str().unwrap(),
+            &base,
+            &commands,
+            &run_dir,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first[0].code, Some(137));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            2
+        );
+        assert!(app.base_runs.lock().unwrap().is_empty());
+        assert!(load_base_runs(&app.data_dir).is_empty());
+        let second = run_on_base(
+            &app,
+            None,
+            repo.to_str().unwrap(),
+            &base,
+            &commands,
+            &run_dir,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second[0].code, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            3
+        );
+        assert_eq!(app.base_runs.lock().unwrap().len(), 1);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_str().unwrap().into();
+        task.base_sha = base.clone();
+        assert!(failing_twice_on_base(&app, &mut task, &commands, &cancel)
+            .await
+            .is_empty());
+        assert!(task
+            .decisions
+            .iter()
+            .any(|l| l.contains("was interrupted") && l.contains("after") && l.contains(" s")));
+        let interrupted = [124, 137, 143]
+            .into_iter()
+            .map(|code| StoredBaseRun {
+                base_sha: base.clone(),
+                outcome: outcome(&format!("exit {code}"), code),
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            app.data_dir.join(BASE_RUNS_FILE),
+            serde_json::to_string(&interrupted).unwrap(),
+        )
+        .unwrap();
+        assert!(load_base_runs(&app.data_dir).is_empty());
     }
 
     #[tokio::test]

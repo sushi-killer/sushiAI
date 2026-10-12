@@ -314,6 +314,53 @@ pub(super) enum RunError {
     NotFound(String),
 }
 
+fn agent_cache_block_reason(
+    harness: Harness,
+    network_allowed: bool,
+    review: bool,
+    sandbox: SandboxMode,
+    cache_dir: &Path,
+    worktree: &Path,
+) -> Option<&'static str> {
+    if harness == Harness::Codex && !network_allowed {
+        return Some("Codex codexNetwork false blocks localhost access");
+    }
+    if harness == Harness::Codex && review {
+        return Some("Codex read-only sandbox cannot write the cache directory");
+    }
+    // Codex always uses its own workspace sandbox, including in Host mode.
+    // Native Claude runs grant the worktree, not the shared cache directory.
+    if (harness == Harness::Codex || sandbox == SandboxMode::Native)
+        && !cache_dir.starts_with(worktree)
+    {
+        return Some("agent sandbox cannot write the shared cache directory");
+    }
+    None
+}
+
+fn apply_agent_cache(
+    cmd: &mut tokio::process::Command,
+    cache: Option<&compiler_cache::CompilerCache>,
+    req: &harness::RunRequest<'_>,
+    sandbox: SandboxMode,
+) -> Option<String> {
+    let cache = cache?;
+    if let Some(reason) = agent_cache_block_reason(
+        req.harness,
+        req.network_allowed,
+        req.review,
+        sandbox,
+        &cache.dir,
+        req.worktree,
+    ) {
+        return Some(format!(
+            "Orchestrator: compiler cache disabled for agent: {reason}"
+        ));
+    }
+    cache.apply(cmd);
+    None
+}
+
 /// Spawn `claude`/`codex` in its own process group, write `brief` to
 /// stdin, stream stdout into `events.jsonl` and the log broadcast, and wait
 /// for it to exit. `cancel` triggers SIGTERM to the group, then SIGKILL
@@ -405,17 +452,32 @@ pub(super) async fn run_harness(
     }
     cmd = tokio::process::Command::new(&bin);
     let path = augmented_path();
-    if let Some(wrapper) = crate::worktree_env::rustc_wrapper(&path) {
-        cmd.env("RUSTC_WRAPPER", wrapper);
-    }
     cmd.args(&argv)
         .current_dir(worktree)
-        .env("PATH", path)
+        .env("PATH", &path)
         // Lets a repo's own hooks tell an orchd-run agent from a person's
         // session (sushiAI's lesson reminder stays quiet for it).
         .env("ORCHD_TASK", task_id)
         .env("SUSHIAI_HOME", &app.home)
         .envs(&project_env);
+    if !project_env.contains_key("RUSTC_WRAPPER") {
+        let cache = compiler_cache::CompilerCache::for_worktree(worktree, &path);
+        let sandbox = app.settings.read().unwrap().sandbox;
+        if let Some(line) = apply_agent_cache(&mut cmd, cache.as_ref(), req, sandbox) {
+            // Best-of candidates can discover the same skip concurrently.
+            static CACHE_DECISIONS: StdMutex<()> = StdMutex::new(());
+            let _write = CACHE_DECISIONS.lock().unwrap();
+            let recorded = app
+                .store
+                .load_task(task_id)
+                .ok()
+                .flatten()
+                .is_some_and(|task| task.decisions.contains(&line));
+            if !recorded {
+                app.append_decision(task_id, line);
+            }
+        }
+    }
     if let Some(token) = app.hook_token_of(task_id, attempt_n) {
         cmd.env("SUSHIAI_ORCH_TOKEN", token);
     }
@@ -817,8 +879,79 @@ pub(super) fn read_cancelled_fingerprint(events_path: &Path) -> Option<Fingerpri
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn codex_without_network_gets_no_wrapper_and_a_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = tmp.path().join("sccache");
+        std::fs::write(&tool, "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cache = compiler_cache::CompilerCache::discover(
+            &tmp.path().display().to_string(),
+            true,
+            false,
+            tmp.path().join("cache"),
+            4227,
+        )
+        .unwrap();
+        let req = harness::RunRequest {
+            harness: Harness::Codex,
+            worktree: tmp.path(),
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            review: false,
+            mcp_config: None,
+            settings_path: None,
+            network_allowed: false,
+            codex_mcp: &[],
+            images: &[],
+            repo_settings: false,
+            resume: None,
+        };
+        let mut command = tokio::process::Command::new("codex");
+        let line = apply_agent_cache(&mut command, Some(&cache), &req, SandboxMode::Host).unwrap();
+        assert!(line.contains("codexNetwork false") && line.contains("localhost"));
+        assert!(!command
+            .as_std()
+            .get_envs()
+            .any(|(k, _)| k == "RUSTC_WRAPPER" || k.to_string_lossy().starts_with("SCCACHE_")));
+        assert_eq!(
+            apply_agent_cache(&mut command, None, &req, SandboxMode::Host),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_write_access_is_required_even_with_agent_network() {
+        let cache = Path::new("/shared/cache");
+        let wt = Path::new("/worktree");
+        assert!(agent_cache_block_reason(
+            Harness::Codex,
+            true,
+            false,
+            SandboxMode::Host,
+            cache,
+            wt
+        )
+        .is_some());
+        assert!(agent_cache_block_reason(
+            Harness::Claude,
+            true,
+            false,
+            SandboxMode::Native,
+            cache,
+            wt
+        )
+        .is_some());
+        assert_eq!(
+            agent_cache_block_reason(Harness::Claude, true, false, SandboxMode::Host, cache, wt),
+            None
+        );
+    }
 
     #[test]
     fn redacts_known_values_longest_first() {

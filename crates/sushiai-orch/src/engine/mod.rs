@@ -40,6 +40,8 @@ mod base_check;
 mod best_of;
 mod brief_check;
 mod chat_tools;
+mod check_reuse;
+pub mod compiler_cache;
 mod cost;
 mod criteria;
 mod decision;
@@ -67,11 +69,12 @@ mod routing;
 mod rpc_misc;
 mod rpc_tasks;
 mod slots;
+mod subtask_checks;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
 mod time_budget;
-mod verify;
+pub mod verify;
 mod wait_sla;
 mod worktrees;
 
@@ -83,6 +86,7 @@ use backlog::*;
 use base_check::*;
 use best_of::*;
 use brief_check::*;
+use check_reuse::*;
 use cost::*;
 use criteria::*;
 use decision::*;
@@ -352,19 +356,18 @@ pub struct App {
     /// so `parallel` is never exceeded by a race.
     autopilot_admission: StdMutex<()>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
-    /// computed for, and its results -- shared by `hook.stop` and the
-    /// post-session gate so an unchanged diff never re-runs verify twice.
+    /// computed for, and its completed results, shared by `hook.stop` and
+    /// the post-session gate. Interrupted result sets are never stored.
     verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command. Kept on
-    /// disk (`base-results.json`), so a restart does not run them again; a
-    /// run that timed out or hit an environment failure is never stored.
+    /// disk (`base-results.json`), so a restart does not run them again; an
+    /// interrupted, cancelled or environment-failed run is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
-    /// (tree hash, base sha, command) triples that passed (exit 0) in a
-    /// subtask's final run: a parent on the same tree and the same base does
-    /// not run that command again. The base is part of the key because every
-    /// command sees it as `ORCHD_BASE_SHA`.
-    gate_passes: StdMutex<std::collections::HashSet<(String, String, String)>>,
+    /// Exit-0 checks on exact worktree trees, in insertion order, memory only.
+    gate_passes: StdMutex<PassedChecks>,
+    /// Retry decisions from background base runs, keyed by (base sha, command).
+    base_run_decisions: StdMutex<HashMap<(String, String), Vec<String>>>,
     /// Keyed by (base sha, command): background base runs in flight. The
     /// receiver flips to `true` when the job is over; its result, if any, is
     /// then in `base_runs`. Concurrent lookups share the same job.
@@ -574,6 +577,7 @@ impl App {
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
             gate_passes: StdMutex::new(Default::default()),
+            base_run_decisions: StdMutex::new(HashMap::new()),
             base_jobs: StdMutex::new(HashMap::new()),
             final_base_jobs: StdMutex::new(HashMap::new()),
             base_flaky: StdMutex::new(Default::default()),
@@ -759,7 +763,7 @@ impl App {
     /// it rides along with their next save instead of racing a reload.
     fn append_decision(&self, task_id: &str, line: String) {
         if let Ok(Some(mut task)) = self.store.load_task(task_id) {
-            task.decisions.push(line);
+            record_check_decisions(&mut task, vec![line]);
             task.updated_at = now_ms();
             let _ = self.store.save_task(&task);
             self.broadcast_task(&task);

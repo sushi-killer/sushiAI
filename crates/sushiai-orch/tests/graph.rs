@@ -1929,7 +1929,7 @@ fn a_parent_skips_a_command_its_child_passed_on_the_same_tree() {
     assert!(
         decisions_of(&parent)
             .iter()
-            .any(|d| d.contains("passed on this tree")),
+            .any(|d| d.contains("already passed on tree")),
         "{parent}"
     );
     let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();

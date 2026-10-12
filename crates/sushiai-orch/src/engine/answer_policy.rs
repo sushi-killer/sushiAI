@@ -102,7 +102,7 @@ fn segment_runs_ci(segment: &str) -> bool {
 }
 
 /// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
-fn runs_ci_entry(command: &str) -> bool {
+pub(super) fn runs_ci_entry(command: &str) -> bool {
     command
         .replace("&&", "\n")
         .replace("||", "\n")
@@ -128,7 +128,7 @@ pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -
         return false;
     }
     runs_ci_entry(&command)
-        || settings.scoped_checks.iter().any(|e| {
+        || scoped_checks_for(settings, task).iter().any(|e| {
             e.repo
                 .as_deref()
                 .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))

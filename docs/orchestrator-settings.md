@@ -48,7 +48,7 @@ Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
 | `verifyTimeoutSecs`          | integer (seconds)                                                                    | `1200` (an orchestrator without the key uses its built-in 20 minutes) | How long one verify command may run before it is stopped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Checks and worktrees: Verify timeout             |
 | `landOnDefault`              | boolean                                                                              | `false`                                                               | Tasks may move a repo's default branch. Off: such a landing is refused and the task stays done on its own branch.                                                                                                                                                                                                                                                                                                                                                                                                                           | Advanced JSON                                    |
 | `landOnDefaultRepos`         | repo path to boolean                                                                 | `{}`                                                                  | Per repo, overrides `landOnDefault`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Safety & limits                                  |
-| `gateAt`                     | repo path to `"parent"` or `"every"`                                                 | `{}` (a repo not listed uses `"parent"`)                              | Where a subtask's whole-repo checks run. Under `"parent"`, a subtask leaves out the `finalVerify` commands its parent also runs, and the parent runs them once on the final tree. Under `"every"`, each subtask runs them too, and the parent skips a command that already passed on the same tree.                                                                                                                                                                                                                                         | Advanced JSON                                    |
+| `gateAt`                     | repo path to `"parent"` or `"every"`                                                 | `{}` (a repo not listed uses `"parent"`)                              | Where a subtask's whole-repo checks run. Under `"parent"`, a subtask narrows broad CI entries to its changed packages/tests and leaves out the `finalVerify` commands its parent also runs; the parent keeps the full commands on the combined tree. Under `"every"`, each subtask runs them too, and the parent skips a command that already passed on the same tree.                                                                                                                                                                      | Advanced JSON                                    |
 | `afterLand`                  | list of `{repo, run}`                                                                | `[]`                                                                  | Shell command `run` executed in the main checkout `repo` after a task lands there, for example to rebuild a binary.                                                                                                                                                                                                                                                                                                                                                                                                                         | Advanced JSON                                    |
 | `scopedChecks`               | list of `{repo?, command, paths}`                                                    | `[]`                                                                  | A command that runs only when the task's diff touches one of its `paths` globs; `command` is a glob over the whole command string. Without `repo` it applies to every repo.                                                                                                                                                                                                                                                                                                                                                                 | Advanced JSON                                    |
 | `presets`                    | list of `{id, label, values}`                                                        | `[]`                                                                  | Custom presets: a named bundle of pipeline switches and routes (see Presets below). An id may not be a built-in id (`fast`, `careful`, `docs`) and must be unique.                                                                                                                                                                                                                                                                                                                                                                          | Pipeline view, Advanced JSON                     |
@@ -59,7 +59,11 @@ The Orchestrator panel's Log view lists what the orchestrator agent did in that 
 
 A question the orchestrator agent is looking at (its turn has started) is held: it carries `heldForOverseer: true` and `heldAt`, and the app raises no Inbox row, Dock badge or notification for it. The hold ends when that turn ends with the question still open, so you are asked then. A turn is cancelled after 15 minutes (logged as failed, "timed out"), and a hold older than 10 minutes no longer counts. Questions only you may answer are never held.
 
-A base check that fails on the task's base commit is run once more alone (the pair of runs is the only base-check pair of its repo at that time). If the rerun passes, the task records `Orchestrator: base check <cmd> flaky on <sha>: passed on rerun` and goes on without a question. The checks that fail twice are asked about in one question per task that lists every one of them (`commands`), with the options "keep all" / "drop all" / "stop" for a parent and "retry after the base is fixed" / "drop all" / "stop" for a single task. A failing check is kept by rule, with no question, no overseer wake and no feasibility judge run, when at least one file, directory or glob it names is absent on the base commit and the task has subtasks or the name lies under the paths of the task or of a subtask: the plan creates it, and the task records `Orchestrator: kept check <cmd>, targets absent on base; the plan creates them`. Only you may answer "drop all" when any listed check is shared (nothing is removed then): the repo's CI entry (`npm run ci`, `npm test`, `cargo test`), a `scopedChecks` or `afterLand` command, or a command you wrote in the task request. the repo's CI entry (`npm run ci`, `npm test`, `cargo test`), a `scopedChecks` or `afterLand` command, or a command you wrote in the task request. The orchestrator agent, the answer policy and the waiting default can answer "retry after the base is fixed" or "stop" for those; a check the planner invented for one task can still be dropped by the agent.
+A base check that fails on the task's base commit is run once more alone (the pair of runs is the only base-check pair of its repo at that time). If the rerun passes, the task records `Orchestrator: base check <cmd> flaky on <sha>: passed on rerun` and goes on without a question. A background final base check publishes this decision when it finishes, even if the task has already finished; passing final checks do not wait for it. The checks that fail twice are asked about in one question per task that lists every one of them (`commands`), with the options "keep all" / "drop all" / "stop" for a parent and "retry after the base is fixed" / "drop all" / "stop" for a single task. A failing check is kept by rule, with no question, no overseer wake and no feasibility judge run, when at least one file, directory or glob it names is absent on the base commit and the task has subtasks or the name lies under the paths of the task or of a subtask: the plan creates it, and the task records `Orchestrator: kept check <cmd>, targets absent on base; the plan creates them`. Only you may answer "drop all" when any listed check is shared (nothing is removed then): the repo's CI entry (`npm run ci`, `npm test`, `cargo test`), a `scopedChecks` or `afterLand` command, or a command you wrote in the task request. The orchestrator agent, the answer policy and the waiting default can answer "retry after the base is fixed" or "stop" for those; a check the planner invented for one task can still be dropped by the agent.
+
+Checks that exit 0 are reused across later gates on the same Git worktree tree. A pass is cached only when the tree is unchanged after the command: a check that changes tracked or untracked files must run again, including after a base preflight. Ignored build outputs do not change the tree. The cache key is the tree id and exact command text; the base sha is included only when that text contains `ORCHD_BASE_SHA`, since a check can read it. The cache holds at most 512 entries in insertion order, evicting the oldest, and lives only in memory until the daemon stops. A reused check records `Orchestrator: <cmd> already passed on tree <short id>; not run again` and counts as a pass without running. Held-out decision lines use `held-out check (criterion N)` in place of the command.
+
+An interrupted check runs once more at once unless cancelled. The same runner retains check-slot admission and the machine-load diagnostics: a timeout under load is classified as an environment failure even if its rerun exits non-zero. Interrupted means no exit code (except cancellation, spawn failure or an internal runner error), exit 124, 137 or 143, or a line containing `timed out` or `timeout` (case-insensitive) in the `--- failures ---` section of its tail. The task records both run durations in seconds and the rerun result: `Orchestrator: <cmd> was interrupted after ... s (...); ran it again at once: ... after ... s`. Interrupted outcomes are never cached as failures in either the base or verify result cache, so a later retry runs afresh. A still-interrupted base run is not treated as an existing base failure; a grounded baseline check that is still interrupted remains a failing baseline.
 
 ## Worktree environment
 
@@ -68,16 +72,75 @@ A new task worktree is a clean checkout: it has no installed dependencies and no
 **`.sushiai/setup.json`.** A repo commits this file to say how to prepare a worktree:
 
 ```json
-{ "setup": "npm ci", "env": { "NAME": "value" } }
+{
+  "setup": "npm ci",
+  "env": { "NAME": "value" },
+  "compilerCache": true,
+  "scopedChecks": [
+    {
+      "command": "npm run test:desktop",
+      "paths": ["electron/**", "src/app/**"]
+    }
+  ]
+}
 ```
 
 `setup` is a string (run with `sh -c`) or an argv list (run directly). `env` is optional. The command runs once per worktree, in the worktree, in the same sandbox as the checks (`Host` runs it unsandboxed, as it does a check), with the verify timeout. On macOS it gets `npm_config_cache` under `~/Library/Caches/sushiai/npm`, a path the sandbox lets it write. It gets orchd's own environment plus the extended `PATH`, `ORCHD_ROOT_PATH` (the main checkout), `ORCHD_WORKTREE_PATH` (the worktree) and the `env` of the file. No project secret is added. If `setup.json` is not valid JSON, or the command exits non-zero, the task ends `failed` with no attempt and a decision line `Worktree setup: ...` that holds the tail of the output. Stopping the task stops the setup. A worktree recreated from its branch runs the setup again.
+
+`scopedChecks` is an optional list of `{command, paths}` entries. Unknown keys
+in the file or an entry are rejected. The command is a glob over the complete
+check command; paths are globs over repo-relative files. Unlike setup and env,
+check declarations are read from `.sushiai/setup.json` at the task's base
+commit, never from its edited worktree. They are merged with
+`settings.scopedChecks` and apply only to this repo. The same path filter is
+used by verification, the Stop hook and best-of evaluation; the base preflight
+uses the task's planned paths, and the planner brief lists the merged policy.
+Repo-declared checks are shared checks: only the owner may drop one. Adding or
+editing a declaration during a task cannot skip that task's own check.
+
+**Scoped subtask checks.** After path scoping, a subtask in a repo with
+`gateAt: "parent"` replaces each broad CI-entry command with checks for its
+changed files. Files inside a crate use `cargo test -p <package name>` from the
+nearest ancestor `Cargo.toml` with `[package]`. Changed `*.test.cjs`,
+`*.test.mjs` and `*.test.js` files use `node --test <file>`; source files also
+use existing tests with the same stem before `.test.`, in the source's own
+directory or anywhere under the root `tests/` directory. Derived commands are
+deduplicated and retain tree-pass reuse and compiler-cache reporting. Commands
+already naming `-p`, `--package`, `--test`, `--manifest-path` or a file, and
+commands that are not CI entries, run unchanged. With `gateAt: "every"`,
+subtask scoping is disabled.
+
+Any unmapped changed file keeps the full command. The unsafe files always do
+so: the root `Cargo.toml`, any `Cargo.toml` with `[workspace]` or without `[package]`, `Cargo.lock`, any
+`package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+`.sushiai/setup.json`, `rust-toolchain*`, `.cargo/config*`, `tsconfig*.json`,
+`vite.config.*`, `eslint.config.*`, `.prettierrc*`, `Makefile` and `.github/**`.
+The original scoped command remains a parent check. If absent from the
+parent's trimmed `verify` and `finalVerify`, it is added to `finalVerify`.
+The parent still runs `verify` plus `finalVerify` on the combined tree; a
+parent that is itself a subtask can scope to its own parent. Decisions record:
+
+- `Orchestrator: subtask ran <derived joined by "; " or "nothing"> instead of <cmd>; the parent runs <cmd> on the combined tree`
+- `Orchestrator: subtask runs <cmd> in full: <file> maps to no package or test`
+- `Orchestrator: added <cmd> to finalVerify for subtask <short id>`
 
 **Default install.** A repo without `setup.json` gets `npm ci`, `pnpm install --frozen-lockfile` or `yarn install --frozen-lockfile` when it has `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock` and no `node_modules`. A `setup.json` replaces it. orchd no longer links the main checkout's `node_modules` into a worktree.
 
 **`.worktreeinclude`.** A file in the main checkout, in gitignore syntax, lists ignored files to copy into each worktree (for example `.env*`). Only regular files that the main checkout ignores and git does not track are copied; a symlink is skipped and a file the worktree already has is kept. Without this file, `.env`, `.env.local` and `.claude/settings.local.json` are copied when ignored.
 
-**sccache.** When `sccache` is on the extended `PATH` and `RUSTC_WRAPPER` is not set, setup, verify and agent processes get `RUSTC_WRAPPER=sccache`; the daemon starts the sccache server once, outside any sandbox. orchd never sets `CARGO_TARGET_DIR`.
+**Compiler cache.** `compilerCache` is an optional boolean in `.sushiai/setup.json`, on by default. Setting `"compilerCache": false` disables orchd's compiler wrapper, server startup and cache decision lines for that worktree, including a file with no `setup` step. When `sccache` is on the extended `PATH` and the owner has not set `RUSTC_WRAPPER`, setup and every verify command (including base checks, final checks and the parent gate) get:
+
+```text
+RUSTC_WRAPPER=sccache
+SCCACHE_DIR=$HOME/.cache/sushiai/sccache
+SCCACHE_SERVER_PORT=4227
+```
+
+Port 4227 and the cache directory are dedicated to orchd, shared across its task worktrees, separate from sccache's defaults. The daemon runs `sccache --start-server` with this environment outside any sandbox and any check's process group, so stopping a check does not stop the server. orchd never sets `CARGO_TARGET_DIR`: every worktree keeps its own `target/` outputs. Without sccache, or when the owner supplies a wrapper, orchd leaves the compiler environment unchanged and writes no cache line.
+
+Agents get the same compiler environment when their sandbox can reach localhost and write the cache directory. A Codex agent with `codexNetwork: false` gets no injected wrapper, and the task records `Orchestrator: compiler cache disabled for agent: Codex codexNetwork false blocks localhost access` once. A read-only Codex agent, or an agent whose sandbox only permits writes in the worktree, also skips the wrapper with a reason line. orchd does not expand the agent's sandbox permissions for caching. Host-mode Claude agents can use the shared cache; Codex keeps its workspace sandbox even in Host mode.
+
+After a verify run, final checks or the parent gate, orchd reads its server's JSON stats before and after the run and records one line from the difference, for example `Orchestrator: compiler cache 41/52 hits (79%) in final checks`. It writes no hit-rate line when there were no compile requests or stats could not be read; reused verify results do not produce another line. These are counters from the shared server, so concurrent builds can contribute to the same interval. sccache caches eligible compilations, not Rust's incremental builds or linking; each repository controls its Cargo profiles. Rust cache keys also include a crate's working directory, so registry dependencies at stable paths can hit across fresh worktrees while copies of a worktree's own crate can still miss.
 
 ## Presets
 

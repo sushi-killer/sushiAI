@@ -126,6 +126,23 @@ test("node states, labels and flags", async () => {
   );
 });
 
+test("an auto brief check and judge show the model the engine resolved", async () => {
+  const { blueprintNodes } = await model;
+  const nodes = blueprintNodes(
+    payload({
+      stages: [
+        stage("brief-check", { routeId: "auto", model: "sonnet" }),
+        stage("judge", { routeId: "auto", model: "sonnet" }),
+      ],
+    }),
+    routes,
+  );
+  assert.deepEqual(
+    nodes.map((n) => n.model),
+    ["sonnet", "sonnet"],
+  );
+});
+
 test("the question branch goes to the overseer or to you", async () => {
   const { blueprintNodes } = await model;
   const held = blueprintNodes(

@@ -286,7 +286,7 @@ mod tests {
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
         );
-        record_answer(&mut task, Some(&q), "continue", false);
+        record_answer(&mut task, Some(&q), "continue", AnsweredBy::Owner);
         assert_eq!(task.queue.rate_pauses, 0);
     }
 }

@@ -326,10 +326,11 @@ fn covered_by_rule(task: &Task, question: &Question, answer: &str) -> bool {
     if question.commands.is_empty() {
         return earlier().next().is_some();
     }
-    question
-        .commands
-        .iter()
-        .all(|c| earlier().any(|a| a.commands.contains(c)))
+    question.commands.iter().all(|c| {
+        earlier().any(|a| a.commands.contains(c))
+            || (answer == base_check::PRE_EXISTING_RETRY
+                && base_check::non_owner_base_retry(task, c, None))
+    })
 }
 
 /// The fixed rule for `question`: its answer and why. Each rule fires once
@@ -430,6 +431,10 @@ pub(super) fn record_answered_question(
     answer: &str,
     answered_by: AnsweredBy,
 ) {
+    if question.kind == QuestionKind::PreexistingFailure {
+        let base_sha = task.base_sha.clone();
+        base_check::record_base_retry(task, &question.commands, &base_sha, answer);
+    }
     task.question_history.push(AnsweredQuestion {
         question: question.text.clone(),
         options: question.options.clone(),
@@ -713,6 +718,7 @@ mod tests {
                 code: Some(1),
                 tail: "boom".to_string(),
                 ms: 1,
+                ..Default::default()
             })
             .collect();
         let mut q = base_check::pre_existing_question(&failed, "0123456789");
@@ -775,5 +781,57 @@ mod tests {
         assert!(rule_answer(&task, &one, 1).is_none());
         let other = base_check_question(&["a.sh", "d.sh"], &[retry, "drop all", "stop"]);
         assert!(rule_answer(&task, &other, 1).is_some());
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn a_command_retried_by_a_lead_overseer_or_chat_is_not_retried_by_rule() {
+        for caller in [
+            AnsweredBy::Lead,
+            AnsweredBy::Overseer,
+            AnsweredBy::Orchestrator,
+            AnsweredBy::Owner,
+        ] {
+            let mut task = task_with_status(TaskStatus::Waiting);
+            let first = base_check::pre_existing_question(
+                &[VerifyOutcome {
+                    command: "a.sh".into(),
+                    code: Some(1),
+                    ..Default::default()
+                }],
+                &task.base_sha,
+            );
+            assert!(rule_answer(&task, &first, 1).is_some());
+            record_answer(
+                &mut task,
+                Some(&first),
+                base_check::PRE_EXISTING_RETRY,
+                caller,
+            );
+            let sha = task.base_sha.clone();
+            record_owner_base_check(
+                &mut task,
+                &first.commands,
+                &sha,
+                base_check::PRE_EXISTING_RETRY,
+                false,
+            );
+            assert_eq!(
+                rule_answer(&task, &first, 1).is_none(),
+                caller != AnsweredBy::Owner
+            );
+            let mut new_command = first.clone();
+            new_command.commands.push("b.sh".into());
+            assert!(rule_answer(&task, &new_command, 1).is_some());
+            task.base_sha = "1234567890".into();
+            assert_eq!(
+                rule_answer(&task, &first, 1).is_none(),
+                caller != AnsweredBy::Owner
+            );
+        }
     }
 }

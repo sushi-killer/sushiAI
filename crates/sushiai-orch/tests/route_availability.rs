@@ -260,7 +260,37 @@ fn verify_timeout_secs_bounds_a_verify_command_and_names_the_limit() {
     let id = create(&s, &repo, json!({"verify": ["sleep 30"]}));
     let task = settle(&s, &id);
     let verify = &task["attempts"][0]["verify"][0];
-    assert_eq!(verify["tail"], "timed out after 1 seconds", "{task}");
+    let timeout = "timed out after 1 seconds";
+    let tail = verify["tail"].as_str().unwrap();
+    let lines = decisions(&task);
+    let load_retries: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("timed out under load"))
+        .map(String::as_str)
+        .collect();
+    // The daemon samples real machine load. A high-load timeout adds its
+    // environment detail and retries; the one-second execution budget stays.
+    if verify["loadTimeout"] == true {
+        assert_eq!(load_retries.len(), 1, "{task}");
+        let detail = load_retries[0]
+            .strip_prefix("Orchestrator: sleep 30: ")
+            .and_then(|line| line.strip_suffix(" (environment); rerun once on the same tree"))
+            .expect("load retry names the command and environment reason");
+        assert!(detail.contains(" ms, timed out under load "), "{task}");
+        assert!(detail.ends_with(" cores"), "{task}");
+        assert_eq!(
+            tail,
+            format!("sleep 30: {detail}\nRerun: {timeout}"),
+            "{task}"
+        );
+    } else {
+        assert!(load_retries.is_empty(), "{task}");
+        assert_eq!(tail, timeout, "{task}");
+    }
+    assert!(verify["ms"].as_u64().unwrap() >= 1000, "{task}");
+    assert!(verify["load"].as_f64().unwrap() >= 0.0, "{task}");
+    assert!(verify["cores"].as_u64().unwrap() > 0, "{task}");
+    assert_eq!(task["attempts"].as_array().unwrap().len(), 1, "{task}");
     assert!(verify["code"].is_null());
     s.daemon.shutdown_and_wait();
 }

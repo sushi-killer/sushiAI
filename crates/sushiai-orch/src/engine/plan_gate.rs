@@ -1113,6 +1113,7 @@ pub(super) async fn run_checklist(
         .map(|&i| task.checklist[i].check.clone())
         .collect();
     let results = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)),
         worktree,
         run_dir,
         &commands,

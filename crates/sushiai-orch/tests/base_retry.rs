@@ -284,22 +284,36 @@ fn a_final_that_only_timed_out_is_rerun_once_without_a_new_attempt() {
     prepare(&daemon, |s| s["verifyTimeoutSecs"] = json!(2));
     let repo = init_git_repo();
     let flag = scripts.path().join("slept");
+    let runs = scripts.path().join("runs.log");
     // Passes on the base (no marker); on the worktree the first run hangs
     // past the timeout, the rerun passes.
     let check = format!(
-        "if [ -f CHANGED_MARKER.txt ] && [ ! -f {f} ]; then touch {f}; sleep 60; fi; true",
-        f = flag.display()
+        "if [ -f CHANGED_MARKER.txt ]; then echo ran >> {runs}; if [ ! -f {f} ]; then touch {f}; sleep 60; fi; fi; true",
+        f = flag.display(),
+        runs = runs.display()
     );
     let id = create(&daemon, repo.path(), &check);
     let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
-    assert!(
+    assert_eq!(lines(&runs), 2, "one initial worktree run and one retry");
+    assert!(done["question"].is_null(), "{done}");
+    // Real machine load selects either the final-check retry or the runner's
+    // load-aware retry. Both must record the command and environment reason.
+    assert_eq!(
         done["decisions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d.as_str().unwrap().contains("timed out (environment)")),
+            .filter(|d| {
+                let line = d.as_str().unwrap();
+                line.contains(&check)
+                    && line.contains("timed out")
+                    && line.contains("(environment)")
+                    && line.contains("rerun once on the same tree")
+            })
+            .count(),
+        1,
         "{done}"
     );
     let worktree = done["worktree"].as_str().unwrap().to_string();

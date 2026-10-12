@@ -224,7 +224,9 @@ pub(super) fn subtask_request(parent: &Task, part: &str) -> String {
     let decided: Vec<&String> = parent
         .decisions
         .iter()
-        .filter(|d| d.starts_with("Owner:") || d.starts_with("Orchestrator:"))
+        .filter(|d| {
+            d.starts_with("Owner:") || d.starts_with("Lead:") || d.starts_with("Orchestrator:")
+        })
         .collect();
     if !decided.is_empty() {
         out.push_str("\n\nAlready decided for the whole task:\n");
@@ -269,7 +271,7 @@ pub(super) async fn ask_plan_question(
     options: Vec<String>,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     // Same as wait_for_answer: a task parked on a question holds no slot.
     permit.take();
@@ -306,14 +308,20 @@ pub(super) async fn ask_plan_question(
         Some(answer) => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 // Peeked: the caller reads the mark again for its own wording.
-                let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
-                if by_agent || evidence.is_some() {
+                let caller = app
+                    .agent_answers
+                    .lock()
+                    .unwrap()
+                    .get(task_id)
+                    .copied()
+                    .unwrap_or(AnsweredBy::Owner);
+                if caller != AnsweredBy::Owner || evidence.is_some() {
                     let question = task.question.take();
                     record_answer_for(
                         &mut task,
                         question.as_ref(),
                         answer,
-                        true,
+                        caller,
                         evidence.as_deref(),
                     );
                 } else {
@@ -332,7 +340,12 @@ pub(super) async fn ask_plan_question(
         None => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
                 let next = app.cancelled_status(&task.status);
-                if task.status != next {
+                let changed =
+                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
+                if next == TaskStatus::Stopped {
+                    app.close_stopped_task(&mut task);
+                }
+                if changed {
                     task.status = next;
                     task.updated_at = now_ms();
                     let _ = app.store.save_task(&task);
@@ -689,7 +702,7 @@ pub(super) async fn run_plan_stage(
     task_id: &str,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
     auto_start_after_plan: bool,
 ) -> PlanOutcome {
     let mut clarify_rounds: u32 = 0;
@@ -998,10 +1011,11 @@ pub(super) async fn run_plan_stage(
             .await
             {
                 Some(answer) => {
-                    let who = if app.take_agent_answer(task_id) {
-                        "Orchestrator"
-                    } else {
-                        "Owner"
+                    let who = match app.take_agent_answer(task_id) {
+                        Some(AnsweredBy::Lead) => "Lead",
+                        Some(AnsweredBy::Policy | AnsweredBy::Judge) => "Policy",
+                        Some(_) => "Orchestrator",
+                        None => "Owner",
                     };
                     if let Ok(Some(mut t)) = app.store.load_task(task_id) {
                         let combined = format!(
@@ -1235,6 +1249,9 @@ pub(super) async fn run_plan_stage(
             } else {
                 TaskStatus::Stopped
             };
+            if t.status == TaskStatus::Stopped {
+                app.close_stopped_task(&mut t);
+            }
             t.updated_at = now_ms();
             let _ = app.store.save_task(&t);
             app.broadcast_task(&t);
@@ -1541,6 +1558,9 @@ async fn split_into_subtasks(
     } else {
         TaskStatus::Stopped
     };
+    if parent.status == TaskStatus::Stopped {
+        app.close_stopped_task(&mut parent);
+    }
     parent.updated_at = now_ms();
     if let Err(e) = app.store.save_task(&parent) {
         discard_children(app, children).await;

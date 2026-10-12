@@ -194,6 +194,7 @@ fn failed_with(kind: FailureKind, verify_codes: &[Option<i32>], changed: &[&str]
             code: *c,
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         })
         .collect();
     a.changed_files = changed.iter().map(|f| f.to_string()).collect();

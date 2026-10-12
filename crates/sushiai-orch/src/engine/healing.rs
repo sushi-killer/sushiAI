@@ -450,7 +450,16 @@ async fn run_base_preflight(
         .store
         .run_dir(&task.id, attempt_n)
         .join("feasibility-base");
-    let ran = run_on_base(app, &task.repo, &task.base_sha, &commands, &run_dir, cancel).await;
+    let ran = run_on_base(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &run_dir,
+        cancel,
+    )
+    .await;
     if cancel.is_cancelled() {
         return None;
     }
@@ -462,15 +471,16 @@ async fn run_base_preflight(
     // judge run, only the kept decision.
     let failing: Vec<String> = results
         .iter()
-        .filter(|r| r.code != Some(0))
+        .filter(|r| r.code != Some(0) && !timed_out_under_load(r))
         .map(|r| r.command.clone())
         .collect();
     let mut scratch = task.clone();
+    record_check_outcomes(app, &mut scratch, &results);
     let kept = keep_planned_checks(app, &mut scratch, &failing);
     out.decisions = scratch.decisions[task.decisions.len()..].to_vec();
     for (i, failed) in results
         .iter()
-        .filter(|r| r.code != Some(0) && !kept.contains(&r.command))
+        .filter(|r| r.code != Some(0) && !timed_out_under_load(r) && !kept.contains(&r.command))
         .enumerate()
     {
         let prompt = feasibility_prompt(task, failed);
@@ -816,6 +826,7 @@ pub(super) fn is_ui_path(path: &str) -> bool {
 /// images the attempt left under `artifacts/`. A failing command is a
 /// decision line, never a failed attempt.
 pub(super) async fn capture_screenshots(
+    app: &App,
     task: &mut Task,
     idx: usize,
     worktree: &Path,
@@ -827,6 +838,7 @@ pub(super) async fn capture_screenshots(
         return;
     };
     let ran = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)),
         worktree,
         &run_dir.join("screenshot"),
         std::slice::from_ref(&cmd),
@@ -835,6 +847,7 @@ pub(super) async fn capture_screenshots(
         cancel,
     )
     .await;
+    record_check_outcomes(app, task, &ran);
     if cancel.is_cancelled() {
         return;
     }
@@ -985,7 +998,7 @@ pub(super) fn add_follow_ups(task: &mut Task, findings: Vec<String>) {
 
 const ANSWER_PROMPT: &str = "You judge whether the owner's answers to a coding task's questions contradict any of its acceptance criteria. An answer contradicts a criterion when following the answer makes the criterion, as written, wrong or unmeetable. An answer that only adds detail, or that a criterion already agrees with, does not. Reply with only JSON: {\"amend\": [{\"criterion\": <index>, \"text\": \"<the criterion rewritten to agree with the answer, keeping its -- check: part>\"}], \"reason\": \"<one sentence>\"}. Use an empty list when nothing contradicts.";
 
-/// The decisions after the first `seen` that record an owner or policy answer.
+/// The decisions after the first `seen` that record an owner, lead or policy answer.
 pub(super) fn new_answers(task: &Task) -> Vec<String> {
     task.decisions
         .iter()
@@ -994,6 +1007,7 @@ pub(super) fn new_answers(task: &Task) -> Vec<String> {
             (d.starts_with("Owner: ")
                 && !d.starts_with("Owner: stop")
                 && !d.starts_with("Owner: dropped"))
+                || (d.starts_with("Lead: ") && d.contains(" -> "))
                 || d.starts_with("Policy: ")
         })
         .cloned()
@@ -1290,6 +1304,35 @@ mod tests {
         assert_eq!(
             own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
             vec!["Button.tsx".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn new_answers_feed_lead_answers_but_not_lead_stops_to_the_criteria_check() {
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.decisions = vec![
+            "Lead: old question -> old answer (answered by a lead session)".into(),
+            "Lead: q -> a (answered by a lead session)".into(),
+            "Lead: stop the service? -> yes (answered by a lead session)".into(),
+            "Lead: stop".into(),
+            "Lead: dropped from parent".into(),
+            "Owner: B".into(),
+            "Policy: q -> a (policy: e)".into(),
+        ];
+        task.brief_check.answers_seen = 1;
+        assert_eq!(
+            new_answers(&task),
+            [
+                task.decisions[1].clone(),
+                task.decisions[2].clone(),
+                task.decisions[5].clone(),
+                task.decisions[6].clone()
+            ]
         );
     }
 }

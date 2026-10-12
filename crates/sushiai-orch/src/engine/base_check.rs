@@ -224,24 +224,113 @@ fn base_check_prefix(who: &str, command: &str, base_sha: &str) -> String {
 }
 
 /// The decision line recording an answer to a base-check question, by `who`
-/// (`Owner` or `Orchestrator`).
+/// (`Owner`, `Lead` or `Orchestrator`).
 pub(super) fn base_check_line(who: &str, command: &str, base_sha: &str, answer: &str) -> String {
     format!("{}{answer}", base_check_prefix(who, command, base_sha))
 }
 
-/// Whether the owner or the orchestrator agent already answered the
+/// Whether the owner, lead or orchestrator agent already answered the
 /// base-check question for this command on this base.
 pub(super) fn base_check_answered(task: &Task, command: &str, base_sha: &str) -> bool {
-    let prefixes = ["Owner", "Orchestrator"].map(|who| base_check_prefix(who, command, base_sha));
+    let prefixes =
+        ["Owner", "Orchestrator", "Lead"].map(|who| base_check_prefix(who, command, base_sha));
     task.decisions
         .iter()
         .any(|d| prefixes.iter().any(|p| d.starts_with(p)))
 }
 
+/// Whether a non-owner already retried this command. The RPC gate passes a
+/// base SHA; the answer policy checks the command across bases, as its rules do.
+pub(super) fn non_owner_base_retry(task: &Task, command: &str, base_sha: Option<&str>) -> bool {
+    let decision = task.decisions.iter().any(|d| {
+        ["Orchestrator", "Lead"].iter().any(|who| {
+            let answer = if let Some(sha) = base_sha {
+                d.strip_prefix(&base_check_prefix(who, command, sha))
+            } else {
+                d.strip_prefix(&format!("{who}: base check {command} on "))
+                    .and_then(|rest| rest.split_once(" -> "))
+                    .filter(|(sha, _)| {
+                        !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+                    .map(|(_, answer)| answer)
+            };
+            answer.is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
+        })
+    });
+    decision
+        || task.assumptions.iter().any(|a| {
+            matches!(a.by.as_str(), "policy" | "judge")
+                && a.kind == Some(QuestionKind::PreexistingFailure)
+                && is_option(&a.answer, PRE_EXISTING_RETRY)
+                && a.commands.iter().any(|c| c == command)
+                && base_sha.is_none_or(|sha| {
+                    let sha: String = sha.chars().take(7).collect();
+                    let first_line = a.question.lines().next().unwrap_or_default();
+                    first_line.contains(&format!(" already fails on base {sha}:"))
+                        || first_line.contains(&format!(" already fail on base {sha}:"))
+                })
+        })
+}
+
+fn base_retry_line(command: &str, base_sha: &str) -> String {
+    format!("Orchestrator: retry base check {command} after {base_sha} moves")
+}
+
+pub(super) fn record_base_retry(
+    task: &mut Task,
+    commands: &[String],
+    base_sha: &str,
+    answer: &str,
+) {
+    if is_option(answer, PRE_EXISTING_RETRY) {
+        for command in commands {
+            let line = base_retry_line(command, base_sha);
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
+    }
+}
+
+/// A retry remains pending until its exact base moves, including after a
+/// restart and when the answer came from the policy.
+pub(super) fn base_retry_requested(task: &Task, commands: &[String], base_sha: &str) -> bool {
+    commands.iter().any(|command| {
+        if task.decisions.contains(&base_retry_line(command, base_sha)) {
+            return true;
+        }
+        let retry_prefix = format!("Orchestrator: retry base check {command} after ");
+        if task
+            .decisions
+            .iter()
+            .any(|line| line.starts_with(&retry_prefix))
+        {
+            return false;
+        }
+        // Tasks answered before full-SHA retry records existed.
+        ["Owner", "Orchestrator"].iter().any(|who| {
+            let prefix = base_check_prefix(who, command, base_sha);
+            task.decisions.iter().any(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
+            })
+        }) || task.assumptions.iter().any(|a| {
+            !a.overturned
+                && a.kind == Some(QuestionKind::PreexistingFailure)
+                && a.commands.contains(command)
+                && is_option(&a.answer, PRE_EXISTING_RETRY)
+                && a.question.contains(&format!(
+                    "base {}:",
+                    base_sha.chars().take(7).collect::<String>()
+                ))
+        })
+    })
+}
+
 /// Records an answer to a base-check question about `commands`, asked on
 /// `base_sha`, one line per command, unless the answer policy gave it (`policy_answered`). The line
 /// says who answered, read from the question history entry the wait just
-/// wrote: `Orchestrator:` for the agent, `Owner:` otherwise.
+/// wrote: `Owner:`, `Lead:` or `Orchestrator:`.
 pub(super) fn record_owner_base_check(
     task: &mut Task,
     commands: &[String],
@@ -249,6 +338,7 @@ pub(super) fn record_owner_base_check(
     answer: &str,
     policy_answered: bool,
 ) {
+    record_base_retry(task, commands, base_sha, answer);
     if !policy_answered {
         if let Some(who) = answerer_label(task) {
             for command in commands {
@@ -260,11 +350,12 @@ pub(super) fn record_owner_base_check(
 }
 
 /// Who gave the answer the wait just recorded: `Owner` (also when nothing
-/// was recorded), `Orchestrator` for the agent, `None` for a rule or judge,
+/// was recorded), `Lead` or `Orchestrator` for an agent, `None` for a rule or judge,
 /// whose own line already says so.
 pub(super) fn answerer_label(task: &Task) -> Option<&'static str> {
     match task.question_history.last().map(|h| h.answered_by) {
-        Some(AnsweredBy::Orchestrator) => Some("Orchestrator"),
+        Some(AnsweredBy::Orchestrator | AnsweredBy::Overseer) => Some("Orchestrator"),
+        Some(AnsweredBy::Lead) => Some("Lead"),
         Some(AnsweredBy::Policy | AnsweredBy::Judge) => None,
         Some(AnsweredBy::Owner) | None => Some("Owner"),
     }
@@ -281,25 +372,38 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
+fn is_environment_result(outcome: &VerifyOutcome) -> bool {
+    let tail = outcome.tail.to_ascii_lowercase();
+    ["setup failed", "eexist", "failed to install"]
+        .iter()
+        .any(|marker| tail.contains(marker))
+}
+
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
 /// A missing or unreadable file is an empty cache; an entry without an exit
-/// code is skipped.
+/// code or with an environment result is skipped.
 pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), VerifyOutcome> {
     let rows: Vec<StoredBaseRun> = std::fs::read_to_string(data_dir.join(BASE_RUNS_FILE))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    rows.into_iter()
-        .filter(|r| r.outcome.code.is_some())
+    let poisoned = rows.iter().any(|r| is_environment_result(&r.outcome));
+    let cache = rows
+        .into_iter()
+        .filter(|r| r.outcome.code.is_some() && !is_environment_result(&r.outcome))
         .map(|r| ((r.base_sha, r.outcome.command.clone()), r.outcome))
-        .collect()
+        .collect();
+    if poisoned {
+        save_base_runs(data_dir, &cache);
+    }
+    cache
 }
 
 /// Writes the cache next to the other daemon state (best effort).
 fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutcome>) {
     let rows: Vec<StoredBaseRun> = cache
         .iter()
-        .filter(|(_, o)| o.code.is_some())
+        .filter(|(_, o)| o.code.is_some() && !timed_out_under_load(o) && !is_environment_result(o))
         .take(BASE_RUNS_KEPT)
         .map(|((sha, _), o)| StoredBaseRun {
             base_sha: sha.clone(),
@@ -320,10 +424,13 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
-/// same command on an unchanged base runs once. `Err` only when the checkout
-/// itself could not be made; the caller then knows nothing about the base.
+/// same command on an unchanged base runs once. Environment results and
+/// checkout errors get one retry in a fresh worktree and are never cached.
+/// `Err` when neither checkout could be made; nothing is known about the base.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
@@ -344,7 +451,10 @@ pub(super) async fn run_on_base(
             }
         }
     }
-    if !missing.is_empty() {
+    for attempt in 0..2 {
+        if missing.is_empty() || cancel.is_cancelled() {
+            break;
+        }
         let sandbox = app.settings.read().unwrap().sandbox;
         let scratch = app
             .data_dir
@@ -370,9 +480,16 @@ pub(super) async fn run_on_base(
             err => err,
         };
         let ran = match setup {
-            Ok(()) => {
-                Ok(run_verify_commands(&wt, run_dir, &missing, sandbox, base_sha, cancel).await)
-            }
+            Ok(()) => Ok(run_verify_commands(
+                CheckContext::new(app, task_id),
+                &wt,
+                run_dir,
+                &missing,
+                sandbox,
+                base_sha,
+                cancel,
+            )
+            .await),
             Err(e) => Err(format!("could not check out {base_sha}: {e}")),
         };
         let (repo_path, wt3) = (PathBuf::from(repo), wt.clone());
@@ -381,17 +498,28 @@ pub(super) async fn run_on_base(
             let _ = std::fs::remove_dir_all(&scratch);
         })
         .await;
-        let results = ran?;
         let cancelled = cancel.is_cancelled();
+        let results = match ran {
+            Ok(results) => results,
+            Err(_) if attempt == 0 && !cancelled => continue,
+            Err(e) if known.is_empty() => return Err(e),
+            Err(_) => break,
+        };
+        let mut retry = Vec::new();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
+            if is_environment_result(&r) {
+                retry.push(c.clone());
+                continue;
+            }
             // A timeout says nothing about the commit: never stored.
-            if !cancelled && r.code.is_some() {
+            if !cancelled && r.code.is_some() && !timed_out_under_load(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
             }
             known.insert(c.clone(), r);
         }
         save_base_runs(&app.data_dir, &cache);
+        missing = retry;
     }
     Ok(commands
         .iter()
@@ -401,11 +529,13 @@ pub(super) async fn run_on_base(
 
 /// The result of `command` on `base_sha`: the cache, else the in-flight
 /// background job of the same pair, else a job started now (its run folders
-/// under `run_dir`). `None` when the base cannot be checked out or the wait
-/// was cancelled: nothing is known then. `background` picks the lane of a job
-/// started here (see `start_base_jobs`).
+/// under `run_dir`). `None` after environment failures, when the base cannot
+/// be checked out or the wait was cancelled: nothing is known then.
+/// `background` picks the lane of a job started here (see `start_base_jobs`).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn base_result(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     command: &str,
@@ -415,6 +545,7 @@ pub(super) async fn base_result(
 ) -> Option<VerifyOutcome> {
     start_base_jobs(
         app,
+        task_id,
         repo,
         base_sha,
         &[command.to_string()],
@@ -435,17 +566,36 @@ pub(super) async fn failing_on_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
-    let base = base_result(
-        app,
-        &task.repo,
-        &task.base_sha,
-        &failed.command,
-        run_dir,
-        cancel,
-        true,
-    )
-    .await?;
-    base.code.is_some_and(|c| c != 0).then_some(base)
+    if timed_out_under_load(failed) {
+        return None;
+    }
+    let key = (task.base_sha.clone(), failed.command.clone());
+    let mut job = app
+        .final_base_jobs
+        .lock()
+        .unwrap()
+        .get(&task.id)
+        .and_then(|jobs| jobs.get(&key).cloned());
+    if job.is_none() {
+        let jobs = start_base_jobs(
+            app,
+            Some(&task.id),
+            &task.repo,
+            &task.base_sha,
+            std::slice::from_ref(&failed.command),
+            run_dir,
+            true,
+        );
+        job = jobs.get(&key).cloned();
+        app.final_base_jobs
+            .lock()
+            .unwrap()
+            .entry(task.id.clone())
+            .or_default()
+            .extend(jobs);
+    }
+    let base = wait_for_base_job(app, &task.base_sha, &failed.command, job, cancel).await?;
+    (base.code.is_some_and(|c| c != 0) && !timed_out_under_load(&base)).then_some(base)
 }
 
 /// A `verify` command that failed after the work was carried onto a moved
@@ -462,10 +612,14 @@ pub(super) async fn broken_by_the_new_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Option<VerifyOutcome> {
+    if timed_out_under_load(failed) {
+        return None;
+    }
     // A `verify` command: its lookups use the blocking lane, so a slow
     // background final of the same repo never holds them back.
     let on_new = base_result(
         app,
+        Some(&task.id),
         &task.repo,
         &task.base_sha,
         &failed.command,
@@ -474,9 +628,10 @@ pub(super) async fn broken_by_the_new_base(
         false,
     )
     .await
-    .filter(|b| b.code.is_some_and(|c| c != 0))?;
+    .filter(|b| b.code.is_some_and(|c| c != 0) && !timed_out_under_load(b))?;
     let on_old = base_result(
         app,
+        Some(&task.id),
         &task.repo,
         old_base,
         &failed.command,
@@ -514,7 +669,7 @@ pub(super) async fn wait_on_broken_base(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> BaseBreak {
     let command = failed.command.clone();
     let base_sha = task.base_sha.clone();
@@ -540,25 +695,34 @@ pub(super) async fn wait_on_broken_base(
         f.signature = format!("base:{command}");
     }
     *attempt_budget += 1;
-    task.question = Some(pre_existing_question(
-        std::slice::from_ref(base_run),
-        &base_sha,
-    ));
-    task.status = TaskStatus::Waiting;
-    task.updated_at = now_ms();
     let assumed = task.assumptions.len();
-    let Some(answer) = wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
-    else {
-        return BaseBreak::Stopped;
+    let already_retried = base_retry_requested(task, std::slice::from_ref(&command), &base_sha);
+    let answer = if already_retried {
+        PRE_EXISTING_RETRY.to_string()
+    } else {
+        task.question = Some(pre_existing_question(
+            std::slice::from_ref(base_run),
+            &base_sha,
+        ));
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        let Some(answer) =
+            wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+        else {
+            return BaseBreak::Stopped;
+        };
+        answer
     };
     let policy_answered = task.assumptions.len() > assumed;
-    record_owner_base_check(
-        task,
-        std::slice::from_ref(&command),
-        &base_sha,
-        &answer,
-        policy_answered,
-    );
+    if !already_retried {
+        record_owner_base_check(
+            task,
+            std::slice::from_ref(&command),
+            &base_sha,
+            &answer,
+            policy_answered,
+        );
+    }
     if is_option(&answer, PRE_EXISTING_DROP) {
         let settings = app.settings.read().unwrap().clone();
         let origin = origin_of_last_answer(task);
@@ -586,8 +750,10 @@ pub(super) async fn wait_on_broken_base(
         }
     }
     let wt = PathBuf::from(&task.worktree);
-    if !carry_after_base_moves(app, task, &wt, cancel, permit).await {
-        return BaseBreak::Stopped;
+    match carry_after_base_moves(app, task, &wt, pending_answer, cancel, permit).await {
+        BaseRetry::Ready => {}
+        BaseRetry::Conflict(detail) => record_failure(task, idx, FailureKind::Conflict, detail),
+        BaseRetry::Stopped => return BaseBreak::Stopped,
     }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
@@ -623,6 +789,8 @@ async fn lock_base_checks(
     }
 }
 
+pub(super) type BaseJobReceivers = HashMap<(String, String), watch::Receiver<bool>>;
+
 /// Starts one background job for the pairs of `commands` on `base_sha` that
 /// are neither cached nor in flight; their run folders go under `run_dir`
 /// (`preflight-base`, `preflight-base-retry`). The job is the run plus the
@@ -632,16 +800,18 @@ async fn lock_base_checks(
 /// end it: another task may wait on the same job), writes its results into
 /// `base_runs` and leaves `base_jobs` when done. A cancelled job caches
 /// nothing. `background` jobs (finals) take the repo's background lane,
-/// the others the blocking lane.
+/// the others the blocking lane. Returns receipts for new and in-flight jobs.
 pub(super) fn start_base_jobs(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
     run_dir: &Path,
     background: bool,
-) {
+) -> BaseJobReceivers {
     let mut todo: Vec<String> = Vec::new();
+    let mut receipts = HashMap::new();
     let (tx, rx) = watch::channel(false);
     {
         // Jobs first, then the cache: a job caches before it leaves the
@@ -650,16 +820,22 @@ pub(super) fn start_base_jobs(
         let cache = app.base_runs.lock().unwrap();
         for c in commands {
             let key = (base_sha.to_string(), c.clone());
-            if jobs.contains_key(&key) || cache.contains_key(&key) || todo.contains(c) {
+            if let Some(job) = jobs.get(&key) {
+                receipts.insert(key, job.clone());
                 continue;
             }
+            if cache.contains_key(&key) {
+                continue;
+            }
+            receipts.insert(key.clone(), rx.clone());
             jobs.insert(key, rx.clone());
             todo.push(c.clone());
         }
     }
     if todo.is_empty() {
-        return;
+        return receipts;
     }
+    let task_id = task_id.map(str::to_string);
     let (app, repo, base_sha, run_dir) = (
         app.clone(),
         repo.to_string(),
@@ -696,12 +872,23 @@ pub(super) fn start_base_jobs(
             todo: todo.clone(),
             tx,
         };
-        run_base_job(&app, &repo, &base_sha, &todo, &run_dir, background).await;
+        run_base_job(
+            &app,
+            task_id.as_deref(),
+            &repo,
+            &base_sha,
+            &todo,
+            &run_dir,
+            background,
+        )
+        .await;
     });
+    receipts
 }
 
 async fn run_base_job(
     app: &Arc<App>,
+    task_id: Option<&str>,
     repo: &str,
     base_sha: &str,
     commands: &[String],
@@ -712,9 +899,10 @@ async fn run_base_job(
     let Some(_alone) = lock_base_checks(app, repo, background, &cancel).await else {
         return;
     };
-    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0);
+    let fails = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0) && !timed_out_under_load(r);
     let Ok(first) = run_on_base(
         app,
+        task_id,
         repo,
         base_sha,
         commands,
@@ -738,9 +926,11 @@ async fn run_base_job(
         for c in &failed {
             cache.remove(&(base_sha.to_string(), c.clone()));
         }
+        save_base_runs(&app.data_dir, &cache);
     }
     let Ok(second) = run_on_base(
         app,
+        task_id,
         repo,
         base_sha,
         &failed,
@@ -753,15 +943,15 @@ async fn run_base_job(
     };
     let mut flaky = app.base_flaky.lock().unwrap();
     for c in &failed {
-        if second.iter().any(|r| &r.command == c && !fails(r)) {
+        if second.iter().any(|r| &r.command == c && r.code == Some(0)) {
             flaky.insert((base_sha.to_string(), c.clone()));
         }
     }
 }
 
 /// Waits for the in-flight job of the pair (if any), then reads the cache.
-/// `None`: the job was cancelled or could not check out the base, or `cancel`
-/// fired while waiting.
+/// `None`: the job was cancelled, hit an environment failure or could not
+/// check out the base, or `cancel` fired while waiting.
 async fn wait_for_base(
     app: &Arc<App>,
     base_sha: &str,
@@ -770,6 +960,16 @@ async fn wait_for_base(
 ) -> Option<VerifyOutcome> {
     let key = (base_sha.to_string(), command.to_string());
     let job = app.base_jobs.lock().unwrap().get(&key).cloned();
+    wait_for_base_job(app, base_sha, command, job, cancel).await
+}
+
+async fn wait_for_base_job(
+    app: &Arc<App>,
+    base_sha: &str,
+    command: &str,
+    job: Option<watch::Receiver<bool>>,
+    cancel: &CancelToken,
+) -> Option<VerifyOutcome> {
     if let Some(mut rx) = job {
         tokio::select! {
             // An `Err` is a dropped sender: the job is over either way.
@@ -777,7 +977,11 @@ async fn wait_for_base(
             _ = cancel.cancelled() => return None,
         }
     }
-    app.base_runs.lock().unwrap().get(&key).cloned()
+    app.base_runs
+        .lock()
+        .unwrap()
+        .get(&(base_sha.to_string(), command.to_string()))
+        .cloned()
 }
 
 /// Records on `task` the commands whose first base run failed and whose
@@ -819,11 +1023,20 @@ pub(super) async fn failing_twice_on_base(
         return Vec::new();
     }
     let dir = app.store.task_dir(&task.id);
-    start_base_jobs(app, &task.repo, &task.base_sha, &commands, &dir, false);
+    start_base_jobs(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &dir,
+        false,
+    );
     let mut failing = Vec::new();
     for c in &commands {
         if let Some(r) = wait_for_base(app, &task.base_sha, c, cancel).await {
-            if r.code.is_some_and(|code| code != 0) {
+            record_check_outcomes(app, task, std::slice::from_ref(&r));
+            if r.code.is_some_and(|code| code != 0) && !timed_out_under_load(&r) {
                 failing.push(r);
             }
         }
@@ -870,7 +1083,21 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         return;
     }
     let dir = app.store.task_dir(&task.id);
-    start_base_jobs(app, &task.repo, &task.base_sha, &commands, &dir, true);
+    let jobs = start_base_jobs(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &task.base_sha,
+        &commands,
+        &dir,
+        true,
+    );
+    app.final_base_jobs
+        .lock()
+        .unwrap()
+        .entry(task.id.clone())
+        .or_default()
+        .extend(jobs);
 }
 
 /// Baselines the checks that have none yet on the base commit, or on the
@@ -889,8 +1116,19 @@ pub(super) async fn baseline_on_base(
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
     let rev = task.work_base().to_string();
-    match run_on_base(app, &task.repo, &rev, &commands, &run_dir, cancel).await {
+    match run_on_base(
+        app,
+        Some(&task.id),
+        &task.repo,
+        &rev,
+        &commands,
+        &run_dir,
+        cancel,
+    )
+    .await
+    {
         Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
+            record_check_outcomes(app, task, &results);
             record_baselines(task, &todo, &results)
         }
         _ => false,
@@ -909,6 +1147,8 @@ pub(super) struct Amendment {
     pub screenshot: Option<String>,
     pub checks: Option<Vec<Check>>,
     pub held_out: Option<Option<Check>>,
+    pub depends_on: Option<Vec<String>>,
+    pub dependency_titles: Vec<String>,
 }
 
 impl Amendment {
@@ -937,6 +1177,9 @@ impl Amendment {
         if self.held_out.is_some() {
             names.push("heldOut");
         }
+        if self.depends_on.is_some() {
+            names.push("dependsOn");
+        }
         names
     }
 
@@ -951,10 +1194,13 @@ impl Amendment {
         self.screenshot = later.screenshot.or(self.screenshot.take());
         self.checks = later.checks.or(self.checks.take());
         self.held_out = later.held_out.or(self.held_out.take());
+        if later.depends_on.is_some() {
+            self.depends_on = later.depends_on;
+            self.dependency_titles = later.dependency_titles;
+        }
     }
 
-    /// Replaces the fields on `task` and adds the decision line: field
-    /// names only, so it can never carry a command or a held-out check.
+    /// Replaces the fields and records their names, plus dependency titles.
     pub fn apply(self, task: &mut Task) {
         let line = format!("Amended: {}", self.fields().join(", "));
         if let Some(v) = self.criteria {
@@ -979,6 +1225,20 @@ impl Amendment {
             task.held_out = valid_check(h, len);
         }
         task.decisions.push(line);
+        if let Some(deps) = self.depends_on {
+            task.depends_on = deps;
+            let waits = if self.dependency_titles.is_empty() {
+                "nothing".to_string()
+            } else {
+                self.dependency_titles
+                    .iter()
+                    .map(|title| format!("\"{title}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            task.decisions
+                .push(format!("Dependencies: waits for {waits}"));
+        }
         task.updated_at = now_ms();
     }
 }
@@ -1017,6 +1277,7 @@ mod tests {
             code: Some(code),
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         }
     }
 
@@ -1033,6 +1294,7 @@ mod tests {
             tokio::spawn(async move {
                 base_result(
                     &app,
+                    None,
                     "/no/such/repo",
                     "abc",
                     "npm run ci",
@@ -1065,6 +1327,7 @@ mod tests {
         let run_dir = dir.path().join("runs");
         let got = base_result(
             &app,
+            None,
             "/no/such/repo",
             "abc",
             "npm run ci",
@@ -1113,9 +1376,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_drop_leaves_the_check_and_the_failed_attempt_and_retries() {
-        let (app, _dir) = crate::engine::test_support::test_app();
+        let (app, dir) = crate::engine::test_support::test_app();
         app.settings.write().unwrap().answer_policy = false;
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::engine::test_support::init_git_repo(&repo);
+        let wt = dir.path().join("worktree");
+        let created = git::create_worktree(&repo, &task.branch, &wt, "HEAD").unwrap();
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.base_ref = git::branch_of(&repo, "HEAD");
+        crate::engine::test_support::git_in(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "fix base"],
+        );
+        let new_base = git::head_sha(&repo).unwrap();
         task.verify = vec!["npm run ci".into()];
         task.attempts = vec![crate::engine::test_support::attempt_with_failure(1, "x")];
         task.attempts[0].status = AttemptStatus::Failed;
@@ -1126,6 +1403,7 @@ mod tests {
             code: Some(1),
             tail: "boom".into(),
             ms: 1,
+            ..Default::default()
         };
         let pending: Arc<StdMutex<Option<oneshot::Sender<Reply>>>> = Arc::new(StdMutex::new(None));
         let cancel = CancelToken::new();
@@ -1137,7 +1415,10 @@ mod tests {
             loop {
                 let tx = pending.lock().unwrap().take();
                 if let Some(tx) = tx {
-                    app.agent_answers.lock().unwrap().insert(id.clone());
+                    app.agent_answers
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), AnsweredBy::Orchestrator);
                     tx.send(Reply {
                         text: PRE_EXISTING_DROP.to_string(),
                         default_evidence: None,
@@ -1148,22 +1429,29 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
-        let (end, ()) = tokio::join!(
-            wait_on_broken_base(
-                &app,
-                &id,
-                &mut task,
-                0,
-                &failed,
-                &failed,
-                &mut budget,
-                &pending,
-                &cancel,
-                &mut permit,
-            ),
-            deliver
-        );
+        let (end, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                wait_on_broken_base(
+                    &app,
+                    &id,
+                    &mut task,
+                    0,
+                    &failed,
+                    &failed,
+                    &mut budget,
+                    &pending,
+                    &cancel,
+                    &mut permit,
+                ),
+                deliver
+            )
+        })
+        .await
+        .expect("a refused drop must retry on the moved base without another owner answer");
         assert!(matches!(end, BaseBreak::Retry));
+        assert_eq!(task.base_sha, new_base);
+        assert_eq!(git::head_sha(&wt).unwrap(), new_base);
+        assert!(task.question.is_none());
         assert_eq!(task.verify, vec!["npm run ci".to_string()]);
         assert_eq!(task.attempts[0].status, AttemptStatus::Failed);
         assert!(task.attempts[0].failure.is_some());
@@ -1248,6 +1536,7 @@ mod tests {
             code: Some(1),
             tail: "tail".into(),
             ms: 1,
+            ..Default::default()
         };
         let q = pre_existing_question(&[failed], sha);
         crate::engine::answer_policy::record_answered_question(
@@ -1263,6 +1552,38 @@ mod tests {
             "Orchestrator: base check npm test on 0123456 -> keep all"
         );
         assert!(base_check_answered(&task, "npm test", sha));
+    }
+
+    #[test]
+    fn every_answerer_records_a_retry_on_the_exact_base() {
+        let sha = "0123456789abcdef";
+        let commands = ["npm test".to_string()];
+        for who in [
+            AnsweredBy::Owner,
+            AnsweredBy::Orchestrator,
+            AnsweredBy::Policy,
+        ] {
+            let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+            task.base_sha = sha.to_string();
+            let question = pre_existing_question(
+                &[VerifyOutcome {
+                    command: commands[0].clone(),
+                    code: Some(1),
+                    tail: "failed".to_string(),
+                    ms: 1,
+                    ..Default::default()
+                }],
+                sha,
+            );
+            record_answered_question(&mut task, &question, PRE_EXISTING_RETRY, who);
+            assert!(base_retry_requested(&task, &commands, sha));
+            assert!(!base_retry_requested(&task, &commands, "0123456ffff"));
+            assert!(!base_retry_requested(
+                &task,
+                &["npm run lint".to_string()],
+                sha
+            ));
+        }
     }
 
     #[test]
@@ -1299,5 +1620,24 @@ mod tests {
         assert!(target_in_plan_path("src/new/a.rs", "src/**"));
         assert!(target_in_plan_path("src/new/*.rs", "src/new/a.rs"));
         assert!(!target_in_plan_path("tests/a.rs", "src/new"));
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[test]
+    fn a_retry_of_a_longer_command_does_not_cover_its_prefix_command() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.decisions.push(base_check_line(
+            "Lead",
+            "check on target",
+            &task.base_sha,
+            PRE_EXISTING_RETRY,
+        ));
+        assert!(non_owner_base_retry(&task, "check on target", None));
+        assert!(!non_owner_base_retry(&task, "check", None));
+        assert!(!non_owner_base_retry(&task, "check", Some(&task.base_sha)));
     }
 }

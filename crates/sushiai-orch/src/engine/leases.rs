@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashSet;
 
 /// One task's claim on files of its repo and base branch. Kept in memory:
 /// a claim is only valid while the task's loop is live (or it waits to land),
@@ -74,15 +73,15 @@ impl App {
     /// Drops the claims of tasks whose loop ended: the task landed, stopped
     /// or failed. A task waiting to land keeps its claim without a loop.
     fn prune_leases(&self, leases: &mut HashMap<String, Lease>) {
-        let live: HashSet<String> = self.controls.lock().unwrap().keys().cloned().collect();
-        leases.retain(|id, _| {
-            live.contains(id)
-                || self
-                    .store
-                    .load_task(id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|t| t.status == TaskStatus::Landing && !t.archived)
+        let controls = self.controls.lock().unwrap();
+        leases.retain(|id, _| match controls.get(id) {
+            Some(ctrl) => !ctrl.cancel.is_cancelled(),
+            None => self
+                .store
+                .load_task(id)
+                .ok()
+                .flatten()
+                .is_some_and(|t| t.status == TaskStatus::Landing && !t.archived),
         });
     }
 
@@ -134,6 +133,17 @@ impl App {
     pub(super) fn acquire_lease(&self, task: &Task, force: bool) -> Option<Held> {
         let mut leases = self.leases.lock().unwrap();
         self.prune_leases(&mut leases);
+        if self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&task.id)
+            .map_or(task.status == TaskStatus::Stopped, |ctrl| {
+                ctrl.cancel.is_cancelled()
+            })
+        {
+            return None;
+        }
         let key = scope(task);
         if !force {
             if let Some(held) = self.conflict_in(&leases, &task.id, &key, &task.paths) {
@@ -150,9 +160,20 @@ impl App {
     /// `hook.edit`: `Some` when another live task on the same base holds
     /// `file`; otherwise the file joins the caller's own lease.
     pub(super) fn lease_file(&self, task_id: &str, file: &str) -> Option<Held> {
-        let task = self.store.load_task(task_id).ok().flatten()?;
         let mut leases = self.leases.lock().unwrap();
         self.prune_leases(&mut leases);
+        let task = self.store.load_task(task_id).ok().flatten()?;
+        if self
+            .controls
+            .lock()
+            .unwrap()
+            .get(task_id)
+            .map_or(task.status == TaskStatus::Stopped, |ctrl| {
+                ctrl.cancel.is_cancelled()
+            })
+        {
+            return None;
+        }
         let key = scope(&task);
         let wanted = [file.to_string()];
         if let Some(held) = self.conflict_in(&leases, task_id, &key, &wanted) {

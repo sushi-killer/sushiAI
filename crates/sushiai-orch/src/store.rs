@@ -111,7 +111,7 @@ impl Store {
     /// (if still alive -- the child was `setsid()`ed, so it survives the
     /// daemon's own death and would otherwise run forever unsupervised),
     /// delete its leftover per-run API key file if any, then mark the
-    /// attempt `interrupted` and the task `stopped`, per spec step 10.
+    /// attempt `interrupted` and requeue its task unless already `stopped`.
     /// `settle(task, idx)` runs on each such attempt once its process is
     /// gone (the engine counts the spend it left in `events.jsonl`).
     /// Returns the tasks that were mutated.
@@ -155,12 +155,12 @@ impl Store {
                     }
                 }
             }
-            // A running attempt at startup means the daemon died under it (an
-            // owner's stop marks its attempt interrupted right away), so the
-            // task is queued again and resumes, rather than waiting for the
-            // owner to notice and press Start.
+            // Resume interrupted work unless the owner already stopped the task
+            // before its attempt had time to wind down.
             if interrupted {
-                task.status = TaskStatus::Queued;
+                if task.status != TaskStatus::Stopped {
+                    task.status = TaskStatus::Queued;
+                }
                 task.updated_at = crate::model::now_ms();
                 self.save_task(&task)?;
                 recovered.push(task);

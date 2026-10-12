@@ -19,7 +19,7 @@ impl From<&str> for Reply {
     }
 }
 
-/// How many times the orchestrator may extend a task's budget on its own
+/// How many times non-owner sessions may extend a task's budget on their own
 /// before "attempts keep failing" goes to the owner: enough to push past a
 /// fixable failure or a wrong review finding, not enough to burn the
 /// budget in a loop.
@@ -37,7 +37,7 @@ pub(super) async fn wait_for_exhausted_answer(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
     let asked = task.question.clone();
     if let Some(text) = try_policy_answer(app, task, cancel).await {
@@ -47,11 +47,7 @@ pub(super) async fn wait_for_exhausted_answer(
             shown: asked,
         });
     }
-    let continues = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-        .count();
+    let continues = non_owner_continues(task);
     if continues < MAX_ORCHESTRATOR_CONTINUES {
         wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
     } else {
@@ -60,7 +56,7 @@ pub(super) async fn wait_for_exhausted_answer(
             .await
             .map(|text| Answered {
                 text,
-                by_owner: !app.take_agent_answer(task_id),
+                by_owner: app.take_agent_answer(task_id).is_none(),
                 shown,
             })
     }
@@ -167,7 +163,7 @@ pub(super) async fn wait_for_answer(
     task: &mut Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
@@ -191,7 +187,7 @@ async fn park_for_answer(
     task: &mut Task,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     // A task waiting for its owner holds no slot: parallel limits running
     // agents, not open questions.
@@ -216,35 +212,38 @@ async fn park_for_answer(
     let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
     let result = reply.map(|r| r.text);
     match &result {
-        // The caller keeps using (and later saves) its own copy, so the
-        // transition is applied to it rather than to a fresh load -- a
-        // stale copy used to overwrite it with the question still set.
+        // Keep the caller's copy in sync with either transition so its
+        // next save cannot restore the open question.
         Some(answer) => {
-            // The chat or an MCP client answered: an orchestrator line, which
-            // also counts toward the continue cap. Peeked, not taken: the
-            // caller reads it again to decide `by_owner`.
-            let by_agent = app.agent_answers.lock().unwrap().contains(task_id);
+            // Peeked: the caller reads it again to decide `by_owner`.
+            let caller = app
+                .agent_answers
+                .lock()
+                .unwrap()
+                .get(task_id)
+                .copied()
+                .unwrap_or(AnsweredBy::Owner);
             let question = task.question.take();
-            record_answer_for(
-                task,
-                question.as_ref(),
-                answer,
-                by_agent,
-                evidence.as_deref(),
-            );
+            record_answer_for(task, question.as_ref(), answer, caller, evidence.as_deref());
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
             let _ = app.store.save_task(task);
             app.broadcast_task(task);
         }
         None => {
-            if let Ok(Some(mut task)) = app.store.load_task(task_id) {
+            if let Ok(Some(saved)) = app.store.load_task(task_id) {
+                *task = saved;
                 let next = app.cancelled_status(&task.status);
-                if task.status != next {
+                let changed =
+                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
+                if next == TaskStatus::Stopped {
+                    app.close_stopped_task(task);
+                }
+                if changed {
                     task.status = next;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
-                    app.broadcast_task(&task);
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
                 }
             }
         }
@@ -263,34 +262,43 @@ pub(super) fn answer_line_question(q: &Question) -> &str {
     }
 }
 
-/// Records a parked question's answer: the owner's, or the orchestrator
-/// agent's (an `Orchestrator:` decision line and an orchestrator-answered
-/// question, which count toward the triage and continue bounds).
+/// Counts chat, overseer and lead extensions of the attempt budget,
+/// including legacy orchestrator lines.
+pub(super) fn non_owner_continues(task: &Task) -> usize {
+    task.decisions
+        .iter()
+        .filter(|d| {
+            d.starts_with(EXHAUSTED_ANSWER_PREFIX)
+                || d.starts_with("Lead: Attempts keep failing -> ")
+        })
+        .count()
+}
+
+/// Records a parked question's answer and its caller.
 pub(super) fn record_answer(
     task: &mut Task,
     question: Option<&Question>,
     answer: &str,
-    by_agent: bool,
+    caller: AnsweredBy,
 ) {
-    // An answer to "attempts keep failing" starts the limit pauses afresh.
     if question.is_some_and(|q| q.kind == QuestionKind::AttemptsFailing) {
         task.queue.rate_pauses = 0;
     }
-    match (question, by_agent) {
-        (Some(q), true) => {
-            task.decisions.push(orchestrator_answer_line(
-                answer_line_question(q),
-                answer,
-                "answered by the orchestrator agent",
-            ));
-            record_answered_question(task, q, answer, AnsweredBy::Orchestrator);
+    let text = question.map(answer_line_question).unwrap_or_default();
+    let line = match caller {
+        AnsweredBy::Owner => format!("Owner: {answer}"),
+        AnsweredBy::Lead if answer.trim().eq_ignore_ascii_case("stop") => "Lead: stop".into(),
+        AnsweredBy::Lead => format!("Lead: {text} -> {answer} (answered by a lead session)"),
+        AnsweredBy::Overseer => orchestrator_answer_line(text, answer, "answered by the overseer"),
+        AnsweredBy::Orchestrator => {
+            orchestrator_answer_line(text, answer, "answered by the orchestrator agent")
         }
-        (q, _) => {
-            task.decisions.push(format!("Owner: {answer}"));
-            if let Some(q) = q {
-                record_answered_question(task, q, answer, AnsweredBy::Owner);
-            }
-        }
+        AnsweredBy::Policy => policy_answer_line(text, answer, "policy", ""),
+        AnsweredBy::Judge => policy_answer_line(text, answer, "judge", ""),
+    };
+    task.decisions.push(line);
+    if let Some(q) = question {
+        record_answered_question(task, q, answer, caller);
     }
 }
 
@@ -300,7 +308,7 @@ pub(super) fn record_answer_for(
     task: &mut Task,
     question: Option<&Question>,
     answer: &str,
-    by_agent: bool,
+    caller: AnsweredBy,
     default_evidence: Option<&str>,
 ) {
     match (question, default_evidence) {
@@ -308,14 +316,13 @@ pub(super) fn record_answer_for(
             let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
             record_policy_answer(task, q, answer, "policy", evidence, attempt_n);
         }
-        _ => record_answer(task, question, answer, by_agent),
+        _ => record_answer(task, question, answer, caller),
     }
 }
 
 impl App {
-    /// Whether the answer that just arrived for `task_id` came from the chat
-    /// or an MCP client rather than the app; clears the mark.
-    pub(super) fn take_agent_answer(&self, task_id: &str) -> bool {
+    /// Takes the non-owner caller of the answer that just arrived.
+    pub(super) fn take_agent_answer(&self, task_id: &str) -> Option<AnsweredBy> {
         self.agent_answers.lock().unwrap().remove(task_id)
     }
 }
@@ -616,7 +623,7 @@ pub(super) async fn wait_for_answer_with_triage(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
@@ -635,7 +642,7 @@ async fn wait_for_triaged_answer(
     idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
     let question = task.question.clone().unwrap_or_else(|| {
         Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
@@ -741,7 +748,7 @@ async fn wait_for_triaged_answer(
         .await
         .map(|text| Answered {
             text,
-            by_owner: !app.take_agent_answer(task_id),
+            by_owner: app.take_agent_answer(task_id).is_none(),
             shown,
         })
 }
@@ -767,7 +774,7 @@ pub(super) async fn ask_plan_question_with_triage(
     keep_text: bool,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
     let asked = Question::new(
         question_text,
@@ -985,11 +992,14 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
-        app.agent_answers.lock().unwrap().insert(id.clone());
+        app.agent_answers
+            .lock()
+            .unwrap()
+            .insert(id.clone(), AnsweredBy::Orchestrator);
         tx.send("continue".into()).unwrap();
         let (answered, task) = parked.await.unwrap();
         assert_eq!(answered.as_deref(), Some("continue"));
-        assert!(app.take_agent_answer(&id));
+        assert_eq!(app.take_agent_answer(&id), Some(AnsweredBy::Orchestrator));
         assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
         assert_eq!(
             task.decisions
@@ -1027,7 +1037,7 @@ mod tests {
         app.store.save_task(&task).unwrap();
         let q = task.question.clone();
         for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
-            record_answer(&mut task, q.as_ref(), "continue", true);
+            record_answer(&mut task, q.as_ref(), "continue", AnsweredBy::Orchestrator);
         }
         assert_eq!(
             task.decisions
@@ -1059,5 +1069,146 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("own branch"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    async fn wait_until_parked(events: &mut broadcast::Receiver<Event>, id: &str) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Event::Task { task } = events.recv().await.unwrap() {
+                    if task.id == id && task.status == TaskStatus::Waiting {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_parked_loop_records_each_real_caller() {
+        for (source, expected) in [
+            (None, AnsweredBy::Owner),
+            (Some("lead"), AnsweredBy::Lead),
+            (Some("mcp"), AnsweredBy::Lead),
+            (Some("overseer"), AnsweredBy::Overseer),
+            (Some("chat"), AnsweredBy::Orchestrator),
+            (Some("policy"), AnsweredBy::Policy),
+        ] {
+            let (app, _dir) = test_app();
+            app.settings.write().unwrap().answer_policy = false;
+            let mut task = task_with_status(TaskStatus::Waiting);
+            task.question = Some(Question::new(
+                "Which way?",
+                vec!["B".into()],
+                QuestionKind::AgentQuestion,
+                AskedBy::Implement,
+            ));
+            let id = task.id.clone();
+            let pending = Arc::new(StdMutex::new(None));
+            let cancel = CancelToken::new();
+            app.controls.lock().unwrap().insert(
+                id.clone(),
+                TaskControl {
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: Arc::new(StdMutex::new(None)),
+                    handle: tokio::spawn(async {}),
+                },
+            );
+            let mut events = app.subscribe();
+            let loop_app = app.clone();
+            let waiter = tokio::spawn(async move {
+                let id = task.id.clone();
+                let reply =
+                    wait_for_answer(&loop_app, &id, &mut task, &pending, &cancel, &mut None).await;
+                assert_eq!(reply.as_deref(), Some("B"));
+                task
+            });
+            wait_until_parked(&mut events, &id).await;
+            let mut params = json!({"id": id, "answer": "B"});
+            if let Some(source) = source {
+                params["source"] = json!(source);
+            }
+            if expected == AnsweredBy::Policy {
+                params["evidence"] = json!("SLA elapsed");
+            }
+            app.handle_task_answer(params).await.unwrap();
+            let task = waiter.await.unwrap();
+            assert_eq!(task.question_history.len(), 1);
+            assert_eq!(task.question_history[0].answered_by, expected);
+            if expected == AnsweredBy::Lead {
+                assert!(task
+                    .decisions
+                    .contains(&"Lead: Which way? -> B (answered by a lead session)".to_string()));
+            }
+            if expected != AnsweredBy::Owner {
+                assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+            }
+            assert!(app.agent_answers.lock().unwrap().is_empty());
+            app.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parked_plan_answer_records_the_lead_and_planner_context_keeps_it() {
+        let (app, _dir) = test_app();
+        let task = task_with_status(TaskStatus::Drafting);
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        let mut events = app.subscribe();
+        let loop_app = app.clone();
+        let loop_id = id.clone();
+        let waiter = tokio::spawn(async move {
+            ask_plan_question(
+                &loop_app,
+                &loop_id,
+                "Which plan?",
+                vec!["B".into()],
+                &pending,
+                &cancel,
+                &mut None,
+            )
+            .await
+        });
+        wait_until_parked(&mut events, &id).await;
+        app.handle_task_answer(json!({"id": id, "answer": "B", "source": "lead"}))
+            .await
+            .unwrap();
+        assert_eq!(waiter.await.unwrap().as_deref(), Some("B"));
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.question_history[0].answered_by, AnsweredBy::Lead);
+        assert!(task
+            .decisions
+            .contains(&"Lead: Which plan? -> B (answered by a lead session)".to_string()));
+        assert!(subtask_request(&task, "Build it").contains("Lead: Which plan? -> B"));
+        assert_eq!(app.take_agent_answer(&id), Some(AnsweredBy::Lead));
+        app.shutdown();
+    }
+
+    #[test]
+    fn lead_answers_trigger_the_triage_guard_but_stop_and_owner_lines_do_not() {
+        assert!(is_orchestrator_answer_decision(
+            "Lead: q -> a (answered by a lead session)"
+        ));
+        assert!(!is_orchestrator_answer_decision("Lead: stop"));
+        assert!(!is_orchestrator_answer_decision("Owner: q -> a"));
+        assert!(!is_orchestrator_answer_decision(&no_planner_tier_line("r")));
     }
 }

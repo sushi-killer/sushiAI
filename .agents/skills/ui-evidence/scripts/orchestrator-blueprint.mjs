@@ -242,7 +242,9 @@ try {
   for (const stage of ["Advisor", "Implement", "Checks"]) {
     await page
       .locator(".bp-flow .bp-node, .bp-branch .bp-node")
-      .filter({ hasText: stage })
+      .filter({
+        has: page.locator(".bp-node-label").getByText(stage, { exact: true }),
+      })
       .first()
       .click();
   }

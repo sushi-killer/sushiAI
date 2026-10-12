@@ -425,7 +425,7 @@ fn landed_entry(dep: &Task) -> String {
     let decisions: Vec<&String> = dep
         .decisions
         .iter()
-        .filter(|d| d.starts_with("Agent:") || d.starts_with("Owner:"))
+        .filter(|d| d.starts_with("Agent:") || d.starts_with("Owner:") || d.starts_with("Lead:"))
         .collect();
     let skip = decisions.len().saturating_sub(LANDED_DECISIONS_MAX);
     if !decisions[skip..].is_empty() {
@@ -1650,12 +1650,12 @@ pub fn dropped_findings_block(dropped: &[(String, String)]) -> String {
 }
 
 /// The attempt's own report decisions as `Agent: ...` lines: a leading
-/// `Owner:`/`Agent:` the agent echoed is stripped before the prefix is added.
+/// `Owner:`/`Lead:`/`Agent:` the agent echoed is stripped before the prefix is added.
 pub fn agent_decision_lines(decisions: &[String]) -> Vec<String> {
     decisions
         .iter()
         .map(|d| {
-            let cleaned = ["Owner:", "Agent:"]
+            let cleaned = ["Owner:", "Lead:", "Agent:"]
                 .iter()
                 .find_map(|p| d.strip_prefix(p))
                 .map(|s| s.trim_start())
@@ -2213,6 +2213,19 @@ pub(crate) fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::model::{Failure, FailureKind, Harness, Stage, TaskStatus, Tier, Verdict};
+
+    mod answer_caller_tests {
+        use super::*;
+
+        #[test]
+        fn lead_decisions_are_kept_in_dependency_briefs_and_the_echoed_prefix_is_stripped() {
+            let mut task = sample_task();
+            task.decisions = vec!["Lead: q -> a (answered by a lead session)".into()];
+            assert!(landed_entry(&task).contains(&task.decisions[0]));
+            assert!(build_brief(&task, "", "").contains(&task.decisions[0]));
+            assert_eq!(agent_decision_lines(&["Lead: a".into()]), ["Agent: a"]);
+        }
+    }
 
     fn sample_task() -> Task {
         Task {
@@ -3676,6 +3689,7 @@ mod tests {
             code,
             tail: String::new(),
             ms: 1,
+            ..Default::default()
         };
         let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], None, "");
         assert!(failed.contains("`vacuous-cmd` already passed on the base, so it is not grounded"));
@@ -3697,6 +3711,7 @@ mod tests {
                 code,
                 tail: String::new(),
                 ms: 1,
+                ..Default::default()
             };
             let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
             let result =

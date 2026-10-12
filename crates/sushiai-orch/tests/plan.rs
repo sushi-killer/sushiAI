@@ -750,7 +750,6 @@ fn a_parent_drafted_part_keeps_its_drafted_checks_and_held_out() {
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "build the part",
-            "variant": {"groundedChecks": true},
             "start": true,
         }),
     );

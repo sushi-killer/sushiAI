@@ -1,7 +1,7 @@
 use super::*;
 
-/// `settings.verifyTimeoutSecs`, set when the daemon starts and on every
-/// `settings.set`; the verify runners are free functions with no `App`.
+/// Worktree setup uses this timeout; check runners read their App settings.
+/// Updated at daemon start and on every `settings.set`.
 static VERIFY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1200);
 
 /// The most the Stop hook waits for verify: under Claude's 600 s hook limit.
@@ -282,7 +282,88 @@ pub(super) fn filter_scoped_planned(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CheckContext<'a> {
+    app: &'a App,
+    task_id: Option<&'a str>,
+    label: Option<&'a str>,
+}
+
+impl<'a> CheckContext<'a> {
+    pub(super) fn new(app: &'a App, task_id: Option<&'a str>) -> Self {
+        Self {
+            app,
+            task_id,
+            label: None,
+        }
+    }
+
+    fn decision(&self, mut line: String, lines: &mut Vec<String>) {
+        let mut stored = self
+            .task_id
+            .and_then(|id| self.app.store.load_task(id).ok().flatten());
+        if let Some(held) = stored
+            .as_ref()
+            .and_then(|task| task.held_out.as_ref())
+            .filter(|held| !held.run.is_empty())
+        {
+            line = line.replace(&held.run, &brief::held_out_label(held.criterion));
+        }
+        lines.push(line.clone());
+        if let Some(id) = self.task_id {
+            {
+                let controls = self.app.controls.lock().unwrap();
+                if controls.contains_key(id) {
+                    self.app
+                        .check_decisions
+                        .lock()
+                        .unwrap()
+                        .entry(id.to_string())
+                        .or_default()
+                        .push(line.clone());
+                }
+            }
+            if let Some(task) = stored.as_mut() {
+                record_skips(task, vec![line]);
+                task.updated_at = now_ms();
+                let _ = self.app.store.save_task(task);
+                self.app.broadcast_task(task);
+            }
+        }
+    }
+}
+
+pub(super) fn record_check_outcomes(app: &App, task: &mut Task, results: &[VerifyOutcome]) {
+    let mut lines = app
+        .check_decisions
+        .lock()
+        .unwrap()
+        .remove(&task.id)
+        .unwrap_or_default();
+    lines.extend(results.iter().flat_map(|r| r.decisions.iter().cloned()));
+    record_skips(task, lines);
+}
+
+pub(super) fn machine_load() -> (f64, u32) {
+    let mut load = 0.0;
+    // getloadavg writes at most one double into this buffer.
+    unsafe {
+        libc::getloadavg(&mut load, 1);
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    (load, cores)
+}
+
+pub(super) fn timed_out_under_load(outcome: &VerifyOutcome) -> bool {
+    outcome.load_timeout
+        || (outcome.code.is_none()
+            && outcome.tail.starts_with("timed out after ")
+            && outcome.cores > 0
+            && outcome.load >= f64::from(outcome.cores))
+}
+
 pub(super) async fn run_verify_commands(
+    ctx: CheckContext<'_>,
     cwd: &Path,
     run_dir: &Path,
     commands: &[String],
@@ -293,11 +374,13 @@ pub(super) async fn run_verify_commands(
     let allow_write = verify_allow_write_paths(cwd, run_dir);
     let mut results = Vec::new();
     for cmd in commands {
+        let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
         results.push(
             run_one_verify_command(
+                ctx,
                 cwd,
                 cmd,
-                verify_timeout(),
+                timeout,
                 sandbox,
                 &allow_write,
                 base_sha,
@@ -312,15 +395,20 @@ pub(super) async fn run_verify_commands(
 /// Grades an eval task: runs its set's `check` from the root of a throwaway
 /// detached worktree at `sha` (never the task's own), with the verify timeout.
 pub(super) async fn run_eval_check(
+    ctx: CheckContext<'_>,
     repo: &Path,
     run_dir: &Path,
     sha: &str,
     cmd: &str,
     sandbox: SandboxMode,
     cancel: &CancelToken,
-) -> EvalCheck {
+) -> VerifyOutcome {
     let path = run_dir.join("eval-check");
-    let failed = |tail: String| EvalCheck { code: None, tail };
+    let failed = |tail: String| VerifyOutcome {
+        command: cmd.into(),
+        tail,
+        ..Default::default()
+    };
     let (r, p, s) = (repo.to_path_buf(), path.clone(), sha.to_string());
     let made = tokio::task::spawn_blocking(move || {
         git::remove_worktree(&r, &p);
@@ -338,22 +426,12 @@ pub(super) async fn run_eval_check(
         return failed(e);
     }
     let allow_write = verify_allow_write_paths(&path, run_dir);
-    let out = run_one_verify_command(
-        &path,
-        cmd,
-        verify_timeout(),
-        sandbox,
-        &allow_write,
-        sha,
-        cancel,
-    )
-    .await;
+    let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
+    let out =
+        run_one_verify_command(ctx, &path, cmd, timeout, sandbox, &allow_write, sha, cancel).await;
     let (r, p) = (repo.to_path_buf(), path);
     let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
-    EvalCheck {
-        code: out.code,
-        tail: out.tail,
-    }
+    out
 }
 
 /// Cached by a hash of `git diff <base>` + the untracked-file list: if
@@ -382,7 +460,16 @@ pub(super) async fn run_verify_cached(
         }
     }
     let sandbox = app.settings.read().unwrap().sandbox;
-    let results = run_verify_commands(worktree, run_dir, commands, sandbox, base, cancel).await;
+    let results = run_verify_commands(
+        CheckContext::new(app, Some(task_id)),
+        worktree,
+        run_dir,
+        commands,
+        sandbox,
+        base,
+        cancel,
+    )
+    .await;
     app.verify_cache
         .lock()
         .unwrap()
@@ -673,6 +760,12 @@ const INTERNAL_ERROR_PREFIX: &str = "internal error: ";
 /// How a check ran on the base checkout. `None` for a cancel, which aborts
 /// the baseline instead of classifying anything.
 pub(super) fn classify_baseline(outcome: &VerifyOutcome) -> Option<Baseline> {
+    if outcome.tail == CANCELLED_TAIL {
+        return None;
+    }
+    if outcome.code != Some(0) && timed_out_under_load(outcome) {
+        return Some(Baseline::Env);
+    }
     match outcome.code {
         Some(0) => Some(Baseline::Pass),
         Some(126 | 127) => Some(Baseline::Env),
@@ -710,6 +803,7 @@ pub(super) async fn baseline_checks(
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let sandbox = app.settings.read().unwrap().sandbox;
     let results = run_verify_commands(
+        CheckContext::new(app, Some(task_id)),
         worktree,
         &app.store.task_dir(task_id),
         &commands,
@@ -723,6 +817,7 @@ pub(super) async fn baseline_checks(
     if cancel.is_cancelled() {
         return false;
     }
+    record_check_outcomes(app, task, &results);
     record_baselines(task, &todo, &results)
 }
 
@@ -814,7 +909,9 @@ pub(super) fn gated_held_out(task: &Task) -> Option<Check> {
 /// Runs the held-out check and returns its outcome with the command scrubbed
 /// out of the command field and the tail, plus the failure detail when it
 /// did not exit 0.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_held_out(
+    ctx: CheckContext<'_>,
     task: &Task,
     check: &Check,
     worktree: &Path,
@@ -822,7 +919,13 @@ pub(super) async fn run_held_out(
     sandbox: SandboxMode,
     cancel: &CancelToken,
 ) -> (VerifyOutcome, Option<String>) {
+    let label = brief::held_out_label(check.criterion);
+    let ctx = CheckContext {
+        label: Some(&label),
+        ..ctx
+    };
     let mut result = run_verify_commands(
+        ctx,
         worktree,
         run_dir,
         std::slice::from_ref(&check.run),
@@ -859,7 +962,9 @@ pub(super) async fn run_held_out(
 /// run from `cwd` are stopped too -- a bare `tokio::time::timeout` around `Command::output()`
 /// only stops *waiting*, it never touches the still-running process (or any
 /// children it spawned), which is the bug this replaces.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_one_verify_command(
+    ctx: CheckContext<'_>,
     cwd: &Path,
     cmd: &str,
     timeout: Duration,
@@ -868,6 +973,95 @@ pub(super) async fn run_one_verify_command(
     base_sha: &str,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
+    let mut decisions = Vec::new();
+    let mut load_detail = None;
+    for attempt in 0..2 {
+        // The only check-slot acquire site: every retry queues afresh, and
+        // waiting never spends the command's execution timeout.
+        let permit = match ctx.app.check_slots.clone().try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                let (running, limit) = ctx.app.check_slots.usage();
+                ctx.decision(
+                    format!(
+                        "Orchestrator: waiting for a check slot ({running} of {limit}): {}",
+                        ctx.label.unwrap_or(cmd)
+                    ),
+                    &mut decisions,
+                );
+                tokio::select! {
+                    p = ctx.app.check_slots.clone().acquire_owned() => p.ok(),
+                    _ = cancel.cancelled() => None,
+                }
+            }
+        };
+        let Some(permit) = permit else {
+            return VerifyOutcome {
+                command: cmd.into(),
+                tail: CANCELLED_TAIL.into(),
+                decisions,
+                ..Default::default()
+            };
+        };
+        if cancel.is_cancelled() {
+            return VerifyOutcome {
+                command: cmd.into(),
+                tail: CANCELLED_TAIL.into(),
+                decisions,
+                ..Default::default()
+            };
+        }
+        let mut result = execute_verify_command(
+            ctx,
+            cwd,
+            cmd,
+            timeout,
+            sandbox,
+            allow_write,
+            base_sha,
+            cancel,
+        )
+        .await;
+        drop(permit);
+        if attempt == 0 && timed_out_under_load(&result) {
+            let detail = format!(
+                "{}: {} ms, timed out under load {:.2} on {} cores",
+                ctx.label.unwrap_or(cmd),
+                result.ms,
+                result.load,
+                result.cores
+            );
+            ctx.decision(
+                format!("Orchestrator: {detail} (environment); rerun once on the same tree"),
+                &mut decisions,
+            );
+            load_detail = Some(detail);
+            continue;
+        }
+        if let Some(detail) = load_detail {
+            result.load_timeout = true;
+            if result.code != Some(0) && result.tail != CANCELLED_TAIL {
+                result.tail = format!("{detail}\nRerun: {}", result.tail);
+            }
+        }
+        result.decisions = decisions;
+        return result;
+    }
+    unreachable!("one initial run and at most one retry")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_verify_command(
+    ctx: CheckContext<'_>,
+    cwd: &Path,
+    cmd: &str,
+    timeout: Duration,
+    sandbox: SandboxMode,
+    allow_write: &[PathBuf],
+    base_sha: &str,
+    cancel: &CancelToken,
+) -> VerifyOutcome {
+    let (load, cores) = (ctx.app.check_load.read().unwrap())();
     let start = std::time::Instant::now();
     let mut command = build_verify_command(cwd, cmd, sandbox, allow_write, base_sha);
     let mut child = match command.spawn() {
@@ -878,6 +1072,9 @@ pub(super) async fn run_one_verify_command(
                 code: None,
                 tail: format!("{SPAWN_FAILED_PREFIX}{e}"),
                 ms: start.elapsed().as_millis() as u64,
+                load,
+                cores,
+                ..Default::default()
             };
         }
     };
@@ -900,31 +1097,22 @@ pub(super) async fn run_one_verify_command(
         let dir = cwd.to_path_buf();
         let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
     }
-    match outcome {
-        Outcome::Done(Ok((status, out_buf, err_buf))) => VerifyOutcome {
-            command: cmd.to_string(),
-            code: status.code(),
-            tail: verify_tail(&out_buf, &err_buf),
-            ms: start.elapsed().as_millis() as u64,
-        },
-        Outcome::Done(Err(e)) => VerifyOutcome {
-            command: cmd.to_string(),
-            code: None,
-            tail: format!("{INTERNAL_ERROR_PREFIX}{e}"),
-            ms: start.elapsed().as_millis() as u64,
-        },
-        Outcome::TimedOut => VerifyOutcome {
-            command: cmd.to_string(),
-            code: None,
-            tail: timed_out_tail(timeout),
-            ms: start.elapsed().as_millis() as u64,
-        },
-        Outcome::Cancelled => VerifyOutcome {
-            command: cmd.to_string(),
-            code: None,
-            tail: CANCELLED_TAIL.to_string(),
-            ms: start.elapsed().as_millis() as u64,
-        },
+    let (code, tail) = match outcome {
+        Outcome::Done(Ok((status, out_buf, err_buf))) => {
+            (status.code(), verify_tail(&out_buf, &err_buf))
+        }
+        Outcome::Done(Err(e)) => (None, format!("{INTERNAL_ERROR_PREFIX}{e}")),
+        Outcome::TimedOut => (None, timed_out_tail(timeout)),
+        Outcome::Cancelled => (None, CANCELLED_TAIL.to_string()),
+    };
+    VerifyOutcome {
+        command: cmd.to_string(),
+        code,
+        tail,
+        ms: start.elapsed().as_millis() as u64,
+        load,
+        cores,
+        ..Default::default()
     }
 }
 
@@ -1031,6 +1219,7 @@ mod grounded_checks_tests {
             code,
             tail: tail.into(),
             ms: 0,
+            ..Default::default()
         }
     }
 
@@ -1085,7 +1274,9 @@ mod grounded_checks_tests {
             run: command.into(),
             baseline: Some(Baseline::Fail),
         };
+        let (app, _app_dir) = test_app();
         let (result, detail) = run_held_out(
+            CheckContext::new(&app, None),
             &task,
             &check,
             dir.path(),
@@ -1123,6 +1314,7 @@ mod grounded_checks_tests {
         sh(&["add", "."]);
         sh(&["commit", "-q", "-m", "init"]);
         let (app, _dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
         let mut task = task_with_status(TaskStatus::Running);
         task.criteria = vec!["a".into(), "b".into(), "c".into()];
         let check = |criterion, run: &str| Check {
@@ -1131,7 +1323,10 @@ mod grounded_checks_tests {
             baseline: None,
         };
         task.checks = vec![
-            check(0, "echo x > made.txt; mkdir -p d/e; echo y > d/e/f.txt; echo more >> tracked.txt; false"),
+            check(
+                0,
+                "echo x > made.txt; mkdir -p d/e; echo y > d/e/f.txt; echo more >> tracked.txt; false",
+            ),
             check(1, "true"),
             check(2, "no-such-command-anywhere"),
         ];

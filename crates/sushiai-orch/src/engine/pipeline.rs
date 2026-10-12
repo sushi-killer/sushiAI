@@ -311,8 +311,8 @@ impl App {
                     "implement" => (true, false, implement_id.as_str()),
                     "held-out" => (variant.held_out, true, ""),
                     "review" => (!review_id.is_empty(), false, review_id.as_str()),
-                    // The answer judge reads the global route (`check_route`),
-                    // not the task's variant, so it is shown as the engine runs it.
+                    // Judge keeps the global route, even when a preset or
+                    // task variant overrides the brief check.
                     "judge" => (
                         !settings.brief_check_route.is_empty(),
                         false,
@@ -323,6 +323,18 @@ impl App {
                     _ => (true, false, ""),
                 };
                 let (route_id, mut model) = route_of(&settings, route);
+                if enabled && matches!(id, "brief-check" | "judge") {
+                    // The route the engine resolves now: `auto` and a named
+                    // route without its harness both fall to the cheapest.
+                    let resolved = if id == "judge" {
+                        super::brief_check::check_route_for(self, &Variant::default())
+                    } else {
+                        super::brief_check::check_route_for(self, &variant)
+                    };
+                    model = resolved
+                        .and_then(|(_, r, _)| r)
+                        .map(|r| r.model.unwrap_or(r.label));
+                }
                 if id == "review" && route == "auto" {
                     // `auto` picks at run time; show the route it would pick now.
                     let implementer = settings.routes.iter().find(|r| r.id == implement_id);

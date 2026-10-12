@@ -467,7 +467,7 @@ pub(super) async fn fail_and_continue(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> LoopSignal {
     match fail_or_accept(
         app,
@@ -506,7 +506,7 @@ pub(super) async fn fail_or_accept(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> FailSignal {
     record_failure(task, idx, kind, detail);
     let protected = app.settings.read().unwrap().protected_paths.clone();

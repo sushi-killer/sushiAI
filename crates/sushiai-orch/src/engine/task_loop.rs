@@ -21,6 +21,7 @@ pub(super) async fn run_task_loop(
     // failure its own implement attempt has to fix. While it is set (and once
     // the parent has an attempt) the parent never goes back to `run_parent`.
     let mut parent_failure: Option<String> = None;
+    let mut parent_conflict_only = false;
 
     'attempts: loop {
         if cancel.is_cancelled() {
@@ -110,6 +111,8 @@ pub(super) async fn run_task_loop(
             return;
         }
 
+        apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+
         // The task graph: a parent never implements, and a task whose
         // dependencies are not all done waits `queued` with no loop until
         // `advance_graph` starts it again. Drafting runs meanwhile.
@@ -127,7 +130,12 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt { failure, budget } => {
+                    ParentEnd::Attempt {
+                        failure,
+                        budget,
+                        conflict_only,
+                    } => {
+                        parent_conflict_only = conflict_only;
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -171,6 +179,51 @@ pub(super) async fn run_task_loop(
                     return;
                 }
             }
+        }
+
+        // An answered retry survives a daemon restart without another
+        // attempt or another question on the same base.
+        let checks: Vec<String> = task
+            .verify
+            .iter()
+            .chain(&task.final_verify)
+            .cloned()
+            .collect();
+        if base_retry_requested(&task, &checks, &task.base_sha) {
+            let worktree = PathBuf::from(&task.worktree);
+            match carry_after_base_moves(
+                &app,
+                &mut task,
+                &worktree,
+                &pending_answer,
+                &cancel,
+                &mut None,
+            )
+            .await
+            {
+                BaseRetry::Ready => {}
+                BaseRetry::Conflict(detail) => {
+                    if let Some(idx) = task
+                        .attempts
+                        .iter()
+                        .rposition(|a| a.stage == Stage::Implement)
+                    {
+                        record_failure(&mut task, idx, FailureKind::Conflict, detail);
+                    } else {
+                        parent_conflict_only = true;
+                        parent_failure = Some(detail);
+                    }
+                }
+                BaseRetry::Stopped => {
+                    mark_stopped_if_not_already(&app, &task_id).await;
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+            attempt_budget = attempt_budget.max(counted_attempts(&task) + 1);
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
         }
 
         // Concurrency limit: stays `queued` while waiting for a slot, and
@@ -290,7 +343,7 @@ pub(super) async fn run_task_loop(
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
-            match run_plan_stage(
+            let planned = run_plan_stage(
                 &app,
                 &task_id,
                 &pending_answer,
@@ -298,8 +351,11 @@ pub(super) async fn run_task_loop(
                 &mut permit,
                 auto_start_after_plan,
             )
-            .await
-            {
+            .await;
+            if let Ok(Some(mut planned_task)) = app.store.load_task(&task_id) {
+                apply_pending_amendment(&app, &mut planned_task, &pending_amend, &cancel).await;
+            }
+            match planned {
                 PlanOutcome::Proceed => {
                     drop(permit);
                     continue;
@@ -323,7 +379,12 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt { failure, budget } => {
+                    ParentEnd::Attempt {
+                        failure,
+                        budget,
+                        conflict_only,
+                    } => {
+                        parent_conflict_only = conflict_only;
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -490,7 +551,11 @@ pub(super) async fn run_task_loop(
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
         }
+        let dependencies_before = task.depends_on.clone();
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+        if task.depends_on != dependencies_before && completed_implement_attempts(&task) == 0 {
+            continue 'attempts;
+        }
 
         // A final check that already fails on the base is looked up after
         // the attempt, from the cache or the job started here: the first
@@ -614,7 +679,8 @@ pub(super) async fn run_task_loop(
             let attempt_n = implement_attempt_count(&task) + 1;
             // A landing that conflicted only needs its markers resolved: that
             // runs on the cheap route, not as a full re-implementation.
-            let conflict_only = last_failure_is_conflict(&task);
+            let conflict_only = last_failure_is_conflict(&task)
+                || (parent_conflict_only && completed_implement_attempts(&task) == 0);
             let (route_id, overridden) = task.variant().implement_route_id(
                 &settings,
                 if conflict_only {
@@ -625,7 +691,7 @@ pub(super) async fn run_task_loop(
             );
             if conflict_only {
                 task.decisions.push(format!(
-                "Orchestrator: the landing conflicted -> conflict-only attempt on the cheap route {route_id}"
+                "Orchestrator: the carry conflicted -> conflict-only attempt on the cheap route {route_id}"
             ));
             } else if overridden {
                 let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
@@ -979,7 +1045,7 @@ pub(super) async fn run_task_loop(
         // top of the winner's (added below with the attempt's own).
         task.cost_usd += best_of.cost;
         task.attempts[idx].candidates = best_of.candidates;
-        task.decisions.extend(best_of.decisions);
+        record_skips(&mut task, best_of.decisions);
         let b_won = best_of.winner.is_some();
         let route = match best_of.winner {
             Some(winner) => {
@@ -1000,6 +1066,9 @@ pub(super) async fn run_task_loop(
                 task.attempts[idx].ended_at = Some(now_ms());
                 settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);
                 task.status = app.cancelled_status(&task.status);
+                if task.status == TaskStatus::Stopped {
+                    app.close_stopped_task(&mut task);
+                }
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(&task);
                 app.broadcast_task(&task);
@@ -1779,6 +1848,7 @@ pub(super) async fn run_task_loop(
             app.finish_task_loop(&task_id);
             return;
         }
+        record_check_outcomes(&app, &mut task, &verify_results);
         task.attempts[idx].verify = verify_results.clone();
         let mut preflight_checked = false;
         while let Some(failed) = verify_results.iter().find(|v| v.code != Some(0)).cloned() {
@@ -1786,7 +1856,7 @@ pub(super) async fn run_task_loop(
             // run here, or fails for an unrelated reason): its ruling comes
             // before the failure counts. A changed command runs again, so a
             // rewrite spends no counted attempt.
-            if !preflight_checked {
+            if !preflight_checked && !timed_out_under_load(&failed) {
                 preflight_checked = true;
                 let before = task.verify.clone();
                 if !settle_base_preflight(&app, &mut task, &cancel).await {
@@ -1815,6 +1885,7 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
+                    record_check_outcomes(&app, &mut task, &verify_results);
                     task.attempts[idx].verify = verify_results.clone();
                     continue;
                 }
@@ -1861,6 +1932,7 @@ pub(super) async fn run_task_loop(
                         }
                         BaseBreak::Dropped => {
                             verify_results.retain(|v| v.command != failed.command);
+                            record_check_outcomes(&app, &mut task, &verify_results);
                             task.attempts[idx].verify = verify_results.clone();
                             continue;
                         }
@@ -1909,6 +1981,7 @@ pub(super) async fn run_task_loop(
         if !gated.is_empty() {
             let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
             let results = run_verify_commands(
+                CheckContext::new(&app, Some(&task.id)),
                 &worktree,
                 &run_dir.join("checks"),
                 &commands,
@@ -1917,6 +1990,7 @@ pub(super) async fn run_task_loop(
                 &cancel,
             )
             .await;
+            record_check_outcomes(&app, &mut task, &results);
             if cancel.is_cancelled() {
                 interrupt_attempt(&app, &mut task, idx);
                 drop(permit);
@@ -1943,6 +2017,7 @@ pub(super) async fn run_task_loop(
         if failure.is_none() {
             if let Some(held) = gated_held_out(&task) {
                 let (result, detail) = run_held_out(
+                    CheckContext::new(&app, Some(&task.id)),
                     &task,
                     &held,
                     &worktree,
@@ -1951,6 +2026,7 @@ pub(super) async fn run_task_loop(
                     &cancel,
                 )
                 .await;
+                record_check_outcomes(&app, &mut task, std::slice::from_ref(&result));
                 if cancel.is_cancelled() {
                     interrupt_attempt(&app, &mut task, idx);
                     drop(permit);
@@ -1993,6 +2069,7 @@ pub(super) async fn run_task_loop(
         // The planner named the command that captures the images: orchd
         // runs it itself, so an attempt is never failed for a missing image.
         capture_screenshots(
+            &app,
             &mut task,
             idx,
             &worktree,
@@ -2669,39 +2746,65 @@ fn rebase_conflict_note(
     }
 }
 
-/// Carries the task's work onto its base branch as it is now, so a retry
-/// after "the base is fixed" runs on the fix. Nothing happens when the task
-/// has no base branch or it did not move. `false` when the carry was refused
-/// or failed; the decision names why.
-pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> bool {
+pub(super) enum BaseCarry {
+    Ready,
+    Conflict(String),
+    Failed(String),
+}
+
+/// Carries committed and uncommitted task work (and its trusted planner test
+/// commit) onto the current base head.
+pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> BaseCarry {
     let Some(base_ref) = task.base_ref.clone() else {
-        return true;
+        let reason = "Rebase: cannot carry the work without a base branch".to_string();
+        task.decisions.push(reason.clone());
+        return BaseCarry::Failed(reason);
     };
     let (wt, mut snapshot, r) = (worktree.to_path_buf(), task.clone(), base_ref.clone());
     let carried = tokio::task::spawn_blocking(move || {
+        let from = snapshot.base_sha.clone();
+        let new_sha = git::resolve_commit(&wt, &r)?;
+        if new_sha == from {
+            return Ok((git::Rebase::Unchanged, false, snapshot.planner_tests));
+        }
+        // Preserve a merge the task already made; resetting it would carry
+        // the base's changes a second time along with the task's own work.
+        if git::is_ancestor(&wt, &new_sha, "HEAD") == Some(true) {
+            return Ok((
+                git::Rebase::Moved {
+                    new_sha,
+                    rewritten: false,
+                },
+                true,
+                snapshot.planner_tests,
+            ));
+        }
+        // Work committed by an attempt goes back to uncommitted, down to the
+        // trusted planner test commit when there is one.
+        let keep = snapshot
+            .planner_tests
+            .commit
+            .clone()
+            .filter(|c| *c != from && git::is_ancestor(&wt, c, "HEAD") == Some(true));
+        let target = keep.unwrap_or_else(|| from.clone());
+        if git::head_sha(&wt)? != target {
+            git::uncommit_to(&wt, &target)?;
+        }
         let carried = carry_with_planner_tests(&mut snapshot, &wt, &r)?;
-        Ok::<_, git::GitError>((carried, snapshot.planner_tests))
+        Ok((carried, false, snapshot.planner_tests))
     })
-    .await;
-    let carried = match carried {
-        Ok(Ok((carried, tests))) => {
-            task.planner_tests = tests;
-            carried
-        }
-        Ok(Err(error)) => {
-            task.decisions
-                .push(format!("Rebase: could not carry onto {base_ref}: {error}"));
-            return false;
-        }
-        Err(error) => {
-            task.decisions
-                .push(format!("Rebase: could not carry onto {base_ref}: {error}"));
-            return false;
-        }
-    };
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
     match carried {
-        git::Rebase::Moved { new_sha, rewritten } => {
-            task.decisions.push(if rewritten {
+        Ok((git::Rebase::Unchanged, _, _)) => BaseCarry::Ready,
+        Ok((git::Rebase::Moved { new_sha, rewritten }, already_contained, tests)) => {
+            task.planner_tests = tests;
+            task.decisions.push(if already_contained {
+                format!(
+                    "Rebase: the task branch already contains {base_ref} at {}; moved base_sha to that head",
+                    short_sha(&new_sha)
+                )
+            } else if rewritten {
                 format!(
                     "Rebase: {base_ref} was rewritten; carried the work's own changes onto it at {}",
                     short_sha(&new_sha)
@@ -2713,78 +2816,116 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> 
                 )
             });
             task.base_sha = new_sha;
+            BaseCarry::Ready
         }
-        git::Rebase::Conflicts {
-            new_sha,
-            files,
-            rewritten,
-        } => {
+        Ok((
+            git::Rebase::Conflicts {
+                new_sha,
+                files,
+                rewritten,
+            },
+            _,
+            tests,
+        )) => {
+            task.planner_tests = tests;
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
+            let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
             task.base_sha = new_sha;
+            BaseCarry::Conflict(detail)
         }
-        git::Rebase::Skipped { reason } => {
-            task.decisions
-                .push(format!("Rebase: carry onto {base_ref} skipped: {reason}"));
-            return false;
+        Ok((git::Rebase::Skipped { reason }, _, _)) => {
+            let detail = format!("Rebase: not carried onto {base_ref}: {reason}");
+            task.decisions.push(detail.clone());
+            BaseCarry::Failed(detail)
         }
-        git::Rebase::Unchanged => {}
+        Err(e) => {
+            let detail = format!("Rebase: carrying onto {base_ref} failed: {e}");
+            task.decisions.push(detail.clone());
+            BaseCarry::Failed(detail)
+        }
     }
-    true
 }
 
 /// How often a task that waits for its base branch to move looks at it.
 const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
 
-/// A "retry after the base is fixed" answer: waits until the base branch has
-/// moved past the task's base, then carries the work onto it. No attempt
-/// starts on the same base: the failure it would meet is the one already
-/// known. Returns `false` when cancelled or the carry cannot be completed.
-/// A task without a base branch goes on at once.
+pub(super) enum BaseRetry {
+    Ready,
+    Conflict(String),
+    Stopped,
+}
+
+/// Waits for the base to move and carries onto it. A failed carry stays on
+/// an owner question until it can be retried, rather than implementing on
+/// the old base. Conflicts are left for a conflict-only implement attempt.
 pub(super) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,
     worktree: &Path,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
-) -> bool {
-    if let Some(base_ref) = task.base_ref.clone() {
-        let mut noted = false;
-        loop {
-            let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
-            let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-            if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
-                break;
-            }
-            if !noted {
-                noted = true;
-                // No slot is held while nothing runs.
-                permit.take();
-                task.decisions.push(format!(
-                    "Orchestrator: waiting for {base_ref} to move past {} before the retry",
-                    short_sha(&task.base_sha)
-                ));
-                task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
-                app.broadcast_task(task);
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return false,
-                _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+    permit: &mut Option<SlotPermit>,
+) -> BaseRetry {
+    loop {
+        if let Some(base_ref) = task.base_ref.clone() {
+            let mut noted = false;
+            loop {
+                let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
+                let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
+                    break;
+                }
+                if !noted {
+                    noted = true;
+                    permit.take();
+                    task.decisions.push(format!(
+                        "Orchestrator: waiting for {base_ref} to move past {} before the retry",
+                        short_sha(&task.base_sha)
+                    ));
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return BaseRetry::Stopped,
+                    _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+                }
             }
         }
-    }
-    if carry_onto_newest_base(task, worktree).await {
-        true
-    } else {
-        task.status = TaskStatus::Stopped;
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
-        app.broadcast_task(task);
-        false
+        if cancel.is_cancelled() {
+            return BaseRetry::Stopped;
+        }
+        match carry_onto_newest_base(task, worktree).await {
+            BaseCarry::Ready => return BaseRetry::Ready,
+            BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
+            BaseCarry::Failed(reason) => {
+                task.question = Some(Question::new(
+                    format!("{reason}. Fix the carry problem, then retry, or stop?"),
+                    vec!["retry".to_string(), "stop".to_string()],
+                    QuestionKind::AgentQuestion,
+                    AskedBy::Verify,
+                ));
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let task_id = task.id.clone();
+                let Some(answer) =
+                    wait_for_answer(app, &task_id, task, pending_answer, cancel, permit).await
+                else {
+                    return BaseRetry::Stopped;
+                };
+                if is_option(&answer, "stop") {
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
+                    return BaseRetry::Stopped;
+                }
+            }
+        }
     }
 }
 
@@ -2799,6 +2940,9 @@ fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
     task.attempts[idx].status = AttemptStatus::Interrupted;
     task.attempts[idx].ended_at = Some(now_ms());
     task.status = app.cancelled_status(&task.status);
+    if task.status == TaskStatus::Stopped {
+        app.close_stopped_task(task);
+    }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
@@ -2811,6 +2955,9 @@ pub(super) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
             TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
         ) {
             task.status = app.cancelled_status(&task.status);
+            if task.status == TaskStatus::Stopped {
+                app.close_stopped_task(&mut task);
+            }
             task.updated_at = now_ms();
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
@@ -2868,7 +3015,14 @@ impl App {
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
         self.record_task_metrics(task_id);
-        if let Ok(Some(task)) = self.store.load_task(task_id) {
+        self.final_base_jobs.lock().unwrap().remove(task_id);
+        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
+            let before = task.decisions.len();
+            record_check_outcomes(self, &mut task, &[]);
+            if task.decisions.len() != before {
+                let _ = self.store.save_task(&task);
+                self.broadcast_task(&task);
+            }
             self.drop_settled_output(&task);
             self.advance_graph(&task.repo);
         }
@@ -2920,7 +3074,7 @@ pub(super) async fn finish_after_review(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Tail {
     // The gate: the base preflight is settled before finalVerify runs on
     // the worktree, so a ruling of the judge never comes after a landing.
@@ -2950,6 +3104,7 @@ pub(super) async fn finish_after_review(
                 .and_then(|r| r.ok())
         };
         let mut final_results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
             worktree,
             &run_dir.join("final"),
             &final_commands,
@@ -2958,6 +3113,7 @@ pub(super) async fn finish_after_review(
             cancel,
         )
         .await;
+        record_check_outcomes(app, task, &final_results);
         if cancel.is_cancelled() {
             interrupt_attempt(app, task, idx);
             *permit = None;
@@ -2969,7 +3125,7 @@ pub(super) async fn finish_after_review(
         // environment failure, and no implement session is spent on it.
         let timed_out: Vec<String> = final_results
             .iter()
-            .filter(|v| v.code.is_none())
+            .filter(|v| v.code.is_none() && !timed_out_under_load(v))
             .map(|v| v.command.clone())
             .collect();
         if !timed_out.is_empty() {
@@ -2978,6 +3134,7 @@ pub(super) async fn finish_after_review(
                 timed_out.join(", ")
             ));
             let rerun = run_verify_commands(
+                CheckContext::new(app, Some(&task.id)),
                 worktree,
                 &run_dir.join("final-rerun"),
                 &timed_out,
@@ -2992,6 +3149,7 @@ pub(super) async fn finish_after_review(
                 app.finish_task_loop(task_id);
                 return Tail::Return;
             }
+            record_check_outcomes(app, task, &rerun);
             for again in rerun {
                 if let Some(slot) = final_results
                     .iter_mut()
@@ -3019,6 +3177,10 @@ pub(super) async fn finish_after_review(
         let mut on_base: Vec<(VerifyOutcome, VerifyOutcome)> = Vec::new();
         let mut ordinary: Vec<VerifyOutcome> = Vec::new();
         for failed in failed_finals {
+            if timed_out_under_load(&failed) {
+                ordinary.push(failed);
+                continue;
+            }
             match failing_on_base(app, task, &failed, &base_dir, cancel).await {
                 Some(base_run) => on_base.push((failed, base_run)),
                 None => ordinary.push(failed),
@@ -3094,26 +3256,34 @@ pub(super) async fn finish_after_review(
             }
             record_failure(task, idx, FailureKind::Verify, detail.join("\n\n"));
             let question = pre_existing_question(&pre_existing, &task.base_sha);
-            task.question = Some(question.clone());
-            task.status = TaskStatus::Waiting;
-            task.updated_at = now_ms();
             let assumed = task.assumptions.len();
-            let Some(answer) =
-                wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
-            else {
-                *permit = None;
-                app.finish_task_loop(task_id);
-                return Tail::Return;
+            let already_retried = base_retry_requested(task, &question.commands, &task.base_sha);
+            let answer = if already_retried {
+                PRE_EXISTING_RETRY.to_string()
+            } else {
+                task.question = Some(question.clone());
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let Some(answer) =
+                    wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+                else {
+                    *permit = None;
+                    app.finish_task_loop(task_id);
+                    return Tail::Return;
+                };
+                answer
             };
             let policy_answered = task.assumptions.len() > assumed;
-            let base_sha = task.base_sha.clone();
-            record_owner_base_check(
-                task,
-                &question.commands,
-                &base_sha,
-                &answer,
-                policy_answered,
-            );
+            if !already_retried {
+                let base_sha = task.base_sha.clone();
+                record_owner_base_check(
+                    task,
+                    &question.commands,
+                    &base_sha,
+                    &answer,
+                    policy_answered,
+                );
+            }
             let settings = app.settings.read().unwrap().clone();
             let origin = origin_of_last_answer(task);
             // Every removal goes through `remove_check_command`; a refused
@@ -3128,11 +3298,19 @@ pub(super) async fn finish_after_review(
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                if !carry_after_base_moves(app, task, worktree, cancel, permit).await {
-                    interrupt_attempt(app, task, idx);
-                    *permit = None;
-                    app.finish_task_loop(task_id);
-                    return Tail::Return;
+                match carry_after_base_moves(app, task, worktree, pending_answer, cancel, permit)
+                    .await
+                {
+                    BaseRetry::Ready => {}
+                    BaseRetry::Conflict(detail) => {
+                        record_failure(task, idx, FailureKind::Conflict, detail);
+                    }
+                    BaseRetry::Stopped => {
+                        interrupt_attempt(app, task, idx);
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        return Tail::Return;
+                    }
                 }
                 *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
                 task.updated_at = now_ms();
@@ -3211,7 +3389,7 @@ pub(super) async fn finish_attempt(
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> Tail {
     let landing = if let Some(parent_id) = task.parent.clone() {
         Some(
@@ -3283,6 +3461,9 @@ pub(super) async fn finish_attempt(
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
                 task.status = app.cancelled_status(&task.status);
+                if task.status == TaskStatus::Stopped {
+                    app.close_stopped_task(task);
+                }
                 task.updated_at = now_ms();
                 let _ = app.store.save_task(task);
                 app.broadcast_task(task);
@@ -3308,17 +3489,21 @@ pub(super) async fn finish_attempt(
             task.status = TaskStatus::Done;
             if let Some(cmd) = task.eval_check_cmd.clone() {
                 let sha = git::head_sha(worktree).unwrap_or_default();
-                task.eval_check = Some(
-                    run_eval_check(
-                        Path::new(&task.repo),
-                        run_dir,
-                        &sha,
-                        &cmd,
-                        settings.sandbox,
-                        cancel,
-                    )
-                    .await,
-                );
+                let check = run_eval_check(
+                    CheckContext::new(app, Some(task_id)),
+                    Path::new(&task.repo),
+                    run_dir,
+                    &sha,
+                    &cmd,
+                    settings.sandbox,
+                    cancel,
+                )
+                .await;
+                record_check_outcomes(app, task, std::slice::from_ref(&check));
+                task.eval_check = Some(EvalCheck {
+                    code: check.code,
+                    tail: check.tail,
+                });
             }
         }
         Ok(Err(e)) => {

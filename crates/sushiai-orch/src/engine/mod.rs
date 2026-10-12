@@ -70,6 +70,7 @@ mod review_findings;
 mod routing;
 mod rpc_misc;
 mod rpc_tasks;
+mod slots;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
@@ -104,6 +105,7 @@ use review::*;
 use review_findings::*;
 use routing::*;
 use rpc_tasks::*;
+use slots::{ResizableSlots, SlotPermit};
 use task_loop::*;
 #[cfg(test)]
 use test_support::*;
@@ -339,11 +341,11 @@ pub struct App {
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the held tool call a `task.answer` resolves.
-    permission_waits: StdMutex<HashMap<String, oneshot::Sender<String>>>,
-    /// Tasks whose parked question the chat or an MCP client just answered
+    permission_waits: StdMutex<HashMap<String, oneshot::Sender<Reply>>>,
+    /// Callers who just answered a task's parked question
     /// (`task.answer` with a source): the loop reads and clears it when the
     /// answer arrives, so such an answer is never recorded as the owner's.
-    agent_answers: StdMutex<std::collections::HashSet<String>>,
+    agent_answers: StdMutex<HashMap<String, AnsweredBy>>,
     /// Keyed by repo: overseer wakes skipped while its chat was busy; each
     /// fires when that repo's turn ends.
     deferred_wakes: StdMutex<HashMap<String, Vec<chat::DeferredWake>>>,
@@ -362,7 +364,7 @@ pub struct App {
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command. Kept on
     /// disk (`base-results.json`), so a restart does not run them again; a
-    /// run that ended without an exit code (a timeout) is never stored.
+    /// run that timed out or hit an environment failure is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
     /// (tree hash, base sha, command) triples that passed (exit 0) in a
     /// subtask's final run: a parent on the same tree and the same base does
@@ -371,8 +373,12 @@ pub struct App {
     gate_passes: StdMutex<std::collections::HashSet<(String, String, String)>>,
     /// Keyed by (base sha, command): background base runs in flight. The
     /// receiver flips to `true` when the job is over; its result, if any, is
-    /// then in `base_runs`. One pair runs on base at most once per daemon.
+    /// then in `base_runs`. Concurrent lookups share the same job.
     base_jobs: StdMutex<HashMap<(String, String), watch::Receiver<bool>>>,
+    /// Final-check job receipts for each live task, including jobs that
+    /// finished without a base result. A final lookup waits for its original
+    /// job instead of starting another one just because nothing was cached.
+    final_base_jobs: StdMutex<HashMap<String, base_check::BaseJobReceivers>>,
     /// Pairs whose first base run failed and whose rerun passed (load-flaky).
     base_flaky: StdMutex<std::collections::HashSet<(String, String)>>,
     /// Cancelled by `shutdown_for` only: a task stop must not end a job
@@ -383,12 +389,14 @@ pub struct App {
     base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
-    /// Concurrency limit (`settings.parallel` at startup -- a live
-    /// `settings.set` change takes effect on the next restart, not
-    /// immediately; resizing a `Semaphore` down isn't a thing tokio
-    /// supports, and the spec explicitly allows skipping this).
-    slots: Arc<Semaphore>,
-    parallel_limit: u32,
+    /// Live task-loop limit. Shrinking retires free permits first, then
+    /// held permits as their owners finish.
+    slots: Arc<ResizableSlots>,
+    /// Shared by all check runners on this daemon, independent of agent slots.
+    check_slots: Arc<ResizableSlots>,
+    check_load: RwLock<fn() -> (f64, u32)>,
+    /// Hook and background check lines awaiting the loop's own Task copy.
+    check_decisions: StdMutex<HashMap<String, Vec<String>>>,
     /// Keyed by parent task id: held while one child lands on the parent's
     /// branch, so landings onto one branch happen one at a time.
     landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -544,8 +552,8 @@ impl App {
         let store = Store::new(&data_dir)?;
         let settings = store.load_settings()?;
         let (events_tx, _) = broadcast::channel(1024);
-        let parallel_limit = settings.parallel.max(1);
-        let slots = Arc::new(Semaphore::new(parallel_limit as usize));
+        let slots = ResizableSlots::new(settings.parallel.max(1) as usize);
+        let check_slots = ResizableSlots::new(settings.heavy_check_limit() as usize);
 
         let messages = messages::load(&data_dir);
         let base_runs_dir = data_dir.clone();
@@ -573,12 +581,15 @@ impl App {
             base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
             gate_passes: StdMutex::new(Default::default()),
             base_jobs: StdMutex::new(HashMap::new()),
+            final_base_jobs: StdMutex::new(HashMap::new()),
             base_flaky: StdMutex::new(Default::default()),
             base_cancel: CancelToken::new(),
             base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
-            parallel_limit,
+            check_slots,
+            check_load: RwLock::new(verify::machine_load),
+            check_decisions: StdMutex::new(HashMap::new()),
             landing_locks: StdMutex::new(HashMap::new()),
             base_check_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
@@ -672,6 +683,17 @@ impl App {
             TaskStatus::Running => TaskStatus::Queued,
             other => *other,
         }
+    }
+
+    pub(super) fn close_stopped_task(&self, task: &mut Task) {
+        if let Some(question) = task.question.take() {
+            task.decisions.push(format!(
+                "Stop: closed the open question \"{}\"",
+                truncate_chars(&question.text, 200)
+            ));
+        }
+        self.leases.lock().unwrap().remove(&task.id);
+        self.permission_waits.lock().unwrap().remove(&task.id);
     }
 
     /// Registers `token` for a run's Stop hook and keeps it in the run's token
@@ -846,6 +868,7 @@ mod tests {
     include!("tests/review.rs");
     include!("tests/routing.rs");
     include!("tests/rpc_tasks.rs");
+    include!("tests/stop.rs");
     include!("tests/verify.rs");
     include!("tests/worktrees.rs");
 }

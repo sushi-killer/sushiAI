@@ -201,6 +201,7 @@ fn run_cost(app: &App, res: &Result<harness::RunOutcome, RunError>, events: &Pat
 /// compared by how many fail.
 #[allow(clippy::too_many_arguments)]
 async fn evaluate(
+    app: &App,
     task: &Task,
     worktree: &Path,
     base_sha: &str,
@@ -231,6 +232,7 @@ async fn evaluate(
     // attempt records the skip.
     let (verify_commands, _) = filter_scoped(scoped_checks, &task.repo, &task.verify, &changed);
     let mut verify = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)),
         worktree,
         &dir.join("verify"),
         &verify_commands,
@@ -245,6 +247,7 @@ async fn evaluate(
     if !commands.is_empty() {
         verify.extend(
             run_verify_commands(
+                CheckContext::new(app, Some(&task.id)),
                 worktree,
                 &dir.join("checks"),
                 &commands,
@@ -256,8 +259,16 @@ async fn evaluate(
         );
     }
     if let Some(held) = gated_held_out(task) {
-        let (result, _) =
-            run_held_out(task, &held, worktree, &dir.join("checks"), sandbox, cancel).await;
+        let (result, _) = run_held_out(
+            CheckContext::new(app, Some(&task.id)),
+            task,
+            &held,
+            worktree,
+            &dir.join("checks"),
+            sandbox,
+            cancel,
+        )
+        .await;
         verify.push(result);
     }
 
@@ -421,6 +432,7 @@ where
     let sandbox = settings.sandbox;
     let (eval_a, eval_b) = tokio::join!(
         evaluate(
+            app,
             task,
             worktree,
             base_sha,
@@ -432,6 +444,7 @@ where
             cancel
         ),
         evaluate(
+            app,
             task,
             &wt_b,
             base_sha,
@@ -444,6 +457,13 @@ where
         ),
     );
 
+    extra.decisions.extend(
+        eval_a
+            .verify
+            .iter()
+            .chain(&eval_b.verify)
+            .flat_map(|r| r.decisions.iter().cloned()),
+    );
     let (id_a, id_b) = (a_route.id.as_str(), b_route.id.as_str());
     let mut pick_b;
     let decision;

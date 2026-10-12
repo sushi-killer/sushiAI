@@ -574,7 +574,7 @@ mod tests {
         // A second answer, by the owner, is not a policy one.
         app.agent_answers.lock().unwrap().remove(&id);
         let mut task = task;
-        record_answer_for(&mut task, None, "x", false, None);
+        record_answer_for(&mut task, None, "x", AnsweredBy::Owner, None);
         assert!(task.assumptions.len() == 1);
     }
 

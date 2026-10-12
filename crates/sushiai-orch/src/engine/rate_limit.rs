@@ -89,7 +89,7 @@ pub(super) async fn pause_for_rate_limit(
     error: &str,
     wait_secs: u64,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> bool {
     let attempt_n = task.attempts[idx].n;
     task.attempts[idx].status = AttemptStatus::Interrupted;
@@ -119,6 +119,9 @@ pub(super) async fn pause_for_rate_limit(
     }
     if !resumed {
         task.status = app.cancelled_status(&task.status);
+        if task.status == TaskStatus::Stopped {
+            app.close_stopped_task(task);
+        }
     }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);

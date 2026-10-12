@@ -226,6 +226,7 @@ pub(super) async fn handle_repeated_findings(
                 .join(format!("finding-scenario-{id}"));
             let _ = std::fs::create_dir_all(&dir);
             let results = run_verify_commands(
+                CheckContext::new(app, Some(&task.id)),
                 worktree,
                 &dir,
                 std::slice::from_ref(&run),

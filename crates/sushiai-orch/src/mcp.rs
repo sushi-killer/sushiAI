@@ -204,7 +204,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_amend",
             "task.amend",
-            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. Amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            "Replace a drafting, running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks, heldOut or dependsOn (each field you pass replaces the task's; at least one is required). dependsOn replaces the full list of task ids only before the first implement attempt; an empty list makes the task ready. A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. Amended checks and heldOut are re-run on the base commit and only those failing there gate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -215,6 +215,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "screenshot": {"type": "string", "description": "Replaces the repo command that captures the screenshot evidence; an empty string removes it."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
                     "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
+                    "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "The full new list of task ids; only before the first implement attempt; an empty list makes the task ready."},
                 },
                 "required": ["id"],
             }),
@@ -519,12 +520,9 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
     let args = with_task_mcp(method, args, task_mcp);
-    let chat = if std::env::var("ORCHD_BRIDGE_SOURCE").as_deref() == Ok("overseer") {
-        "overseer"
-    } else {
-        "chat"
-    };
-    let args = with_source(method, args, bridge.task.is_some(), chat);
+    let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
+    let source = bridge_source(declared_source.as_deref());
+    let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match (bridge.call)(method, args) {
         Ok(result) => tool_ok(result),
@@ -552,17 +550,24 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
     args
 }
 
+fn bridge_source(source: Option<&str>) -> &'static str {
+    match source {
+        Some("overseer") => "overseer",
+        Some("chat") => "chat",
+        _ => "lead",
+    }
+}
+
 /// Records where a task created through this bridge started: the
 /// orchestrator chat agent (no task id) is `chat`, a task's own agent is
 /// `handoff`. A source the caller set itself is kept.
-/// `chat` names the source of a call made outside a task: `chat` for the
-/// owner's own chat turns, `overseer` for a turn orchd woke by itself.
-fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Value {
+/// `source` names the caller outside a task: a lead, chat, or overseer turn.
+fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> Value {
     if method == "task.answer" || method == "task.amend" {
         // Never trusted from the caller: it marks the answer as not the
         // owner's, so orchd refuses an allow on an owner-only question.
         if let Some(obj) = args.as_object_mut() {
-            let source = if from_task { "mcp" } else { chat };
+            let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
         }
     }
@@ -571,7 +576,7 @@ fn with_source(method: &str, mut args: Value, from_task: bool, chat: &str) -> Va
         // call so the backend refuses one too.
         if let Some(obj) = args.as_object_mut() {
             obj.remove("branch");
-            let source = if from_task { "mcp" } else { chat };
+            let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
         }
     }
@@ -703,6 +708,28 @@ mod tests {
     }
 
     #[test]
+    fn task_amend_schema_offers_full_dependency_replacement_before_implementing() {
+        let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
+        let amend = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "task_amend")
+            .unwrap();
+        let dependencies = &amend["inputSchema"]["properties"]["dependsOn"];
+        assert_eq!(dependencies["type"], "array");
+        assert_eq!(dependencies["items"]["type"], "string");
+        assert!(dependencies["description"]
+            .as_str()
+            .unwrap()
+            .contains("full new list"));
+        let description = amend["description"].as_str().unwrap();
+        assert!(description.contains("dependsOn"));
+        assert!(description.contains("first implement attempt"));
+        assert!(description.contains("empty list"));
+    }
+
+    #[test]
     fn task_pr_never_forwards_a_branch() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let sink = seen.clone();
@@ -721,7 +748,7 @@ mod tests {
         assert_eq!(method, "task.pr");
         assert!(args.get("branch").is_none());
         assert_eq!(args["id"], "t1");
-        assert_eq!(args["source"], "chat");
+        assert_eq!(args["source"], "lead");
     }
 
     #[test]
@@ -999,6 +1026,37 @@ mod tests {
 #[cfg(test)]
 mod answer_source_tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_source_defaults_to_lead_and_only_recognizes_chat_and_overseer() {
+        for (declared, expected) in [
+            (None, "lead"),
+            (Some(""), "lead"),
+            (Some("unknown"), "lead"),
+            (Some("lead"), "lead"),
+            (Some("chat"), "chat"),
+            (Some("overseer"), "overseer"),
+        ] {
+            let source = bridge_source(declared);
+            assert_eq!(source, expected);
+            for forged in ["owner", "policy", "lead", "chat", "overseer"] {
+                let args = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    false,
+                    source,
+                );
+                assert_eq!(args["source"], expected);
+                let task = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    true,
+                    source,
+                );
+                assert_eq!(task["source"], "mcp");
+            }
+        }
+    }
 
     #[test]
     fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {

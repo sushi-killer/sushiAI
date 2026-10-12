@@ -1,7 +1,0 @@
-Task implement runs and all task checks now share one filesystem policy. Native runs cannot read other known projects, other tasks' worktrees and daemon data, or Claude/Codex session archives, and cannot connect to the token-less daemon socket. Default and configured worktree storage is denied except for the current worktree; existing tasks keep that protection after the worktree folder setting changes. Worktree Git metadata, build caches and temporary paths remain writable. Per-repo `sandboxRepos` overrides apply only to task runs; saved global sandbox settings are preserved. Native Claude tasks use orchd-supplied settings so project sandbox grants cannot widen the policy.
-
-Codex implement runs use the same macOS Seatbelt profile as checks. Their shell network stays open even with `codexNetwork=false`. Native Codex runs omit peer messaging and `ask_orchestrator`; a host override restores the messaging bridge. Native checks disable Electron's nested renderer sandbox with `ELECTRON_DISABLE_SANDBOX=1`, while keeping the task sandbox.
-
-Task tools and project secrets are isolated to the task's validated project. Full daemon MCP bridges are excluded from task configs, private per-run MCP files are cleaned up, and historical stored MCP values are redacted once.
-
-Sandboxed checks no longer execute the setuid process-list utility. Native process inspection supplies process identity and CPU data; desktop cleanup asks its disposable daemon to close session holders and shut down. The sandbox retains its process restrictions without an execution exception.

@@ -47,7 +47,7 @@ pub(super) fn known_strength(route: &Route) -> Option<u32> {
 
 /// Whether `route` is one of `excluded`, or runs the same harness and model as
 /// one of them.
-fn is_excluded(route: &Route, excluded: &[&Route]) -> bool {
+pub(super) fn is_excluded(route: &Route, excluded: &[&Route]) -> bool {
     excluded
         .iter()
         .any(|e| e.id == route.id || (e.harness == route.harness && e.model == route.model))

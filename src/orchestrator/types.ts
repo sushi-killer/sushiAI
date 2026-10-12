@@ -160,6 +160,7 @@ export type PresetValues = {
   /** Switch only the hidden check; regular checks always run. */
   heldOut?: boolean;
   planner?: string;
+  judge?: string;
   briefCheckRoute?: string;
   review?: string;
   tierRoutes?: Partial<Record<Tier, string>>;
@@ -185,6 +186,9 @@ export type PipelineStage = {
   optional: boolean;
   ownerOnly: boolean;
   routeId?: string;
+  routeLabel?: string;
+  autoRouteLabel?: string;
+  autoModel?: string;
   model?: string;
   maxAttempts?: number;
   state?: PipelineStageState;
@@ -307,6 +311,8 @@ export type Variant = {
   loopDetect: boolean;
   /** Route id the plan stage runs on instead of `settings.planner`. */
   plannerRoute?: string;
+  /** Route id the finding judge uses instead of its automatic route. */
+  judgeRoute?: string;
   /** Route ids the implement stage uses instead of `settings.tiers`. */
   tierRoutes?: Partial<Record<Tier, string>>;
   /** Dollar budget: once the task has spent it, the task waits for the

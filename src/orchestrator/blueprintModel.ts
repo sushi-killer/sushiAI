@@ -8,6 +8,7 @@ import type {
   Route,
   Settings,
   Task,
+  Tier,
 } from "./types";
 
 export type NodeState =
@@ -26,6 +27,10 @@ export type BlueprintNode = {
   /** The stage's route can be changed from the inspector. */
   routeEditable: boolean;
   routeId?: string;
+  routeLabel?: string;
+  routeModel?: string;
+  autoRouteLabel?: string;
+  autoModel?: string;
   maxAttempts?: number;
   model?: string;
   time?: string;
@@ -35,9 +40,27 @@ export type BlueprintNode = {
   fromLabel?: string;
 };
 
-/** Stages whose route the inspector may change; advisor and judge borrow the
- * plan and brief-check routes, so theirs is shown read-only. */
-const ROUTE_EDITABLE = new Set(["plan", "brief-check", "implement", "review"]);
+/** Stages whose route the inspector may change. */
+const ROUTE_EDITABLE = new Set([
+  "plan",
+  "brief-check",
+  "implement",
+  "review",
+  "judge",
+]);
+
+export function formatRouteLabel(
+  label: string | undefined,
+  model: string | undefined,
+  automatic = false,
+): string {
+  const route = label
+    ? model && model !== label
+      ? `${label} (${model})`
+      : label
+    : model;
+  return automatic ? `Auto: ${route || "route"}` : route || "";
+}
 
 const STATE_OF: Record<string, NodeState> = {
   running: "current",
@@ -52,8 +75,18 @@ export function blueprintNodes(
 ): BlueprintNode[] {
   const labels = new Map(payload.stages.map((s) => [s.id, s.label]));
   const nodes = payload.stages.map((stage): BlueprintNode => {
-    const route = routes.find((r) => r.id === stage.routeId);
-    const model = stage.model || route?.label || undefined;
+    const route =
+      stage.id === "judge" && !stage.routeLabel
+        ? undefined
+        : routes.find((r) => r.id === stage.routeId);
+    const routeLabel = stage.routeLabel ?? route?.label;
+    const routeModel =
+      stage.routeLabel !== undefined
+        ? stage.model
+        : (stage.model ?? route?.model);
+    const model =
+      formatRouteLabel(routeLabel, routeModel, stage.routeId === "auto") ||
+      undefined;
     return {
       id: stage.id,
       label: stage.label || stage.id,
@@ -66,6 +99,10 @@ export function blueprintNodes(
       ownerOnly: stage.ownerOnly,
       routeEditable: ROUTE_EDITABLE.has(stage.id),
       routeId: stage.routeId,
+      routeLabel,
+      routeModel,
+      autoRouteLabel: stage.autoRouteLabel,
+      autoModel: stage.autoModel,
       maxAttempts: stage.id === "implement" ? stage.maxAttempts : undefined,
       model,
       time:
@@ -96,7 +133,7 @@ export function blueprintNodes(
 /** A change the inspector makes to one stage. */
 export type StageChange =
   | { kind: "enabled"; value: boolean; route?: string }
-  | { kind: "route"; value: string }
+  | { kind: "route"; value: string; tier?: Tier }
   | { kind: "maxAttempts"; value: number };
 
 /** The values `change` sets on a preset, laid over `values`. */
@@ -132,9 +169,15 @@ function presetValuesWith(
     case "review":
       if (change.kind === "route") next.review = change.value;
       break;
+    case "judge":
+      if (change.kind === "route") next.judge = change.value;
+      break;
     case "implement":
       if (change.kind === "route")
-        next.tierRoutes = { ...values.tierRoutes, standard: change.value };
+        next.tierRoutes = {
+          ...values.tierRoutes,
+          [change.tier ?? "standard"]: change.value,
+        };
       else if (change.kind === "maxAttempts") next.maxAttempts = change.value;
       break;
   }
@@ -185,11 +228,21 @@ function globalsWith(
     case "review":
       if (change.kind === "route") return { ...settings, review: change.value };
       break;
+    case "judge":
+      if (change.kind === "route")
+        return {
+          ...settings,
+          experiments: { ...experiments, judgeRoute: change.value },
+        };
+      break;
     case "implement":
       if (change.kind === "route")
         return {
           ...settings,
-          tiers: { ...settings.tiers, standard: change.value },
+          tiers: {
+            ...settings.tiers,
+            [change.tier ?? "standard"]: change.value,
+          },
         };
       if (change.kind === "maxAttempts")
         return { ...settings, maxAttempts: change.value };

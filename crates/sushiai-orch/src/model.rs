@@ -884,6 +884,9 @@ pub struct Variant {
     /// review off, `"auto"` picks one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_route: Option<String>,
+    /// Route id for the finding judge; `"auto"` selects one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_route: Option<String>,
     /// Route id of the brief check (and the cheap judges) instead of
     /// `settings.briefCheckRoute`; `""` turns them off.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -910,6 +913,7 @@ impl Default for Variant {
             best_of_route: None,
             land: false,
             review_route: None,
+            judge_route: None,
             brief_check_route: None,
             max_attempts: None,
         }
@@ -948,6 +952,8 @@ pub struct PresetValues {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tier_routes: Option<BTreeMap<Tier, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
@@ -973,6 +979,9 @@ impl PresetValues {
         }
         if let Some(id) = &self.review {
             variant.review_route = Some(id.clone());
+        }
+        if let Some(id) = &self.judge {
+            variant.judge_route = Some(id.clone());
         }
         if let Some(routes) = &self.tier_routes {
             variant.tier_routes = routes.clone();
@@ -1068,6 +1077,12 @@ impl Settings {
                         p.id
                     ));
                 }
+            }
+            if let Some(id) = v.judge.as_deref().filter(|id| *id != "auto" && !known(id)) {
+                return Err(format!(
+                    "preset {} judge \"{id}\" is not a configured route",
+                    p.id
+                ));
             }
             for (tier, id) in v.tier_routes.iter().flatten() {
                 if !known(id) {
@@ -1278,7 +1293,7 @@ impl Variant {
 
     /// Keys a serialized default `Variant` leaves out, but a partial
     /// override object may still name.
-    pub const OPTIONAL_KEYS: [&'static str; 12] = [
+    pub const OPTIONAL_KEYS: [&'static str; 13] = [
         "heldOut",
         "plannerRoute",
         "tierRoutes",
@@ -1289,6 +1304,7 @@ impl Variant {
         "bestOfRoute",
         "land",
         "reviewRoute",
+        "judgeRoute",
         "briefCheckRoute",
         "maxAttempts",
     ];
@@ -1316,6 +1332,15 @@ impl Variant {
             {
                 return Err(format!("variant {key} \"{id}\" is not a configured route"));
             }
+        }
+        if let Some(id) = self
+            .judge_route
+            .as_deref()
+            .filter(|id| *id != "auto" && !known(id))
+        {
+            return Err(format!(
+                "variant judgeRoute \"{id}\" is not a configured route"
+            ));
         }
         for (tier, id) in &self.tier_routes {
             if !known(id) {
@@ -2885,6 +2910,17 @@ mod tests {
         );
         let back: Variant = serde_json::from_str(&json).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn preset_apply_copies_judge_route_to_variant() {
+        let values = PresetValues {
+            judge: Some("claude-opus".into()),
+            ..PresetValues::default()
+        };
+        let mut variant = Variant::default();
+        values.apply(&mut variant);
+        assert_eq!(variant.judge_route.as_deref(), Some("claude-opus"));
     }
 
     #[test]

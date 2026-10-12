@@ -316,6 +316,15 @@ fn settings_set_rejects_bad_presets() {
     });
     assert!(err.contains("not a configured route"), "{err}");
     let err = set_error(&daemon, |s| {
+        s["presets"] = json!([{"id": "x", "label": "X", "values": {"judge": "nope"}}]);
+    });
+    let err: Value = serde_json::from_str(&err).unwrap();
+    let message = err["message"].as_str().unwrap();
+    assert!(
+        message.contains("judge") && message.contains("not a configured route"),
+        "{message}"
+    );
+    let err = set_error(&daemon, |s| {
         s["presets"] = json!([
             {"id": "x", "label": "X", "values": {}},
             {"id": "x", "label": "Y", "values": {}},
@@ -336,6 +345,84 @@ fn settings_set_rejects_bad_presets() {
             {"id": "x", "label": "X", "values": {"review": "", "briefCheckRoute": "auto"}}
         ]);
     });
+}
+
+#[test]
+fn settings_set_round_trips_preset_judge_and_tier_routes() {
+    let daemon = spawn();
+    let preset = json!({
+        "id": "routes", "label": "Routes", "builtin": false,
+        "values": {
+            "judge": "claude-opus",
+            "planner": "codex-luna",
+            "tierRoutes": {
+                "mechanical": "codex",
+                "standard": "codex-luna",
+                "hard": "claude-opus"
+            }
+        }
+    });
+    set_settings(&daemon, |s| {
+        s["routes"].as_array_mut().unwrap().push(json!({
+            "id": "codex-luna", "label": "Codex Luna", "harness": "codex",
+            "model": "gpt-5.6-luna"
+        }));
+        s["presets"] = json!([preset]);
+    });
+    let got = daemon.request("settings.get", json!({}));
+    assert_eq!(got["presets"][0]["values"]["judge"], "claude-opus");
+    assert_eq!(
+        got["presets"][0]["values"]["tierRoutes"]["mechanical"],
+        "codex"
+    );
+    assert_eq!(
+        got["presets"][0]["values"]["tierRoutes"]["standard"],
+        "codex-luna"
+    );
+    assert_eq!(
+        got["presets"][0]["values"]["tierRoutes"]["hard"],
+        "claude-opus"
+    );
+}
+
+#[test]
+fn describe_reports_preset_judge_route_and_labels_for_routed_stages() {
+    let daemon = spawn();
+    let repo = init_git_repo();
+    let repo_path = repo.path().to_str().unwrap();
+    set_settings(&daemon, |s| {
+        s["presets"] = json!([{
+            "id": "judge-preset", "label": "Judge preset",
+            "values": {
+                "judge": "claude-opus",
+                "planner": "codex-luna",
+                "tierRoutes": {
+                    "mechanical": "codex",
+                    "standard": "codex-luna",
+                    "hard": "claude-opus"
+                }
+            }
+        }]);
+        s["routes"].as_array_mut().unwrap().push(json!({
+            "id": "codex-luna", "label": "Codex Luna", "harness": "codex",
+            "model": "gpt-5.6-luna"
+        }));
+        s["repoPresets"] = json!({ repo_path: "judge-preset" });
+        s["review"] = json!("claude-sonnet");
+    });
+    let d = daemon.request("pipeline.describe", json!({"repo": repo_path}));
+    assert_eq!(d["presetId"], "judge-preset");
+    assert_eq!(stage(&d, "judge")["routeId"], "claude-opus");
+    assert_eq!(stage(&d, "judge")["model"], "opus");
+    assert_eq!(stage(&d, "judge")["routeLabel"], "Claude Opus");
+    assert_eq!(stage(&d, "implement")["routeId"], "codex-luna");
+    assert_eq!(stage(&d, "implement")["routeLabel"], "Codex Luna");
+    assert_eq!(stage(&d, "plan")["routeId"], "codex-luna");
+    for s in d["stages"].as_array().unwrap() {
+        if s.get("routeId").is_some() {
+            assert!(s.get("routeLabel").is_some(), "missing label: {s}");
+        }
+    }
 }
 
 #[test]
@@ -407,31 +494,30 @@ fn describe_resolves_the_model_of_brief_check_and_judge() {
     let (daemon, _scripts) = spawn_with_clis(true, true);
     set_settings(&daemon, |s| s["briefCheckRoute"] = json!("auto"));
     let d = daemon.request("pipeline.describe", json!({}));
-    for id in ["brief-check", "judge"] {
-        assert_eq!(stage(&d, id)["routeId"], "auto", "{id}");
-        assert_eq!(stage(&d, id)["model"], "sonnet", "{id}");
-        assert_eq!(stage(&d, id)["enabled"], true, "{id}");
-    }
+    assert_eq!(stage(&d, "brief-check")["routeId"], "auto");
+    assert_eq!(stage(&d, "brief-check")["model"], "sonnet");
+    assert_eq!(stage(&d, "judge")["routeId"], "auto");
+    assert_eq!(stage(&d, "judge")["enabled"], true);
 
     set_settings(&daemon, |s| s["briefCheckRoute"] = json!("claude-opus"));
     let d = daemon.request("pipeline.describe", json!({}));
-    for id in ["brief-check", "judge"] {
-        assert_eq!(stage(&d, id)["routeId"], "claude-opus", "{id}");
-        assert_eq!(stage(&d, id)["model"], "opus", "{id}");
-    }
+    assert_eq!(stage(&d, "brief-check")["routeId"], "claude-opus");
+    assert_eq!(stage(&d, "brief-check")["model"], "opus");
+    assert_eq!(stage(&d, "judge")["routeId"], "auto");
+    assert!(stage(&d, "judge").get("model").is_none());
 
     set_settings(&daemon, |s| s["briefCheckRoute"] = json!("auto"));
     let repo = init_git_repo();
     let task = create(
         &daemon,
         repo.path(),
-        json!({"variant": {"briefCheckRoute": "claude-opus"}}),
+        json!({"variant": {"briefCheckRoute": "claude-sonnet"}}),
     );
     let d = daemon.request("pipeline.describe", json!({"taskId": task["id"]}));
-    assert_eq!(stage(&d, "brief-check")["routeId"], "claude-opus");
-    assert_eq!(stage(&d, "brief-check")["model"], "opus");
+    assert_eq!(stage(&d, "brief-check")["routeId"], "claude-sonnet");
+    assert_eq!(stage(&d, "brief-check")["model"], "sonnet");
     assert_eq!(stage(&d, "judge")["routeId"], "auto");
-    assert_eq!(stage(&d, "judge")["model"], "sonnet");
+    assert!(stage(&d, "judge").get("model").is_none());
 }
 
 #[test]
@@ -440,10 +526,8 @@ fn describe_shows_the_label_when_the_resolved_route_has_no_model() {
     for route in ["auto", "claude-opus"] {
         set_settings(&daemon, |s| s["briefCheckRoute"] = json!(route));
         let d = daemon.request("pipeline.describe", json!({}));
-        for id in ["brief-check", "judge"] {
-            assert_eq!(stage(&d, id)["routeId"], route, "{id}");
-            assert_eq!(stage(&d, id)["model"], "Codex", "{id}");
-        }
+        assert_eq!(stage(&d, "brief-check")["routeId"], route);
+        assert_eq!(stage(&d, "brief-check")["model"], "Codex");
     }
 }
 
@@ -452,10 +536,9 @@ fn describe_shows_no_model_when_the_brief_check_is_off() {
     let (daemon, _scripts) = spawn_with_clis(true, true);
     set_settings(&daemon, |s| s["briefCheckRoute"] = json!(""));
     let d = daemon.request("pipeline.describe", json!({}));
-    for id in ["brief-check", "judge"] {
-        assert_eq!(stage(&d, id)["enabled"], false, "{id}");
-        assert!(stage(&d, id).get("model").is_none(), "{id}");
-    }
+    assert_eq!(stage(&d, "brief-check")["enabled"], false);
+    assert!(stage(&d, "brief-check").get("model").is_none());
+    assert_eq!(stage(&d, "judge")["enabled"], true);
 
     let repo = init_git_repo();
     let repo_path = repo.path().to_str().unwrap();
@@ -468,5 +551,5 @@ fn describe_shows_no_model_when_the_brief_check_is_off() {
     assert!(stage(&d, "brief-check").get("model").is_none());
     assert_eq!(stage(&d, "judge")["enabled"], true);
     assert_eq!(stage(&d, "judge")["routeId"], "auto");
-    assert_eq!(stage(&d, "judge")["model"], "sonnet");
+    assert!(stage(&d, "judge").get("model").is_none());
 }

@@ -18,6 +18,20 @@ export function PipelineView({
 }) {
   const { pipeline, error } = usePipeline({ repo: cwd }, settings);
   const [saveError, setSaveError] = useState("");
+  const selectedPreset = pipeline?.presets.find(
+    (preset) => preset.id === pipeline.presetId,
+  );
+  const tierRoutes = {
+    mechanical:
+      selectedPreset?.values.tierRoutes?.mechanical ??
+      settings?.tiers.mechanical ??
+      "",
+    standard:
+      selectedPreset?.values.tierRoutes?.standard ??
+      settings?.tiers.standard ??
+      "",
+    hard: selectedPreset?.values.tierRoutes?.hard ?? settings?.tiers.hard ?? "",
+  };
 
   async function write(patch: Partial<Settings>) {
     setSaveError("");
@@ -56,6 +70,7 @@ export function PipelineView({
       <Blueprint
         pipeline={pipeline}
         routes={settings?.routes ?? []}
+        tierRoutes={tierRoutes}
         error={saveError || error}
         onEdit={settings ? edit : undefined}
         preset={{

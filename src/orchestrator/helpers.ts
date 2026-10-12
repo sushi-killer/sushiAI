@@ -92,6 +92,7 @@ const VARIANT_KEYS: Exclude<
   | "land"
   | "reviewRoute"
   | "briefCheckRoute"
+  | "judgeRoute"
   | "maxAttempts"
   | "heldOut"
 >[] = ["stallTimeoutSecs", "reviewEvidence"];
@@ -122,6 +123,9 @@ export function variantLabel(task: Task, experiments: Variant): string {
   }
   if (variant.plannerRoute !== experiments.plannerRoute) {
     diffs.push(`plannerRoute ${variant.plannerRoute ?? "settings"}`);
+  }
+  if (variant.judgeRoute !== experiments.judgeRoute) {
+    diffs.push(`judgeRoute ${variant.judgeRoute ?? "settings"}`);
   }
   const tierRoutes = tierRoutesText(variant.tierRoutes);
   if (tierRoutes !== tierRoutesText(experiments.tierRoutes)) {

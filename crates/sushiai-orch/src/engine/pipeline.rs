@@ -33,6 +33,12 @@ struct StageOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    route_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_route_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_attempts: Option<u32>,
@@ -301,6 +307,11 @@ impl App {
         let plan_id = variant.plan_route_id(&settings).to_string();
         let review_id = variant.review_route_id(&settings).to_string();
         let check_id = variant.brief_check_route_id(&settings).to_string();
+        let judge_id = variant.judge_route.as_deref().unwrap_or("auto");
+        let implementer = settings.routes.iter().find(|r| r.id == implement_id);
+        let resolved_review = implementer.and_then(|imp| {
+            super::review::select_review_route_with(&settings, &review_id, imp, tier)
+        });
 
         let mut stages = Vec::new();
         for (kind, list) in [("main", &MAIN[..]), ("side", &SIDE[..])] {
@@ -311,39 +322,77 @@ impl App {
                     "implement" => (true, false, implement_id.as_str()),
                     "held-out" => (variant.held_out, true, ""),
                     "review" => (!review_id.is_empty(), false, review_id.as_str()),
-                    // Judge keeps the global route, even when a preset or
-                    // task variant overrides the brief check.
-                    "judge" => (
-                        !settings.brief_check_route.is_empty(),
-                        false,
-                        settings.brief_check_route.as_str(),
-                    ),
+                    "judge" => (!review_id.is_empty(), false, judge_id),
                     "land" => (variant.land, true, ""),
                     "advisor" => (variant.advisor, true, plan_id.as_str()),
                     _ => (true, false, ""),
                 };
                 let (route_id, mut model) = route_of(&settings, route);
-                if enabled && matches!(id, "brief-check" | "judge") {
-                    // The route the engine resolves now: `auto` and a named
-                    // route without its harness both fall to the cheapest.
-                    let resolved = if id == "judge" {
-                        super::brief_check::check_route_for(self, &Variant::default())
-                    } else {
-                        super::brief_check::check_route_for(self, &variant)
+                let mut auto_route_label = None;
+                let mut auto_model = None;
+                let mut resolved_route = if route.is_empty() || route == "auto" {
+                    None
+                } else {
+                    settings.routes.iter().find(|r| r.id == route).cloned()
+                };
+                if enabled && id == "brief-check" {
+                    resolved_route = super::brief_check::check_route_for(self, &variant)
+                        .and_then(|(_, route, _)| route);
+                    model = resolved_route
+                        .as_ref()
+                        .map(|r| r.model.clone().unwrap_or_else(|| r.label.clone()));
+                    let mut automatic_variant = variant.clone();
+                    automatic_variant.brief_check_route = Some("auto".to_string());
+                    let automatic = super::brief_check::check_route_for(self, &automatic_variant)
+                        .and_then(|(_, route, _)| route);
+                    auto_route_label = automatic.as_ref().map(|r| r.label.clone());
+                    auto_model = automatic.and_then(|r| r.model);
+                }
+                if enabled && id == "review" {
+                    resolved_route = resolved_review.as_ref().map(|(r, _)| (**r).clone());
+                    if route == "auto" {
+                        model = resolved_route.as_ref().and_then(|r| r.model.clone());
+                    }
+                    let automatic = implementer.and_then(|imp| {
+                        super::review::select_review_route_with(&settings, "auto", imp, tier)
+                            .map(|(r, _)| (*r).clone())
+                    });
+                    auto_route_label = automatic.as_ref().map(|r| r.label.clone());
+                    auto_model = automatic.and_then(|r| r.model);
+                }
+                if enabled && id == "judge" {
+                    let judge_resolution = match (resolved_review.as_ref(), implementer) {
+                        (Some((reviewer, _)), Some(implementer)) => {
+                            super::finding_judge::resolve_judge_route(
+                                &settings,
+                                variant.judge_route.as_deref(),
+                                reviewer,
+                                implementer,
+                                tier,
+                            )
+                            .0
+                        }
+                        _ => None,
                     };
-                    model = resolved
-                        .and_then(|(_, r, _)| r)
-                        .map(|r| r.model.unwrap_or(r.label));
+                    let automatic = match (resolved_review.as_ref(), implementer) {
+                        (Some((reviewer, _)), Some(implementer)) => {
+                            super::finding_judge::resolve_judge_route(
+                                &settings,
+                                None,
+                                reviewer,
+                                implementer,
+                                tier,
+                            )
+                            .0
+                        }
+                        _ => None,
+                    };
+                    auto_route_label = automatic.map(|r| r.label.clone());
+                    auto_model = automatic.and_then(|r| r.model.clone());
+                    resolved_route = judge_resolution.cloned();
+                    model = resolved_route.as_ref().and_then(|r| r.model.clone());
                 }
-                if id == "review" && route == "auto" {
-                    // `auto` picks at run time; show the route it would pick now.
-                    let implementer = settings.routes.iter().find(|r| r.id == implement_id);
-                    model = implementer
-                        .and_then(|imp| {
-                            super::review::select_review_route_with(&settings, route, imp, tier)
-                        })
-                        .and_then(|(r, _)| r.model.clone());
-                }
+                let route_label = resolved_route.map(|r| r.label);
                 let mut out = StageOut {
                     id,
                     label,
@@ -352,6 +401,9 @@ impl App {
                     optional,
                     owner_only: matches!(id, "checks" | "base-checks"),
                     route_id,
+                    route_label,
+                    auto_route_label,
+                    auto_model,
                     model,
                     max_attempts: (id == "implement").then(|| variant.max_attempts(&settings)),
                     state: None,

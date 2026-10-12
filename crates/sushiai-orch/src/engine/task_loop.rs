@@ -2428,6 +2428,7 @@ pub(super) async fn run_task_loop(
                                     && !r.repeated.is_empty()
                                     && !task.attempts[idx].disputes.is_empty()
                                 {
+                                    let judge_route = task.variant().judge_route;
                                     newly = judge_disputed_findings(
                                         &app,
                                         &mut task,
@@ -2436,6 +2437,7 @@ pub(super) async fn run_task_loop(
                                         &r.repeated,
                                         None,
                                         &settings,
+                                        judge_route.as_deref(),
                                         review_route,
                                         &route,
                                         task_tier,

@@ -9,6 +9,12 @@ const json = import("../src/orchestrator/settingsJson.ts");
 const routes = [
   { id: "claude-sonnet", label: "Sonnet", harness: "claude", model: "sonnet" },
   { id: "codex", label: "Codex", harness: "codex" },
+  {
+    id: "codex-luna",
+    label: "Codex Luna",
+    harness: "codex",
+    model: "gpt-5.6-luna",
+  },
 ];
 
 function stage(id, overrides = {}) {
@@ -43,6 +49,7 @@ function payload(overrides = {}) {
       stage("held-out", { optional: true }),
       stage("plan-review"),
       stage("review", { routeId: "codex" }),
+      stage("judge", { routeId: "codex", routeLabel: "Codex" }),
       stage("land", { optional: true, enabled: false }),
       stage("advisor", {
         kind: "side",
@@ -99,8 +106,8 @@ test("node states, labels and flags", async () => {
   assert.equal(by.brief.state, "pending");
   assert.equal(by.implement.time, "2m");
   assert.equal(by.implement.cost, "$0.42");
-  assert.equal(by.implement.model, "Sonnet");
-  assert.equal(by.plan.model, "sonnet");
+  assert.equal(by.implement.model, "Sonnet (sonnet)");
+  assert.equal(by.plan.model, "Sonnet (sonnet)");
   assert.equal(by.review.model, "Codex");
   for (const id of ["checks", "base-checks"]) {
     assert.equal(by[id].ownerOnly, true);
@@ -116,7 +123,7 @@ test("node states, labels and flags", async () => {
     Object.values(by)
       .filter((n) => n.routeEditable)
       .map((n) => n.id),
-    ["plan", "brief-check", "implement", "review"],
+    ["plan", "brief-check", "implement", "review", "judge"],
   );
   assert.deepEqual(
     Object.values(by)
@@ -139,8 +146,77 @@ test("an auto brief check and judge show the model the engine resolved", async (
   );
   assert.deepEqual(
     nodes.map((n) => n.model),
-    ["sonnet", "sonnet"],
+    ["Auto: sonnet", "Auto: sonnet"],
   );
+});
+
+test("an unresolved judge does not fall back to the preset route label", async () => {
+  const { blueprintNodes } = await model;
+  const [node] = blueprintNodes(
+    payload({
+      stages: [stage("judge", { routeId: "codex-luna", model: undefined })],
+    }),
+    routes,
+  );
+  assert.equal(node.routeLabel, undefined);
+  assert.equal(node.model, undefined);
+});
+
+test("a resolved judge label without a model does not borrow the named route model", async () => {
+  const { blueprintNodes } = await model;
+  const [node] = blueprintNodes(
+    payload({
+      stages: [
+        stage("judge", {
+          routeId: "codex-luna",
+          routeLabel: "No-model route",
+          model: undefined,
+        }),
+      ],
+    }),
+    routes,
+  );
+  assert.equal(node.model, "No-model route");
+});
+
+test("an auto route uses its resolved label and model", async () => {
+  const { blueprintNodes } = await model;
+  const [node] = blueprintNodes(
+    payload({
+      stages: [
+        stage("judge", {
+          routeId: "auto",
+          routeLabel: "Codex Luna",
+          model: "gpt-5.6-luna",
+        }),
+      ],
+    }),
+    routes,
+  );
+  assert.equal(node.model, "Auto: Codex Luna (gpt-5.6-luna)");
+});
+
+test("route formatting omits a model that repeats the label", async () => {
+  const { formatRouteLabel } = await model;
+  assert.equal(formatRouteLabel("Codex", "Codex"), "Codex");
+  assert.equal(formatRouteLabel("Codex", undefined, true), "Auto: Codex");
+});
+
+test("routed nodes show the route label and model", async () => {
+  const { blueprintNodes } = await model;
+  const [node] = blueprintNodes(
+    payload({
+      stages: [
+        stage("implement", {
+          routeId: "codex-luna",
+          routeLabel: "Codex Luna",
+          model: "gpt-5.6-luna",
+        }),
+      ],
+    }),
+    routes,
+  );
+  assert.equal(node.model, "Codex Luna (gpt-5.6-luna)");
 });
 
 test("the question branch goes to the overseer or to you", async () => {
@@ -209,6 +285,19 @@ test("stageEdit without a preset changes only the globals", async () => {
     "codex",
   );
   assert.equal(
+    edit("implement", {
+      kind: "route",
+      value: "codex-luna",
+      tier: "mechanical",
+    }).tiers.mechanical,
+    "codex-luna",
+  );
+  assert.equal(
+    edit("judge", { kind: "route", value: "codex-luna" }).experiments
+      .judgeRoute,
+    "codex-luna",
+  );
+  assert.equal(
     edit("implement", { kind: "maxAttempts", value: 5 }).maxAttempts,
     5,
   );
@@ -243,8 +332,33 @@ test("stageEdit on a custom preset edits only that preset", async () => {
   const tier = stageEdit(base, "/r", "mine", "implement", {
     kind: "route",
     value: "codex",
+    tier: "mechanical",
   });
-  assert.deepEqual(tier.presets[0].values.tierRoutes, { standard: "codex" });
+  const allTiers = stageEdit(
+    stageEdit(tier, "/r", "mine", "implement", {
+      kind: "route",
+      value: "codex-luna",
+      tier: "standard",
+    }),
+    "/r",
+    "mine",
+    "implement",
+    { kind: "route", value: "codex", tier: "hard" },
+  );
+  const withJudge = stageEdit(allTiers, "/r", "mine", "judge", {
+    kind: "route",
+    value: "codex-luna",
+  });
+  assert.deepEqual(withJudge.presets[0].values, {
+    advisor: false,
+    maxAttempts: 2,
+    tierRoutes: {
+      mechanical: "codex",
+      standard: "codex-luna",
+      hard: "codex",
+    },
+    judge: "codex-luna",
+  });
   assert.equal(tier.tiers.standard, "claude-sonnet");
   const held = stageEdit(base, "/r", "mine", "held-out", {
     kind: "enabled",
@@ -271,8 +385,8 @@ test("stageEdit on a built-in appends one custom copy and points the repo at it"
     base,
     "/r",
     "fast",
-    "advisor",
-    { kind: "enabled", value: true },
+    "judge",
+    { kind: "route", value: "codex-luna" },
     [fast],
   );
   assert.equal(next.presets.length, 1);
@@ -283,7 +397,7 @@ test("stageEdit on a built-in appends one custom copy and points the repo at it"
   assert.deepEqual(copy.values, {
     briefCheck: false,
     maxAttempts: 2,
-    advisor: true,
+    judge: "codex-luna",
   });
   assert.deepEqual(next.repoPresets, { "/r": copy.id });
   assert.deepEqual(next.experiments, base.experiments);

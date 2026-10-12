@@ -268,6 +268,7 @@ pub(super) async fn handle_repeated_findings(
     if to_judge.is_empty() || cancel.is_cancelled() {
         return Vec::new();
     }
+    let judge_route = task.variant().judge_route;
     judge_disputed_findings(
         app,
         task,
@@ -276,6 +277,7 @@ pub(super) async fn handle_repeated_findings(
         &to_judge,
         Some(&truncate_chars(implementer_note.trim(), 2000)),
         settings,
+        judge_route.as_deref(),
         review_route,
         implementer,
         task.tier,

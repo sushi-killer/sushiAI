@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { ArrowRight, CornerDownRight } from "lucide-react";
-import type { Pipeline, Route } from "./types";
+import type { Pipeline, Route, Tier } from "./types";
 import {
   blueprintNodes,
+  formatRouteLabel,
   type BlueprintNode,
   type NodeState,
   type StageChange,
@@ -28,6 +29,7 @@ const STATE_TONE: Record<NodeState, Tone> = {
   disabled: "neutral",
   pending: "neutral",
 };
+const TIERS: Tier[] = ["mechanical", "standard", "hard"];
 
 /** The preset picker's options: the value is a preset id, "" = none. */
 export type PresetPicker = {
@@ -57,11 +59,13 @@ function NodeFacts({ node }: { node: BlueprintNode }) {
 function Inspector({
   node,
   routes,
+  tierRoutes,
   landLocked,
   onEdit,
 }: {
   node: BlueprintNode;
   routes: Route[];
+  tierRoutes: Record<Tier, string>;
   /** A preset is selected and presets carry no land switch. */
   landLocked: boolean;
   /** Absent = read-only (a task's pipeline). */
@@ -70,8 +74,20 @@ function Inspector({
   const editable = onEdit !== undefined;
   const routeId = node.routeId ?? "";
   const known = routes.some((r) => r.id === routeId);
+  const route =
+    node.id === "judge" && !node.routeLabel
+      ? undefined
+      : routes.find((r) => r.id === routeId);
   const routeName =
-    routes.find((r) => r.id === routeId)?.label || node.model || routeId;
+    formatRouteLabel(
+      node.routeLabel ?? route?.label,
+      node.routeLabel !== undefined
+        ? node.routeModel
+        : (node.routeModel ?? route?.model),
+      node.routeId === "auto",
+    ) ||
+    node.model ||
+    routeId;
   const toggleLocked = node.id === "land" && landLocked;
   return (
     <div
@@ -100,32 +116,75 @@ function Inspector({
           Land follows the global setting; presets do not change it.
         </p>
       )}
-      {node.routeEditable && editable && (
-        <label className="bp-row-field">
-          <span>Route</span>
-          <select
-            className="bp-select"
-            aria-label={`${node.label} route`}
-            value={routeId}
-            onChange={(event) =>
-              onEdit?.(node.id, { kind: "route", value: event.target.value })
-            }
-          >
-            {!known && <option value={routeId}>{routeId || "none"}</option>}
-            {node.id === "review" && <option value="auto">Auto</option>}
-            {routes.map((route) => (
-              <option key={route.id} value={route.id}>
-                {route.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {node.routeEditable &&
+        editable &&
+        (node.id === "implement" ? (
+          TIERS.map((tier) => {
+            const value = tierRoutes[tier];
+            return (
+              <label className="bp-row-field" key={tier}>
+                <span>{tier[0].toUpperCase() + tier.slice(1)}</span>
+                <select
+                  className="bp-select"
+                  aria-label={`${tier[0].toUpperCase() + tier.slice(1)} route`}
+                  value={value}
+                  onChange={(event) =>
+                    onEdit?.(node.id, {
+                      kind: "route",
+                      value: event.target.value,
+                      tier,
+                    })
+                  }
+                >
+                  {!routes.some((item) => item.id === value) && (
+                    <option value={value}>{value || "none"}</option>
+                  )}
+                  {routes.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {formatRouteLabel(item.label, item.model)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })
+        ) : (
+          <label className="bp-row-field">
+            <span>Route</span>
+            <select
+              className="bp-select"
+              aria-label={`${node.label} route`}
+              value={routeId}
+              onChange={(event) =>
+                onEdit?.(node.id, { kind: "route", value: event.target.value })
+              }
+            >
+              {!known && routeId !== "auto" && (
+                <option value={routeId}>{routeId || "none"}</option>
+              )}
+              {["brief-check", "review", "judge"].includes(node.id) && (
+                <option value="auto">
+                  {formatRouteLabel(
+                    node.autoRouteLabel ??
+                      (routeId === "auto" ? node.routeLabel : undefined),
+                    node.autoModel ??
+                      (routeId === "auto" ? node.routeModel : undefined),
+                    true,
+                  )}
+                </option>
+              )}
+              {routes.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {formatRouteLabel(item.label, item.model)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
       {(!node.routeEditable || !editable) && routeName && (
         <p className="bp-note">
           Route: {routeName}
           {node.id === "advisor" && " (the plan route)"}
-          {node.id === "judge" && " (the brief-check route)"}
         </p>
       )}
       {node.maxAttempts !== undefined &&
@@ -159,12 +218,14 @@ function Inspector({
 export function Blueprint({
   pipeline,
   routes,
+  tierRoutes,
   preset,
   onEdit,
   error,
 }: {
   pipeline: Pipeline | null;
   routes: Route[];
+  tierRoutes: Record<Tier, string>;
   preset: PresetPicker;
   onEdit?: (stageId: string, change: StageChange) => void;
   error?: string;
@@ -248,6 +309,7 @@ export function Blueprint({
               key={node.id}
               node={node}
               routes={routes}
+              tierRoutes={tierRoutes}
               landLocked={preset.value !== ""}
               onEdit={onEdit}
             />

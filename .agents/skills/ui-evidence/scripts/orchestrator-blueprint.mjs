@@ -23,7 +23,7 @@ const git = (...args) =>
   execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 
 const report = { screenshots: {}, widths: {}, pageErrors: [] };
-const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
+const profile = await fs.mkdtemp(`${root}/artifacts/sushiai-evidence-`);
 const daemonHome = `${profile}/sushiai`;
 const dataDir = `${daemonHome}/orchestrator`;
 const queuedId = randomUUID();
@@ -155,6 +155,67 @@ try {
   // The daemon hosts the orchestrator module only when it is enabled.
   await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
   await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(
+    `${dataDir}/settings.json`,
+    JSON.stringify(
+      {
+        routes: [
+          {
+            id: "codex-luna",
+            label: "Codex Luna",
+            harness: "codex",
+            model: "gpt-5.6-luna",
+            strength: 1,
+          },
+          {
+            id: "claude-sonnet",
+            label: "Claude Sonnet",
+            harness: "claude",
+            model: "sonnet",
+            strength: 2,
+          },
+          {
+            id: "claude-opus",
+            label: "Claude Opus",
+            harness: "claude",
+            model: "opus",
+            strength: 3,
+          },
+        ],
+        planner: "claude-opus",
+        review: "claude-opus",
+        tiers: {
+          mechanical: "codex-luna",
+          standard: "codex-luna",
+          hard: "codex-luna",
+        },
+        sandbox: "native",
+        allowedDomains: ["*"],
+        protectedPaths: [],
+        maxAttempts: 4,
+        parallel: 2,
+        presets: [
+          {
+            id: "blueprint-custom",
+            label: "Blueprint custom",
+            builtin: false,
+            values: {
+              judge: "claude-sonnet",
+              tierRoutes: {
+                mechanical: "codex-luna",
+                standard: "codex-luna",
+                hard: "codex-luna",
+              },
+            },
+          },
+        ],
+        repoPresets: { [root]: "blueprint-custom" },
+      },
+      null,
+      2,
+    ),
+  );
 
   app = await electron.launch({
     args: ["."],
@@ -231,15 +292,16 @@ try {
   // container query hides the rail below 640 px), so every pick is made wide.
   await fit(WIDE, "wide");
 
-  // Pipeline view with one optional stage's inspector open.
+  // Pipeline view with optional, implement-tier and judge inspectors open.
   await page
     .locator(".orch-rail")
     .getByRole("button", { name: /^Pipeline/ })
     .click();
   await page.locator(".bp").waitFor({ timeout: 10000 });
   // Several inspectors stay open together: an optional stage (enable
-  // switch), Implement (route select, max attempts) and Checks (owner only).
-  for (const stage of ["Advisor", "Implement", "Checks"]) {
+  // switch), Implement (three tier routes, max attempts), Judge (route) and
+  // Checks (owner only).
+  for (const stage of ["Advisor", "Implement", "Judge", "Checks"]) {
     await page
       .locator(".bp-flow .bp-node, .bp-branch .bp-node")
       .filter({
@@ -253,6 +315,24 @@ try {
     .getByText("Enabled", { exact: true })
     .waitFor();
   await page.getByLabel("Max attempts").waitFor();
+  await page.getByLabel("Mechanical route").waitFor();
+  await page.getByLabel("Standard route").waitFor();
+  await page.getByLabel("Hard route").waitFor();
+  await page.getByLabel("Judge route").waitFor();
+  for (const [name, option] of [
+    ["Mechanical route", "Codex Luna (gpt-5.6-luna)"],
+    ["Judge route", "Claude Sonnet (sonnet)"],
+    ["Judge route", "Auto: Claude Sonnet (sonnet)"],
+  ]) {
+    const found = await page
+      .getByLabel(name)
+      .evaluate(
+        (select, text) =>
+          [...select.options].some((item) => item.text === text),
+        option,
+      );
+    if (!found) throw new Error(`${name} is missing option "${option}"`);
+  }
   await page.getByText("shared checks: owner only").waitFor();
   const pipelineView = page.locator(".orch-view-scroll").first();
   await save("blueprint-repo-inspector-wide", pipelineView);
@@ -317,9 +397,9 @@ try {
 
   // Stop it before the app closes, so no fake harness is left running.
   await taskDetail.getByRole("button", { name: "Stop task" }).click();
-  await taskDetail
-    .getByRole("button", { name: "Stop task" })
-    .waitFor({ state: "detached", timeout: 30000 });
+  await taskDetail.getByText("Stopped", { exact: true }).waitFor({
+    timeout: 30000,
+  });
 } catch (error) {
   report.error = String(error?.message ?? error);
 } finally {

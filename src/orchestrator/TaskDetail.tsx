@@ -523,6 +523,15 @@ function TaskBlueprint({
     <Blueprint
       pipeline={pipeline}
       routes={settings?.routes ?? []}
+      tierRoutes={{
+        mechanical:
+          task.variant?.tierRoutes?.mechanical ??
+          settings?.tiers.mechanical ??
+          "",
+        standard:
+          task.variant?.tierRoutes?.standard ?? settings?.tiers.standard ?? "",
+        hard: task.variant?.tierRoutes?.hard ?? settings?.tiers.hard ?? "",
+      }}
       error={error}
       preset={{
         options: [

@@ -194,7 +194,8 @@ test("a connecting host is waited for; one that never settles times out", async 
   const manager = fakeDaemonManager({
     hosts: { local: { state: "connecting" } },
   });
-  const service = serviceFor(manager, { readyTimeoutMs: 40 });
+  // Far above a loaded machine's timer lag for the 10 ms ready below.
+  const service = serviceFor(manager, { readyTimeoutMs: 1000 });
   const pending = service.call("task.list");
   setTimeout(() => manager.setState("local", { state: "ready" }), 10);
   await pending;

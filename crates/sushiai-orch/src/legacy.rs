@@ -32,8 +32,8 @@ fn alive(pid: i32) -> bool {
 }
 
 /// An unidentified process is left alone. The executable path or the name it was started
-/// under (what `ps -o comm=` showed) must say `orchd`; on Linux `/proc/<pid>/exe` alone
-/// did not identify a freshly started copy.
+/// under (its argv[0], like the old process-list check) must say `orchd`; on Linux
+/// `/proc/<pid>/exe` alone did not identify a freshly started copy.
 fn looks_like_orchd(pid: i32) -> bool {
     let named = |s: &str| {
         Path::new(s)

@@ -1322,9 +1322,10 @@ mod stall_tests {
             outcome.error,
             Some(helper_timeout_message("planner", limit))
         );
-        // Under load the deadline can stop the fake before it writes its pid.
-        if let Ok(pid) = std::fs::read_to_string(bin.with_extension("pid")) {
-            let pgid: i32 = pid.trim().parse().unwrap();
+        // Under load the deadline can stop the fake before it writes its pid,
+        // or between creating the pid file and writing it.
+        let pid = std::fs::read_to_string(bin.with_extension("pid")).unwrap_or_default();
+        if let Ok(pgid) = pid.trim().parse::<i32>() {
             assert!(!group_alive(pgid), "the version probe was not stopped");
         }
 

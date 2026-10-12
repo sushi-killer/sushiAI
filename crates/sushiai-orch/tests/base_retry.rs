@@ -180,21 +180,22 @@ fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() 
     assert_eq!(done["baseSha"], new_base, "{done}");
     let tests = done["plannerTests"]["commit"].as_str().unwrap();
     assert_ne!(tests, old_tests);
+    // A done task's worktree is removed: read the result from its branch.
+    let repo_path = repo.path();
+    let branch = done["branch"].as_str().unwrap();
+    let show = |file: &str| git_out(repo_path, &["show", &format!("{branch}:{file}")]);
     assert_eq!(
-        git_out(worktree, &["rev-parse", &format!("{tests}^")]),
+        git_out(repo_path, &["rev-parse", &format!("{tests}^")]),
         new_base
     );
     assert_eq!(done["plannerTests"]["protected"], protected);
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("tests/planner-check.sh")).unwrap(),
-        test_content
+    assert_eq!(show("tests/planner-check.sh"), test_content.trim_end());
+    assert_eq!(show("CHANGED_MARKER.txt"), "changed");
+    git_out(
+        repo_path,
+        &["cat-file", "-e", &format!("{branch}:FIXED.txt")],
     );
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("CHANGED_MARKER.txt")).unwrap(),
-        "changed\n"
-    );
-    assert!(worktree.join("FIXED.txt").exists());
-    let diff = git_out(worktree, &["diff", "--name-only", tests, "HEAD"]);
+    let diff = git_out(repo_path, &["diff", "--name-only", tests, branch]);
     assert_eq!(diff, "CHANGED_MARKER.txt");
     let worktree = worktree.to_path_buf();
     daemon.shutdown_and_wait();

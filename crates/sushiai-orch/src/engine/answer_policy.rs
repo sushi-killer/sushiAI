@@ -427,6 +427,10 @@ pub(super) fn record_answered_question(
     answer: &str,
     answered_by: AnsweredBy,
 ) {
+    if question.kind == QuestionKind::PreexistingFailure {
+        let base_sha = task.base_sha.clone();
+        base_check::record_base_retry(task, &question.commands, &base_sha, answer);
+    }
     task.question_history.push(AnsweredQuestion {
         question: question.text.clone(),
         options: question.options.clone(),

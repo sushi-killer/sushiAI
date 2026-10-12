@@ -21,6 +21,7 @@ pub(super) async fn run_task_loop(
     // failure its own implement attempt has to fix. While it is set (and once
     // the parent has an attempt) the parent never goes back to `run_parent`.
     let mut parent_failure: Option<String> = None;
+    let mut parent_conflict_only = false;
 
     'attempts: loop {
         if cancel.is_cancelled() {
@@ -121,7 +122,12 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt { failure, budget } => {
+                    ParentEnd::Attempt {
+                        failure,
+                        budget,
+                        conflict_only,
+                    } => {
+                        parent_conflict_only = conflict_only;
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -165,6 +171,51 @@ pub(super) async fn run_task_loop(
                     return;
                 }
             }
+        }
+
+        // An answered retry survives a daemon restart without another
+        // attempt or another question on the same base.
+        let checks: Vec<String> = task
+            .verify
+            .iter()
+            .chain(&task.final_verify)
+            .cloned()
+            .collect();
+        if base_retry_requested(&task, &checks, &task.base_sha) {
+            let worktree = PathBuf::from(&task.worktree);
+            match carry_after_base_moves(
+                &app,
+                &mut task,
+                &worktree,
+                &pending_answer,
+                &cancel,
+                &mut None,
+            )
+            .await
+            {
+                BaseRetry::Ready => {}
+                BaseRetry::Conflict(detail) => {
+                    if let Some(idx) = task
+                        .attempts
+                        .iter()
+                        .rposition(|a| a.stage == Stage::Implement)
+                    {
+                        record_failure(&mut task, idx, FailureKind::Conflict, detail);
+                    } else {
+                        parent_conflict_only = true;
+                        parent_failure = Some(detail);
+                    }
+                }
+                BaseRetry::Stopped => {
+                    mark_stopped_if_not_already(&app, &task_id).await;
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
+            }
+            attempt_budget = attempt_budget.max(counted_attempts(&task) + 1);
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
         }
 
         // Concurrency limit: stays `queued` while waiting for a slot, and
@@ -291,7 +342,12 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt { failure, budget } => {
+                    ParentEnd::Attempt {
+                        failure,
+                        budget,
+                        conflict_only,
+                    } => {
+                        parent_conflict_only = conflict_only;
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -589,7 +645,8 @@ pub(super) async fn run_task_loop(
             let attempt_n = implement_attempt_count(&task) + 1;
             // A landing that conflicted only needs its markers resolved: that
             // runs on the cheap route, not as a full re-implementation.
-            let conflict_only = last_failure_is_conflict(&task);
+            let conflict_only = last_failure_is_conflict(&task)
+                || (parent_conflict_only && completed_implement_attempts(&task) == 0);
             let (route_id, overridden) = task.variant().implement_route_id(
                 &settings,
                 if conflict_only {
@@ -600,7 +657,7 @@ pub(super) async fn run_task_loop(
             );
             if conflict_only {
                 task.decisions.push(format!(
-                "Orchestrator: the landing conflicted -> conflict-only attempt on the cheap route {route_id}"
+                "Orchestrator: the carry conflicted -> conflict-only attempt on the cheap route {route_id}"
             ));
             } else if overridden {
                 let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
@@ -2545,12 +2602,18 @@ fn rebase_conflict_note(
     }
 }
 
-/// Carries the task's work onto its base branch as it is now, so a retry
-/// after "the base is fixed" runs on the fix. Nothing happens when the task
-/// has no base branch or it did not move.
-pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
+pub(super) enum BaseCarry {
+    Ready,
+    Conflict(String),
+    Failed(String),
+}
+
+/// Carries committed and uncommitted task work onto the current base head.
+pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> BaseCarry {
     let Some(base_ref) = task.base_ref.clone() else {
-        return;
+        let reason = "Rebase: cannot carry the work without a base branch".to_string();
+        task.decisions.push(reason.clone());
+        return BaseCarry::Failed(reason);
     };
     let (wt, from, tid, r) = (
         worktree.to_path_buf(),
@@ -2558,11 +2621,38 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
         task.id.clone(),
         base_ref.clone(),
     );
-    let carried =
-        tokio::task::spawn_blocking(move || git::carry_onto_moved_base(&wt, &r, &from, &tid)).await;
+    let carried = tokio::task::spawn_blocking(move || {
+        let new_sha = git::resolve_commit(&wt, &r)?;
+        if new_sha == from {
+            return Ok((git::Rebase::Unchanged, false));
+        }
+        // Preserve a merge the task already made; resetting it would carry
+        // the base's changes a second time along with the task's own work.
+        if git::is_ancestor(&wt, &new_sha, "HEAD") == Some(true) {
+            return Ok((
+                git::Rebase::Moved {
+                    new_sha,
+                    rewritten: false,
+                },
+                true,
+            ));
+        }
+        if git::head_sha(&wt)? != from {
+            git::uncommit_to(&wt, &from)?;
+        }
+        git::carry_onto_moved_base(&wt, &r, &from, &tid).map(|carried| (carried, false))
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
     match carried {
-        Ok(Ok(git::Rebase::Moved { new_sha, rewritten })) => {
-            task.decisions.push(if rewritten {
+        Ok((git::Rebase::Unchanged, _)) => BaseCarry::Ready,
+        Ok((git::Rebase::Moved { new_sha, rewritten }, already_contained)) => {
+            task.decisions.push(if already_contained {
+                format!(
+                    "Rebase: the task branch already contains {base_ref} at {}; moved base_sha to that head",
+                    short_sha(&new_sha)
+                )
+            } else if rewritten {
                 format!(
                     "Rebase: {base_ref} was rewritten; carried the work's own changes onto it at {}",
                     short_sha(&new_sha)
@@ -2574,72 +2664,115 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) {
                 )
             });
             task.base_sha = new_sha;
+            BaseCarry::Ready
         }
-        Ok(Ok(git::Rebase::Conflicts {
-            new_sha,
-            files,
-            rewritten,
-        })) => {
+        Ok((
+            git::Rebase::Conflicts {
+                new_sha,
+                files,
+                rewritten,
+            },
+            _,
+        )) => {
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
+            let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
             task.base_sha = new_sha;
+            BaseCarry::Conflict(detail)
         }
-        Ok(Ok(git::Rebase::Skipped { reason })) => task
-            .decisions
-            .push(format!("Rebase: not carried onto {base_ref}: {reason}")),
-        Ok(Err(e)) => task
-            .decisions
-            .push(format!("Rebase: carrying onto {base_ref} failed: {e}")),
-        Ok(Ok(git::Rebase::Unchanged)) | Err(_) => {}
+        Ok((git::Rebase::Skipped { reason }, _)) => {
+            let detail = format!("Rebase: not carried onto {base_ref}: {reason}");
+            task.decisions.push(detail.clone());
+            BaseCarry::Failed(detail)
+        }
+        Err(e) => {
+            let detail = format!("Rebase: carrying onto {base_ref} failed: {e}");
+            task.decisions.push(detail.clone());
+            BaseCarry::Failed(detail)
+        }
     }
 }
 
 /// How often a task that waits for its base branch to move looks at it.
 const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
 
-/// A "retry after the base is fixed" answer: waits until the base branch has
-/// moved past the task's base, then carries the work onto it. No attempt
-/// starts on the same base: the failure it would meet is the one already
-/// known. Returns `false` when `cancel` fired while waiting. A task without a
-/// base branch, or one whose branch cannot be read, goes on at once.
+pub(super) enum BaseRetry {
+    Ready,
+    Conflict(String),
+    Stopped,
+}
+
+/// Waits for the base to move and carries onto it. A failed carry stays on
+/// an owner question until it can be retried, rather than implementing on
+/// the old base. Conflicts are left for a conflict-only implement attempt.
 pub(super) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,
     worktree: &Path,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
-) -> bool {
-    if let Some(base_ref) = task.base_ref.clone() {
-        let mut noted = false;
-        loop {
-            let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
-            let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-            if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
-                break;
+) -> BaseRetry {
+    loop {
+        if let Some(base_ref) = task.base_ref.clone() {
+            let mut noted = false;
+            loop {
+                let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
+                let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
+                    break;
+                }
+                if !noted {
+                    noted = true;
+                    permit.take();
+                    task.decisions.push(format!(
+                        "Orchestrator: waiting for {base_ref} to move past {} before the retry",
+                        short_sha(&task.base_sha)
+                    ));
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return BaseRetry::Stopped,
+                    _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+                }
             }
-            if !noted {
-                noted = true;
-                // No slot is held while nothing runs.
-                permit.take();
-                task.decisions.push(format!(
-                    "Orchestrator: waiting for {base_ref} to move past {} before the retry",
-                    short_sha(&task.base_sha)
+        }
+        if cancel.is_cancelled() {
+            return BaseRetry::Stopped;
+        }
+        match carry_onto_newest_base(task, worktree).await {
+            BaseCarry::Ready => return BaseRetry::Ready,
+            BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
+            BaseCarry::Failed(reason) => {
+                task.question = Some(Question::new(
+                    format!("{reason}. Fix the carry problem, then retry, or stop?"),
+                    vec!["retry".to_string(), "stop".to_string()],
+                    QuestionKind::AgentQuestion,
+                    AskedBy::Verify,
                 ));
+                task.status = TaskStatus::Waiting;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
-                app.broadcast_task(task);
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return false,
-                _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+                let task_id = task.id.clone();
+                let Some(answer) =
+                    wait_for_answer(app, &task_id, task, pending_answer, cancel, permit).await
+                else {
+                    return BaseRetry::Stopped;
+                };
+                if is_option(&answer, "stop") {
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    let _ = app.store.save_task(task);
+                    app.broadcast_task(task);
+                    return BaseRetry::Stopped;
+                }
             }
         }
     }
-    carry_onto_newest_base(task, worktree).await;
-    true
 }
 
 /// The attempt's loop was cancelled after its run: interrupted, never a
@@ -2727,6 +2860,7 @@ impl App {
 
     fn finish_task_loop(&self, task_id: &str) {
         self.controls.lock().unwrap().remove(task_id);
+        self.final_base_jobs.lock().unwrap().remove(task_id);
         if let Ok(Some(mut task)) = self.store.load_task(task_id) {
             let before = task.decisions.len();
             record_check_outcomes(self, &mut task, &[]);
@@ -2967,26 +3101,34 @@ pub(super) async fn finish_after_review(
             }
             record_failure(task, idx, FailureKind::Verify, detail.join("\n\n"));
             let question = pre_existing_question(&pre_existing, &task.base_sha);
-            task.question = Some(question.clone());
-            task.status = TaskStatus::Waiting;
-            task.updated_at = now_ms();
             let assumed = task.assumptions.len();
-            let Some(answer) =
-                wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
-            else {
-                *permit = None;
-                app.finish_task_loop(task_id);
-                return Tail::Return;
+            let already_retried = base_retry_requested(task, &question.commands, &task.base_sha);
+            let answer = if already_retried {
+                PRE_EXISTING_RETRY.to_string()
+            } else {
+                task.question = Some(question.clone());
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let Some(answer) =
+                    wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+                else {
+                    *permit = None;
+                    app.finish_task_loop(task_id);
+                    return Tail::Return;
+                };
+                answer
             };
             let policy_answered = task.assumptions.len() > assumed;
-            let base_sha = task.base_sha.clone();
-            record_owner_base_check(
-                task,
-                &question.commands,
-                &base_sha,
-                &answer,
-                policy_answered,
-            );
+            if !already_retried {
+                let base_sha = task.base_sha.clone();
+                record_owner_base_check(
+                    task,
+                    &question.commands,
+                    &base_sha,
+                    &answer,
+                    policy_answered,
+                );
+            }
             let settings = app.settings.read().unwrap().clone();
             let origin = origin_of_last_answer(task);
             // Every removal goes through `remove_check_command`; a refused
@@ -3002,11 +3144,19 @@ pub(super) async fn finish_after_review(
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                if !carry_after_base_moves(app, task, worktree, cancel, permit).await {
-                    interrupt_attempt(app, task, idx);
-                    *permit = None;
-                    app.finish_task_loop(task_id);
-                    return Tail::Return;
+                match carry_after_base_moves(app, task, worktree, pending_answer, cancel, permit)
+                    .await
+                {
+                    BaseRetry::Ready => {}
+                    BaseRetry::Conflict(detail) => {
+                        record_failure(task, idx, FailureKind::Conflict, detail);
+                    }
+                    BaseRetry::Stopped => {
+                        interrupt_attempt(app, task, idx);
+                        *permit = None;
+                        app.finish_task_loop(task_id);
+                        return Tail::Return;
+                    }
                 }
                 *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
                 task.updated_at = now_ms();

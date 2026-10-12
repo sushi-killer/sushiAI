@@ -272,6 +272,61 @@ pub(super) fn non_owner_base_retry(task: &Task, command: &str, base_sha: Option<
         })
 }
 
+fn base_retry_line(command: &str, base_sha: &str) -> String {
+    format!("Orchestrator: retry base check {command} after {base_sha} moves")
+}
+
+pub(super) fn record_base_retry(
+    task: &mut Task,
+    commands: &[String],
+    base_sha: &str,
+    answer: &str,
+) {
+    if is_option(answer, PRE_EXISTING_RETRY) {
+        for command in commands {
+            let line = base_retry_line(command, base_sha);
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
+    }
+}
+
+/// A retry remains pending until its exact base moves, including after a
+/// restart and when the answer came from the policy.
+pub(super) fn base_retry_requested(task: &Task, commands: &[String], base_sha: &str) -> bool {
+    commands.iter().any(|command| {
+        if task.decisions.contains(&base_retry_line(command, base_sha)) {
+            return true;
+        }
+        let retry_prefix = format!("Orchestrator: retry base check {command} after ");
+        if task
+            .decisions
+            .iter()
+            .any(|line| line.starts_with(&retry_prefix))
+        {
+            return false;
+        }
+        // Tasks answered before full-SHA retry records existed.
+        ["Owner", "Orchestrator"].iter().any(|who| {
+            let prefix = base_check_prefix(who, command, base_sha);
+            task.decisions.iter().any(|line| {
+                line.strip_prefix(&prefix)
+                    .is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
+            })
+        }) || task.assumptions.iter().any(|a| {
+            !a.overturned
+                && a.kind == Some(QuestionKind::PreexistingFailure)
+                && a.commands.contains(command)
+                && is_option(&a.answer, PRE_EXISTING_RETRY)
+                && a.question.contains(&format!(
+                    "base {}:",
+                    base_sha.chars().take(7).collect::<String>()
+                ))
+        })
+    })
+}
+
 /// Records an answer to a base-check question about `commands`, asked on
 /// `base_sha`, one line per command, unless the answer policy gave it (`policy_answered`). The line
 /// says who answered, read from the question history entry the wait just
@@ -283,6 +338,7 @@ pub(super) fn record_owner_base_check(
     answer: &str,
     policy_answered: bool,
 ) {
+    record_base_retry(task, commands, base_sha, answer);
     if !policy_answered {
         if let Some(who) = answerer_label(task) {
             for command in commands {
@@ -316,25 +372,38 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
+fn is_environment_result(outcome: &VerifyOutcome) -> bool {
+    let tail = outcome.tail.to_ascii_lowercase();
+    ["setup failed", "eexist", "failed to install"]
+        .iter()
+        .any(|marker| tail.contains(marker))
+}
+
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
 /// A missing or unreadable file is an empty cache; an entry without an exit
-/// code is skipped.
+/// code or with an environment result is skipped.
 pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), VerifyOutcome> {
     let rows: Vec<StoredBaseRun> = std::fs::read_to_string(data_dir.join(BASE_RUNS_FILE))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    rows.into_iter()
-        .filter(|r| r.outcome.code.is_some())
+    let poisoned = rows.iter().any(|r| is_environment_result(&r.outcome));
+    let cache = rows
+        .into_iter()
+        .filter(|r| r.outcome.code.is_some() && !is_environment_result(&r.outcome))
         .map(|r| ((r.base_sha, r.outcome.command.clone()), r.outcome))
-        .collect()
+        .collect();
+    if poisoned {
+        save_base_runs(data_dir, &cache);
+    }
+    cache
 }
 
 /// Writes the cache next to the other daemon state (best effort).
 fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutcome>) {
     let rows: Vec<StoredBaseRun> = cache
         .iter()
-        .filter(|(_, o)| o.code.is_some() && !timed_out_under_load(o))
+        .filter(|(_, o)| o.code.is_some() && !timed_out_under_load(o) && !is_environment_result(o))
         .take(BASE_RUNS_KEPT)
         .map(|((sha, _), o)| StoredBaseRun {
             base_sha: sha.clone(),
@@ -355,8 +424,9 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
-/// same command on an unchanged base runs once. `Err` only when the checkout
-/// itself could not be made; the caller then knows nothing about the base.
+/// same command on an unchanged base runs once. Environment results and
+/// checkout errors get one retry in a fresh worktree and are never cached.
+/// `Err` when neither checkout could be made; nothing is known about the base.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
     app: &Arc<App>,
@@ -381,7 +451,10 @@ pub(super) async fn run_on_base(
             }
         }
     }
-    if !missing.is_empty() {
+    for attempt in 0..2 {
+        if missing.is_empty() || cancel.is_cancelled() {
+            break;
+        }
         let sandbox = app.settings.read().unwrap().sandbox;
         let scratch = app
             .data_dir
@@ -425,10 +498,20 @@ pub(super) async fn run_on_base(
             let _ = std::fs::remove_dir_all(&scratch);
         })
         .await;
-        let results = ran?;
         let cancelled = cancel.is_cancelled();
+        let results = match ran {
+            Ok(results) => results,
+            Err(_) if attempt == 0 && !cancelled => continue,
+            Err(e) if known.is_empty() => return Err(e),
+            Err(_) => break,
+        };
+        let mut retry = Vec::new();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
+            if is_environment_result(&r) {
+                retry.push(c.clone());
+                continue;
+            }
             // A timeout says nothing about the commit: never stored.
             if !cancelled && r.code.is_some() && !timed_out_under_load(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
@@ -436,6 +519,7 @@ pub(super) async fn run_on_base(
             known.insert(c.clone(), r);
         }
         save_base_runs(&app.data_dir, &cache);
+        missing = retry;
     }
     Ok(commands
         .iter()
@@ -445,9 +529,9 @@ pub(super) async fn run_on_base(
 
 /// The result of `command` on `base_sha`: the cache, else the in-flight
 /// background job of the same pair, else a job started now (its run folders
-/// under `run_dir`). `None` when the base cannot be checked out or the wait
-/// was cancelled: nothing is known then. `background` picks the lane of a job
-/// started here (see `start_base_jobs`).
+/// under `run_dir`). `None` after environment failures, when the base cannot
+/// be checked out or the wait was cancelled: nothing is known then.
+/// `background` picks the lane of a job started here (see `start_base_jobs`).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn base_result(
     app: &Arc<App>,
@@ -485,17 +569,32 @@ pub(super) async fn failing_on_base(
     if timed_out_under_load(failed) {
         return None;
     }
-    let base = base_result(
-        app,
-        Some(&task.id),
-        &task.repo,
-        &task.base_sha,
-        &failed.command,
-        run_dir,
-        cancel,
-        true,
-    )
-    .await?;
+    let key = (task.base_sha.clone(), failed.command.clone());
+    let mut job = app
+        .final_base_jobs
+        .lock()
+        .unwrap()
+        .get(&task.id)
+        .and_then(|jobs| jobs.get(&key).cloned());
+    if job.is_none() {
+        let jobs = start_base_jobs(
+            app,
+            Some(&task.id),
+            &task.repo,
+            &task.base_sha,
+            std::slice::from_ref(&failed.command),
+            run_dir,
+            true,
+        );
+        job = jobs.get(&key).cloned();
+        app.final_base_jobs
+            .lock()
+            .unwrap()
+            .entry(task.id.clone())
+            .or_default()
+            .extend(jobs);
+    }
+    let base = wait_for_base_job(app, &task.base_sha, &failed.command, job, cancel).await?;
     (base.code.is_some_and(|c| c != 0) && !timed_out_under_load(&base)).then_some(base)
 }
 
@@ -596,25 +695,34 @@ pub(super) async fn wait_on_broken_base(
         f.signature = format!("base:{command}");
     }
     *attempt_budget += 1;
-    task.question = Some(pre_existing_question(
-        std::slice::from_ref(base_run),
-        &base_sha,
-    ));
-    task.status = TaskStatus::Waiting;
-    task.updated_at = now_ms();
     let assumed = task.assumptions.len();
-    let Some(answer) = wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
-    else {
-        return BaseBreak::Stopped;
+    let already_retried = base_retry_requested(task, std::slice::from_ref(&command), &base_sha);
+    let answer = if already_retried {
+        PRE_EXISTING_RETRY.to_string()
+    } else {
+        task.question = Some(pre_existing_question(
+            std::slice::from_ref(base_run),
+            &base_sha,
+        ));
+        task.status = TaskStatus::Waiting;
+        task.updated_at = now_ms();
+        let Some(answer) =
+            wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await
+        else {
+            return BaseBreak::Stopped;
+        };
+        answer
     };
     let policy_answered = task.assumptions.len() > assumed;
-    record_owner_base_check(
-        task,
-        std::slice::from_ref(&command),
-        &base_sha,
-        &answer,
-        policy_answered,
-    );
+    if !already_retried {
+        record_owner_base_check(
+            task,
+            std::slice::from_ref(&command),
+            &base_sha,
+            &answer,
+            policy_answered,
+        );
+    }
     if is_option(&answer, PRE_EXISTING_DROP) {
         let settings = app.settings.read().unwrap().clone();
         let origin = origin_of_last_answer(task);
@@ -642,8 +750,10 @@ pub(super) async fn wait_on_broken_base(
         }
     }
     let wt = PathBuf::from(&task.worktree);
-    if !carry_after_base_moves(app, task, &wt, cancel, permit).await {
-        return BaseBreak::Stopped;
+    match carry_after_base_moves(app, task, &wt, pending_answer, cancel, permit).await {
+        BaseRetry::Ready => {}
+        BaseRetry::Conflict(detail) => record_failure(task, idx, FailureKind::Conflict, detail),
+        BaseRetry::Stopped => return BaseBreak::Stopped,
     }
     task.updated_at = now_ms();
     let _ = app.store.save_task(task);
@@ -679,6 +789,8 @@ async fn lock_base_checks(
     }
 }
 
+pub(super) type BaseJobReceivers = HashMap<(String, String), watch::Receiver<bool>>;
+
 /// Starts one background job for the pairs of `commands` on `base_sha` that
 /// are neither cached nor in flight; their run folders go under `run_dir`
 /// (`preflight-base`, `preflight-base-retry`). The job is the run plus the
@@ -688,7 +800,7 @@ async fn lock_base_checks(
 /// end it: another task may wait on the same job), writes its results into
 /// `base_runs` and leaves `base_jobs` when done. A cancelled job caches
 /// nothing. `background` jobs (finals) take the repo's background lane,
-/// the others the blocking lane.
+/// the others the blocking lane. Returns receipts for new and in-flight jobs.
 pub(super) fn start_base_jobs(
     app: &Arc<App>,
     task_id: Option<&str>,
@@ -697,8 +809,9 @@ pub(super) fn start_base_jobs(
     commands: &[String],
     run_dir: &Path,
     background: bool,
-) {
+) -> BaseJobReceivers {
     let mut todo: Vec<String> = Vec::new();
+    let mut receipts = HashMap::new();
     let (tx, rx) = watch::channel(false);
     {
         // Jobs first, then the cache: a job caches before it leaves the
@@ -707,15 +820,20 @@ pub(super) fn start_base_jobs(
         let cache = app.base_runs.lock().unwrap();
         for c in commands {
             let key = (base_sha.to_string(), c.clone());
-            if jobs.contains_key(&key) || cache.contains_key(&key) || todo.contains(c) {
+            if let Some(job) = jobs.get(&key) {
+                receipts.insert(key, job.clone());
                 continue;
             }
+            if cache.contains_key(&key) {
+                continue;
+            }
+            receipts.insert(key.clone(), rx.clone());
             jobs.insert(key, rx.clone());
             todo.push(c.clone());
         }
     }
     if todo.is_empty() {
-        return;
+        return receipts;
     }
     let task_id = task_id.map(str::to_string);
     let (app, repo, base_sha, run_dir) = (
@@ -765,6 +883,7 @@ pub(super) fn start_base_jobs(
         )
         .await;
     });
+    receipts
 }
 
 async fn run_base_job(
@@ -807,6 +926,7 @@ async fn run_base_job(
         for c in &failed {
             cache.remove(&(base_sha.to_string(), c.clone()));
         }
+        save_base_runs(&app.data_dir, &cache);
     }
     let Ok(second) = run_on_base(
         app,
@@ -830,8 +950,8 @@ async fn run_base_job(
 }
 
 /// Waits for the in-flight job of the pair (if any), then reads the cache.
-/// `None`: the job was cancelled or could not check out the base, or `cancel`
-/// fired while waiting.
+/// `None`: the job was cancelled, hit an environment failure or could not
+/// check out the base, or `cancel` fired while waiting.
 async fn wait_for_base(
     app: &Arc<App>,
     base_sha: &str,
@@ -840,6 +960,16 @@ async fn wait_for_base(
 ) -> Option<VerifyOutcome> {
     let key = (base_sha.to_string(), command.to_string());
     let job = app.base_jobs.lock().unwrap().get(&key).cloned();
+    wait_for_base_job(app, base_sha, command, job, cancel).await
+}
+
+async fn wait_for_base_job(
+    app: &Arc<App>,
+    base_sha: &str,
+    command: &str,
+    job: Option<watch::Receiver<bool>>,
+    cancel: &CancelToken,
+) -> Option<VerifyOutcome> {
     if let Some(mut rx) = job {
         tokio::select! {
             // An `Err` is a dropped sender: the job is over either way.
@@ -847,7 +977,11 @@ async fn wait_for_base(
             _ = cancel.cancelled() => return None,
         }
     }
-    app.base_runs.lock().unwrap().get(&key).cloned()
+    app.base_runs
+        .lock()
+        .unwrap()
+        .get(&(base_sha.to_string(), command.to_string()))
+        .cloned()
 }
 
 /// Records on `task` the commands whose first base run failed and whose
@@ -949,7 +1083,7 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         return;
     }
     let dir = app.store.task_dir(&task.id);
-    start_base_jobs(
+    let jobs = start_base_jobs(
         app,
         Some(&task.id),
         &task.repo,
@@ -958,6 +1092,12 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         &dir,
         true,
     );
+    app.final_base_jobs
+        .lock()
+        .unwrap()
+        .entry(task.id.clone())
+        .or_default()
+        .extend(jobs);
 }
 
 /// Baselines the checks that have none yet on the base commit (not in the
@@ -1234,9 +1374,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_drop_leaves_the_check_and_the_failed_attempt_and_retries() {
-        let (app, _dir) = crate::engine::test_support::test_app();
+        let (app, dir) = crate::engine::test_support::test_app();
         app.settings.write().unwrap().answer_policy = false;
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::engine::test_support::init_git_repo(&repo);
+        let wt = dir.path().join("worktree");
+        let created = git::create_worktree(&repo, &task.branch, &wt, "HEAD").unwrap();
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.base_ref = git::branch_of(&repo, "HEAD");
+        crate::engine::test_support::git_in(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "fix base"],
+        );
+        let new_base = git::head_sha(&repo).unwrap();
         task.verify = vec!["npm run ci".into()];
         task.attempts = vec![crate::engine::test_support::attempt_with_failure(1, "x")];
         task.attempts[0].status = AttemptStatus::Failed;
@@ -1273,22 +1427,29 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
-        let (end, ()) = tokio::join!(
-            wait_on_broken_base(
-                &app,
-                &id,
-                &mut task,
-                0,
-                &failed,
-                &failed,
-                &mut budget,
-                &pending,
-                &cancel,
-                &mut permit,
-            ),
-            deliver
-        );
+        let (end, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                wait_on_broken_base(
+                    &app,
+                    &id,
+                    &mut task,
+                    0,
+                    &failed,
+                    &failed,
+                    &mut budget,
+                    &pending,
+                    &cancel,
+                    &mut permit,
+                ),
+                deliver
+            )
+        })
+        .await
+        .expect("a refused drop must retry on the moved base without another owner answer");
         assert!(matches!(end, BaseBreak::Retry));
+        assert_eq!(task.base_sha, new_base);
+        assert_eq!(git::head_sha(&wt).unwrap(), new_base);
+        assert!(task.question.is_none());
         assert_eq!(task.verify, vec!["npm run ci".to_string()]);
         assert_eq!(task.attempts[0].status, AttemptStatus::Failed);
         assert!(task.attempts[0].failure.is_some());
@@ -1389,6 +1550,38 @@ mod tests {
             "Orchestrator: base check npm test on 0123456 -> keep all"
         );
         assert!(base_check_answered(&task, "npm test", sha));
+    }
+
+    #[test]
+    fn every_answerer_records_a_retry_on_the_exact_base() {
+        let sha = "0123456789abcdef";
+        let commands = ["npm test".to_string()];
+        for who in [
+            AnsweredBy::Owner,
+            AnsweredBy::Orchestrator,
+            AnsweredBy::Policy,
+        ] {
+            let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+            task.base_sha = sha.to_string();
+            let question = pre_existing_question(
+                &[VerifyOutcome {
+                    command: commands[0].clone(),
+                    code: Some(1),
+                    tail: "failed".to_string(),
+                    ms: 1,
+                    ..Default::default()
+                }],
+                sha,
+            );
+            record_answered_question(&mut task, &question, PRE_EXISTING_RETRY, who);
+            assert!(base_retry_requested(&task, &commands, sha));
+            assert!(!base_retry_requested(&task, &commands, "0123456ffff"));
+            assert!(!base_retry_requested(
+                &task,
+                &["npm run lint".to_string()],
+                sha
+            ));
+        }
     }
 
     #[test]

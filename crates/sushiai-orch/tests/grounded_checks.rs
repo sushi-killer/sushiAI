@@ -206,7 +206,7 @@ emit "$REPORT""#,
 fn a_failing_held_out_check_fails_the_attempt_and_its_command_never_leaks() {
     // The held-out command prints itself (held.sh holds exactly that text).
     let held = "cat held.sh; test -f hidden.txt";
-    let s = setup(
+    let mut s = setup(
         r#"echo ok > impl.txt
 if [ "$n" != 0 ]; then echo ok > hidden.txt; fi
 emit "$REPORT""#,
@@ -258,6 +258,12 @@ emit "$REPORT""#,
     .unwrap();
     assert!(second.contains("Held-out check for criterion 1 failed: hidden.txt exists."));
     assert!(!second.contains(held));
+
+    // Completion removes raw run files after publishing `done`.
+    stop_daemon(&s.daemon.socket);
+    wait_until("the daemon to exit before inspecting run files", || {
+        s.daemon.child.try_wait().unwrap()
+    });
 
     // Nothing the implementer or reviewer could read holds the command.
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {

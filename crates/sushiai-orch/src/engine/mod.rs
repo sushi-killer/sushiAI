@@ -358,7 +358,7 @@ pub struct App {
     /// Keyed by (base sha, command): what a command did on that commit, so an
     /// unchanged base is never checked twice for the same command. Kept on
     /// disk (`base-results.json`), so a restart does not run them again; a
-    /// run that ended without an exit code (a timeout) is never stored.
+    /// run that timed out or hit an environment failure is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
     /// (tree hash, base sha, command) triples that passed (exit 0) in a
     /// subtask's final run: a parent on the same tree and the same base does
@@ -367,8 +367,12 @@ pub struct App {
     gate_passes: StdMutex<std::collections::HashSet<(String, String, String)>>,
     /// Keyed by (base sha, command): background base runs in flight. The
     /// receiver flips to `true` when the job is over; its result, if any, is
-    /// then in `base_runs`. One pair runs on base at most once per daemon.
+    /// then in `base_runs`. Concurrent lookups share the same job.
     base_jobs: StdMutex<HashMap<(String, String), watch::Receiver<bool>>>,
+    /// Final-check job receipts for each live task, including jobs that
+    /// finished without a base result. A final lookup waits for its original
+    /// job instead of starting another one just because nothing was cached.
+    final_base_jobs: StdMutex<HashMap<String, base_check::BaseJobReceivers>>,
     /// Pairs whose first base run failed and whose rerun passed (load-flaky).
     base_flaky: StdMutex<std::collections::HashSet<(String, String)>>,
     /// Cancelled by `shutdown_for` only: a task stop must not end a job
@@ -571,6 +575,7 @@ impl App {
             base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
             gate_passes: StdMutex::new(Default::default()),
             base_jobs: StdMutex::new(HashMap::new()),
+            final_base_jobs: StdMutex::new(HashMap::new()),
             base_flaky: StdMutex::new(Default::default()),
             base_cancel: CancelToken::new(),
             base_preflights: StdMutex::new(HashMap::new()),

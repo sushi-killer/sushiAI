@@ -156,7 +156,16 @@ fn build_verify_command_in(
         command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(cmd);
     }
-    if let Some(cache) = &environment.compiler_cache {
+    if sandbox == SandboxMode::Native {
+        // An empty value beats a rustc-wrapper from the owner's cargo config:
+        // Seatbelt denies the sccache client, and the profile grants no exception.
+        command.env("RUSTC_WRAPPER", "");
+        for (key, _) in
+            std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("SCCACHE_"))
+        {
+            command.env_remove(key);
+        }
+    } else if let Some(cache) = &environment.compiler_cache {
         cache.apply(&mut command);
     }
     command
@@ -1789,6 +1798,25 @@ mod scoped_task_tests {
                 .0,
             ["cargo test --workspace"]
         );
+    }
+
+    #[test]
+    fn a_native_sandbox_check_overrides_a_configured_rustc_wrapper() {
+        let wrapper = |sandbox| {
+            let environment = VerifyEnvironment {
+                path: "/usr/bin:/bin".into(),
+                compiler_cache: None,
+            };
+            let command =
+                build_verify_command_in(Path::new("/"), "true", sandbox, &[], "base", &environment);
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "RUSTC_WRAPPER")
+                .map(|(_, value)| value.map(|v| v.to_os_string()))
+        };
+        assert_eq!(wrapper(SandboxMode::Native), Some(Some("".into())));
+        assert_eq!(wrapper(SandboxMode::Host), None);
     }
 
     #[tokio::test]

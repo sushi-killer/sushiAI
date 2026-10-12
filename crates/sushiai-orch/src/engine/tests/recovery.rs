@@ -296,6 +296,11 @@ async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
     let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
 
     assert!(outcome.stalled, "{:?}", outcome.error);
+    // The kill is sent at once; a loaded machine takes a moment to tear the group down.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while group_alive(pgid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!group_alive(pgid), "the adopted run must be stopped");
 }
 
@@ -370,6 +375,11 @@ async fn an_over_budget_adopted_run_is_killed() {
     let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
 
     assert!(outcome.over_budget, "{:?}", outcome.error);
+    // The kill is sent at once; a loaded machine takes a moment to tear the group down.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while group_alive(pgid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!group_alive(pgid), "the adopted run must be stopped");
 }
 

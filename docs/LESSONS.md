@@ -35,6 +35,7 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 
 ## Promoted
 
+- 2026-10-12 A 2 s background `git status` took index.lock and broke the task commit → read-only git polls pass `--no-optional-locks`.
 - 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-11 Electron 44 has no postinstall; a fresh `npm ci` raced parallel tests into EEXIST → `install-electron` in our postinstall.
 - 2026-10-10 An agent answer counted as the owner's → authority from the source. `an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap`.
@@ -55,4 +56,3 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 - 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.
 - 2026-09-30 A hook `allow` did not open `.claude/**` to headless `claude -p` → stage in `.orchd-staging/`, copy in before verify.
 - 2026-09-30 A plugin MCP server failed under `--strict-mcp-config` (OAuth keyed by plugin name) → keep its Claude Code name. `chat_tools::server_key`.
-- 2026-09-30 A preselected answer plus Enter sent unpicked answers → Enter needs a pick or typed text. `enterAnswer` in `ownerAttention.ts`.

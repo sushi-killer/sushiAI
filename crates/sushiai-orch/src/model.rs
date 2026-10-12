@@ -2380,6 +2380,10 @@ pub struct Attempt {
     /// brief. `None` for Codex attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_tokens: Option<u64>,
+    /// When the run first streamed an edit (`ab::is_edit_event`), in ms.
+    /// Recorded live: `events.jsonl` has no timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_edit_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

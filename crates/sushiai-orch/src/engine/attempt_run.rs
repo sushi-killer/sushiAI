@@ -422,6 +422,29 @@ fn apply_agent_cache(
     None
 }
 
+/// Stamps `first_edit_at` now when the streamed `line` is the first edit of
+/// an implement attempt; `true` once it has.
+pub(super) async fn note_first_edit(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    line: &str,
+) -> bool {
+    let is_edit = serde_json::from_str(line)
+        .ok()
+        .is_some_and(|v| crate::ab::is_edit_event(&v));
+    if is_edit {
+        let at = now_ms();
+        persist_attempt_field(app, task_id, attempt_n, move |a| {
+            if a.stage == Stage::Implement && a.first_edit_at.is_none() {
+                a.first_edit_at = Some(at);
+            }
+        })
+        .await;
+    }
+    is_edit
+}
+
 /// Spawn `claude`/`codex` in its own process group, write `brief` to
 /// stdin, stream stdout into `events.jsonl` and the log broadcast, and wait
 /// for it to exit. `cancel` triggers SIGTERM to the group, then SIGKILL
@@ -660,6 +683,7 @@ pub(super) async fn run_harness(
     let mut stderr_done = false;
     let mut stderr_tail = String::new();
     let mut session_persisted = false;
+    let mut edit_seen = false;
     let model = req.model;
 
     loop {
@@ -729,6 +753,9 @@ pub(super) async fn run_harness(
                                 session_persisted = true;
                                 persist_attempt_field(app, task_id, attempt_n, move |a| a.session_id = Some(sid)).await;
                             }
+                        }
+                        if track_attempt && !edit_seen {
+                            edit_seen = note_first_edit(app, task_id, attempt_n, &l).await;
                         }
                     }
                     _ => { stdout_done = true; }

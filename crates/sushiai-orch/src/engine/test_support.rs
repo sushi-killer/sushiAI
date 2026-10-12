@@ -143,6 +143,7 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         verify: vec![],
         gate_blocks: 0,
         prefix_tokens: None,
+        first_edit_at: None,
         review: None,
         failure: Some(Failure {
             kind: FailureKind::Verify,

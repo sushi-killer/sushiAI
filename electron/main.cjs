@@ -65,7 +65,7 @@ const { createNotices } = require("./extensions/notices.cjs");
 const { createModuleIpc } = require("./extensions/module-ipc.cjs");
 const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
-const { testWindow } = require("./test-window.cjs");
+const { testWindow, isolateTestProfile } = require("./test-window.cjs");
 
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
@@ -98,6 +98,7 @@ let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+isolateTestProfile(app, testMode);
 // The PATH extended below is on process.env before any companion starts; the
 // supervisor passes the child only an allowlist of it.
 const companions = createCompanions({

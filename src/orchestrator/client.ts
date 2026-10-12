@@ -13,6 +13,7 @@ import type {
   FailureRow,
   Message,
   Note,
+  PrecedentList,
   OverseerEntry,
   Pipeline,
   Proposal,
@@ -224,6 +225,20 @@ export function orchestratorClientFor(host: string = LOCAL) {
       call<Note>("repo.notes.add", { repo, text }),
     repoNotesRemove: (repo: string, id: string) =>
       call<{ removed: string }>("repo.notes.remove", { repo, id }).then(
+        () => undefined,
+      ),
+    precedentsList: (repo: string) =>
+      call<PrecedentList>("precedents.list", { repo }),
+    precedentsRemove: (repo: string, id: string) =>
+      call<{ removed: string }>("precedents.remove", { repo, id }).then(
+        () => undefined,
+      ),
+    precedentRuleAccept: (repo: string, id: string) =>
+      call<{ note: Note }>("precedents.rule.accept", { repo, id }).then(
+        (result) => result.note,
+      ),
+    precedentRuleDismiss: (repo: string, id: string) =>
+      call<unknown>("precedents.rule.dismiss", { repo, id }).then(
         () => undefined,
       ),
   };

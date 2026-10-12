@@ -88,19 +88,31 @@ pub(crate) fn in_quiet(window: Option<(u16, u16)>, minute: u16) -> bool {
     }
 }
 
-/// The key of a question: task id, kind and sorted options.
-pub(crate) fn decision_key(task_id: &str, question: &Question) -> String {
-    let kind = serde_json::to_value(question.kind)
+/// A question kind as its serialized name.
+pub(crate) fn kind_name(kind: QuestionKind) -> String {
+    serde_json::to_value(kind)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default();
-    let mut options: Vec<String> = question
-        .options
+        .unwrap_or_default()
+}
+
+/// The sorted options of a question joined by 0x1f, each on one line.
+pub(crate) fn option_part(options: &[String]) -> String {
+    let mut options: Vec<String> = options
         .iter()
         .map(|o| o.replace(['\n', '\u{1f}'], " "))
         .collect();
     options.sort();
-    format!("{task_id}|{kind}|{}", options.join("\u{1f}"))
+    options.join("\u{1f}")
+}
+
+/// The key of a question: task id, kind and sorted options.
+pub(crate) fn decision_key(task_id: &str, question: &Question) -> String {
+    format!(
+        "{task_id}|{}|{}",
+        kind_name(question.kind),
+        option_part(&question.options)
+    )
 }
 
 fn is_notice(entry: &Entry) -> bool {

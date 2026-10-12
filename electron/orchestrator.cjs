@@ -95,6 +95,10 @@ const ALLOWED_METHODS = new Set([
   "repo.notes.list",
   "repo.notes.add",
   "repo.notes.remove",
+  "precedents.list",
+  "precedents.remove",
+  "precedents.rule.accept",
+  "precedents.rule.dismiss",
 ]);
 
 // Results that are one task or a list of them: a remote host's are tagged

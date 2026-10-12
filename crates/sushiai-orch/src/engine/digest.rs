@@ -78,14 +78,7 @@ impl App {
         for repo in repos {
             let last = days.get(&repo).map(String::as_str);
             if digest_due(digest_hour, hour, &today, last)
-                && chat::wake_overseer(
-                    self,
-                    &repo,
-                    crate::prompts::get("digest"),
-                    true,
-                    "digest",
-                    None,
-                )
+                && chat::wake_overseer(self, &repo, self.digest_prompt(&repo), true, "digest", None)
             {
                 days.insert(repo, today.clone());
                 changed = true;

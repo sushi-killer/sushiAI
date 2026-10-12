@@ -98,6 +98,10 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "repo.notes.list",
     "repo.notes.add",
     "repo.notes.remove",
+    "precedents.list",
+    "precedents.remove",
+    "precedents.rule.accept",
+    "precedents.rule.dismiss",
   ])
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);

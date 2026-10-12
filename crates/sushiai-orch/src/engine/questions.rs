@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct Reply {
     pub text: String,
     pub default_evidence: Option<String>,
+    /// The overseer answered like an earlier answer (`task.answer {like}`).
+    pub like: Option<String>,
 }
 
 #[cfg(test)]
@@ -15,6 +17,7 @@ impl From<&str> for Reply {
         Reply {
             text: text.to_string(),
             default_evidence: None,
+            like: None,
         }
     }
 }
@@ -199,7 +202,7 @@ pub(super) async fn wait_for_answer(
 /// and get wrongly rejected as "no live parked loop". Persists the
 /// decision/status transition either way afterwards, so a caller never has
 /// to duplicate that bookkeeping.
-async fn park_for_answer(
+pub(super) async fn park_for_answer(
     app: &Arc<App>,
     task_id: &str,
     task: &mut Task,
@@ -236,6 +239,7 @@ async fn park_for_answer(
     };
     *pending_answer.lock().unwrap() = None;
     let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
+    let like = reply.as_ref().and_then(|r| r.like.clone());
     let result = reply.map(|r| r.text);
     match &result {
         // Keep the caller's copy in sync with either transition so its
@@ -250,7 +254,14 @@ async fn park_for_answer(
                 .copied()
                 .unwrap_or(AnsweredBy::Owner);
             let question = task.question.take();
-            record_answer_for(task, question.as_ref(), answer, caller, evidence.as_deref());
+            record_answer_for(
+                task,
+                question.as_ref(),
+                answer,
+                caller,
+                evidence.as_deref(),
+                like.as_deref(),
+            );
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
             app.save_task_logged(task);
@@ -292,6 +303,13 @@ pub(super) fn non_owner_continues(task: &Task) -> usize {
         .iter()
         .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
         .count();
+    let like = task
+        .decisions
+        .iter()
+        .filter(|d| {
+            d.starts_with(LIKE_PREFIX) && d.contains(&format!(" -- {EXHAUSTED_QUESTION} -> "))
+        })
+        .count();
     let legacy_lead = task
         .decisions
         .iter()
@@ -306,15 +324,27 @@ pub(super) fn non_owner_continues(task: &Task) -> usize {
                 && !is_option(&q.answer, "stop")
         })
         .count();
-    orchestrator + lead.max(legacy_lead)
+    orchestrator + like + lead.max(legacy_lead)
 }
 
 /// Records a parked question's answer and its caller.
+#[cfg(test)]
 pub(super) fn record_answer(
     task: &mut Task,
     question: Option<&Question>,
     answer: &str,
     caller: AnsweredBy,
+) {
+    record_answer_like(task, question, answer, caller, None);
+}
+
+/// [`record_answer`], where an overseer answer may name what it was given like.
+fn record_answer_like(
+    task: &mut Task,
+    question: Option<&Question>,
+    answer: &str,
+    caller: AnsweredBy,
+    like: Option<&str>,
 ) {
     if question.is_some_and(|q| q.kind == QuestionKind::AttemptsFailing) {
         task.queue.rate_pauses = 0;
@@ -323,7 +353,10 @@ pub(super) fn record_answer(
     let line = match caller {
         AnsweredBy::Owner => format!("Owner: {answer}"),
         AnsweredBy::Lead => format!("Lead: {answer}"),
-        AnsweredBy::Overseer => orchestrator_answer_line(text, answer, "answered by the overseer"),
+        AnsweredBy::Overseer => match like {
+            Some(like) => overseer_like_line(like, text, answer),
+            None => orchestrator_answer_line(text, answer, "answered by the overseer"),
+        },
         AnsweredBy::Orchestrator => {
             orchestrator_answer_line(text, answer, "answered by the orchestrator chat")
         }
@@ -344,13 +377,14 @@ pub(super) fn record_answer_for(
     answer: &str,
     caller: AnsweredBy,
     default_evidence: Option<&str>,
+    like: Option<&str>,
 ) {
     match (question, default_evidence) {
         (Some(q), Some(evidence)) => {
             let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
             record_policy_answer(task, q, answer, "policy", evidence, attempt_n);
         }
-        _ => record_answer(task, question, answer, caller),
+        _ => record_answer_like(task, question, answer, caller, like),
     }
 }
 
@@ -472,8 +506,47 @@ pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
     if !app.settings.read().unwrap().auto_answer || owner_only(question.kind) {
         return;
     }
-    let prompt = overseer_prompt("overseer_waiting", task);
+    if answer_like_precedent(app, task, question) {
+        return;
+    }
+    wake_for_waiting(app, task);
+}
+
+fn wake_for_waiting(app: &App, task: &Task) {
+    let prompt = app.with_precedents(overseer_prompt("overseer_waiting", task), &[task]);
     chat::wake_overseer(app, &task.repo, prompt, false, "waiting", Some(&task.id));
+}
+
+/// Holds the question and answers it as the overseer, like the owner did
+/// before (`decision_memory.rs`), with no overseer turn. Every guard of
+/// `task.answer` still applies; one that refuses ends the hold and the
+/// overseer is woken as usual. Whether it took the question.
+fn answer_like_precedent(app: &App, task: &Task, question: &Question) -> bool {
+    let Some((answer, like)) = app.precedent_answer(task, question) else {
+        return false;
+    };
+    if tokio::runtime::Handle::try_current().is_err() || app.shutting_down.load(Ordering::SeqCst) {
+        return false;
+    }
+    let held = app.hold_for_overseer(&task.repo, "waiting", Some(&task.id));
+    if held.is_empty() {
+        return false;
+    }
+    let app = app.arc();
+    let (repo, id) = (task.repo.clone(), task.id.clone());
+    tokio::spawn(async move {
+        let params = json!({"id": id, "answer": answer, "source": "overseer", "like": like});
+        if app.handle_task_answer(params).await.is_ok() {
+            return;
+        }
+        app.release_holds(&repo, &held);
+        if let Ok(Some(task)) = app.store.load_task(&id) {
+            if task.status == TaskStatus::Waiting && task.question.is_some() {
+                wake_for_waiting(&app, &task);
+            }
+        }
+    });
+    true
 }
 
 /// Wakes the overseer once, at the moment the task loop moves a top-level

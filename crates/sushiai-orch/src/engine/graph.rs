@@ -1508,7 +1508,7 @@ impl App {
                     .any(|a| a.kind == Some(QuestionKind::DependencyEnded))
             {
                 let answer = "retry the dependency";
-                match self.answer_dependency_question(task.clone(), answer, None, None) {
+                match self.answer_dependency_question(task.clone(), answer, None, None, None) {
                     Ok(_) => return,
                     Err(e) => eprintln!(
                         "orch: answering dependency for task {} failed: {e}",
@@ -1558,6 +1558,7 @@ impl App {
         answer: &str,
         caller: Option<AnsweredBy>,
         default_evidence: Option<&str>,
+        like: Option<&str>,
     ) -> Result<serde_json::Value, String> {
         let all = self.repo_tasks(&task.repo);
         let was_parent = is_parent(&task, &all);
@@ -1625,7 +1626,7 @@ impl App {
             }
             let question = current.question.clone();
             if let Some(caller) = caller {
-                record_answer_for(current, question.as_ref(), answer.trim(), caller, default_evidence);
+                record_answer_for(current, question.as_ref(), answer.trim(), caller, default_evidence, like);
             } else if let Some(question) = task.question.as_ref() {
                 record_policy_answer(
                     current, question, answer, "policy",

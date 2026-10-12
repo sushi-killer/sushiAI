@@ -194,10 +194,14 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_answer",
             "task.answer",
-            "Answer a task's pending question (send \"stop\" as the answer to cancel it instead).",
+            "Answer a task's pending question (send \"stop\" as the answer to cancel it instead). When an owner precedent or a repo note covers it, pass `like` naming it.",
             json!({
                 "type": "object",
-                "properties": {"id": {"type": "string"}, "answer": {"type": "string"}},
+                "properties": {
+                    "id": {"type": "string"},
+                    "answer": {"type": "string"},
+                    "like": {"type": "string", "description": "Only when an owner precedent or a repo note covers the question: name it (one line, at most 120 characters). Refused for questions the owner alone decides."},
+                },
                 "required": ["id", "answer"],
             }),
         ),
@@ -578,9 +582,13 @@ fn bridge_source(source: Option<&str>) -> &'static str {
 /// `handoff`. A source the caller set itself is kept.
 /// `source` names the caller outside a task: a lead, chat, or overseer turn.
 fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> Value {
-    if method == "task.answer" || method == "task.amend" {
+    if matches!(
+        method,
+        "task.answer" | "task.amend" | "repo.notes.add" | "repo.notes.remove"
+    ) {
         // Never trusted from the caller: it marks the answer as not the
-        // owner's, so orchd refuses an allow on an owner-only question.
+        // owner's, so orchd refuses an allow on an owner-only question (and an
+        // overseer's repo note).
         if let Some(obj) = args.as_object_mut() {
             let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
@@ -1171,6 +1179,18 @@ mod answer_source_tests {
         let create = with_source("task.create", json!({}), false, "overseer");
         assert_eq!(create["source"], "chat");
         assert!(crate::model::TASK_SOURCES.contains(&"chat"));
+    }
+
+    #[test]
+    fn decision_memory_repo_notes_carry_the_bridges_source_and_precedents_are_no_tools() {
+        for method in ["repo.notes.add", "repo.notes.remove"] {
+            let forged = with_source(method, json!({"source": "owner"}), false, "overseer");
+            assert_eq!(forged["source"], "overseer");
+        }
+        let specs = tool_specs();
+        assert!(specs.iter().all(|t| !t.1.starts_with("precedents.")));
+        let answer = specs.iter().find(|t| t.0 == "task_answer").unwrap();
+        assert!(answer.3["properties"].get("like").is_some());
     }
 
     #[test]

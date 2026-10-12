@@ -597,6 +597,7 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
                 tx.send(Reply {
                     text: KEEP_ALL.into(),
                     default_evidence: None,
+                    like: None,
                 })
                 .unwrap();
                 break;

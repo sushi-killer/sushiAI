@@ -646,7 +646,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         {
             if let Some(answer) = &answer {
                 task.question = None;
-                record_answer_for(task, Some(&question), answer, caller, evidence);
+                record_answer_for(task, Some(&question), answer, caller, evidence, None);
                 task.status = TaskStatus::Running;
             } else if app
                 .controls

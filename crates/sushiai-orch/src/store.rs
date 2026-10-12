@@ -132,7 +132,10 @@ impl Store {
     pub fn save_task(&self, task: &Task) -> io::Result<()> {
         let dir = self.task_dir(&task.id);
         fs::create_dir_all(&dir)?;
-        write_json_atomic(&self.task_path(&task.id), task)
+        write_json_atomic(&self.task_path(&task.id), task)?;
+        // Every answered question lands in the decision memory (`precedents.rs`).
+        crate::precedents::sync(&self.data_dir, task);
+        Ok(())
     }
 
     pub fn load_task(&self, id: &str) -> io::Result<Option<Task>> {
@@ -388,7 +391,7 @@ impl Store {
     }
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     if !path.exists() {
         return Ok(None);
     }

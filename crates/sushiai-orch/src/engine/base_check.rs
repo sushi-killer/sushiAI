@@ -479,7 +479,7 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
-fn is_environment_result(outcome: &VerifyOutcome) -> bool {
+pub(crate) fn is_environment_result(outcome: &VerifyOutcome) -> bool {
     let tail = outcome.tail.to_ascii_lowercase();
     ["setup failed", "eexist", "failed to install"]
         .iter()
@@ -1705,6 +1705,7 @@ mod tests {
                     tx.send(Reply {
                         text: PRE_EXISTING_DROP.to_string(),
                         default_evidence: None,
+                        like: None,
                     })
                     .ok();
                     return;

@@ -4,7 +4,7 @@
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
-// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes, settings} (see
+// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes, precedents, settings} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
 // else defaults. A task may include `git: {base, commits}` to create an
 // isolated repository with that base branch and patch-unique task commits.
@@ -17,7 +17,11 @@
 // "owner", createdAt) and written under this repo's root in
 // <dataDir>/repo-notes.json ({repo: [note]}, what the store reads); when
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
-// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because the orchestrator resumes
+// a crop of the REPO NOTES list. `precedents` is {precedents, proposals} for the decision memory:
+// each entry is completed (id, key, title, answer defaults, `minutesAgo` becomes firstAt/lastAt)
+// and written under this repo's root in <dataDir>/precedents.json (the daemon's file shape); when
+// any were seeded the run also saves artifacts/orchestrator-precedents.png, a crop of the
+// DECISION MEMORY section. Only finished/waiting statuses are accepted, because the orchestrator resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
 // A task's pausedInHours becomes pausedUntil relative to the run's start.
 // Settings overrides are merged over settings.get and saved with settings.set
@@ -165,6 +169,7 @@ async function loadSeed(seedPath) {
       tasks: raw.tasks,
       proposals: raw.proposals ?? [],
       notes: raw.notes ?? [],
+      precedents: raw.precedents,
       settings: raw.settings,
     };
   throw new Error(
@@ -186,7 +191,11 @@ if (!seedPath || !title) {
   let app = null;
 
   try {
-    const { tasks, proposals, notes, settings } = await loadSeed(seedPath);
+    const { tasks, proposals, notes, precedents, settings } =
+      await loadSeed(seedPath);
+    const memory = precedents ?? { precedents: [], proposals: [] };
+    const hasMemory =
+      (memory.precedents ?? []).length + (memory.proposals ?? []).length > 0;
     const now = Date.now();
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
@@ -240,6 +249,44 @@ if (!seedPath || !title) {
       await fs.writeFile(
         `${dataDir}/repo-notes.json`,
         JSON.stringify({ [root]: seeded }, null, 2),
+      );
+    }
+    if (hasMemory) {
+      const at = (seed, index) => now - (seed.minutesAgo ?? index) * 60_000;
+      const stored = {
+        since: now - 3_600_000,
+        tasks: {},
+        repos: {
+          [root]: {
+            precedents: (memory.precedents ?? []).map((seed, index) => ({
+              id: randomUUID(),
+              key: `${seed.kind}|${index}`,
+              title: seed.title ?? "",
+              signals: [],
+              commands: [],
+              files: [],
+              goal: "",
+              why: "",
+              count: 1,
+              ...seed,
+              firstAt: at(seed, index),
+              lastAt: at(seed, index),
+            })),
+            proposals: (memory.proposals ?? []).map((seed, index) => ({
+              id: randomUUID(),
+              key: `${seed.kind}|rule${index}`,
+              status: "open",
+              ...seed,
+              createdAt: at(seed, index),
+            })),
+          },
+        },
+      };
+      await fs.mkdir(dataDir, { recursive: true });
+      await fs.writeFile(
+        `${dataDir}/precedents.json`,
+        JSON.stringify(stored, null, 2),
+        { mode: 0o600 },
       );
     }
     report.seededTitles = tasks.map((t) => t.title);
@@ -382,7 +429,7 @@ if (!seedPath || !title) {
       .screenshot({ path: shot("orchestrator-home") });
     // Proposals, recurring failures and repo notes live on the Improvements
     // view, opened from the rail.
-    if (proposals.length > 0 || notes.length > 0) {
+    if (proposals.length > 0 || notes.length > 0 || hasMemory) {
       await page
         .locator(".orch-rail")
         .getByRole("button", { name: /^Improvements/ })
@@ -400,10 +447,14 @@ if (!seedPath || !title) {
         .screenshot({ path: shot("orchestrator-proposals") });
     }
     if (notes.length > 0) {
-      await page.locator(".imp-notes").waitFor({ timeout: 10000 });
-      await page
-        .locator(".imp-notes")
-        .screenshot({ path: shot("orchestrator-repo-notes") });
+      const list = page.locator(".imp-notes:not(.imp-memory)");
+      await list.waitFor({ timeout: 10000 });
+      await list.screenshot({ path: shot("orchestrator-repo-notes") });
+    }
+    if (hasMemory) {
+      const section = page.locator(".imp-memory-section");
+      await section.waitFor({ timeout: 10000 });
+      await section.screenshot({ path: shot("orchestrator-precedents") });
     }
     await row.first().click();
     await page.locator(".td").waitFor();
@@ -430,13 +481,14 @@ if (!seedPath || !title) {
       window: shot("orchestrator-window"),
       detail: shot("orchestrator-detail"),
       home: shot("orchestrator-home"),
-      ...(proposals.length > 0 || notes.length > 0
+      ...(proposals.length > 0 || notes.length > 0 || hasMemory
         ? { improvements: shot("orchestrator-improvements") }
         : {}),
       ...(proposals.length > 0
         ? { proposals: shot("orchestrator-proposals") }
         : {}),
       ...(notes.length > 0 ? { notes: shot("orchestrator-repo-notes") } : {}),
+      ...(hasMemory ? { precedents: shot("orchestrator-precedents") } : {}),
     };
     report.selectedTitle = title;
   } catch (error) {

@@ -953,6 +953,10 @@ impl App {
             /// With source `policy` (the waiting SLA): why this answer was given.
             #[serde(default)]
             evidence: Option<String>,
+            /// With source `overseer`: the precedent or repo note this answer
+            /// follows (see `decision_memory.rs`).
+            #[serde(default)]
+            like: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
@@ -977,6 +981,7 @@ impl App {
         if task.status != TaskStatus::Waiting || task.question.is_none() {
             return Err("task is not waiting for an answer".to_string());
         }
+        let like = checked_like(p.like.as_deref(), p.source.as_deref(), &task, &p.answer)?;
         if caller != AnsweredBy::Owner {
             if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
                 if !is_refusal(q, &p.answer) {
@@ -1054,6 +1059,7 @@ impl App {
                 "stop",
                 caller,
                 default_evidence.as_deref(),
+                like.as_deref(),
             );
             let line = match caller {
                 AnsweredBy::Owner => "Owner: stop (UI)".to_string(),
@@ -1083,6 +1089,7 @@ impl App {
                 &p.answer,
                 Some(caller),
                 default_evidence.as_deref(),
+                like.as_deref(),
             );
         }
 
@@ -1092,6 +1099,7 @@ impl App {
                 .send(Reply {
                     text: p.answer.clone(),
                     default_evidence: default_evidence.clone(),
+                    like: None,
                 })
                 .is_ok()
             {
@@ -1108,6 +1116,7 @@ impl App {
                     tx.send(Reply {
                         text: p.answer.clone(),
                         default_evidence: default_evidence.clone(),
+                        like: like.clone(),
                     })
                     .is_ok()
                 })
@@ -1131,6 +1140,7 @@ impl App {
                     &p.answer,
                     caller,
                     default_evidence.as_deref(),
+                    like.as_deref(),
                 );
                 self.agent_answers.lock().unwrap().remove(&p.id);
                 if let Some(n) = task

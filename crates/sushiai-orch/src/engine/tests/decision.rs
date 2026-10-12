@@ -81,6 +81,7 @@ fn a_resume_brief_keeps_failure_output_messages_and_new_owner_answers() {
             answered_at: at,
             answered_by: by,
             failure_signature: None,
+            commands: vec![],
         });
     }
     let brief = brief::build_resume_brief(

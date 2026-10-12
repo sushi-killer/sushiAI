@@ -9,6 +9,8 @@ import {
   failureTitle,
   failuresHint,
   openProposalCount,
+  precedentRow,
+  recentPrecedents,
   RECENT_DAYS,
   recurringFailures,
   recurringTotal,
@@ -17,7 +19,7 @@ import {
   seenIn,
   upsertProposal,
 } from "./improvementsModel";
-import type { FailureRow, Note, Proposal } from "./types";
+import type { FailureRow, Note, PrecedentList, Proposal } from "./types";
 import { Tag } from "../ui";
 import "./improvements.css";
 
@@ -400,6 +402,160 @@ function RepoNotes({
   );
 }
 
+/** What the overseer remembers of how the owner answered: rules it proposes
+ * from repeated answers (Accept makes a repo note, Dismiss stops proposing
+ * it) and the latest precedents, which it may follow for routine questions. */
+function DecisionMemory({
+  cwd,
+  refresh,
+  onAccepted,
+}: {
+  cwd: string;
+  refresh: string;
+  onAccepted: () => void;
+}) {
+  const orchestratorClient = useOrchestratorClient();
+  const [memory, setMemory] = useState<PrecedentList | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    orchestratorClient
+      .precedentsList(cwd)
+      .then((loaded) => {
+        if (cancelled) return;
+        setMemory(loaded);
+        setError("");
+      })
+      .catch((caught: unknown) => !cancelled && setError(errorText(caught)));
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, refresh, orchestratorClient]);
+
+  function closeRule(
+    id: string,
+    call: () => Promise<unknown>,
+    accepted: boolean,
+  ) {
+    call()
+      .then(() => {
+        setMemory((old) =>
+          old
+            ? { ...old, proposals: old.proposals.filter((p) => p.id !== id) }
+            : old,
+        );
+        setError("");
+        if (accepted) onAccepted();
+      })
+      .catch((caught: unknown) => setError(errorText(caught)));
+  }
+
+  function remove(id: string) {
+    orchestratorClient
+      .precedentsRemove(cwd, id)
+      .then(() => {
+        setMemory((old) =>
+          old
+            ? { ...old, precedents: old.precedents.filter((p) => p.id !== id) }
+            : old,
+        );
+        setError("");
+      })
+      .catch((caught: unknown) => setError(errorText(caught)));
+  }
+
+  const rules = memory?.proposals ?? [];
+  const rows = recentPrecedents(memory?.precedents ?? []);
+  if (!memory && !error) return null;
+  return (
+    <section className="imp-memory-section">
+      <span className="orch-eyebrow">
+        {sectionLabel(
+          "DECISION MEMORY",
+          rows.length,
+          "how you answered similar questions",
+        )}
+      </span>
+      <div className="imp-notes imp-memory">
+        {rules.map((rule) => (
+          <div key={rule.id} className="imp-note imp-rule">
+            <span className="imp-note-text">{rule.rule}</span>
+            <Tag tone="info">proposed</Tag>
+            <span className="imp-rule-actions">
+              <button
+                type="button"
+                className="ui-button primary"
+                onClick={() =>
+                  closeRule(
+                    rule.id,
+                    () => orchestratorClient.precedentRuleAccept(cwd, rule.id),
+                    true,
+                  )
+                }
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                className="ui-button ghost"
+                onClick={() =>
+                  closeRule(
+                    rule.id,
+                    () => orchestratorClient.precedentRuleDismiss(cwd, rule.id),
+                    false,
+                  )
+                }
+              >
+                Dismiss
+              </button>
+            </span>
+          </div>
+        ))}
+        {rows.map((precedent) => {
+          const row = precedentRow(precedent);
+          return (
+            <div key={precedent.id} className="imp-note imp-precedent">
+              <span className="imp-note-text">
+                <span className="imp-precedent-answer">
+                  {row.kind} → {row.answer}
+                </span>
+                <span className="imp-precedent-meta">
+                  {row.by}
+                  {row.why ? ` · ${row.why}` : ""}
+                </span>
+              </span>
+              {row.count && (
+                <Tag tone="neutral" dot={false}>
+                  {row.count}
+                </Tag>
+              )}
+              <button
+                type="button"
+                className="imp-note-remove"
+                aria-label="Remove precedent"
+                onClick={() => remove(precedent.id)}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          );
+        })}
+        {rules.length === 0 && rows.length === 0 && (
+          <div className="imp-note imp-precedent-empty">
+            <span className="imp-note-text">Nothing remembered yet.</span>
+          </div>
+        )}
+      </div>
+      {error && (
+        <div className="imp-error" role="alert">
+          {error}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** The Improvements view: proposals, recurring failures and repo notes.
  * `refresh` changes whenever the task list does. */
 export function ImprovementsView({
@@ -412,6 +568,8 @@ export function ImprovementsView({
   onOpenTask: (id: string) => void;
 }) {
   const [draft, setDraft] = useState("");
+  // Counts accepted rules, so the notes list reloads with the new note.
+  const [accepted, setAccepted] = useState(0);
   const input = useRef<HTMLInputElement | null>(null);
 
   function addNote(text: string) {
@@ -426,7 +584,8 @@ export function ImprovementsView({
         <h2 className="orch-view-title">Improvements</h2>
         <p className="imp-lede">
           Changes to how the orchestrator works — its own proposals, failures
-          that keep repeating, and your standing notes.
+          that keep repeating, your standing notes and how you answered similar
+          questions.
         </p>
       </div>
       <Proposals cwd={cwd} refresh={refresh} />
@@ -438,10 +597,15 @@ export function ImprovementsView({
       />
       <RepoNotes
         cwd={cwd}
-        refresh={refresh}
+        refresh={`${refresh}:${accepted}`}
         draft={draft}
         onDraft={setDraft}
         inputRef={input}
+      />
+      <DecisionMemory
+        cwd={cwd}
+        refresh={refresh}
+        onAccepted={() => setAccepted((n) => n + 1)}
       />
     </div>
   );

@@ -46,6 +46,7 @@ pub mod compiler_cache;
 mod cost;
 mod criteria;
 mod decision;
+mod decision_memory;
 mod deliverables;
 mod digest;
 mod finding_judge;
@@ -89,10 +90,12 @@ mod wait_sla;
 mod worktrees;
 
 use advisor::*;
+pub(crate) use answer_policy::owner_only;
 use answer_policy::*;
 use attempt_run::*;
 use availability::*;
 use backlog::*;
+pub(crate) use base_check::is_environment_result;
 use base_check::*;
 use best_of::*;
 use brief_check::*;
@@ -100,12 +103,14 @@ use check_reuse::*;
 use cost::*;
 use criteria::*;
 use decision::*;
+use decision_memory::*;
 use finding_judge::*;
 use graph::*;
 use healing::*;
 use land::*;
 use leases::*;
 use lines::*;
+pub(crate) use owner_notice::{kind_name, option_part};
 use plan::*;
 use protected::*;
 use questions::*;
@@ -989,6 +994,10 @@ impl App {
             "repo.notes.list" => self.handle_repo_notes_list(params).await,
             "repo.notes.add" => self.handle_repo_notes_add(params).await,
             "repo.notes.remove" => self.handle_repo_notes_remove(params).await,
+            "precedents.list" => self.handle_precedents_list(params).await,
+            "precedents.remove" => self.handle_precedents_remove(params).await,
+            "precedents.rule.accept" => self.handle_precedents_rule_accept(params).await,
+            "precedents.rule.dismiss" => self.handle_precedents_rule_dismiss(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "hook.edit" => self.handle_hook_edit(params).await,
             other => Err(format!("{UNKNOWN_METHOD}{other}")),

@@ -27,6 +27,7 @@ pub struct TaskSandbox {
     pub read_tool_denied_roots: Vec<PathBuf>,
     pub read_exceptions: Vec<PathBuf>,
     pub read_metadata_paths: Vec<PathBuf>,
+    pub read_metadata_subpaths: Vec<PathBuf>,
     pub daemon_socket: PathBuf,
     pub check_env: BTreeMap<String, String>,
     pub check_env_remove_prefixes: Vec<String>,
@@ -180,6 +181,10 @@ impl TaskSandbox {
         read_tool_denied_roots.sort();
         read_tool_denied_roots.dedup();
         let read_exceptions = vec![run_dir, worktree];
+        // Codex create_dir_all checks existing date directories with stat
+        // before creating a session file. Metadata access does not expose
+        // session contents, which remain denied by denied_read_roots.
+        let read_metadata_subpaths = vec![home.join(".codex/sessions")];
         // Cargo resolves the allowed paths through their otherwise hidden parents.
         let mut read_metadata_paths: Vec<PathBuf> = read_exceptions
             .iter()
@@ -195,6 +200,7 @@ impl TaskSandbox {
             read_tool_denied_roots,
             read_exceptions,
             read_metadata_paths,
+            read_metadata_subpaths,
             daemon_socket: resolved(inputs.daemon_socket),
             check_env: [
                 ("ELECTRON_DISABLE_SANDBOX".into(), "1".into()),
@@ -449,6 +455,14 @@ mod tests {
             policy.read_exceptions,
             vec![root.join("data/runs/own"), root.join("data/worktree")]
         );
+        assert_eq!(
+            policy.read_metadata_subpaths,
+            vec![root.join("home/.codex/sessions")]
+        );
+        assert!(sbpl.contains(&format!(
+            "(allow file-read-metadata (subpath \"{}\"))",
+            root.join("home/.codex/sessions").display()
+        )));
         assert!(sbpl.contains(&format!(
             "(deny network-outbound (remote unix-socket (path-literal \"{}\")))",
             policy.daemon_socket.display()

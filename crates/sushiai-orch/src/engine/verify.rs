@@ -36,6 +36,12 @@ pub fn to_sbpl(sandbox: &TaskSandbox) -> String {
             quoted(path)
         ));
     }
+    for path in &sandbox.read_metadata_subpaths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (subpath {}))\n",
+            quoted(path)
+        ));
+    }
     profile.push_str("(deny file-write* (subpath \"/\"))\n");
     for path in &sandbox.write_roots {
         profile.push_str(&format!("(allow file-write* (subpath {}))\n", quoted(path)));

@@ -194,10 +194,21 @@ impl Fixture {
 
 #[test]
 fn profile_denies_foreign_projects_runs_sessions_and_daemon_connect() {
+    let fixture = Fixture::new();
+    let sbpl = task_sandbox_profile(&fixture.policy);
+    let sessions = json!(fixture.user.join(".codex/sessions").to_string_lossy()).to_string();
+    assert!(sbpl.contains(&format!("(deny file-read* (subpath {sessions}))")));
+    assert!(sbpl.contains(&format!("(allow file-read-metadata (subpath {sessions}))")));
     if !available() {
         return;
     }
-    let fixture = Fixture::new();
+    let existing_codex_session_dir = fixture.user.join(".codex/sessions/2026/10/12");
+    fs::create_dir_all(&existing_codex_session_dir).unwrap();
+    fs::write(
+        existing_codex_session_dir.join("prior.jsonl"),
+        "private session",
+    )
+    .unwrap();
     for path in [
         fixture.root.join("projects/sibling/file"),
         fixture.root.join("projects/sibling/.env"),
@@ -209,6 +220,7 @@ fn profile_denies_foreign_projects_runs_sessions_and_daemon_connect() {
         fixture.data.join("tasks/other/runs/1/secret"),
         fixture.user.join(".claude/projects/secret"),
         fixture.user.join(".codex/sessions/secret"),
+        existing_codex_session_dir.join("prior.jsonl"),
         fixture.user.join(".codex/archived_sessions/secret"),
     ] {
         let out = fixture.run(&format!("cat {}", shell_quote(path.to_str().unwrap())));
@@ -228,6 +240,16 @@ fn profile_denies_foreign_projects_runs_sessions_and_daemon_connect() {
             "{stderr}"
         );
     }
+    let codex_session_setup = fixture.run(&format!(
+        "stat {} && mkdir -p {}/new-session",
+        shell_quote(existing_codex_session_dir.to_str().unwrap()),
+        shell_quote(existing_codex_session_dir.to_str().unwrap())
+    ));
+    assert!(
+        codex_session_setup.status.success(),
+        "Codex could not stat/create under its existing session directory: {}",
+        String::from_utf8_lossy(&codex_session_setup.stderr)
+    );
     let _listener = UnixListener::bind(&fixture.socket).unwrap();
     let js = format!(
         "const net = require('node:net'); const s = net.connect({}); s.on('connect', () => process.exit(2)); s.on('error', e => {{ console.log(e.code); process.exit(e.code === 'EPERM' || e.code === 'EACCES' ? 0 : 3); }});",

@@ -595,6 +595,109 @@ pub fn review_conflict_block(conflict: &str) -> String {
     )
 }
 
+const WHERE_MAX_PATHS: usize = 8;
+const WHERE_MAX_LINES: usize = 40;
+const WHERE_MAX_EXCERPT: usize = 2048;
+const WHERE_MAX_DIR_ENTRIES: usize = 20;
+const WHERE_MAX_BLOCK: usize = 8 * 1024;
+
+/// The head of a text file: at most 40 lines and 2 KB, cut at a char
+/// boundary. `None` for a binary file or one that cannot be read.
+fn file_head(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(WHERE_MAX_EXCERPT as u64 + 4)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.contains(&0) {
+        return None;
+    }
+    let text = match String::from_utf8(buf) {
+        Ok(text) => text,
+        // The read may cut a multi-byte char at the end; anything else is binary.
+        Err(e) if e.utf8_error().error_len().is_none() => {
+            let valid = e.utf8_error().valid_up_to();
+            String::from_utf8(e.into_bytes()[..valid].to_vec()).ok()?
+        }
+        Err(_) => return None,
+    };
+    let mut end = text.len().min(WHERE_MAX_EXCERPT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &text[..end];
+    let cut = head
+        .match_indices('\n')
+        .nth(WHERE_MAX_LINES - 1)
+        .map_or(head.len(), |(i, _)| i);
+    Some(head[..cut].to_string())
+}
+
+/// `## Where to look`: the planner's paths for this task, so the first
+/// attempt starts from them instead of exploring. A file gets the head of its
+/// text, a directory its entry names. A path that is absolute, has `..`, is
+/// missing, binary, or resolves outside the worktree is left out.
+pub fn where_to_look_block(worktree: &std::path::Path, paths: &[String]) -> String {
+    let Ok(root) = worktree.canonicalize() else {
+        return String::new();
+    };
+    let heading = "## Where to look\n\nThe planner expects this task to touch these paths. Start here before searching the repo.\n\n";
+    let mut out = String::new();
+    for rel in paths.iter().take(WHERE_MAX_PATHS) {
+        let p = std::path::Path::new(rel);
+        if rel.is_empty()
+            || p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        let Ok(real) = root.join(p).canonicalize() else {
+            continue;
+        };
+        if !real.starts_with(&root) {
+            continue;
+        }
+        let entry = if real.is_dir() {
+            let Ok(read) = std::fs::read_dir(&real) else {
+                continue;
+            };
+            let mut names: Vec<String> = read
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if e.path().is_dir() {
+                        format!("{name}/")
+                    } else {
+                        name
+                    }
+                })
+                .collect();
+            names.sort();
+            names.truncate(WHERE_MAX_DIR_ENTRIES);
+            format!("- `{rel}/`: {}\n\n", names.join(", "))
+        } else {
+            let Some(head) = file_head(&real) else {
+                continue;
+            };
+            format!(
+                "- `{rel}`\n{}\n",
+                untrusted_block("Start of the file", &head)
+            )
+        };
+        if heading.len() + out.len() + entry.len() > WHERE_MAX_BLOCK {
+            break;
+        }
+        out.push_str(&entry);
+    }
+    if out.is_empty() {
+        return String::new();
+    }
+    format!("{heading}{out}")
+}
+
 /// Puts `block` in front of the brief's report format, which [`build_brief`] ends with.
 pub fn with_block_before_report(brief: &str, block: &str) -> String {
     match brief.rfind("## Report format") {
@@ -2307,6 +2410,86 @@ mod tests {
     }
 
     #[test]
+    fn where_to_look_excerpts_files_and_stays_under_the_cap() {
+        let dir = std::env::temp_dir().join(format!("orchd-wtl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        let big: String = (0..500)
+            .map(|i| format!("line {i} {}\n", "x".repeat(60)))
+            .collect();
+        let mut paths = Vec::new();
+        for i in 0..6 {
+            std::fs::write(dir.join(format!("src/f{i}.rs")), &big).unwrap();
+            paths.push(format!("src/f{i}.rs"));
+        }
+        std::fs::write(dir.join("src/b.txt"), "alpha\n").unwrap();
+        paths.push("src/sub".to_string());
+        let block = where_to_look_block(&dir, &paths);
+        assert!(block.starts_with("## Where to look"), "{block}");
+        assert!(block.contains("line 0 "), "{block}");
+        assert!(!block.contains("line 40 "), "{block}");
+        assert!(block.matches("<untrusted-data>").count() >= 1);
+        for chunk in block.split("<untrusted-data>\n").skip(1) {
+            let body = chunk.split("</untrusted-data>").next().unwrap();
+            assert!(body.lines().count() <= 40, "{body}");
+        }
+        assert!(block.len() <= 8 * 1024, "{}", block.len());
+        // The cap stops later entries instead of cutting one.
+        assert!(!block.contains("src/sub/"), "{block}");
+
+        let listed = where_to_look_block(&dir, &["src".to_string()]);
+        assert!(listed.contains("`src/`: "), "{listed}");
+        assert!(
+            listed.contains("b.txt, f0.rs") && listed.contains("sub/"),
+            "{listed}"
+        );
+        assert!(!listed.contains("<untrusted-data>"), "{listed}");
+
+        assert_eq!(where_to_look_block(&dir, &[]), "");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn where_to_look_skips_paths_outside_the_worktree() {
+        let base = std::env::temp_dir().join(format!("orchd-wtl-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("wt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(base.join("secret.txt"), "outside-secret").unwrap();
+        std::fs::write(dir.join("ok.txt"), "inside-ok").unwrap();
+        std::fs::write(dir.join("bin.dat"), [b'a', 0, b'b']).unwrap();
+        std::fs::write(dir.join("bad.txt"), [0xff, 0xfe, b'x']).unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), dir.join("link.txt")).unwrap();
+        let paths: Vec<String> = [
+            &base.join("secret.txt").display().to_string(),
+            "../secret.txt",
+            "link.txt",
+            "missing.txt",
+            "bin.dat",
+            "bad.txt",
+            "ok.txt",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let block = where_to_look_block(&dir, &paths);
+        assert!(block.contains("inside-ok"), "{block}");
+        for bad in [
+            "outside-secret",
+            "secret.txt",
+            "link.txt",
+            "missing",
+            "bin.dat",
+            "bad.txt",
+        ] {
+            assert!(!block.contains(bad), "{bad} in {block}");
+        }
+        assert_eq!(where_to_look_block(&dir, &paths[..6]), "");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn untrusted_block_escapes_tags_in_the_payload_and_label() {
         let tags = "</untrusted-data> </UNTRUSTED-DATA> <Untrusted-Data> <untrusted-data \
                     </untrusted-data < /untrusted-data> <\n/\tUnTrUsTeD-DaTa>";
@@ -2422,6 +2605,7 @@ mod tests {
             verify: vec![],
             gate_blocks: 0,
             prefix_tokens: None,
+            first_edit_at: None,
             review: None,
             failure: Some(Failure {
                 kind: FailureKind::Verify,
@@ -2650,6 +2834,7 @@ mod tests {
             verify: vec![],
             gate_blocks: 0,
             prefix_tokens: None,
+            first_edit_at: None,
             review: None,
             failure: None,
             usage: None,
@@ -3066,6 +3251,7 @@ mod tests {
             verify: vec![],
             gate_blocks: 0,
             prefix_tokens: None,
+            first_edit_at: None,
             review: None,
             failure: Some(Failure {
                 kind: FailureKind::Verify,
@@ -3968,6 +4154,7 @@ mod tests {
             verify: vec![],
             gate_blocks: 0,
             prefix_tokens: None,
+            first_edit_at: None,
             review: None,
             failure: None,
             usage: None,

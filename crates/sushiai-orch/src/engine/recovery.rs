@@ -264,6 +264,7 @@ pub(super) async fn follow_run(
     let mut tail = RawTail::rebuild(&files, &events);
     let mut notes = harness::RunOutcome::default();
     let mut caught_up = false;
+    let mut edit_seen = attempt.first_edit_at.is_some();
     let mut stderr_len = 0u64;
     loop {
         let over = files.exit.exists() || !group_alive(pgid);
@@ -277,6 +278,10 @@ pub(super) async fn follow_run(
             let note = harness::feed_stream_line(attempt.harness, &line, &mut notes);
             if let (true, Some(note)) = (caught_up, note) {
                 app.broadcast_log(&task.id, n, note);
+            }
+            // Replayed lines have no real arrival time: only live ones count.
+            if caught_up && !edit_seen {
+                edit_seen = note_first_edit(app, &task.id, n, &line).await;
             }
             if trip.is_none() {
                 let run = (attempt.harness, model.as_deref());

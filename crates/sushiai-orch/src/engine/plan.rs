@@ -430,6 +430,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         verify: vec![],
         gate_blocks: 0,
         prefix_tokens: None,
+        first_edit_at: None,
         review: None,
         failure: None,
         usage: None,

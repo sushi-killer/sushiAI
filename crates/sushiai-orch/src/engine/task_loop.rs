@@ -803,6 +803,16 @@ pub(super) async fn run_task_loop(
                 }
                 _ => brief_text,
             };
+            // Every attempt here starts a fresh session; a conflict-only one
+            // touches only the conflicted files.
+            let brief_text = if conflict_only {
+                brief_text
+            } else {
+                brief::with_block_before_report(
+                    &brief_text,
+                    &brief::where_to_look_block(&worktree, &task.paths),
+                )
+            };
             let brief_text = brief::with_block_before_report(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
@@ -908,6 +918,7 @@ pub(super) async fn run_task_loop(
                 verify: vec![],
                 gate_blocks: 0,
                 prefix_tokens: None,
+                first_edit_at: None,
                 review: None,
                 failure: None,
                 usage: None,

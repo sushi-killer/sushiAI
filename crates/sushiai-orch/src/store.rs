@@ -559,6 +559,7 @@ mod tests {
                 verify: vec![],
                 gate_blocks: 0,
                 prefix_tokens: None,
+                first_edit_at: None,
                 review: None,
                 failure: None,
                 usage: None,

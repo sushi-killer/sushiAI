@@ -83,13 +83,46 @@ pub(super) async fn record_landing(task: &mut Task) {
     refresh_diff_stat(task).await;
 }
 
-fn gather_facts(task: &Task) -> Facts {
+/// Per implement attempt of every task in `graph`: its exploration calls
+/// (the timeline's `explore` bucket) and the time to its first edit.
+fn attempt_facts(
+    store: &crate::store::Store,
+    graph: &[&Task],
+    rules: &crate::model::WorkBuckets,
+) -> Vec<report::AttemptFact> {
+    let mut out = Vec::new();
+    for task in graph {
+        let segments = crate::timeline::task_timeline(store, task, rules, now_ms());
+        for a in task.attempts.iter().filter(|a| a.stage == Stage::Implement) {
+            let explore = segments
+                .iter()
+                .find(|s| s.stage == "implement" && s.attempt == a.n)
+                .and_then(|s| s.buckets.as_ref())
+                .map(|b| b.explore);
+            out.push(report::AttemptFact {
+                task_id: task.id.clone(),
+                n: a.n,
+                explore,
+                first_edit_ms: a.first_edit_at.map(|at| at - a.started_at),
+            });
+        }
+    }
+    out
+}
+
+fn gather_facts(
+    task: &Task,
+    store: &crate::store::Store,
+    graph: &[&Task],
+    rules: &crate::model::WorkBuckets,
+) -> Facts {
     let repo = Path::new(&task.repo);
     let (from, to) = task_range(task);
     let mut facts = Facts {
         commits: git::log_subjects(repo, &from, &to).unwrap_or_default(),
         files: git::numstat(repo, &from, &to).unwrap_or_default(),
         images: Vec::new(),
+        attempts: attempt_facts(store, graph, rules),
     };
     let wt = Path::new(&task.worktree);
     if wt.join("artifacts").is_dir() {
@@ -189,18 +222,21 @@ impl App {
         self.collect_deliverables(task).await;
         let all = self.repo_tasks(&task.repo);
         let data = self.data_dir.clone();
+        let rules = self
+            .store
+            .load_settings()
+            .map(|s| s.work_buckets)
+            .unwrap_or_default();
         let snapshot = task.clone();
         let (text, touched, unlanded) = tokio::task::spawn_blocking(move || {
             let mut t = snapshot;
             Self::apply_auto_touch(&mut t);
             refresh_unlanded(&mut t);
             let graph = report::graph_of(&t, &all);
-            let text = report::build(
-                &t,
-                &graph,
-                &crate::costs::read_all(&data),
-                &gather_facts(&t),
-            );
+            let facts = crate::store::Store::new(&data)
+                .map(|store| gather_facts(&t, &store, &graph, &rules))
+                .unwrap_or_default();
+            let text = report::build(&t, &graph, &crate::costs::read_all(&data), &facts);
             (text, t.lead_touch, t.unlanded)
         })
         .await

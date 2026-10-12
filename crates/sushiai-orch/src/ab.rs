@@ -179,6 +179,20 @@ pub(crate) fn top_level_calls(events: &[Value]) -> impl Iterator<Item = (usize, 
     })
 }
 
+const EDIT_TOOLS: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"];
+
+/// Whether one streamed stdout line shows the agent editing a file: a
+/// top-level Claude edit `tool_use`, or a Codex `file_change` item.
+pub(crate) fn is_edit_event(line: &Value) -> bool {
+    if top_level_calls(std::slice::from_ref(line)).any(|(_, name, _)| EDIT_TOOLS.contains(&name)) {
+        return true;
+    }
+    line.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.starts_with("item."))
+        && line.pointer("/item/type").and_then(Value::as_str) == Some("file_change")
+}
+
 /// Splits an implement attempt's top-level tool calls (assistant `tool_use`
 /// blocks in `events.jsonl`; a subagent's carry `parent_tool_use_id` and are
 /// ignored) into process, evidence, verify, task and explore, given the files
@@ -781,6 +795,23 @@ mod tests {
                 {"type": "tool_use", "id": "x", "name": name, "input": input}
             ]}
         })
+    }
+
+    #[test]
+    fn edit_events_are_top_level_edit_calls_and_codex_file_changes() {
+        for name in ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"] {
+            assert!(is_edit_event(&ev(None, name, Value::Null)), "{name}");
+        }
+        assert!(!is_edit_event(&ev(None, "Read", Value::Null)));
+        assert!(!is_edit_event(&ev(Some("sub"), "Edit", Value::Null)));
+        let codex = |ty: &str, item: &str| serde_json::json!({"type": ty, "item": {"type": item}});
+        assert!(is_edit_event(&codex("item.completed", "file_change")));
+        assert!(is_edit_event(&codex("item.started", "file_change")));
+        assert!(!is_edit_event(&codex(
+            "item.completed",
+            "command_execution"
+        )));
+        assert!(!is_edit_event(&serde_json::json!({"type": "result"})));
     }
 
     #[test]

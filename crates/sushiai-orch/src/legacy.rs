@@ -102,10 +102,21 @@ mod tests {
         for name in FILES {
             std::fs::write(data.join(name), child.id().to_string()).unwrap();
         }
+        let pid = child.id() as i32;
+        let seen = format!(
+            "alive {}, looks like orchd {}, exe {:?}, argv {:?}",
+            alive(pid),
+            looks_like_orchd(pid),
+            crate::process::executable(pid),
+            crate::process::argv(pid)
+        );
         stop(&data);
         // `stop` waits for the process to exit; `wait` reaps it and shows it did not survive.
         let status = child.wait().unwrap();
-        assert!(!status.success(), "the process was signalled: {status:?}");
+        assert!(
+            !status.success(),
+            "the process was signalled: {status:?}; {seen}"
+        );
         for name in FILES {
             assert!(!data.join(name).exists(), "{name} remains");
         }

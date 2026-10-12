@@ -107,6 +107,7 @@ pub(super) struct TaskTools {
     /// `mcp__server__tool` names the owner allowed for this repo or task.
     pub granted: Vec<String>,
     pub env: HashMap<String, String>,
+    pub notes: Vec<String>,
 }
 
 fn servers_of(file: &Path) -> BTreeMap<String, serde_json::Value> {
@@ -132,16 +133,6 @@ pub(super) fn task_tools(
         .iter()
         .filter_map(|r| r.strip_prefix("enable:"))
         .collect();
-    let mut on = settings.clone();
-    let mut off = Vec::new();
-    for cfg in on.chat_tools.iter_mut() {
-        if enabled_here.contains(&cfg.id.as_str()) {
-            cfg.enabled = true;
-        }
-        if !cfg.enabled {
-            off.push((cfg.id.clone(), cfg.label.clone()));
-        }
-    }
     let project_id = task.project_id.clone().or_else(|| {
         app.secrets
             .read()
@@ -156,17 +147,78 @@ pub(super) fn task_tools(
         env.extend(secrets.project_mcp.get(id).cloned().unwrap_or_default());
         env
     });
+    let mut project = if project_id.is_some() {
+        BTreeMap::new()
+    } else {
+        servers_of(&worktree.join(".mcp.json"))
+    };
+    let mut task_servers = servers_of(&app.store.task_dir(&task.id).join("mcp.json"));
+    let enable = settings
+        .mcp_enable
+        .get(&task.repo)
+        .cloned()
+        .unwrap_or_default();
+    let disable = settings
+        .mcp_disable
+        .get(&task.repo)
+        .cloned()
+        .unwrap_or_default();
+    let mut notes = Vec::new();
+    for name in &enable {
+        if !settings.chat_tools.iter().any(|cfg| cfg.id == *name) {
+            notes.push(format!(
+                "MCP: ignored unknown name {name:?} in mcpEnable for {}",
+                task.repo
+            ));
+        }
+    }
+    let mut disabled = HashSet::new();
+    for name in &disable {
+        if name == messages::SERVER {
+            continue;
+        }
+        let mut known = project.contains_key(name) || task_servers.contains_key(name);
+        disabled.insert(name.clone());
+        for cfg in &settings.chat_tools {
+            let key = chat_tools::server_key(cfg);
+            if cfg.id == *name || key == *name {
+                known = true;
+                disabled.insert(cfg.id.clone());
+                disabled.insert(key);
+            }
+        }
+        if !known {
+            notes.push(format!(
+                "MCP: ignored unknown name {name:?} in mcpDisable for {}",
+                task.repo
+            ));
+        }
+    }
+    disabled.remove(messages::SERVER);
+    project.retain(|key, _| !disabled.contains(key));
+    task_servers.retain(|key, _| !disabled.contains(key));
+    let mut on = settings.clone();
+    let mut off = Vec::new();
+    for cfg in &mut on.chat_tools {
+        cfg.enabled = (enable.contains(&cfg.id) || enabled_here.contains(&cfg.id.as_str()))
+            && !disabled.contains(&cfg.id)
+            && !disabled.contains(&chat_tools::server_key(cfg));
+        if !cfg.enabled {
+            off.push((cfg.id.clone(), cfg.label.clone()));
+        }
+    }
     TaskTools {
         connected: chat_tools::for_task(app, &on),
         off,
-        project: servers_of(&worktree.join(".mcp.json")),
-        task: servers_of(&app.store.task_dir(&task.id).join("mcp.json")),
+        project,
+        task: task_servers,
         granted: rules
             .iter()
             .filter_map(|r| r.strip_prefix("tool:"))
             .map(str::to_string)
             .collect(),
         env,
+        notes,
     }
 }
 
@@ -845,6 +897,11 @@ pub(super) fn tools_block(tools: &TaskTools, planning: bool) -> String {
     for line in &lines {
         text.push_str(&format!("- {line}\n"));
     }
+    for (id, label) in &tools.off {
+        text.push_str(&format!(
+            "- {id} ({label}): connected but off for this repo\n"
+        ));
+    }
     if planning {
         text.push_str("\nCriteria may only ask for what these tools can do. A step that needs a service with no tool here belongs to the owner: say so in the criterion instead of asking the agent to do it.\n\n");
     } else {
@@ -1056,6 +1113,7 @@ mod tests {
             .into(),
             granted: vec!["mcp__a__send".into(), "mcp__a__get".into()],
             env: HashMap::new(),
+            notes: vec![],
         };
         assert_eq!(tools.allowed(), vec!["mcp__a__get", "mcp__a__send"]);
         let config = tools.mcp_config(&json!({"command": "messages"}));
@@ -1082,5 +1140,182 @@ mod tests {
         );
         assert!(block.contains("No tool: "), "{block}");
         assert!(!tools_block(&tools, true).contains("No tool: "));
+    }
+
+    #[tokio::test]
+    async fn task_tools_project_id_uses_only_snapshot_and_no_id_falls_back_to_worktree() {
+        let (app, dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        app.store.save_task(&task).unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".mcp.json"),
+            json!({"mcpServers": {
+                "fallback": {"command": "fallback"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            app.store.task_dir(&task.id).join("mcp.json"),
+            json!({"mcpServers": {
+                "snapshot": {"command": "snapshot", "codex": true},
+                "remove": {"command": "remove", "codex": true},
+                "sushiai-messages": {"command": "fake", "codex": true}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let mut settings = Settings::default();
+        let tools = task_tools(&app, &settings, &task, &worktree);
+        assert!(tools.project.contains_key("fallback"));
+        settings.mcp_disable.insert(
+            task.repo.clone(),
+            vec!["remove".into(), messages::SERVER.into(), "missing".into()],
+        );
+        settings
+            .mcp_enable
+            .insert(task.repo.clone(), vec!["not-a-tool".into()]);
+        let tools = task_tools(&app, &settings, &task, &worktree);
+        let config = tools.mcp_config(&json!({"command": "messages"}));
+        assert_eq!(
+            config["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["fallback", "snapshot", messages::SERVER]
+        );
+        let codex = tools.codex_servers(&json!({"command": "messages"}));
+        assert_eq!(
+            codex
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["snapshot", messages::SERVER]
+        );
+        assert_eq!(codex.last().unwrap().1["command"], "messages");
+        assert_eq!(
+            config["mcpServers"][messages::SERVER]["command"],
+            "messages"
+        );
+        assert_eq!(
+            tools.notes,
+            vec![
+                format!(
+                    "MCP: ignored unknown name \"not-a-tool\" in mcpEnable for {}",
+                    task.repo
+                ),
+                format!(
+                    "MCP: ignored unknown name \"missing\" in mcpDisable for {}",
+                    task.repo
+                ),
+            ]
+        );
+        app.secrets
+            .write()
+            .unwrap()
+            .repo_projects
+            .insert(task.repo.clone(), "project".into());
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+        app.secrets.write().unwrap().repo_projects.clear();
+        task.project_id = Some("project".into());
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+        settings
+            .mcp_disable
+            .insert(task.repo.clone(), vec!["fallback".into()]);
+        task.project_id = None;
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_tools_enable_and_grants_are_repo_scoped_and_disable_matches_id_or_server_key() {
+        let (app, dir) = test_app();
+        let task = task_with_status(TaskStatus::Queued);
+        app.store.save_task(&task).unwrap();
+        let mut settings = Settings {
+            chat_tools: serde_json::from_value(json!([
+                {"id": "global", "label": "Global tool", "enabled": true, "server": {"command": "true"}},
+                {"id": "local", "label": "Local tool", "enabled": false, "server": {"command": "true"}},
+                {"id": "plug", "label": "Plugin tool", "enabled": true, "server": {"ref": "plugin:demo/server"}}
+            ])).unwrap(),
+            ..Settings::default()
+        };
+        std::fs::write(app.data_dir.join("chat-tools.json"), json!({
+            "global": {"status": "ok", "tools": [{"name": "get_item", "readOnly": true}], "checkedAt": 0},
+            "local": {"status": "ok", "tools": [{"name": "get_item", "readOnly": true}], "checkedAt": 0}
+        }).to_string()).unwrap();
+        settings
+            .mcp_enable
+            .insert(format!("{}/", task.repo), vec!["global".into()]);
+        let tools = task_tools(&app, &settings, &task, dir.path());
+        assert!(tools.connected.servers.is_empty());
+        assert!(tools_block(&tools, false)
+            .contains("global (Global tool): connected but off for this repo"));
+        assert_eq!(
+            tools.capabilities()["connectedButOffForThisTask"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        settings
+            .mcp_enable
+            .insert(task.repo.clone(), vec!["local".into()]);
+        add_rule(&app, Scope::Repo(&task.repo), "enable:global");
+        let tools = task_tools(&app, &settings, &task, dir.path());
+        assert_eq!(
+            tools
+                .connected
+                .servers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["global", "local"]
+        );
+        assert_eq!(tools.off, vec![("plug".into(), "Plugin tool".into())]);
+        add_rule(&app, Scope::Task(&task.id), "enable:local");
+        settings.mcp_enable.clear();
+        assert!(task_tools(&app, &settings, &task, dir.path())
+            .connected
+            .servers
+            .contains_key("local"));
+
+        std::fs::write(
+            app.store.task_dir(&task.id).join("mcp.json"),
+            json!({"mcpServers": {
+                "global": {"command": "task-copy", "codex": true},
+                "plugin:demo:server": {"command": "plugin-copy", "codex": true}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        for name in ["plug", "plugin:demo:server"] {
+            settings
+                .mcp_disable
+                .insert(task.repo.clone(), vec!["global".into(), name.into()]);
+            let tools = task_tools(&app, &settings, &task, dir.path());
+            assert_eq!(
+                tools
+                    .connected
+                    .servers
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["local"]
+            );
+            assert!(tools.task.is_empty());
+            assert!(tools.notes.is_empty());
+            assert!(tools.allowed().iter().all(|tool| !tool.contains("global")));
+            assert_eq!(tools.codex_servers(&json!({})).len(), 1);
+        }
     }
 }

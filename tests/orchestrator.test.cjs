@@ -250,34 +250,50 @@ test("probe() reports readiness and never connects or retries a host", async () 
   assert.equal(hosts.services.size, 0);
 });
 
-test("task.create is enriched with the repo's enabled MCP launch config", async () => {
+test("task.create sends the project's enabled MCP servers with caller overrides", async () => {
   const manager = fakeDaemonManager({
     handlers: { "orch.task.create": (params) => ({ id: "t1", ...params }) },
   });
-  const mcpSnapshot = { mcpServers: { fs: { command: "fs-server" } } };
+  const project = {
+    id: "project-1",
+    mcp: {
+      mcpServers: {
+        fs: { command: "project-fs" },
+        lookup: { command: "project-lookup" },
+        disabled: { command: "disabled-server" },
+      },
+      disabledMcpServers: ["disabled"],
+    },
+  };
   const service = serviceFor(manager, {
-    getClaudeMcp: () => ({ launchConfig: async () => mcpSnapshot }),
+    getProjects: () => ({ resolveDirectory: async () => project }),
   });
   const result = await service.call("task.create", {
     repo: "/Users/sushi/project",
     title: "Export CSV",
+    mcp: {
+      mcpServers: { fs: { command: "caller-fs" }, extra: { command: "extra" } },
+    },
   });
   assert.equal(result.id, "t1");
   const sent = manager.requestsFor("orch.task.create")[0];
-  assert.deepEqual(sent.params.mcp, mcpSnapshot);
+  assert.deepEqual(sent.params.mcp, {
+    mcpServers: {
+      fs: { command: "caller-fs" },
+      lookup: { command: "project-lookup" },
+      extra: { command: "extra" },
+    },
+  });
+  assert.equal(sent.params.projectId, project.id);
   assert.equal(sent.params.title, "Export CSV");
 });
 
-test("task.create proceeds without mcp when the project has no readable MCP config", async () => {
+test("task.create sends no mcp when there is no project", async () => {
   const manager = fakeDaemonManager({
     handlers: { "orch.task.create": (params) => ({ id: "t2", ...params }) },
   });
   const service = serviceFor(manager, {
-    getClaudeMcp: () => ({
-      launchConfig: async () => {
-        throw new Error("no such project");
-      },
-    }),
+    getProjects: () => ({ resolveDirectory: async () => null }),
   });
   await service.call("task.create", { repo: "/nope", title: "x" });
   const sent = manager.requestsFor("orch.task.create")[0].params;

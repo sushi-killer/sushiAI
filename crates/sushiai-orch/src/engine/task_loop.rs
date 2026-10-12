@@ -755,6 +755,11 @@ pub(super) async fn run_task_loop(
             };
 
             let tools = permissions::task_tools(&app, &settings, &task, &worktree);
+            for line in &tools.notes {
+                if !task.decisions.contains(line) {
+                    task.decisions.push(line.clone());
+                }
+            }
             let brief_text = brief::with_block_before_report(
                 &brief_text,
                 &permissions::tools_block(&tools, false),

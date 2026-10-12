@@ -337,6 +337,11 @@ where
     let run_dir_b = run_dir.join("b");
     let _ = std::fs::create_dir_all(&run_dir_b);
     let tools_b = permissions::task_tools(app, settings, task, &wt_b);
+    for line in &tools_b.notes {
+        if !task.decisions.contains(line) && !extra.decisions.contains(line) {
+            extra.decisions.push(line.clone());
+        }
+    }
     let prep = prepare_run(
         app, task, task_id, b_route, settings, &wt_b, base_sha, attempt_n, &run_dir_b, deny_read,
         &tools_b,

@@ -1,0 +1,2 @@
+- Small task requests now draft on the standard-tier route, with configurable character and path limits and a recorded routing decision. Larger requests and lists use the planner; setting `smallPlanMaxChars` to `0` disables small-request routing.
+- Task runs now receive their project’s enabled MCP servers, with repo-specific `mcpEnable` and `mcpDisable` settings. Personal Claude servers and globally enabled connected tools are no longer added automatically; task messaging always remains available.

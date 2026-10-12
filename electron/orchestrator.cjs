@@ -397,7 +397,6 @@ class OrchestratorService {
     send,
     notify,
     onTask,
-    getClaudeMcp,
     getModelProviders,
     getProjects,
     moduleSwitch,
@@ -416,7 +415,6 @@ class OrchestratorService {
       : send;
     this.notify = notify;
     this.onTask = onTask;
-    this.getClaudeMcp = getClaudeMcp;
     this.getModelProviders = getModelProviders;
     this.getProjects = getProjects;
     this.readyTimeoutMs = readyTimeoutMs;
@@ -546,27 +544,12 @@ class OrchestratorService {
               ([name]) => !off.has(name),
             ),
           );
-          if (Object.keys(own).length) {
-            const current = params.mcp?.mcpServers || params.mcp || {};
-            params.mcp = { mcpServers: { ...own, ...current } };
-          }
+          const current = params.mcp?.mcpServers || params.mcp || {};
+          params.mcp = { mcpServers: { ...own, ...current } };
         }
       } catch {}
     }
-    if (!this.getClaudeMcp) return params;
-    try {
-      const mcp = await this.getClaudeMcp().launchConfig(params.repo);
-      const project = params.mcp?.mcpServers || params.mcp || {};
-      const local = mcp?.mcpServers || mcp || {};
-      return {
-        ...params,
-        mcp: { mcpServers: { ...local, ...project } },
-      };
-    } catch {
-      // No .mcp.json / no readable project: the task still starts, just
-      // without MCP servers wired into the Claude run.
-      return params;
-    }
+    return params;
   }
 
   /** Replaces what the daemon holds with what is allowed now (a host switched
@@ -1051,7 +1034,6 @@ function createOrchestratorHosts({
   send,
   notify,
   onTask,
-  getClaudeMcp,
   getModelProviders,
   getProjects,
   getConnections,
@@ -1072,7 +1054,6 @@ function createOrchestratorHosts({
       send,
       notify,
       onTask,
-      getClaudeMcp,
       getModelProviders,
       getProjects,
       moduleSwitch,

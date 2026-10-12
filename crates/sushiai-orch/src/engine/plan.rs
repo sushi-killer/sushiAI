@@ -687,6 +687,16 @@ pub(super) async fn run_plan_stage(
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
     auto_start_after_plan: bool,
 ) -> PlanOutcome {
+    let entry_task = match app.store.load_task(task_id) {
+        Ok(Some(task)) => task,
+        _ => return end_plan_stage(app, task_id, None).await,
+    };
+    let (planner, decision) = {
+        let settings = app.settings.read().unwrap();
+        let variant = entry_task.variant();
+        let (id, line) = variant.plan_route_for(&settings, &entry_task);
+        (id.to_string(), line)
+    };
     let mut clarify_rounds: u32 = 0;
     loop {
         if cancel.is_cancelled() {
@@ -741,17 +751,17 @@ pub(super) async fn run_plan_stage(
         }
         let settings = app.settings.read().unwrap().clone();
         let variant = task.variant();
-        let planner = variant.plan_route_id(&settings);
+        if !task.decisions.contains(&decision) {
+            task.decisions.push(decision.clone());
+        }
         let Some(route) = settings.routes.iter().find(|r| r.id == planner).cloned() else {
             // An unconfigured planner id is treated exactly like planner ==
             // "" -- never a silent fallback to some route the owner never
             // chose for this.
-            if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-                t.status = TaskStatus::Failed;
-                t.updated_at = now_ms();
-                let _ = app.store.save_task(&t);
-                app.broadcast_task(&t);
-            }
+            task.status = TaskStatus::Failed;
+            task.updated_at = now_ms();
+            let _ = app.store.save_task(&task);
+            app.broadcast_task(&task);
             return end_plan_stage(app, task_id, None).await;
         };
 

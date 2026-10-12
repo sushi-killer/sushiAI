@@ -4,7 +4,7 @@
 //! shapes independently.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -149,6 +149,13 @@ pub struct Settings {
     /// rejected -- there is nothing to run it with).
     #[serde(default = "default_planner")]
     pub planner: String,
+    /// Maximum Unicode characters for standard-tier planning; 0 disables
+    /// the entire small-request check and keeps every request on the planner.
+    #[serde(default = "default_small_plan_max_chars")]
+    pub small_plan_max_chars: usize,
+    /// Maximum distinct repo paths in a small request.
+    #[serde(default = "default_small_plan_max_paths")]
+    pub small_plan_max_paths: usize,
     /// Route id of the read-only run that checks a brief's goal and criteria
     /// for contradictions after drafting and before the first implement
     /// attempt; `""` turns the check off.
@@ -227,6 +234,12 @@ pub struct Settings {
     /// MCP servers the orchestrator chat may use, each toggled in Settings.
     #[serde(default)]
     pub chat_tools: Vec<ChatToolConfig>,
+    /// Exact repo path -> connected tool ids enabled for task runs.
+    #[serde(default)]
+    pub mcp_enable: HashMap<String, Vec<String>>,
+    /// Exact repo path -> server names excluded from task runs.
+    #[serde(default)]
+    pub mcp_disable: HashMap<String, Vec<String>>,
     /// Custom presets; the built-in ones live in code.
     #[serde(default)]
     pub presets: Vec<Preset>,
@@ -526,6 +539,14 @@ fn default_planner() -> String {
     "claude-opus".to_string()
 }
 
+fn default_small_plan_max_chars() -> usize {
+    1200
+}
+
+fn default_small_plan_max_paths() -> usize {
+    3
+}
+
 /// Whether two repo paths name the same folder: symlinked paths (macOS
 /// /var -> /private/var) do.
 pub fn same_repo_path(a: &str, b: &str) -> bool {
@@ -630,6 +651,8 @@ impl Default for Settings {
             verify_timeout_secs: default_verify_timeout_secs(),
             implement_budget_mins: default_implement_budget_mins(),
             planner: default_planner(),
+            small_plan_max_chars: default_small_plan_max_chars(),
+            small_plan_max_paths: default_small_plan_max_paths(),
             brief_check_route: default_brief_check_route(),
             orchestrator: String::new(),
             auto_answer: false,
@@ -649,6 +672,8 @@ impl Default for Settings {
             scoped_checks: vec![],
             autopilot: false,
             chat_tools: vec![],
+            mcp_enable: HashMap::new(),
+            mcp_disable: HashMap::new(),
             presets: vec![],
             repo_presets: Default::default(),
         }
@@ -1186,6 +1211,93 @@ impl Variant {
     /// `settings.planner` (`""` = planning off).
     pub fn plan_route_id<'a>(&'a self, settings: &'a Settings) -> &'a str {
         self.planner_route.as_deref().unwrap_or(&settings.planner)
+    }
+
+    /// Choose once from the request at entry to a plan stage, before any
+    /// clarification answers are appended to it.
+    pub fn plan_route_for<'a>(&'a self, settings: &'a Settings, task: &Task) -> (&'a str, String) {
+        let planner = self.plan_route_id(settings);
+        if settings.small_plan_max_chars == 0 {
+            let reason = if self.planner_route.is_some() {
+                "variant.plannerRoute"
+            } else {
+                "small-request check off: smallPlanMaxChars = 0"
+            };
+            return (planner, format!("Plan route: {planner} ({reason})"));
+        }
+        if self.planner_route.is_some() {
+            return (
+                planner,
+                format!("Plan route: {planner} (variant.plannerRoute)"),
+            );
+        }
+        if planner.is_empty() {
+            return (planner, "Plan route: off (planner is empty)".into());
+        }
+
+        let request = task.request.as_deref().unwrap_or_default();
+        let chars = request.chars().count();
+        let paths = if task.parent.is_some() && !task.paths.is_empty() {
+            task.paths.iter().collect::<HashSet<_>>().len()
+        } else {
+            request
+                .split_whitespace()
+                .map(|token| {
+                    token.trim_matches(['\'', '"', '`', '[', ']', '(', ')', '{', '}', '<', '>'])
+                })
+                .filter(|token| {
+                    !token.contains("://")
+                        && (token.contains('/')
+                            || token.rsplit_once('.').is_some_and(|(_, ext)| {
+                                (1..=8).contains(&ext.len())
+                                    && ext.bytes().all(|c| c.is_ascii_alphanumeric())
+                            }))
+                })
+                .collect::<HashSet<_>>()
+                .len()
+        };
+        let list_items = request
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                let rest = line.strip_prefix(['-', '*', '+']).or_else(|| {
+                    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+                    (digits > 0)
+                        .then(|| line[digits..].strip_prefix(['.', ')']))
+                        .flatten()
+                });
+                rest.is_some_and(|rest| {
+                    rest.starts_with(char::is_whitespace) && !rest.trim_start().is_empty()
+                })
+            })
+            .count();
+        let mut reasons = Vec::new();
+        if chars > settings.small_plan_max_chars {
+            reasons.push(format!("{chars} chars > {}", settings.small_plan_max_chars));
+        }
+        if paths > settings.small_plan_max_paths {
+            reasons.push(format!("{paths} paths > {}", settings.small_plan_max_paths));
+        }
+        if list_items >= 2 {
+            reasons.push(format!("{list_items} list items >= 2"));
+        }
+        if !reasons.is_empty() {
+            return (
+                planner,
+                format!("Plan route: {planner} (not small: {})", reasons.join(", ")),
+            );
+        }
+
+        let facts = format!(
+            "small request: {chars} chars <= {}, {paths} paths <= {}, no list",
+            settings.small_plan_max_chars, settings.small_plan_max_paths
+        );
+        match settings.tiers.get(&Tier::Standard).filter(|id| {
+            !id.is_empty() && settings.routes.iter().any(|route| route.id == **id)
+        }) {
+            Some(id) => (id, format!("Plan route: {id} ({facts})")),
+            None => (planner, format!("Plan route: {planner} ({facts}; standard route not configured, fell back to planner)")),
+        }
     }
 
     /// The review stage's route id: this variant's override, else
@@ -2392,6 +2504,35 @@ mod tests {
         assert_eq!(s.planner, "claude-opus");
         assert_eq!(s.orchestrator, "");
         assert!(!s.auto_answer);
+    }
+
+    #[test]
+    fn old_settings_default_small_planning_and_repo_mcp_keys() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        for key in [
+            "smallPlanMaxChars",
+            "smallPlanMaxPaths",
+            "mcpEnable",
+            "mcpDisable",
+        ] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let settings: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.small_plan_max_chars, 1200);
+        assert_eq!(settings.small_plan_max_paths, 3);
+        assert!(settings.mcp_enable.is_empty());
+        assert!(settings.mcp_disable.is_empty());
+        let mut json = serde_json::to_value(settings).unwrap();
+        json["smallPlanMaxChars"] = serde_json::json!(0);
+        json["smallPlanMaxPaths"] = serde_json::json!(0);
+        json["mcpEnable"] = serde_json::json!({"/repo": ["tool"]});
+        json["mcpDisable"] = serde_json::json!({"/repo": ["server"]});
+        let settings: Settings = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(settings.small_plan_max_chars, 0);
+        assert_eq!(settings.small_plan_max_paths, 0);
+        assert_eq!(settings.mcp_enable["/repo"], vec!["tool"]);
+        assert_eq!(settings.mcp_disable["/repo"], vec!["server"]);
+        assert_eq!(serde_json::to_value(settings).unwrap(), json);
     }
 
     #[test]

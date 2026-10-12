@@ -114,9 +114,7 @@ fn a_contradicting_planner_draft_is_replanned_once_and_never_twice() {
     assert_eq!(count(&r.calls, "check"), 2, "calls: {:?}", r.calls);
     let lines = decisions(&r.task);
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("Plan gate:") && l.contains("planning again once")),
+        lines.iter().any(|l| l.contains("(drafting again)")),
         "{lines:?}"
     );
     assert!(lines

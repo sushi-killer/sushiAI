@@ -2976,10 +2976,11 @@ pub(super) async fn finish_after_review(
             if apply_base_check_answer(&settings, task, &question, &answer, origin) {
                 app.verify_cache.lock().unwrap().remove(task_id);
             }
-            let stays = question
-                .commands
-                .iter()
-                .any(|c| task.final_verify.contains(c));
+            let stays = is_option(&answer, super::base_check::PRE_EXISTING_RETRY)
+                || question
+                    .commands
+                    .iter()
+                    .any(|c| task.final_verify.contains(c));
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.

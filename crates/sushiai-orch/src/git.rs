@@ -887,7 +887,15 @@ pub fn status_porcelain(cwd: &Path) -> Result<Vec<String>, GitError> {
 pub fn status_entries(cwd: &Path) -> Result<Vec<(String, String)>, GitError> {
     let out = run(
         cwd,
-        &["status", "--porcelain", "-z", "--untracked-files=all"],
+        // Read-only: a background lease poll must never take index.lock
+        // while the task's own commit runs.
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+        ],
     )?;
     let mut entries = Vec::new();
     let mut fields = out.split('\0').filter(|s| !s.is_empty());
@@ -1100,7 +1108,7 @@ pub fn own_changes_between(
 
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
-    let out = run(cwd, &["diff", "--name-only", base])?;
+    let out = run(cwd, &["--no-optional-locks", "diff", "--name-only", base])?;
     Ok(out
         .lines()
         .map(|l| l.to_string())

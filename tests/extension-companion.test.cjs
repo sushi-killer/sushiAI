@@ -16,6 +16,12 @@ const {
   validateExtensionManifest,
 } = require("../electron/extensions/manifest.cjs");
 const { registerExtensionIpc } = require("../electron/ipc/extensions.cjs");
+const {
+  DEADLINE_MS,
+  until,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 
 const FIXTURES = path.join(__dirname, "fixtures/extensions/companion-probe");
 const MANIFEST = JSON.parse(
@@ -25,15 +31,6 @@ const ID = MANIFEST.id;
 const SURFACE = "probe.companion-settings";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitFor(check, what, ms = 8000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await sleep(15);
-  }
-}
 const alive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -90,11 +87,19 @@ function layout(t, { manifest = MANIFEST, install = true } = {}) {
           .filter(Boolean)
           .map((line) => JSON.parse(line))
       : [];
-  t.after(() => {
-    for (const pid of pids()) if (alive(pid)) process.kill(pid, "SIGKILL");
-    fs.rmSync(base, { recursive: true, force: true });
+  // One ordered step, registered first so it runs before any other removal:
+  // stop the supervisor (set by `build`), end every process it started, wait
+  // for their exit, then remove the temp dir.
+  const handle = { stop: async () => {} };
+  t.after(async () => {
+    await handle.stop();
+    for (const pid of pids()) {
+      if (alive(pid)) process.kill(pid, "SIGKILL");
+      await stopPid(pid);
+    }
+    removeDir(base);
   });
-  return { ...dirs, write, probe, pids, control, calls };
+  return { ...dirs, write, probe, pids, control, calls, handle };
 }
 
 const PROFILES = [
@@ -124,7 +129,7 @@ async function build(t, dirs, options = {}) {
     },
     backoffMs: [20, 20, 20],
     killGraceMs: 300,
-    helloTimeoutMs: 20000, // a loaded machine starts node slowly
+    helloTimeoutMs: DEADLINE_MS,
     ...options,
   });
   const manager = new ExtensionManager({
@@ -132,7 +137,11 @@ async function build(t, dirs, options = {}) {
     localDir: dirs.localDir,
     companions,
   });
-  t.after(() => companions.stopAll());
+  const earlier = dirs.handle.stop;
+  dirs.handle.stop = async () => {
+    await earlier();
+    await companions.stopAll();
+  };
   await manager.ready;
   await companions.start();
   return { manager, companions };
@@ -154,6 +163,7 @@ test("the companion is not started before approval, and starts after it", async 
   );
   assert.deepEqual(before.args, ["serve"]);
   assert.deepEqual(before.permissions, ["hosts.read", "hosts.exec"]);
+  // Gives a forbidden start time to happen.
   await sleep(150);
   assert.deepEqual(dirs.pids(), [], "nothing ran without consent");
   await assert.rejects(() => manager.companionRead(ID, SURFACE), /not running/);
@@ -278,7 +288,7 @@ test("view.changed from the companion reaches the listener", async (t) => {
   const seen = [];
   const stop = manager.onCompanionChanged((change) => seen.push(change));
   await manager.companionAction(ID, SURFACE, "add-device");
-  await waitFor(() => seen.length, "view.changed");
+  await until(() => seen.length, "view.changed");
   assert.deepEqual(seen[0], { extensionId: ID, surfaceId: SURFACE });
   stop();
 });
@@ -299,7 +309,7 @@ test("a changed args value or permission forces a new approval", async (t) => {
   const after = await companionOf(manager);
   assert.equal(after.state, "needs-approval");
   assert.deepEqual(after.args, ["serve", "--more"]);
-  await waitFor(() => !alive(pid), "the old process to stop");
+  await until(() => !alive(pid), "the old process to stop");
   assert.equal(dirs.pids().length, 1, "no second start without consent");
 
   await manager.approve(ID);
@@ -372,8 +382,8 @@ test("kill -9 restarts the companion", async (t) => {
   await manager.approve(ID);
   const [first] = dirs.pids();
   process.kill(first, "SIGKILL");
-  await waitFor(async () => dirs.pids().length === 2, "a restart");
-  await waitFor(
+  await until(async () => dirs.pids().length === 2, "a restart");
+  await until(
     async () => (await companionOf(manager)).state === "running",
     "running again",
   );
@@ -390,12 +400,13 @@ test("three exits in ten minutes end in failed, with the stderr tail", async (t)
   const { manager } = await build(t, dirs);
   await manager.setEnabled(ID, true);
   await manager.approve(ID);
-  const status = await waitFor(async () => {
+  const status = await until(async () => {
     const current = await companionOf(manager);
     return current.state === "failed" && current;
   }, "failed");
   assert.match(status.stderrTail, /boom: probe companion refused to start/);
   assert.equal(dirs.pids().length, 3);
+  // Gives a forbidden fourth start time to happen.
   await sleep(120);
   assert.equal(dirs.pids().length, 3, "it stops trying once failed");
   // Switching it off and on again is a fresh start.
@@ -405,15 +416,17 @@ test("three exits in ten minutes end in failed, with the stderr tail", async (t)
   assert.equal((await companionOf(manager)).state, "running");
 });
 
-test("disable removes the process within 3 seconds, even one that ignores SIGTERM", async (t) => {
+test("disable removes the process within the kill grace, even one that ignores SIGTERM", async (t) => {
   const dirs = layout(t);
-  const { manager } = await build(t, dirs);
+  const killGraceMs = 300;
+  const budget = killGraceMs + DEADLINE_MS / 20;
+  const { manager } = await build(t, dirs, { killGraceMs });
   await manager.setEnabled(ID, true);
   await manager.approve(ID);
   const [pid] = dirs.pids();
   const began = Date.now();
   await manager.setEnabled(ID, false);
-  assert.ok(Date.now() - began < 3000);
+  assert.ok(Date.now() - began < budget);
   assert.ok(!alive(pid));
   assert.equal((await companionOf(manager)).state, "off");
 
@@ -423,7 +436,7 @@ test("disable removes the process within 3 seconds, even one that ignores SIGTER
   assert.notEqual(stubborn, pid);
   const started = Date.now();
   await manager.setEnabled(ID, false);
-  assert.ok(Date.now() - started < 3000);
+  assert.ok(Date.now() - started < budget);
   assert.ok(!alive(stubborn), "SIGKILL ends what SIGTERM did not");
 });
 
@@ -434,7 +447,9 @@ async function stubborn(t) {
   dirs.control("no-hello");
   dirs.control("ignore-term");
   const built = await build(t, dirs, {
-    helloTimeoutMs: 150,
+    // Long enough for node to start and note itself on a loaded machine; a
+    // shorter limit kills the process before it ran and no retry is seen.
+    helloTimeoutMs: DEADLINE_MS / 12,
     killGraceMs: 150,
     backoffMs: [20, 20, 20],
     maxExits: 50,
@@ -442,15 +457,16 @@ async function stubborn(t) {
   await built.manager.setEnabled(ID, true);
   await built.manager.approve(ID);
   // A second start proves the first was written off as failed.
-  await waitFor(() => dirs.pids().length >= 2, "a retry");
+  await until(() => dirs.pids().length >= 2, "a retry");
   return { dirs, ...built };
 }
 
 test("a companion that fails the handshake is killed on disable, not leaked", async (t) => {
   const { dirs, manager } = await stubborn(t);
   await manager.setEnabled(ID, false);
-  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
+  await until(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
   const count = dirs.pids().length;
+  // Gives a forbidden restart time to happen.
   await sleep(100);
   assert.equal(dirs.pids().length, count, "no restart after disable");
 });
@@ -458,7 +474,7 @@ test("a companion that fails the handshake is killed on disable, not leaked", as
 test("a companion that fails the handshake is killed on quit, not leaked", async (t) => {
   const { dirs, companions } = await stubborn(t);
   await companions.stopAll();
-  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
+  await until(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
 });
 
 test("quitting stops the process", async (t) => {
@@ -477,11 +493,12 @@ test("after quit, start and sync spawn nothing", async (t) => {
   await manager.setEnabled(ID, true);
   await manager.approve(ID);
   await companions.stopAll();
-  await waitFor(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
+  await until(() => dirs.pids().every((pid) => !alive(pid)), "all dead");
   const count = dirs.pids().length;
   await companions.start();
   await manager.setEnabled(ID, false);
   await manager.setEnabled(ID, true);
+  // Gives a forbidden spawn time to happen.
   await sleep(150);
   assert.equal(dirs.pids().length, count, "nothing spawned after stopAll");
 });

@@ -15,6 +15,25 @@ use common::*;
 use serde_json::{json, Value};
 use sushiai_protocol::{code, encode, Decoder, Frame, Message, Request};
 
+#[test]
+fn shutdown_can_close_its_sessions_without_a_process_list() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = sandbox.create_shell(&mut client);
+    let holder = sandbox.holder_pid(&id);
+    let mut unrelated = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+    client.call("daemon.shutdown", json!({"closeSessions": true}));
+    wait_until("owned holder to stop", 15, || !alive(holder));
+    wait_until("daemon to exit", 15, || {
+        sandbox.daemons[0].try_wait().unwrap().is_some()
+    });
+    let spared = unrelated.try_wait().unwrap().is_none();
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+    assert!(spared, "another process must be left alone");
+}
+
 /// A sandbox whose daemon is the replica of host `devbox`.
 fn devbox() -> Sandbox {
     let mut sandbox = Sandbox::new();

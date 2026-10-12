@@ -61,6 +61,10 @@ export type Settings = {
   routes: Route[];
   /** Servers the orchestrator chat may use, each toggled in Settings. */
   chatTools: ChatToolConfig[];
+  /** Exact repo path -> connected tool ids enabled for task runs. */
+  mcpEnable?: Record<string, string[]>;
+  /** Exact repo path -> server names excluded from task runs. */
+  mcpDisable?: Record<string, string[]>;
   tiers: Record<Tier, string>;
   /** Route id; "" turns review off, "auto" picks the cheapest route that is
    * never weaker than the implementer (at least 2, 3 on the hard tier),
@@ -88,12 +92,23 @@ export type Settings = {
    * request; "" turns drafting off, so `task.create` always needs the full
    * form instead. */
   planner: string;
+  /** Unicode character limit for standard-tier planning; 0 disables the
+   * whole small-request check and sends every request to the planner. */
+  smallPlanMaxChars?: number;
+  /** Distinct repo path limit for standard-tier planning. */
+  smallPlanMaxPaths?: number;
   /** Route the orchestrator agent runs on (its chat and, with `autoAnswer`,
    * its answers to stuck questions); "" means the standard tier's route. */
   orchestrator: string;
   /** The orchestrator answers a stuck agent's question before it reaches
    * the owner, logged in the task as `"Orchestrator: ..."`. */
   autoAnswer: boolean;
+  /** Local digest hour; null turns it off, absent on older daemons. */
+  digestHour?: number | null;
+  /** Waiting-question reminder interval in hours; 0 or absent = off. */
+  waitRemindEveryHours?: number;
+  /** Hours before using a question's cautious answer; 0 or absent = off. */
+  waitDefaultAfterHours?: number;
   /** Routine questions are answered by rules and a cheap judge (at most three
    * per task) and recorded as assumptions; `false` asks the owner every time. */
   answerPolicy: boolean;
@@ -120,11 +135,19 @@ export type Settings = {
   /** Route id of the cheap read-only check of a brief's goal and criteria;
    * "" turns the check off. Absent in older settings. */
   briefCheckRoute?: string;
+  /** Route id of the one read-only plan review, which must be another model
+   * family than the planner; "" turns it off. Absent in older settings (the
+   * daemon then uses "codex"). */
+  planReview?: string;
   /** Where new task worktrees go; relative to the repo root unless absolute. */
   worktreeRoot?: string;
   /** Seconds one verify command may run; absent on an orchd without the
    * setting (the daemon then uses its own default, 1200). */
   verifyTimeoutSecs?: number;
+  /** Minutes an implement attempt may run before it is stopped and asked
+   * for a short report (failure kind "time_budget"). 0 = no limit; the
+   * daemon default is 45. Advanced JSON only, no Settings field. */
+  implementBudgetMins: number;
   /** Tasks may land on the repo's default branch (per-repo overrides in
    * `landOnDefaultRepos`). */
   landOnDefault?: boolean;
@@ -132,6 +155,63 @@ export type Settings = {
   afterLand?: { repo: string; run: string }[];
   /** Commands that only run when the task's diff touches their `paths`. */
   scopedChecks?: { repo?: string; command: string; paths: string[] }[];
+  /** Custom presets (built-ins are defined in orchd, never written here). */
+  presets?: Preset[];
+  /** Repo path -> id of the preset new tasks of that repo start with. */
+  repoPresets?: Record<string, string>;
+};
+
+/** What a preset changes in the pipeline; an absent value is left alone. */
+export type PresetValues = {
+  /** `false` turns the brief check off. */
+  briefCheck?: boolean;
+  advisor?: boolean;
+  /** Switch only the hidden check; regular checks always run. */
+  heldOut?: boolean;
+  planner?: string;
+  judge?: string;
+  briefCheckRoute?: string;
+  review?: string;
+  tierRoutes?: Partial<Record<Tier, string>>;
+  maxAttempts?: number;
+};
+
+export type Preset = {
+  id: string;
+  label: string;
+  builtin: boolean;
+  values: PresetValues;
+};
+
+export type PipelineStageState =
+  "pending" | "running" | "done" | "failed" | "skipped";
+
+/** One stage of `pipeline.describe`. */
+export type PipelineStage = {
+  id: string;
+  label: string;
+  kind: "main" | "side";
+  enabled: boolean;
+  optional: boolean;
+  ownerOnly: boolean;
+  routeId?: string;
+  routeLabel?: string;
+  autoRouteLabel?: string;
+  autoModel?: string;
+  model?: string;
+  maxAttempts?: number;
+  state?: PipelineStageState;
+  durationMs?: number;
+  costUsd?: number;
+};
+
+/** The `pipeline.describe` payload. */
+export type Pipeline = {
+  presetId: string | null;
+  presets: Preset[];
+  stages: PipelineStage[];
+  /** The open question: the stage that asked and who holds it. */
+  branch?: { from: string; to: "overseer" | "owner" };
 };
 
 export type EvolutionSettings = {
@@ -194,6 +274,11 @@ export type Question = {
   askedBy?: AskedBy;
   /** When it was asked, ms epoch; absent like `askedBy`. */
   askedAt?: number;
+  /** The orchestrator agent has a turn running (or queued) for this question:
+   * the owner is not asked yet. Absent when false. */
+  heldForOverseer?: boolean;
+  /** When the hold began, ms epoch. A hold counts for ten minutes only. */
+  heldAt?: number;
 };
 
 /** One answered question in `Task.questionHistory`. */
@@ -205,7 +290,7 @@ export type AnsweredQuestion = {
   askedAt?: number;
   answer: string;
   answeredAt: number;
-  answeredBy: "owner" | "policy" | "judge" | "orchestrator";
+  answeredBy: "owner" | "lead" | "policy" | "judge" | "orchestrator";
 };
 
 export type BacklogBucket = "next" | "later";
@@ -230,9 +315,13 @@ export type Variant = {
   stallTimeoutSecs: number;
   reviewEvidence: boolean;
   advisor: boolean;
+  /** Run a supplied hidden check. Absent = on; regular checks always run. */
+  heldOut?: boolean;
   loopDetect: boolean;
   /** Route id the plan stage runs on instead of `settings.planner`. */
   plannerRoute?: string;
+  /** Route id the finding judge uses instead of its automatic route. */
+  judgeRoute?: string;
   /** Route ids the implement stage uses instead of `settings.tiers`. */
   tierRoutes?: Partial<Record<Tier, string>>;
   /** Dollar budget: once the task has spent it, the task waits for the
@@ -245,10 +334,6 @@ export type Variant = {
   /** Non-blocking planner questions become assumptions instead of waiting
    * for the owner; blocking ones are asked together. Absent = off. */
   batchQuestions?: boolean;
-  /** The planner writes executable checks per criterion; the ones that fail
-   * on the base gate every attempt, and a held-out check is run after
-   * verify. */
-  groundedChecks?: boolean;
   /** 2 = the first implement attempt of a hard task runs twice at once, on
    * the tier route and on `bestOfRoute`, and the checks (then a reviewer)
    * pick. 0/1 or absent = off. */
@@ -259,6 +344,13 @@ export type Variant = {
   /** A finished top-level task lands on its base branch by itself. Absent =
    * off. */
   land?: boolean;
+  /** Route id the review stage runs on instead of `settings.review`. */
+  reviewRoute?: string;
+  /** Route id of the brief check instead of `settings.briefCheckRoute`;
+   * "" turns it off. */
+  briefCheckRoute?: string;
+  /** Implement attempts instead of `settings.maxAttempts`. */
+  maxAttempts?: number;
 };
 
 export type LeadTouch = {
@@ -299,6 +391,7 @@ export type FailureKind =
   | "stall"
   | "loop"
   | "budget"
+  | "time_budget"
   | "verify"
   | "conflict"
   | "heldout"
@@ -395,6 +488,13 @@ export type Deliverable = {
   placed?: string;
 };
 
+/** Why a task is not running (`wait` on the task JSON). */
+export type Wait =
+  | { kind: "slot"; running: number; limit: number }
+  | { kind: "subtaskSlot"; running: number; limit: number }
+  | { kind: "dependency"; titles: string[] }
+  | { kind: "file"; taskId: string; title: string; path: string };
+
 export type Task = {
   id: string;
   /** Set by the app on a task of a remote host ("ssh:<id>"); absent locally. */
@@ -418,6 +518,8 @@ export type Task = {
   baseSha: string;
   /** Branch the task started from; its work is carried onto it when it moves. */
   baseRef?: string;
+  /** Commits left on the task branch instead of landing on the base branch. */
+  unlanded?: { commits: number; base: string };
   /** Where the work started (chat, ui, mcp, cli, planner, eval, handoff). */
   source?: string;
   /** The commit a `variant.land` task put on its base branch. */
@@ -441,18 +543,29 @@ export type Task = {
   /** Repo-relative files or directories the planner said this subtask edits;
    * overlapping siblings run one after another. */
   paths?: string[];
-  /** Why the task sits queued: it waits for another task's lease, e.g.
-   * `waits for "Add a" on src/x`. Gone once it starts. */
-  queueReason?: string;
-  /** The task waited for a lease; its worktree is carried onto the base head
-   * before its first attempt. */
-  waitedOnLease?: boolean;
-  /** The sibling subtask whose branch this one continues (a relay): it starts
-   * from that subtask's commit and only the chain's last link lands on the
-   * parent. */
+  /** What the task waits for right now: a global slot, a subtask slot, the
+   * tasks it depends on, or a file another task has really changed. Gone
+   * once the wait is over. */
+  wait?: Wait;
+  /** An explicit pause: the task stays queued until it is started again. */
+  park?: { reason: string; until?: string; by?: string };
   relayOf?: string;
-  /** Where the relay's chain began (a commit); set once the link started. */
   relayBase?: string;
+  /** The ordered parts of a merged task: each item's check runs after every
+   * attempt, before the full verify. */
+  checklist?: { text: string; check: string; passes: boolean }[];
+  /** Where the plan gate stands: the one replan, the one review and the
+   * findings the implementer is told about. */
+  planGate?: {
+    replanned?: boolean;
+    reviewed?: boolean;
+    findings?: {
+      id: string;
+      severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+      kind: string;
+      text: string;
+    }[];
+  };
   /** The task this one is a part of: it branches from and lands on that
    * task's branch. A task with children runs no attempt of its own. */
   parent?: string;
@@ -477,6 +590,8 @@ export type Task = {
   /** Set while the task sits in the planning backlog; `task.start` or the
    * autopilot clears it. */
   backlog?: Backlog;
+  /** Usage-limit pause end, ms epoch; absent when the task is not paused. */
+  pausedUntil?: number;
   /** Owner and orchestrator decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];
@@ -733,6 +848,43 @@ export type Note = {
   createdAt: number;
 };
 
+/** One remembered answer to a task question (`precedents.list`). */
+export type Precedent = {
+  id: string;
+  /** The question kind, snake_case as the daemon names it. */
+  kind: string;
+  title: string;
+  signals: string[];
+  commands: string[];
+  answer: string;
+  /** `owner`, `lead`, `overseer`, `chat`, `policy` or `judge`. */
+  by: string;
+  /** One line, may be empty. */
+  why: string;
+  count: number;
+  firstAt: number;
+  lastAt: number;
+};
+
+/** A one-line rule the daemon learned from repeated owner answers; the owner
+ * accepts it (it becomes a repo note) or dismisses it. */
+export type RuleProposal = {
+  id: string;
+  kind: string;
+  answer: string;
+  rule: string;
+  status: "open" | "accepted" | "dismissed";
+  createdAt: number;
+};
+
+export type PrecedentList = {
+  repo: string;
+  /** Newest first. */
+  precedents: Precedent[];
+  /** Open ones only. */
+  proposals: RuleProposal[];
+};
+
 export type Proposal = {
   id: string;
   clusterKey: string;
@@ -761,9 +913,38 @@ export type Proposal = {
 
 /** A proposal was stored or changed - an upsert by id. */
 export type ProposalEvent = { event: "proposal"; proposal: Proposal };
+/** One action of the overseer (the orchestrator agent woken by orchd), as
+ * `overseer.log` returns it. `text` is one short line. */
+export type OverseerEntry = {
+  ts: number;
+  repo: string;
+  kind:
+    | "woke"
+    | "answered"
+    | "pr"
+    | "asked_owner"
+    | "digest"
+    | "done"
+    | "skipped"
+    | "failed";
+  taskId?: string;
+  text: string;
+  /** The full text behind `text`; entries from before it existed have none. */
+  detail?: string;
+  costUsd?: number;
+};
+
+/** The overseer acted - appended to the log. */
+export type OverseerEvent = { event: "overseer"; entry: OverseerEntry };
 /** Pushed over `onOrchestrator` from the daemon's one `subscribe` connection. */
 export type OrchestratorEvent = (
-  TaskEvent | LogEvent | ChatEvent | MessageEvent | AuditEvent | ProposalEvent
+  | TaskEvent
+  | LogEvent
+  | ChatEvent
+  | MessageEvent
+  | AuditEvent
+  | ProposalEvent
+  | OverseerEvent
 ) & {
   /** Set on an event relayed from a remote host ("ssh:<id>"); absent locally. */
   host?: string;
@@ -858,5 +1039,7 @@ export type OrchestratorView =
   | { kind: "task"; id: string }
   | { kind: "improvements" }
   | { kind: "analytics" }
+  | { kind: "log" }
+  | { kind: "pipeline" }
   | { kind: "archive" }
   | { kind: "messages" };

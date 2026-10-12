@@ -11,6 +11,8 @@ use crate::harness;
 use crate::hook;
 use crate::loop_detect::LoopDetector;
 use crate::model::*;
+use crate::overseer;
+use crate::sandbox::{Inputs as SandboxInputs, TaskSandbox};
 use crate::store::{self, Store};
 use serde::Deserialize;
 use serde_json::json;
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot, Notify, Semaphore};
+use tokio::sync::{broadcast, oneshot, watch, Notify, Semaphore};
 
 #[path = "../audit.rs"]
 mod audit;
@@ -39,10 +41,14 @@ mod base_check;
 mod best_of;
 mod brief_check;
 mod chat_tools;
+mod check_reuse;
+pub mod compiler_cache;
 mod cost;
 mod criteria;
 mod decision;
+mod decision_memory;
 mod deliverables;
+mod digest;
 mod finding_judge;
 mod graph;
 mod healing;
@@ -50,47 +56,71 @@ mod hooks;
 mod land;
 mod leases;
 mod lines;
+mod metrics;
+mod owner_notice;
+mod park;
 mod past_work;
 mod permissions;
+mod pipeline;
 mod plan;
+mod plan_gate;
 mod pr;
+mod protected;
 mod questions;
+mod rate_limit;
 mod recovery;
 mod repo_notes;
 mod reports;
 mod review;
+mod review_findings;
 mod routing;
 mod rpc_misc;
 mod rpc_tasks;
+mod secrets;
+mod slots;
+mod subtask_checks;
+mod sync;
 mod task_loop;
 #[cfg(test)]
-mod test_support;
-mod verify;
+pub(crate) mod test_support;
+mod time_budget;
+pub mod verify;
+pub use verify::to_sbpl as task_sandbox_profile;
+mod wait_sla;
 mod worktrees;
 
 use advisor::*;
+pub(crate) use answer_policy::owner_only;
 use answer_policy::*;
 use attempt_run::*;
 use availability::*;
 use backlog::*;
+pub(crate) use base_check::is_environment_result;
 use base_check::*;
 use best_of::*;
 use brief_check::*;
+use check_reuse::*;
 use cost::*;
 use criteria::*;
 use decision::*;
+use decision_memory::*;
 use finding_judge::*;
 use graph::*;
 use healing::*;
 use land::*;
 use leases::*;
 use lines::*;
+pub(crate) use owner_notice::{kind_name, option_part};
 use plan::*;
+use protected::*;
 use questions::*;
+use rate_limit::*;
 use reports::*;
 use review::*;
+use review_findings::*;
 use routing::*;
 use rpc_tasks::*;
+use slots::{take_slot, ResizableSlots, Slot, SlotPermit};
 use task_loop::*;
 #[cfg(test)]
 use test_support::*;
@@ -128,7 +158,7 @@ fn validate_task_id(store: &Store, id: &str) -> Result<(), String> {
 
 /// FNV-1a 64-bit -- fast, dependency-free, plenty for a cache key (not a
 /// security boundary).
-fn simple_hash(s: &str) -> String {
+pub(crate) fn simple_hash(s: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         hash ^= b as u64;
@@ -148,6 +178,7 @@ struct CancelToken(Arc<CancelInner>);
 struct CancelInner {
     flag: AtomicBool,
     notify: Notify,
+    parent: Option<CancelToken>,
 }
 
 impl CancelToken {
@@ -155,6 +186,15 @@ impl CancelToken {
         CancelToken(Arc::new(CancelInner {
             flag: AtomicBool::new(false),
             notify: Notify::new(),
+            parent: None,
+        }))
+    }
+
+    fn child(&self) -> Self {
+        CancelToken(Arc::new(CancelInner {
+            flag: AtomicBool::new(false),
+            notify: Notify::new(),
+            parent: Some(self.clone()),
         }))
     }
 
@@ -164,18 +204,43 @@ impl CancelToken {
     }
 
     fn is_cancelled(&self) -> bool {
-        self.0.flag.load(Ordering::SeqCst)
+        let mut token = Some(self);
+        while let Some(current) = token {
+            if current.0.flag.load(Ordering::SeqCst) {
+                return true;
+            }
+            token = current.0.parent.as_ref();
+        }
+        false
     }
 
     async fn cancelled(&self) {
         // Register interest *before* checking the flag, so a cancel() that
         // lands in between can't be missed (the documented tokio::Notify
         // pattern for exactly this race).
-        let notified = self.0.notify.notified();
+        let mut tokens = vec![self];
+        while let Some(parent) = tokens.last().and_then(|t| t.0.parent.as_ref()) {
+            tokens.push(parent);
+        }
+        let mut notified: Vec<_> = tokens
+            .iter()
+            .map(|t| Box::pin(t.0.notify.notified()))
+            .collect();
+        for wait in &mut notified {
+            wait.as_mut().enable();
+        }
         if self.is_cancelled() {
             return;
         }
-        notified.await;
+        std::future::poll_fn(|cx| {
+            for wait in &mut notified {
+                if std::future::Future::poll(wait.as_mut(), cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await;
     }
 }
 
@@ -216,7 +281,7 @@ struct TaskControl {
     /// the loop actually waits, taken (and consumed) by `task.answer`. No
     /// long-lived queue -- an answer that arrives when nobody is waiting is
     /// simply not delivered (`task.answer` rejects it before it gets here).
-    pending_answer: Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     /// An owner's `task.amend` for a task whose loop holds its own copy of
     /// the task: the loop applies it at its next attempt boundary, so no
     /// save of the loop's copy can overwrite it.
@@ -318,13 +383,24 @@ pub struct App {
     controls: std::sync::Mutex<HashMap<String, TaskControl>>,
     /// Keyed by repo: the orchestrator chat turn running for it, if any.
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
+    /// How long an overseer turn may run before it is cancelled (ms).
+    overseer_turn_timeout_ms: std::sync::atomic::AtomicU64,
+    /// How long any task helper may run (ms).
+    helper_timeout_ms: std::sync::atomic::AtomicU64,
     /// Keyed by audit id: the `repo.audit` runs still in flight.
     audits: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
     messages: StdMutex<Vec<Message>>,
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the held tool call a `task.answer` resolves.
-    permission_waits: StdMutex<HashMap<String, oneshot::Sender<String>>>,
+    permission_waits: StdMutex<HashMap<String, oneshot::Sender<Reply>>>,
+    /// Callers who just answered a task's parked question; the loop consumes
+    /// the provenance after recording the answer.
+    agent_answers: StdMutex<HashMap<String, AnsweredBy>>,
+    cancellations: StdMutex<HashMap<String, park::Cancellation>>,
+    /// Keyed by repo: overseer wakes skipped while its chat was busy; each
+    /// fires when that repo's turn ends.
+    deferred_wakes: StdMutex<HashMap<String, Vec<chat::DeferredWake>>>,
     /// Keyed by task id: the files each live task holds (`leases.rs`).
     leases: StdMutex<HashMap<String, Lease>>,
     /// Held while a graph start counts a parent's running children and
@@ -334,23 +410,52 @@ pub struct App {
     /// so `parallel` is never exceeded by a race.
     autopilot_admission: StdMutex<()>,
     /// Keyed by task id: the diff+untracked-list hash a verify run was last
-    /// computed for, and its results -- shared by `hook.stop` and the
-    /// post-session gate so an unchanged diff never re-runs verify twice.
+    /// computed for, and its completed results, shared by `hook.stop` and
+    /// the post-session gate. Interrupted result sets are never stored.
     verify_cache: std::sync::Mutex<HashMap<String, (String, Vec<VerifyOutcome>)>>,
     /// Keyed by (base sha, command): what a command did on that commit, so an
-    /// unchanged base is never checked twice for the same command.
+    /// unchanged base is never checked twice for the same command. Kept on
+    /// disk (`base-results.json`), so a restart does not run them again; an
+    /// interrupted, cancelled or environment-failed run is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// Exit-0 checks on exact worktree trees, in insertion order, memory only.
+    gate_passes: StdMutex<PassedChecks>,
+    /// Retry decisions from background base runs, keyed by (base sha, command).
+    base_run_decisions: StdMutex<HashMap<(String, String), Vec<String>>>,
+    /// Keyed by (base sha, command): background base runs in flight. The
+    /// receiver flips to `true` when the job is over; its result, if any, is
+    /// then in `base_runs`. Concurrent lookups share the same job.
+    base_jobs: StdMutex<HashMap<(String, String), watch::Receiver<bool>>>,
+    /// Final-check job receipts for each live task, including jobs that
+    /// finished without a base result. A final lookup waits for its original
+    /// job instead of starting another one just because nothing was cached.
+    final_base_jobs: StdMutex<HashMap<String, base_check::BaseJobReceivers>>,
+    /// Pairs whose first base run failed and whose rerun passed (load-flaky).
+    base_flaky: StdMutex<std::collections::HashSet<(String, String)>>,
+    /// Cancelled by `shutdown_for` only: a task stop must not end a job
+    /// another task may be waiting on.
+    base_cancel: CancelToken,
+    /// Keyed by task id: the task's base preflight, a background job that
+    /// holds no slot (`healing.rs`). The loop applies its result.
+    base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
-    /// Concurrency limit (`settings.parallel` at startup -- a live
-    /// `settings.set` change takes effect on the next restart, not
-    /// immediately; resizing a `Semaphore` down isn't a thing tokio
-    /// supports, and the spec explicitly allows skipping this).
-    slots: Arc<Semaphore>,
-    parallel_limit: u32,
+    /// Live task-loop limit. Shrinking retires free permits first, then
+    /// held permits as their owners finish.
+    slots: Arc<ResizableSlots>,
+    /// Shared by all check runners on this daemon, independent of agent slots.
+    check_slots: Arc<ResizableSlots>,
+    check_load: RwLock<fn() -> (f64, u32)>,
+    /// Hook and background check lines awaiting the loop's own Task copy.
+    check_decisions: StdMutex<HashMap<String, Vec<String>>>,
     /// Keyed by parent task id: held while one child lands on the parent's
     /// branch, so landings onto one branch happen one at a time.
     landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    task_locks: StdMutex<HashMap<String, Arc<StdMutex<()>>>>,
+    recovery_timers_started: AtomicBool,
+    /// Keyed by repo: one base-commit check runs at a time per repo, so a
+    /// rerun of a failed base check never competes with another one.
+    base_check_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Set by `shutdown()`: the loops it cancels end `stopped`, and that
     /// must not read as a dependency ending.
     shutting_down: AtomicBool,
@@ -484,26 +589,83 @@ async fn persist_attempt_field(
     attempt_n: u32,
     f: impl FnOnce(&mut Attempt),
 ) {
-    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-        if let Some(a) = t.attempts.iter_mut().find(|a| a.n == attempt_n) {
+    if let Err(e) = app.update_task(task_id, |task| {
+        if let Some(a) = task.attempts.iter_mut().find(|a| a.n == attempt_n) {
             f(a);
-            t.updated_at = now_ms();
-            let _ = app.store.save_task(&t);
-            app.broadcast_task(&t);
         }
+    }) {
+        eprintln!("orch: updating task {task_id} attempt {attempt_n} failed: {e}");
     }
 }
 
 impl App {
+    fn helper_timeout(&self) -> Duration {
+        Duration::from_millis(self.helper_timeout_ms.load(Ordering::SeqCst))
+    }
+
+    pub(super) fn task_sandbox(
+        &self,
+        repo: &str,
+        worktree: &Path,
+        run_dir: &Path,
+    ) -> Option<TaskSandbox> {
+        let worktree_root = {
+            let settings = self.settings.read().unwrap();
+            if settings.sandbox_for(repo) == SandboxMode::Host {
+                return None;
+            }
+            settings.worktree_root.clone()
+        };
+        let mut projects: Vec<PathBuf> = self
+            .secrets
+            .read()
+            .unwrap()
+            .repo_projects
+            .keys()
+            .map(PathBuf::from)
+            .collect();
+        let tasks = self.store.list_tasks().unwrap_or_default();
+        projects.extend(tasks.iter().map(|task| PathBuf::from(&task.repo)));
+        let worktrees: Vec<PathBuf> = tasks
+            .iter()
+            .filter(|task| !task.worktree.is_empty())
+            .map(|task| PathBuf::from(&task.worktree))
+            .collect();
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME for task sandbox"));
+        let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+        let rustup_home = std::env::var_os("RUSTUP_HOME").map(PathBuf::from);
+        let tmp_dir = std::env::var_os("TMPDIR").map(PathBuf::from);
+        let npm_cache = std::env::var_os("npm_config_cache")
+            .or_else(|| std::env::var_os("NPM_CONFIG_CACHE"))
+            .map(PathBuf::from);
+        Some(TaskSandbox::build(SandboxInputs {
+            repo_root: Path::new(repo),
+            worktree,
+            run_dir,
+            data_dir: &self.data_dir,
+            sushiai_home: &self.home,
+            worktree_root: &worktree_root,
+            home: &home,
+            daemon_socket: &self.home.join("daemon.sock"),
+            cargo_home: cargo_home.as_deref(),
+            rustup_home: rustup_home.as_deref(),
+            tmp_dir: tmp_dir.as_deref(),
+            npm_cache: npm_cache.as_deref(),
+            known_project_folders: &projects,
+            known_task_worktrees: &worktrees,
+        }))
+    }
+
     pub fn new(data_dir: PathBuf, home: PathBuf, exe_path: String) -> std::io::Result<Arc<App>> {
         crate::prompts::set_data_dir(&data_dir);
         let store = Store::new(&data_dir)?;
         let settings = store.load_settings()?;
         let (events_tx, _) = broadcast::channel(1024);
-        let parallel_limit = settings.parallel.max(1);
-        let slots = Arc::new(Semaphore::new(parallel_limit as usize));
+        let slots = ResizableSlots::new(settings.parallel.max(1) as usize);
+        let check_slots = ResizableSlots::new(settings.heavy_check_limit() as usize);
 
         let messages = messages::load(&data_dir);
+        let base_runs_dir = data_dir.clone();
         let app = Arc::new(App {
             store,
             data_dir,
@@ -514,19 +676,36 @@ impl App {
             events_tx,
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
+            overseer_turn_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
+            helper_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
             permission_waits: StdMutex::new(HashMap::new()),
+            agent_answers: StdMutex::new(Default::default()),
+            cancellations: StdMutex::new(Default::default()),
+            deferred_wakes: StdMutex::new(HashMap::new()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
-            base_runs: std::sync::Mutex::new(HashMap::new()),
+            base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
+            gate_passes: StdMutex::new(Default::default()),
+            base_run_decisions: StdMutex::new(HashMap::new()),
+            base_jobs: StdMutex::new(HashMap::new()),
+            final_base_jobs: StdMutex::new(HashMap::new()),
+            base_flaky: StdMutex::new(Default::default()),
+            base_cancel: CancelToken::new(),
+            base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
             slots,
-            parallel_limit,
+            check_slots,
+            check_load: RwLock::new(verify::machine_load),
+            check_decisions: StdMutex::new(HashMap::new()),
             landing_locks: StdMutex::new(HashMap::new()),
+            task_locks: StdMutex::new(HashMap::new()),
+            recovery_timers_started: AtomicBool::new(false),
+            base_check_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
             evolution_lock: tokio::sync::Mutex::new(()),
@@ -548,10 +727,56 @@ impl App {
             .expect("App is always constructed behind an Arc")
     }
 
+    fn task_lock(&self, id: &str) -> Arc<StdMutex<()>> {
+        self.task_locks
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    pub(crate) fn save_task_logged(&self, task: &Task) {
+        let lock = self.task_lock(&task.id);
+        let _guard = lock.lock().unwrap();
+        if let Err(e) = self.store.save_task(task) {
+            eprintln!("orch: saving task {} failed: {e}", task.id);
+        }
+    }
+
+    pub(crate) fn update_task(&self, id: &str, f: impl FnOnce(&mut Task)) -> Result<Task, String> {
+        let lock = self.task_lock(id);
+        let _guard = lock.lock().unwrap();
+        let mut task = self
+            .store
+            .load_task(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        f(&mut task);
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        Ok(task)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_timers_started(&self) -> bool {
+        self.recovery_timers_started.load(Ordering::SeqCst)
+    }
+
     pub fn broadcast_task(&self, task: &Task) {
         let _ = self.events_tx.send(Event::Task {
             task: Box::new(task.clone()),
         });
+    }
+
+    /// Appends one overseer action to `overseer.jsonl` and broadcasts it.
+    pub(crate) fn record_overseer(&self, entry: crate::overseer::Entry) {
+        if crate::overseer::append(&self.data_dir, &entry).is_ok() {
+            let _ = self.events_tx.send(Event::Overseer {
+                entry: Box::new(entry),
+            });
+        }
     }
 
     pub fn broadcast_log(&self, task_id: &str, attempt: u32, line: String) {
@@ -581,6 +806,7 @@ impl App {
     pub fn shutdown_for(&self, disabling: bool) {
         self.disabling.store(disabling, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
+        self.deferred_wakes.lock().unwrap().clear();
         for ctrl in self.controls.lock().unwrap().values() {
             ctrl.cancel.cancel();
         }
@@ -593,6 +819,7 @@ impl App {
         for cancel in self.proposals.lock().unwrap().values() {
             cancel.cancel();
         }
+        self.base_cancel.cancel();
     }
 
     /// The status a task takes when its loop is cancelled: `stopped` for an
@@ -607,6 +834,17 @@ impl App {
             TaskStatus::Running => TaskStatus::Queued,
             other => *other,
         }
+    }
+
+    pub(super) fn close_stopped_task(&self, task: &mut Task) {
+        if let Some(question) = task.question.take() {
+            task.decisions.push(format!(
+                "Stop: closed the open question \"{}\"",
+                truncate_chars(&question.text, 200)
+            ));
+        }
+        self.leases.lock().unwrap().remove(&task.id);
+        self.permission_waits.lock().unwrap().remove(&task.id);
     }
 
     /// Registers `token` for a run's Stop hook and keeps it in the run's token
@@ -666,16 +904,19 @@ impl App {
         !self.audits.lock().unwrap().is_empty() || !self.proposals.lock().unwrap().is_empty()
     }
 
+    /// Same again for background base runs: a key leaves `base_jobs` only
+    /// after its run returned and its scratch worktree is gone.
+    pub fn any_base_job_running(&self) -> bool {
+        !self.base_jobs.lock().unwrap().is_empty()
+    }
+
     /// Appends a line to a task's `decisions` and persists it right away --
     /// for call sites that don't otherwise hold the task in memory. Call sites that
     /// already hold `&mut Task` push the line onto their own copy instead, so
     /// it rides along with their next save instead of racing a reload.
     fn append_decision(&self, task_id: &str, line: String) {
-        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
-            task.decisions.push(line);
-            task.updated_at = now_ms();
-            let _ = self.store.save_task(&task);
-            self.broadcast_task(&task);
+        if let Err(e) = self.update_task(task_id, |task| record_check_decisions(task, vec![line])) {
+            eprintln!("orch: updating task {task_id} failed: {e}");
         }
     }
 
@@ -701,13 +942,18 @@ impl App {
             "task.land" => self.handle_task_land(params).await,
             "task.pr" => self.handle_task_pr(params).await,
             "task.stop" => self.handle_task_stop(params).await,
+            "task.park" => self.handle_task_park(params).await,
+            "task.sync" => self.handle_task_sync(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.report" => self.handle_task_report(params).await,
             "task.leadTouch" => self.handle_task_lead_touch(params).await,
             "task.overturn" => self.handle_task_overturn(params).await,
             "task.amend" => self.handle_task_amend(params).await,
+            "task.preset" => self.handle_task_preset(params).await,
+            "pipeline.describe" => self.handle_pipeline_describe(params).await,
             "task.delete" => self.handle_task_delete(params).await,
             "costs.summary" => self.handle_costs_summary(params).await,
+            "overseer.log" => self.handle_overseer_log(params).await,
             "worktrees.gc" => self.handle_worktrees_gc(params).await,
             "task.archive" => self.handle_task_archive(params).await,
             "task.unarchive" => self.handle_task_unarchive(params).await,
@@ -748,6 +994,10 @@ impl App {
             "repo.notes.list" => self.handle_repo_notes_list(params).await,
             "repo.notes.add" => self.handle_repo_notes_add(params).await,
             "repo.notes.remove" => self.handle_repo_notes_remove(params).await,
+            "precedents.list" => self.handle_precedents_list(params).await,
+            "precedents.remove" => self.handle_precedents_remove(params).await,
+            "precedents.rule.accept" => self.handle_precedents_rule_accept(params).await,
+            "precedents.rule.dismiss" => self.handle_precedents_rule_dismiss(params).await,
             "hook.stop" => self.handle_hook_stop(params).await,
             "hook.edit" => self.handle_hook_edit(params).await,
             other => Err(format!("{UNKNOWN_METHOD}{other}")),
@@ -772,6 +1022,7 @@ mod tests {
     include!("tests/review.rs");
     include!("tests/routing.rs");
     include!("tests/rpc_tasks.rs");
+    include!("tests/stop.rs");
     include!("tests/verify.rs");
     include!("tests/worktrees.rs");
 }

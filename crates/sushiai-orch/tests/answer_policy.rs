@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 /// One fake plays every role, told apart by the brief. `$LOG_DIR` counts the
 /// implement runs (`implement.<n>`, the body sees `$n`, the runs before this
@@ -107,7 +106,7 @@ fn create(s: &Setup, extra: Value) -> String {
 }
 
 fn finished(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     })
 }
@@ -135,65 +134,25 @@ fn runs(s: &Setup, prefix: &str) -> usize {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
-fn a_review_without_a_verdict_is_retried_once_and_recorded_as_a_policy_assumption() {
-    // Runs 0 and 1 (the automatic re-review) have no verdict; the policy's
-    // retry reviews the same attempt again and run 2 passes.
-    let s = setup(&[("PASS_REVIEW_FROM", "2")], |settings| {
-        settings["review"] = json!("claude-sonnet");
-    });
-    let id = create(&s, json!({}));
-    let task = finished(&s, &id);
-    assert_eq!(task["status"], "done", "task JSON: {task}");
-    assert_eq!(runs(&s, "implement."), 1, "{task}");
-    assert_eq!(runs(&s, "review."), 3, "{task}");
-    let implements = task["attempts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["stage"] == "implement")
-        .count();
-    assert_eq!(implements, 1, "{task}");
-    let assumed = policy_assumptions(&task);
-    assert_eq!(assumed.len(), 1, "{task}");
-    assert_eq!(assumed[0]["by"], "policy");
-    assert_eq!(assumed[0]["kind"], "review_no_verdict");
-    assert_eq!(assumed[0]["answer"], "retry");
-    assert_eq!(assumed[0]["overturned"], false);
-    assert!(
-        assumed[0]["question"]
-            .as_str()
-            .unwrap()
-            .contains("no verdict"),
-        "{task}"
-    );
-    let decisions = task["decisions"].to_string();
-    assert!(
-        decisions.contains("Policy: The review gave no verdict"),
-        "{decisions}"
-    );
-    assert!(!decisions.contains("Owner:"), "{decisions}");
-    cleanup(s, &task);
-}
-
-#[test]
-fn a_second_no_verdict_on_the_same_attempt_reaches_the_owner() {
-    // No review ever gives a verdict: an automatic re-review, one policy
-    // retry (a third review), then the owner is asked. The policy answers a
-    // review question once per attempt, and nothing re-implements.
+fn a_second_no_verdict_on_the_same_attempt_reaches_the_owner_without_retry() {
+    // No review ever gives a verdict: an automatic re-review is the attempt's
+    // second and last review run. The owner is asked with no `retry` offered,
+    // and nothing re-implements.
     let s = setup(&[("PASS_REVIEW_FROM", "99")], |settings| {
         settings["review"] = json!("claude-sonnet");
     });
     let id = create(&s, json!({}));
     let task = finished(&s, &id);
     assert_eq!(task["status"], "waiting", "task JSON: {task}");
-    assert_eq!(policy_assumptions(&task).len(), 1, "{task}");
+    assert!(policy_assumptions(&task).is_empty(), "{task}");
     assert_eq!(runs(&s, "implement."), 1, "{task}");
-    assert_eq!(runs(&s, "review."), 3, "{task}");
+    assert_eq!(runs(&s, "review."), 2, "{task}");
     assert_eq!(task["question"]["kind"], "review_no_verdict", "{task}");
+    assert_eq!(task["question"]["options"], json!(["approve"]), "{task}");
     cleanup(s, &task);
 }
 
@@ -242,13 +201,13 @@ fn an_impossible_claim_with_true_evidence_is_dropped_by_the_judge() {
         |settings| {
             settings["review"] = json!("");
             settings["briefCheckRoute"] = json!("claude-sonnet");
+            settings["planReview"] = serde_json::json!("");
         },
     );
     let id = create(
         &s,
         json!({
-            "variant": {"groundedChecks": true},
-            "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
+                        "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
         }),
     );
     let task = finished(&s, &id);
@@ -268,6 +227,45 @@ fn an_impossible_claim_with_true_evidence_is_dropped_by_the_judge() {
 }
 
 #[test]
+fn a_verified_impossible_claim_on_a_shared_check_criterion_goes_to_the_owner() {
+    let s = setup(
+        &[
+            ("IMPOSSIBLE", "1"),
+            (
+                "JUDGE_REPLY",
+                r#""{\"verified\": true, \"reason\": \"the file it names does not exist\"}""#,
+            ),
+        ],
+        |settings| {
+            settings["review"] = json!("");
+            settings["briefCheckRoute"] = json!("claude-sonnet");
+            settings["planReview"] = serde_json::json!("");
+        },
+    );
+    let id = create(
+        &s,
+        json!({
+            "criteria": ["zero", "one -- check: npm test", "two"],
+                        "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
+        }),
+    );
+    let task = finished(&s, &id);
+    assert_eq!(task["status"], "waiting", "task JSON: {task}");
+    assert_eq!(task["question"]["kind"], "impossible", "{task}");
+    assert_eq!(task["criteria"].as_array().unwrap().len(), 3, "{task}");
+    assert!(policy_assumptions(&task).is_empty(), "{task}");
+    assert!(s.log.path().join("judge.ran").exists());
+    // The owner (no source) may drop it.
+    s.daemon
+        .request("task.answer", json!({"id": id, "answer": "drop criterion"}));
+    let after = poll_until(&s.daemon, &id, |st| {
+        matches!(st, "done" | "failed" | "stopped")
+    });
+    assert_eq!(after["criteria"].as_array().unwrap().len(), 2, "{after}");
+    cleanup(s, &after);
+}
+
+#[test]
 fn an_impossible_claim_with_false_evidence_is_retried() {
     let s = setup(
         &[
@@ -280,13 +278,13 @@ fn an_impossible_claim_with_false_evidence_is_retried() {
         |settings| {
             settings["review"] = json!("");
             settings["briefCheckRoute"] = json!("claude-sonnet");
+            settings["planReview"] = serde_json::json!("");
         },
     );
     let id = create(
         &s,
         json!({
-            "variant": {"groundedChecks": true},
-            "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
+                        "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
         }),
     );
     let task = finished(&s, &id);

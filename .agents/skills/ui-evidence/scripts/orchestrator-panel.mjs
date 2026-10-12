@@ -4,9 +4,11 @@
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
-// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes} (see
+// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes, precedents, settings} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
-// else defaults. The tasks are written as task.json files into the throwaway
+// else defaults. A task may include `git: {base, commits}` to create an
+// isolated repository with that base branch and patch-unique task commits.
+// The tasks are written as task.json files into the throwaway
 // daemon home's orchestrator dir, with the module's enabled flag, before the
 // app starts; the app's sushiai daemon then loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
@@ -15,11 +17,19 @@
 // "owner", createdAt) and written under this repo's root in
 // <dataDir>/repo-notes.json ({repo: [note]}, what the store reads); when
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
-// a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because the orchestrator resumes
+// a crop of the REPO NOTES list. `precedents` is {precedents, proposals} for the decision memory:
+// each entry is completed (id, key, title, answer defaults, `minutesAgo` becomes firstAt/lastAt)
+// and written under this repo's root in <dataDir>/precedents.json (the daemon's file shape); when
+// any were seeded the run also saves artifacts/orchestrator-precedents.png, a crop of the
+// DECISION MEMORY section. Only finished/waiting statuses are accepted, because the orchestrator resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
+// A task's pausedInHours becomes pausedUntil relative to the run's start.
+// Settings overrides are merged over settings.get and saved with settings.set
+// after enabling the extension, before the panel mounts.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
@@ -30,6 +40,59 @@ function escapeRegExp(text) {
 }
 
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
+
+async function createGitFixture(profile, tasks, ids) {
+  const gitTasks = tasks.filter((seed) => seed.git);
+  if (!gitTasks.length) return null;
+  const repo = `${profile}/git-repo`;
+  await fs.mkdir(repo, { recursive: true });
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  const base = gitTasks[0].git.base;
+  if (gitTasks.some((seed) => seed.git.base !== base))
+    throw new Error("all git fixtures in a run must use the same base branch");
+  git("init", "-q", "-b", base);
+  git("config", "user.name", "Evidence User");
+  git("config", "user.email", "evidence@example.test");
+  await fs.writeFile(`${repo}/README.md`, "unlanded evidence\n");
+  git("add", "README.md");
+  git(
+    "-c",
+    "user.name=Evidence User",
+    "-c",
+    "user.email=evidence@example.test",
+    "commit",
+    "-qm",
+    "base",
+  );
+  for (const seed of gitTasks) {
+    const id = (seed.key && ids.get(seed.key)) || randomUUID();
+    const branch = seed.branch ?? `task/${id}`;
+    const commits = seed.git.commits;
+    if (!Number.isInteger(commits) || commits < 1)
+      throw new Error(
+        `seed task "${seed.title}": git.commits must be a positive integer`,
+      );
+    git("switch", "-c", branch);
+    for (let index = 1; index <= commits; index++) {
+      const file = `unlanded-${id}-${index}.txt`;
+      await fs.writeFile(`${repo}/${file}`, `commit ${index}\n`);
+      git("add", file);
+      git(
+        "-c",
+        "user.name=Evidence User",
+        "-c",
+        "user.email=evidence@example.test",
+        "commit",
+        "-qm",
+        `task commit ${index}`,
+      );
+    }
+    git("switch", base);
+    seed.branch = branch;
+  }
+  return repo;
+}
 
 /** A seed object completed to the task.json shape the orchestrator's store loads.
  * `ids` maps each seed's `key` to its generated id, so `parent`,
@@ -66,6 +129,8 @@ function taskJson(seed, repo, now, id, ids) {
     followUps,
     followUpOf,
     evidence: _evidence,
+    pausedInHours,
+    git: _git,
     ...rest
   } = seed;
   return {
@@ -81,6 +146,9 @@ function taskJson(seed, repo, now, id, ids) {
     createdAt: now,
     updatedAt: now,
     ...rest,
+    ...(typeof pausedInHours === "number"
+      ? { pausedUntil: now + pausedInHours * 3_600_000 }
+      : {}),
     ...(parent ? { parent: byKey(parent) } : {}),
     ...(dependsOn ? { dependsOn: dependsOn.map(byKey) } : {}),
     ...(followUps ? { followUps: followUps.map(byKey) } : {}),
@@ -101,9 +169,11 @@ async function loadSeed(seedPath) {
       tasks: raw.tasks,
       proposals: raw.proposals ?? [],
       notes: raw.notes ?? [],
+      precedents: raw.precedents,
+      settings: raw.settings,
     };
   throw new Error(
-    "seed file must be a JSON array of tasks or {tasks, proposals, notes}",
+    "seed file must be a JSON array of tasks or {tasks, proposals, notes, settings}",
   );
 }
 
@@ -121,15 +191,21 @@ if (!seedPath || !title) {
   let app = null;
 
   try {
-    const { tasks, proposals, notes } = await loadSeed(seedPath);
+    const { tasks, proposals, notes, precedents, settings } =
+      await loadSeed(seedPath);
+    const memory = precedents ?? { precedents: [], proposals: [] };
+    const hasMemory =
+      (memory.precedents ?? []).length + (memory.proposals ?? []).length > 0;
     const now = Date.now();
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
     );
+    const gitRepo = await createGitFixture(profile, tasks, ids);
+    const taskRepo = gitRepo ?? root;
     for (const [index, seed] of tasks.entries()) {
       const id = (seed.key && ids.get(seed.key)) || randomUUID();
       // Seed order is creation order, which is how subtasks are listed.
-      const task = taskJson(seed, root, now + index, id, ids);
+      const task = taskJson(seed, taskRepo, now + index, id, ids);
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       // `evidence: {"<attempt n>": ["<image path>", ...]}` copies images into
@@ -175,7 +251,76 @@ if (!seedPath || !title) {
         JSON.stringify({ [root]: seeded }, null, 2),
       );
     }
+    if (hasMemory) {
+      const at = (seed, index) => now - (seed.minutesAgo ?? index) * 60_000;
+      const stored = {
+        since: now - 3_600_000,
+        tasks: {},
+        repos: {
+          [root]: {
+            precedents: (memory.precedents ?? []).map((seed, index) => ({
+              id: randomUUID(),
+              key: `${seed.kind}|${index}`,
+              title: seed.title ?? "",
+              signals: [],
+              commands: [],
+              files: [],
+              goal: "",
+              why: "",
+              count: 1,
+              ...seed,
+              firstAt: at(seed, index),
+              lastAt: at(seed, index),
+            })),
+            proposals: (memory.proposals ?? []).map((seed, index) => ({
+              id: randomUUID(),
+              key: `${seed.kind}|rule${index}`,
+              status: "open",
+              ...seed,
+              createdAt: at(seed, index),
+            })),
+          },
+        },
+      };
+      await fs.mkdir(dataDir, { recursive: true });
+      await fs.writeFile(
+        `${dataDir}/precedents.json`,
+        JSON.stringify(stored, null, 2),
+        { mode: 0o600 },
+      );
+    }
     report.seededTitles = tasks.map((t) => t.title);
+
+    if (gitRepo) {
+      const panel = {
+        id: "evidence-agent",
+        kind: "agent",
+        title: "Evidence Agent",
+        agent: "codex",
+        started: false,
+      };
+      await fs.writeFile(
+        `${profile}/workspace-state.json`,
+        JSON.stringify({
+          workspaces: [
+            {
+              id: "git-evidence",
+              name: "Git Evidence",
+              cwd: gitRepo,
+              panels: [panel],
+              layout: { type: "leaf", id: panel.id },
+            },
+          ],
+          activeId: "git-evidence",
+          selected: panel.id,
+          mode: "Code",
+          sidebar: true,
+          workspaceGrouping: "grouped",
+          routines: [],
+          fontScale: 1,
+        }),
+      );
+    }
 
     // The daemon hosts the orchestrator module only when it is enabled.
     await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
@@ -203,6 +348,24 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Enable Orchestrator" }).click();
     await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
     await page.getByRole("button", { name: "Extensions", exact: true }).click();
+
+    if (settings) {
+      await page.evaluate(async (overrides) => {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          try {
+            const current = await window.bridge.orchestrator("settings.get");
+            await window.bridge.orchestrator("settings.set", {
+              settings: { ...current, ...overrides },
+            });
+            return;
+          } catch (error) {
+            if (Date.now() >= deadline) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+      }, settings);
+    }
 
     // The first-run workspace already runs in this repo, so the seeded tasks'
     // own `repo` field matches its `cwd` (`task.list` filters on equality).
@@ -247,12 +410,26 @@ if (!seedPath || !title) {
       );
     }
     // The first page (Home) is what the panel shows before a task is picked.
+    report.autonomy = await page
+      .locator(".home-autonomy")
+      .evaluateAll(([line]) =>
+        line
+          ? {
+              labels: [...line.children].map((item) => item.textContent.trim()),
+              iconCount: line.querySelectorAll("svg").length,
+              width: line.clientWidth,
+              overflow: line.scrollWidth - line.clientWidth,
+              flexWrap: getComputedStyle(line).flexWrap,
+              fontSize: getComputedStyle(line).fontSize,
+            }
+          : null,
+      );
     await page
       .locator(".orch-main")
       .screenshot({ path: shot("orchestrator-home") });
     // Proposals, recurring failures and repo notes live on the Improvements
     // view, opened from the rail.
-    if (proposals.length > 0 || notes.length > 0) {
+    if (proposals.length > 0 || notes.length > 0 || hasMemory) {
       await page
         .locator(".orch-rail")
         .getByRole("button", { name: /^Improvements/ })
@@ -270,13 +447,33 @@ if (!seedPath || !title) {
         .screenshot({ path: shot("orchestrator-proposals") });
     }
     if (notes.length > 0) {
-      await page.locator(".imp-notes").waitFor({ timeout: 10000 });
-      await page
-        .locator(".imp-notes")
-        .screenshot({ path: shot("orchestrator-repo-notes") });
+      const list = page.locator(".imp-notes:not(.imp-memory)");
+      await list.waitFor({ timeout: 10000 });
+      await list.screenshot({ path: shot("orchestrator-repo-notes") });
+    }
+    if (hasMemory) {
+      const section = page.locator(".imp-memory-section");
+      await section.waitFor({ timeout: 10000 });
+      await section.screenshot({ path: shot("orchestrator-precedents") });
     }
     await row.first().click();
     await page.locator(".td").waitFor();
+    const details = page.locator(".td-details-toggle");
+    const unlanded = tasks.find((seed) => seed.title === title)?.unlanded;
+    if (unlanded) {
+      await details.waitFor({ timeout: 10000 });
+      if ((await details.getAttribute("aria-expanded")) === "false")
+        await details.click();
+      await page
+        .locator(".td-details-body")
+        .getByText(
+          `${unlanded.commits} commit${unlanded.commits === 1 ? "" : "s"} not on ${unlanded.base}`,
+        )
+        .waitFor({ timeout: 10000 });
+    } else if (await details.count()) {
+      if ((await details.getAttribute("aria-expanded")) === "false")
+        await details.click();
+    }
 
     await page.screenshot({ path: shot("orchestrator-window") });
     await page.locator(".td").screenshot({ path: shot("orchestrator-detail") });
@@ -284,13 +481,14 @@ if (!seedPath || !title) {
       window: shot("orchestrator-window"),
       detail: shot("orchestrator-detail"),
       home: shot("orchestrator-home"),
-      ...(proposals.length > 0 || notes.length > 0
+      ...(proposals.length > 0 || notes.length > 0 || hasMemory
         ? { improvements: shot("orchestrator-improvements") }
         : {}),
       ...(proposals.length > 0
         ? { proposals: shot("orchestrator-proposals") }
         : {}),
       ...(notes.length > 0 ? { notes: shot("orchestrator-repo-notes") } : {}),
+      ...(hasMemory ? { precedents: shot("orchestrator-precedents") } : {}),
     };
     report.selectedTitle = title;
   } catch (error) {

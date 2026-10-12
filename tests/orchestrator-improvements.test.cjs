@@ -131,3 +131,68 @@ test("the rail badge adds recurring failures to proposals waiting on the owner",
   assert.equal(improvementsBadge(proposals, 5), 7);
   assert.equal(improvementsBadge([], 0), 0);
 });
+
+const precedent = (over = {}) => ({
+  id: "p1",
+  kind: "preexisting_failure",
+  title: "Base check failing",
+  signals: [],
+  commands: ["cargo test"],
+  answer: "retry after the base is fixed",
+  by: "owner",
+  why: "",
+  count: 1,
+  firstAt: 1,
+  lastAt: 1,
+  ...over,
+});
+
+test("precedent rows name the kind, the answerer, the why and a repeat count", async () => {
+  const { precedentRow, questionKindLabel, countSuffix } = await model;
+  assert.equal(questionKindLabel("preexisting_failure"), "Base check failing");
+  assert.equal(questionKindLabel("agent_question"), "Agent question");
+  assert.equal(questionKindLabel("something_new"), "Something new");
+  assert.equal(countSuffix(1), "");
+  assert.equal(countSuffix(2), "×2");
+  assert.deepEqual(
+    precedentRow(precedent({ count: 2, why: "the base moves daily" })),
+    {
+      kind: "Base check failing (cargo test)",
+      answer: "retry after the base is fixed",
+      by: "answered by owner",
+      why: "the base moves daily",
+      count: "×2",
+    },
+  );
+  const kinds = [["cargo test"], ["npm test", "cargo clippy"], []].map(
+    (commands) => precedentRow(precedent({ commands })).kind,
+  );
+  assert.deepEqual(kinds, [
+    "Base check failing (cargo test)",
+    "Base check failing (npm test, cargo clippy)",
+    "Base check failing",
+  ]);
+  for (const by of ["lead", "overseer", "policy"]) {
+    assert.equal(precedentRow(precedent({ by })).by, `answered by ${by}`);
+  }
+});
+
+test("recent precedents are newest first and capped at 20", async () => {
+  const { recentPrecedents, MAX_PRECEDENTS } = await model;
+  const rows = Array.from({ length: 25 }, (_, i) =>
+    precedent({ id: `p${i}`, lastAt: i }),
+  );
+  const recent = recentPrecedents(rows);
+  assert.equal(recent.length, MAX_PRECEDENTS);
+  assert.equal(recent[0].id, "p24");
+  assert.equal(recent.at(-1).id, "p5");
+  assert.equal(rows[0].id, "p0");
+});
+
+test("the decision memory section label counts its precedents", async () => {
+  const { sectionLabel } = await model;
+  assert.equal(
+    sectionLabel("DECISION MEMORY", 3, "how you answered similar questions"),
+    "DECISION MEMORY · 3 — how you answered similar questions",
+  );
+});

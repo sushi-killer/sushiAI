@@ -7,6 +7,7 @@ import {
   latestImplementAttempt,
   reviewOf,
   taskReason,
+  unlandedLabel,
 } from "./helpers.ts";
 import {
   enterReply,
@@ -65,7 +66,7 @@ function rowMeta(
       review ? `review ${review.verdict}` : "done",
       count ? `${count} file${count === 1 ? "" : "s"}` : "",
       formatCost(task.costUsd),
-      `not landed · → ${task.baseRef}`,
+      task.unlanded ? unlandedLabel(task) : `not landed · → ${task.baseRef}`,
     ]
       .filter(Boolean)
       .join(" · ");

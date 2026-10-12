@@ -1,5 +1,7 @@
 //! `sushiai proxy` against real daemons under a temporary `SUSHIAI_HOME`.
 
+mod common;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -15,31 +17,8 @@ use sushiai_protocol::{encode, Decoder, Frame, Message, Request};
 
 const BIN: &str = env!("CARGO_BIN_EXE_sushiai");
 
-fn ps_rows() -> Vec<(u32, u32, String)> {
-    let Ok(out) = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let ppid = parts.next()?.parse().ok()?;
-            Some((pid, ppid, parts.collect::<Vec<_>>().join(" ")))
-        })
-        .collect()
-}
-
 fn alive(pid: u32) -> bool {
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    !out.is_empty() && !out.starts_with('Z')
+    common::alive(pid)
 }
 
 fn kill(pid: u32) {
@@ -57,12 +36,10 @@ fn wait_until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
     }
 }
 
-/// A temp home. On drop it kills, by pid and without panicking, the proxies and daemons it
-/// started and every holder (and its children) whose command line names this home.
+/// A temp home. Drop closes its sessions through the daemon and reaps owned children.
 struct Sandbox {
     dir: tempfile::TempDir,
     daemons: Vec<Child>,
-    proxies: Vec<u32>,
 }
 
 impl Sandbox {
@@ -74,7 +51,6 @@ impl Sandbox {
         Sandbox {
             dir,
             daemons: Vec::new(),
-            proxies: Vec::new(),
         }
     }
 
@@ -105,45 +81,27 @@ impl Sandbox {
     }
 
     fn proxy_with(&mut self, vars: &[(&str, &str)]) -> Proxy {
-        let proxy = Proxy::start_with(self.home(), vars);
-        self.proxies.push(proxy.child.id());
-        proxy
+        Proxy::start_with(self.home(), vars)
     }
 
-    /// `(pid, ppid)` of every holder of this home.
-    fn holders(&self) -> Vec<(u32, u32)> {
-        let home = self.home().display().to_string();
-        ps_rows()
-            .into_iter()
-            .filter(|(_, _, cmd)| cmd.contains("hold --id") && cmd.contains(&home))
-            .map(|(pid, ppid, _)| (pid, ppid))
+    fn holders(&self) -> Vec<u32> {
+        fs::read(self.home().join("state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|v| v["sessions"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|s| s["holderPid"].as_u64().map(|p| p as u32))
+            .filter(|pid| alive(*pid))
             .collect()
     }
 
-    /// Pids of the daemons of this home, matched by `SUSHIAI_HOME` in the process environment
-    /// (`ps eww -p`). The daemon a proxy started is detached, so there is no other handle.
     fn daemon_pids(&self) -> Vec<u32> {
-        let listing = Command::new("ps")
-            .args(["-axo", "pid=,command="])
-            .output()
-            .expect("ps");
-        let var = format!("SUSHIAI_HOME={}", self.home().display());
-        let head = format!("{BIN} daemon");
-        String::from_utf8_lossy(&listing.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (pid, command) = line.trim().split_once(' ')?;
-                (command == head).then(|| pid.parse::<u32>().ok()).flatten()
-            })
-            .filter(|pid| {
-                // `ps eww -p` lists the environment; the `-ax` listing does not.
-                let out = Command::new("ps")
-                    .args(["eww", "-o", "command=", "-p", &pid.to_string()])
-                    .output()
-                    .expect("ps eww");
-                let text = String::from_utf8_lossy(&out.stdout);
-                text.split_whitespace().any(|word| word == var)
-            })
+        fs::read_to_string(self.home().join("daemon.lock"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|pid| alive(*pid))
+            .into_iter()
             .collect()
     }
 
@@ -161,25 +119,10 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        let daemons = self.daemon_pids();
-        for pid in &self.proxies {
-            kill(*pid);
-        }
+        common::shutdown_home(self.home());
         for child in &mut self.daemons {
             let _ = child.kill();
             let _ = child.wait();
-        }
-        for pid in daemons {
-            kill(pid);
-        }
-        let all = ps_rows();
-        for (pid, _) in self.holders() {
-            for (child, ppid, _) in &all {
-                if *ppid == pid {
-                    kill(*child);
-                }
-            }
-            kill(pid);
         }
     }
 }
@@ -373,7 +316,7 @@ fn closing_stdin_ends_the_proxy_and_leaves_daemon_and_sessions() {
     let mut proxy = sandbox.proxy();
     proxy.hello();
     let id = create_shell(&mut proxy);
-    let holders: Vec<u32> = sandbox.holders().into_iter().map(|h| h.0).collect();
+    let holders: Vec<u32> = sandbox.holders();
     assert_eq!(holders.len(), 1);
     proxy.close_stdin();
     assert!(proxy.wait_exit().success());

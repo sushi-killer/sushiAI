@@ -5,7 +5,6 @@ mod common;
 use common::*;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 const PASS: &str = "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 /// Writes an uncommitted file, then hangs until the task is stopped.
@@ -44,14 +43,7 @@ fn create(daemon: &Daemon, repo: &Path, title: &str, start: bool) -> serde_json:
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let start = Instant::now();
-    while !cond() {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "timed out: {what}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn canon(p: &Path) -> std::path::PathBuf {
@@ -68,29 +60,44 @@ fn stop_hanging(daemon: &Daemon, id: &str, worktree: &Path) {
         worktree.join("AGENT_STARTED.txt").exists()
     });
     daemon.request("task.stop", serde_json::json!({"id": id}));
-    poll_until(daemon, id, Duration::from_secs(30), |s| s == "stopped");
+    poll_until(daemon, id, |s| s == "stopped");
+}
+
+fn archive_stopped(daemon: &Daemon, id: &str) -> serde_json::Value {
+    wait_until("the stopped loop to exit before archiving", || {
+        let response = raw_request_with_params(
+            &daemon.socket,
+            "task.archive",
+            serde_json::json!({"id": id}),
+        );
+        if response["error"]["message"] == "cannot archive a task with a live loop" {
+            return None;
+        }
+        assert!(response.get("error").is_none(), "{response}");
+        Some(response["result"].clone())
+    })
 }
 
 #[test]
-fn new_worktree_lives_under_sushiai_and_done_removes_it_but_keeps_the_commit() {
+fn new_worktree_lives_outside_the_repo_under_the_home_and_done_removes_it_but_keeps_the_commit() {
     let (daemon, _scripts) = spawn(PASS);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), "Pass case", true);
     let id = task["id"].as_str().unwrap().to_string();
     let worktree = task["worktree"].as_str().unwrap().to_string();
-    assert!(
-        canon(Path::new(&worktree).parent().unwrap())
-            == canon(&repo.path().join(".sushiai/worktrees")),
-        "{worktree}"
-    );
-    let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
-    assert!(
-        exclude.lines().any(|l| l == "/.sushiai/worktrees/"),
-        "{exclude}"
-    );
+    let repo_dir = canon(repo.path());
+    let root = canon(&daemon.home.path().join("worktrees.noindex"));
+    let parent = canon(Path::new(&worktree).parent().unwrap());
+    assert_eq!(parent.parent().unwrap(), root, "{worktree}");
+    let id_dir = parent.file_name().unwrap().to_string_lossy().to_string();
+    let name = repo_dir.file_name().unwrap().to_string_lossy().to_string();
+    assert!(id_dir.starts_with(&format!("{name}-")), "{id_dir}");
+    assert_eq!(id_dir.len(), name.len() + 9, "{id_dir}");
+    assert!(canon(Path::new(&worktree)).starts_with(&root));
+    assert!(!canon(Path::new(&worktree)).starts_with(&repo_dir));
     assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
 
-    let settled = poll_task_status(&daemon, &id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &id);
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(settled["worktreeRemoved"], true, "{settled}");
     assert!(!Path::new(&worktree).exists(), "worktree dir is gone");
@@ -108,6 +115,38 @@ fn new_worktree_lives_under_sushiai_and_done_removes_it_but_keeps_the_commit() {
 }
 
 #[test]
+fn an_in_repo_worktree_root_override_excludes_only_that_root() {
+    let (daemon, _scripts) = spawn(PASS);
+    let repo = init_git_repo();
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["worktreeRoot"] = serde_json::json!("src/.wt");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let task = create(&daemon, repo.path(), "Custom root", false);
+    let worktree = task["worktree"].as_str().unwrap();
+    assert_eq!(
+        canon(Path::new(worktree)),
+        canon(&repo.path().join("src/.wt/task-custom-root"))
+    );
+    let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == "/src/.wt/"));
+    assert!(!exclude.lines().any(|line| line == "/src/"));
+    assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
+
+    std::fs::write(repo.path().join("src/new.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        "?? src/new.rs"
+    );
+    daemon.request("task.delete", serde_json::json!({"id": task["id"]}));
+    assert!(!Path::new(worktree).exists());
+    daemon.shutdown_and_wait();
+}
+
+#[test]
 fn archiving_a_stopped_task_saves_its_edits_and_unarchive_restores_them() {
     let (daemon, _scripts) = spawn(HANG);
     let repo = init_git_repo();
@@ -120,7 +159,7 @@ fn archiving_a_stopped_task_saves_its_edits_and_unarchive_restores_them() {
     let branch = task["branch"].as_str().unwrap().to_string();
     let head_before = git_out(repo.path(), &["rev-parse", &branch]);
 
-    let archived = daemon.request("task.archive", serde_json::json!({"id": id}));
+    let archived = archive_stopped(&daemon, &id);
     assert_eq!(archived["worktreeRemoved"], true, "{archived}");
     assert!(!wt.exists());
     assert_eq!(git_out(repo.path(), &["rev-parse", &branch]), head_before);
@@ -218,7 +257,7 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     let done = create(&daemon, repo.path(), "Done", true);
     let done_id = done["id"].as_str().unwrap().to_string();
     let done_wt = done["worktree"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &done_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &done_id);
     assert_eq!(settled["status"], "done", "{settled}");
     git(&[
         "worktree",
@@ -244,9 +283,7 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     let stopped_wt = stopped["worktree"].as_str().unwrap().to_string();
     stop_hanging(&daemon, &stopped_id, Path::new(&stopped_wt));
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
-    // Archive while the record still says stopped but the loop is gone; gc
-    // is what removes it, so archive through the record instead.
-    daemon.request("task.archive", serde_json::json!({"id": stopped_id}));
+    archive_stopped(&daemon, &stopped_id);
     assert!(!Path::new(&stopped_wt).exists());
     git(&[
         "worktree",
@@ -258,7 +295,10 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
 
     // A worktree no task knows about.
-    let unknown = repo.path().join(".sushiai/worktrees/unknown");
+    let unknown = daemon
+        .home
+        .path()
+        .join("worktrees.noindex/stray-repo/unknown");
     git(&[
         "worktree",
         "add",

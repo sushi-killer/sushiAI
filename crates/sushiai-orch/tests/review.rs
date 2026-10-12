@@ -5,7 +5,6 @@ mod common;
 
 use common::*;
 use serde_json::json;
-use std::time::Duration;
 
 /// Review by the Claude hard route, the same fake as the implementer (`auto`
 /// picks a route on the other harness).
@@ -13,6 +12,218 @@ fn review_by_claude(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("claude-opus");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
+}
+
+const FAKE_OVERLAP_REVIEW: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Review"*)
+  printf '%s\n' '{"type":"result","total_cost_usd":0.04,"result":"Review in progress"}'
+  echo "$ORCHD_TASK" > "$LOG_DIR/review-start"
+  while [ ! -f "$LOG_DIR/final-start" ]; do sleep 0.02; done
+  if [ "$REVIEW_MODE" = final-fails ]; then exec sleep 30; fi
+  touch "$LOG_DIR/review-end"
+  if [ "$REVIEW_MODE" = review-fails ]; then
+    printf '%s\n' '{"type":"result","total_cost_usd":0.04,"result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"[P1] CHANGED_MARKER.txt:1 is wrong\"]}\n```"}'
+  else
+    printf '%s\n' '{"type":"result","total_cost_usd":0.04,"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}'
+  fi ;;
+*)
+  echo changed > CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+fn overlapping_review(mode: &str) -> (serde_json::Value, tempfile::TempDir) {
+    let log = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(log.path(), "overlap.sh", FAKE_OVERLAP_REVIEW);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", log.path().to_str().unwrap()),
+        ("REVIEW_MODE", mode),
+    ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("claude-opus");
+    settings["maxAttempts"] = json!(1);
+    // The final check reads the daemon's data folder, which the sandbox hides.
+    settings["sandbox"] = json!("host");
+    daemon.request("settings.set", json!({"settings": settings}));
+    let repo = init_git_repo();
+    // Base preflight passes without markers; only the task tree runs this job.
+    let command = r#"if [ -f CHANGED_MARKER.txt ]; then
+echo ran >> "$LOG_DIR/final-runs"
+touch "$LOG_DIR/final-start"
+case "$REVIEW_MODE" in
+final-fails)
+  while ! grep -q total_cost_usd "$SUSHIAI_HOME/orchestrator/tasks/$(cat "$LOG_DIR/review-start" 2>/dev/null)/helpers/review-1/events.jsonl" 2>/dev/null; do sleep 0.02; done
+  echo final broke; exit 9 ;;
+review-fails) sleep 30 ;;
+*) sleep 0.2 ;;
+esac
+touch "$LOG_DIR/final-done"
+fi"#;
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(), "title": "Overlap",
+            "goal": "Write the marker", "verify": ["true"],
+            "finalVerify": [command], "start": true,
+        }),
+    );
+    let id = task["id"].as_str().unwrap();
+    let settled = poll_task_status(&daemon, id);
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+    (settled, log)
+}
+
+#[test]
+fn review_and_final_checks_overlap_and_passing_finals_run_once() {
+    let (settled, log) = overlapping_review("pass");
+    assert_eq!(settled["status"], "done", "{settled}");
+    // The fake reviewer cannot finish before the final-start marker exists.
+    assert!(log.path().join("review-end").exists());
+    assert!(log.path().join("final-done").exists());
+    assert_eq!(
+        std::fs::read_to_string(log.path().join("final-runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        settled["attempts"][0]["review"]["verdict"], "PASS",
+        "{settled}"
+    );
+}
+
+#[test]
+fn a_preflight_ruling_drops_a_failing_final_before_review_starts() {
+    let log = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        log.path(),
+        "preflight.sh",
+        r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+*"You check a coding task brief"*)
+  printf '%s\n' '{"type":"result","result":"{\"contradiction\":false}"}' ;;
+*"You judge whether a check command"*)
+  while [ ! -f "$LOG_DIR/fast-checked" ]; do sleep 0.02; done
+  printf '%s\n' '{"type":"result","result":"{\"verdict\":\"unrelated\",\"reason\":\"broken on the base\"}"}' ;;
+"## Review"*)
+  echo reviewed >> "$LOG_DIR/review-runs"
+  printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*)
+  echo changed > CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###,
+    );
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("LOG_DIR", log.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["review"] = json!("claude-opus");
+    settings["maxAttempts"] = json!(1);
+    daemon.request("settings.set", json!({"settings": settings}));
+    let repo = init_git_repo();
+    // Fail on the base, pass the fast check, and fail if run as a final.
+    let command = r#"if [ ! -f CHANGED_MARKER.txt ]; then echo broken on base; exit 3; fi
+if [ -f "$LOG_DIR/fast-checked" ]; then
+  echo ran >> "$LOG_DIR/final-runs"
+  echo broken final; exit 3
+fi
+touch "$LOG_DIR/fast-checked""#;
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(), "title": "Preflight before review",
+            "goal": "Write the marker", "verify": [command],
+            "finalVerify": [command], "start": true,
+        }),
+    );
+    let settled = poll_task_status(&daemon, task["id"].as_str().unwrap());
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(settled["attempts"].as_array().unwrap().len(), 1);
+    let attempt = &settled["attempts"][0];
+    assert_eq!(attempt["verify"][0]["code"], 0, "{settled}");
+    assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
+    assert_eq!(settled["briefCheck"]["nonGating"], json!([command]));
+    assert!(
+        settled["finalVerify"].as_array().is_none_or(Vec::is_empty),
+        "{settled}"
+    );
+    assert!(log.path().join("fast-checked").exists());
+    assert!(!log.path().join("final-runs").exists());
+    assert_eq!(
+        std::fs::read_to_string(log.path().join("review-runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(!settled["decisions"]
+        .to_string()
+        .contains("review discarded"));
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+}
+
+#[test]
+fn a_failed_final_discards_the_running_review_and_counts_its_cost() {
+    let (settled, log) = overlapping_review("final-fails");
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    let attempt = &settled["attempts"][0];
+    assert_eq!(attempt["failure"]["kind"], "verify", "{settled}");
+    assert!(attempt.get("review").is_none(), "{settled}");
+    assert!(!log.path().join("review-end").exists());
+    assert!(
+        (attempt["reviewCostUsd"].as_f64().unwrap() - 0.04).abs() < 1e-9,
+        "{settled}"
+    );
+    assert!(
+        (attempt["costUsd"].as_f64().unwrap() - 0.01).abs() < 1e-9,
+        "{settled}"
+    );
+    assert!(
+        (settled["costUsd"].as_f64().unwrap() - 0.05).abs() < 1e-9,
+        "{settled}"
+    );
+    assert!(
+        settled["decisions"]
+            .to_string()
+            .contains("review discarded because a final check failed"),
+        "{settled}"
+    );
+    assert_ne!(
+        settled["question"]["kind"], "review_no_verdict",
+        "{settled}"
+    );
+}
+
+#[test]
+fn a_failed_review_cancels_the_running_final_check() {
+    let (settled, log) = overlapping_review("review-fails");
+    assert_eq!(settled["status"], "waiting", "{settled}");
+    assert_eq!(
+        settled["attempts"][0]["failure"]["kind"], "review",
+        "{settled}"
+    );
+    assert!(log.path().join("final-start").exists());
+    assert!(!log.path().join("final-done").exists());
+    assert!(
+        settled["decisions"]
+            .to_string()
+            .contains("review failed; cancelled the final checks"),
+        "{settled}"
+    );
 }
 
 #[test]
@@ -27,6 +238,7 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
         "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let final_runs = scripts_dir.path().join("final-runs");
     // Review by the Claude hard route, which is the same fake (`auto` would
     // pick a route on the other harness).
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -43,23 +255,33 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
             "goal": "Make a trivial change",
             "criteria": [],
             "verify": ["true"],
+            "finalVerify": [format!("if [ -f CHANGED_MARKER.txt ]; then echo ran >> '{}'; fi", final_runs.display())],
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let waiting = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let waiting = poll_until(&daemon, &task_id, |s| {
         s == "waiting" || s == "done" || s == "failed"
     });
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
     let question = waiting["question"]["text"].as_str().unwrap();
     assert!(question.contains("no verdict"), "{question}");
+    wait_until(
+        "the final to finish while the review waits for its answer",
+        || {
+            std::fs::read_to_string(&final_runs)
+                .ok()
+                .filter(|runs| runs.lines().count() == 1)
+                .map(|_| ())
+        },
+    );
 
     daemon.request(
         "task.answer",
         serde_json::json!({"id": task_id, "answer": "approve"}),
     );
-    let settled = poll_until(&daemon, &task_id, Duration::from_secs(15), |s| {
+    let settled = poll_until(&daemon, &task_id, |s| {
         s == "done" || s == "failed" || s == "stopped"
     });
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
@@ -70,10 +292,17 @@ fn a_review_without_a_verdict_waits_for_the_owner_instead_of_passing() {
         decisions.contains("without a review verdict"),
         "{decisions}"
     );
+    assert_eq!(
+        std::fs::read_to_string(&final_runs)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Like FAKE_RETRY_SCRIPT, but it also answers the advisor: a brief that
@@ -89,7 +318,9 @@ if grep -q 'An implement attempt at this task failed' "$LOG_DIR/brief.$$"; then
 fi
 if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
-printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+case " $* " in *" --resume "*) json=$(printf '%s' "$json" | sed 's/total_cost_usd":0.01/total_cost_usd":0.02/') ;; esac
+printf '%s\n' "$json"
 "#;
 
 #[test]
@@ -120,7 +351,7 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
             }),
         );
         let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        let settled = poll_task_status(&daemon, &task_id);
         let label = format!("advisor={advisor} mode={mode}: {settled}");
         assert_eq!(settled["status"], "done", "{label}");
         let attempts = settled["attempts"].as_array().unwrap();
@@ -136,6 +367,14 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
                 .join("runs/2/brief.md"),
         )
         .unwrap();
+        assert!(
+            brief.contains("## Failed checks") && !brief.contains("## Task"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("test -f SECOND") && brief.contains("exited 1."),
+            "{brief}"
+        );
         let cost = settled["costUsd"].as_f64().unwrap();
         if advisor && mode == "ok" {
             assert_eq!(runs, 1, "{label}");
@@ -164,7 +403,7 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
 
         let worktree = task["worktree"].as_str().unwrap().to_string();
         daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
+        remove_dir_retrying(worktree);
     }
 }
 
@@ -213,7 +452,7 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "{settled}");
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
@@ -224,7 +463,7 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -261,7 +500,7 @@ fn an_explicit_codex_review_route_sends_claude_work_to_codex() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(
         settled["attempts"][0]["routeId"], "claude-sonnet",
@@ -271,7 +510,7 @@ fn an_explicit_codex_review_route_sends_claude_work_to_codex() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -311,7 +550,7 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
     let argv = std::fs::read_to_string(&args_log).unwrap();
     assert!(
@@ -330,11 +569,11 @@ fn review_evidence_attaches_the_attempt_s_screenshots_to_the_codex_reviewer() {
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
-fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
+fn final_checks_run_once_alongside_review_and_gate_the_commit() {
     // The failing check passes on the base and fails once the marker exists.
     for (final_check, status) in [
         ("test ! -f CHANGED_MARKER.txt", "waiting"),
@@ -367,10 +606,20 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
             }),
         );
         let task_id = task["id"].as_str().unwrap().to_string();
-        let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(20));
+        let settled = poll_task_status(&daemon, &task_id);
         assert_eq!(settled["status"], status, "{final_check}: {settled}");
         let attempt = &settled["attempts"][0];
-        assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
+        if status == "done" {
+            assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
+        } else {
+            assert!(attempt.get("review").is_none(), "{settled}");
+            assert!(
+                settled["decisions"]
+                    .to_string()
+                    .contains("review discarded because a final check failed"),
+                "{settled}"
+            );
+        }
         if status == "waiting" {
             assert!(
                 attempt["failure"]["detail"]
@@ -383,7 +632,7 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
         }
         let worktree = task["worktree"].as_str().unwrap().to_string();
         let ran = std::fs::read_to_string(&ran_log).unwrap();
-        // Once on the base before the attempt, once after review passes.
+        // Once on the base before the attempt, once alongside review.
         assert_eq!(ran.lines().count(), 2, "{final_check}: {ran}");
         let brief = std::fs::read_to_string(
             daemon
@@ -399,7 +648,7 @@ fn final_checks_run_once_after_review_passes_and_gate_the_commit() {
         );
 
         daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(&worktree);
+        remove_dir_retrying(&worktree);
     }
 }
 
@@ -435,7 +684,7 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "{settled}");
     let detail = settled["attempts"][0]["failure"]["detail"]
         .as_str()
@@ -444,7 +693,7 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
     assert!(detail.contains("boom_message"), "{detail}");
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(&worktree);
+    remove_dir_retrying(&worktree);
 }
 
 /// Implements; saves a screenshot only once its brief says none was saved
@@ -486,7 +735,7 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
 
     let attempts = settled["attempts"].as_array().unwrap();
@@ -509,9 +758,10 @@ fn a_visual_criterion_needs_a_saved_image_and_the_copies_outlive_the_worktree() 
         "{settled}"
     );
 
-    // Gone with the worktree, still listed and still on disk.
+    // Gone with the worktree, still listed and still on disk. A test action
+    // while the (idle) daemon runs, not cleanup.
     let worktree = task["worktree"].as_str().unwrap().to_string();
-    let _ = std::fs::remove_dir_all(&worktree);
+    remove_dir_retrying(&worktree);
     let got = daemon.request("task.get", serde_json::json!({"id": task_id}));
     let listed: Vec<&str> = got["attempts"]
         .as_array()
@@ -590,14 +840,14 @@ fn run_retry_task(second_file: &str) -> (Daemon, serde_json::Value, String) {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(40));
+    let settled = poll_task_status(&daemon, &task_id);
     // The scripts dir must outlive the run.
     drop(scripts_dir);
     (daemon, settled, task_id)
 }
 
 #[test]
-fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
+fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence_helpers_folder() {
     let (daemon, settled, task_id) = run_retry_task("tests/panel.test.txt");
     assert_eq!(settled["status"], "done", "{settled}");
     let implement: Vec<_> = settled["attempts"]
@@ -623,7 +873,7 @@ fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
             .data_dir()
             .join("tasks")
             .join(&task_id)
-            .join("runs/2/review/brief.md"),
+            .join("helpers/review-2/brief.md"),
     )
     .unwrap();
     assert!(brief.contains(paths[0]), "{brief}");
@@ -703,7 +953,7 @@ fn a_gif_or_svg_saved_for_a_visual_criterion_counts_as_evidence() {
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "done", "{settled}");
     let listed: Vec<String> = settled["attempts"]
         .as_array()
@@ -755,7 +1005,7 @@ esac
 "###;
 
 #[test]
-fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_escalates() {
+fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_handled() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-repeat.sh", FAKE_REPEAT_SCRIPT);
     let daemon = Daemon::spawn(&[
@@ -780,7 +1030,7 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, Duration::from_secs(30));
+    let settled = poll_task_status(&daemon, &task_id);
     assert_eq!(settled["status"], "waiting", "{settled}");
     assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
     let attempts = settled["attempts"].as_array().unwrap();
@@ -789,14 +1039,20 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|a| a["stage"] == "implement")
         .collect();
     // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
-    // repeat -> advisor and a tier up. Attempt 3: repeated again -> waiting.
-    assert_eq!(implements.len(), 3, "{settled}");
+    // repeat -> advisor and a tier up. Attempt 3: repeated a second time ->
+    // handled (the judge), not the owner; the budget of 6 ends the task.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert!(
         implements[0]["review"].get("repeated").is_none(),
         "{settled}"
     );
     assert_eq!(
-        implements[1]["review"]["repeated"][0], "P1: a.rs:1 - null check missing",
+        implements[1]["review"]["repeated"][0]
+            .as_str()
+            .unwrap()
+            .split(" [F-")
+            .next(),
+        Some("P1: a.rs:1 - null check missing"),
         "{settled}"
     );
     assert_eq!(implements[0]["routeId"], "claude-sonnet", "{settled}");
@@ -814,14 +1070,14 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|e| e.file_name().to_string_lossy().starts_with("review."))
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
-    assert_eq!(reviews.len(), 3, "one review per attempt");
+    assert_eq!(reviews.len(), 6, "one review per attempt");
     assert_eq!(
         reviews
             .iter()
             .filter(|b| b.contains("## Previous review") && b.contains("null check missing"))
             .count(),
-        2,
-        "attempts 2 and 3 carry the previous findings"
+        5,
+        "attempts 2 to 6 carry the previous findings"
     );
     let decisions = settled["decisions"].as_array().unwrap();
     assert!(
@@ -834,7 +1090,7 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 /// Implements (appending), answers the advisor, and reviews: FAIL with a
@@ -877,7 +1133,7 @@ fn judge_script(finding_valid: bool) -> String {
 
 /// Runs the dispute flow with a judge answering `finding_valid`; returns the
 /// settled task and the number of judge runs.
-fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, usize) {
+fn run_dispute_task(finding_valid: bool) -> (serde_json::Value, usize) {
     let scripts_dir = tempfile::tempdir().unwrap();
     let claude = fake_harness_script(scripts_dir.path(), "fake-dispute.sh", FAKE_DISPUTE_SCRIPT);
     let codex = fake_harness_script(
@@ -894,10 +1150,14 @@ fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, 
     settings["maxAttempts"] = serde_json::json!(6);
     settings["answerPolicy"] = serde_json::json!(false);
     settings["review"] = serde_json::json!("claude-opus");
-    // Sonnet stays the implementer but is too weak to judge, so the judge is Codex.
+    // Sonnet stays the implementer but is too weak to judge, so the judge is
+    // Codex; a route with no model has no known strength until one is set.
     for route in settings["routes"].as_array_mut().unwrap() {
         if route["id"] == "claude-sonnet" {
             route["strength"] = serde_json::json!(1);
+        }
+        if route["id"] == "codex" {
+            route["strength"] = serde_json::json!(3);
         }
     }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
@@ -913,13 +1173,13 @@ fn run_dispute_task(finding_valid: bool, wait: Duration) -> (serde_json::Value, 
         }),
     );
     let task_id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_task_status(&daemon, &task_id, wait);
+    let settled = poll_task_status(&daemon, &task_id);
     let runs = std::fs::read_to_string(scripts_dir.path().join("judge.log"))
         .map(|t| t.lines().count())
         .unwrap_or(0);
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
     (settled, runs)
 }
 
@@ -934,7 +1194,7 @@ fn decision_lines(task: &serde_json::Value) -> Vec<String> {
 
 #[test]
 fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() {
-    let (settled, runs) = run_dispute_task(false, Duration::from_secs(30));
+    let (settled, runs) = run_dispute_task(false);
     assert_eq!(settled["status"], "done", "{settled}");
     assert_eq!(runs, 1, "{settled}");
     let assumption = settled["assumptions"]
@@ -957,7 +1217,7 @@ fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() 
 
 #[test]
 fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
-    let (settled, runs) = run_dispute_task(true, Duration::from_secs(30));
+    let (settled, runs) = run_dispute_task(true);
     assert_eq!(settled["status"], "waiting", "{settled}");
     assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
     assert_eq!(runs, 1, "the finding is judged once: {settled}");
@@ -967,7 +1227,9 @@ fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
         .iter()
         .filter(|a| a["stage"] == "implement")
         .collect();
-    assert_eq!(implements.len(), 3, "{settled}");
+    // The second repeat (attempt 3) is handled, not escalated: the judge
+    // already ruled, so the attempts run until the budget of 6 is spent.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
     let decisions = decision_lines(&settled);
@@ -1070,22 +1332,18 @@ fn the_owner_picking_the_accept_option_finishes_the_task_on_its_last_attempt() {
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "true");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        s != "running" && s != "queued"
-    });
+    let waiting = poll_until(&daemon, &id, |s| s != "running" && s != "queued");
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
     let options = waiting["question"]["options"].to_string();
     assert!(options.contains(ACCEPT_OPTION), "{options}");
     let said = format!("  {}  ", ACCEPT_OPTION.to_uppercase());
     daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_accepted(&daemon, repo.path(), &done, &said);
     assert!(!scripts_dir.path().join("judge.called").exists());
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -1095,21 +1353,17 @@ fn owner_free_text_the_orchestrator_reads_as_accepting_finishes_the_task() {
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "true");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        s != "running" && s != "queued"
-    });
+    let waiting = poll_until(&daemon, &id, |s| s != "running" && s != "queued");
     assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
     let said = "the review is being picky, ship it";
     daemon.request("task.answer", serde_json::json!({"id": id, "answer": said}));
-    let done = poll_until(&daemon, &id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_accepted(&daemon, repo.path(), &done, said);
     assert!(scripts_dir.path().join("judge.called").exists());
     assert!(done["costUsd"].as_f64().unwrap() > 0.02, "{done}");
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -1121,19 +1375,16 @@ fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt(
         let repo = init_git_repo();
         let task = create_started(&daemon, repo.path(), "true");
         let id = task["id"].as_str().unwrap().to_string();
-        poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+        poll_until(&daemon, &id, |s| s == "waiting");
         daemon.request(
             "task.answer",
             serde_json::json!({"id": id, "answer": "try again, more carefully"}),
         );
-        let again = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
-        let mut latest = again;
-        let start = std::time::Instant::now();
-        while implement_attempts(&latest) < 2 {
-            assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
-            std::thread::sleep(Duration::from_millis(100));
-            latest = daemon.request("task.get", serde_json::json!({"id": id}));
-        }
+        poll_until(&daemon, &id, |s| s == "waiting");
+        let latest = wait_until("a second implement attempt", || {
+            let t = daemon.request("task.get", serde_json::json!({"id": id}));
+            (implement_attempts(&t) >= 2).then_some(t)
+        });
         assert!(scripts_dir.path().join("judge.called").exists());
         assert!(
             !latest["decisions"].to_string().contains("accepted attempt"),
@@ -1141,7 +1392,7 @@ fn free_text_the_orchestrator_does_not_read_as_accepting_starts_another_attempt(
         );
         let worktree = task["worktree"].as_str().unwrap().to_string();
         daemon.shutdown_and_wait();
-        let _ = std::fs::remove_dir_all(worktree);
+        remove_dir_retrying(worktree);
     }
 }
 
@@ -1152,23 +1403,20 @@ fn a_verify_failed_question_offers_no_accept_and_free_text_never_reaches_the_jud
     let repo = init_git_repo();
     let task = create_started(&daemon, repo.path(), "false");
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+    let waiting = poll_until(&daemon, &id, |s| s == "waiting");
     let options = waiting["question"]["options"].to_string();
     assert!(!options.contains(ACCEPT_OPTION), "{options}");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": id, "answer": "accept it, the last attempt is fine"}),
     );
-    let mut latest = waiting;
-    let start = std::time::Instant::now();
-    while implement_attempts(&latest) < 2 {
-        assert!(start.elapsed() < Duration::from_secs(20), "{latest}");
-        std::thread::sleep(Duration::from_millis(100));
-        latest = daemon.request("task.get", serde_json::json!({"id": id}));
-    }
+    let latest = wait_until("a second implement attempt", || {
+        let t = daemon.request("task.get", serde_json::json!({"id": id}));
+        (implement_attempts(&t) >= 2).then_some(t)
+    });
     assert_ne!(latest["status"], "done", "{latest}");
     assert!(!scripts_dir.path().join("judge.called").exists());
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }

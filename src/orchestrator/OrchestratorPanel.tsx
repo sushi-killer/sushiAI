@@ -9,11 +9,13 @@ import {
 import {
   ArchiveRestore,
   ChartColumn,
+  ScrollText,
   ChevronDown,
   LayoutList,
   ListTodo,
   MessageSquare,
   Sparkles,
+  Workflow,
   X,
 } from "lucide-react";
 import "./orchestrator.css";
@@ -53,20 +55,20 @@ import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
 import {
   applyOrchestratorEvent,
+  composerCreateParams,
   emptyLiveState,
   daemonDown,
   errorText,
   formatDuration,
   planDrafts,
   sortTasks,
-  taskCreateParams,
   taskTone,
   unreadChatCount,
   upsertMessage,
   upsertTask,
   type OrchestratorLiveState,
 } from "./helpers";
-import { needsOwner } from "./ownerAttention";
+import { needsOwnerNow } from "./ownerAttention";
 import { upsertProposal } from "./improvementsModel";
 import type {
   ChatMessage,
@@ -87,6 +89,8 @@ import { ImprovementsView } from "./Improvements";
 import { improvementsBadge } from "./improvementsModel";
 import { useRecurringFailures } from "./useRecurringFailures";
 import { AnalyticsView } from "./Analytics";
+import { OverseerLogView } from "./OverseerLog";
+import { PipelineView } from "./PipelineView";
 import { PlanView } from "./PlanView";
 
 type DaemonState = DaemonReach;
@@ -116,22 +120,13 @@ async function createTask(
   try {
     return await orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams({ request: text, start, source: "ui", projectId }, base),
+      composerCreateParams(text, start, base, projectId, "request"),
     );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
     return orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams(
-        {
-          title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
-          goal: text,
-          start,
-          source: "ui",
-          projectId,
-        },
-        base,
-      ),
+      composerCreateParams(text, start, base, projectId, "fallback"),
     );
   }
 }
@@ -164,7 +159,9 @@ const VIEW_NAMES: Record<Exclude<View["kind"], "task">, string> = {
   messages: "Chat",
   improvements: "Improvements",
   analytics: "Analytics",
+  log: "Log",
   archive: "Archive",
+  pipeline: "Pipeline",
 };
 
 function viewIcon(kind: View["kind"]) {
@@ -178,6 +175,10 @@ function viewIcon(kind: View["kind"]) {
       return <Sparkles size={14} />;
     case "analytics":
       return <ChartColumn size={14} />;
+    case "log":
+      return <ScrollText size={14} />;
+    case "pipeline":
+      return <Workflow size={14} />;
     default:
       return <LayoutList size={14} />;
   }
@@ -703,7 +704,7 @@ function OrchestratorBody({
   const connecting = daemonState === "loading" && lastSeenAt === null && !error;
   const offline = daemonState !== "ready";
   const refresh = live.tasks.map((t) => `${t.id}:${t.updatedAt}`).join();
-  const needYou = tasks.filter(needsOwner).length;
+  const needYou = tasks.filter((t) => needsOwnerNow(t)).length;
   const running = runningCount(tasks);
   const improvementsCount = improvementsBadge(
     proposals,
@@ -740,7 +741,11 @@ function OrchestratorBody({
       : null;
   // Figma has no composer on Improvements or Analytics.
   const composerMode: "task" | "plan" | "ask" | null =
-    chatKind || current.kind === "improvements" || current.kind === "analytics"
+    chatKind ||
+    current.kind === "improvements" ||
+    current.kind === "analytics" ||
+    current.kind === "log" ||
+    current.kind === "pipeline"
       ? null
       : current.kind === "task"
         ? "ask"
@@ -810,6 +815,23 @@ function OrchestratorBody({
             onOpenTask={(id) => open({ kind: "task", id })}
           />
         );
+      case "log":
+        return (
+          <OverseerLogView
+            cwd={cwd}
+            dailyBudgetUsd={settings?.dailyBudgetUsd ?? 0}
+            onOpenChat={() => open({ kind: "chat" })}
+            onOpenTask={(id) => open({ kind: "task", id })}
+          />
+        );
+      case "pipeline":
+        return (
+          <PipelineView
+            cwd={cwd}
+            settings={settings}
+            onSettings={updateSettings}
+          />
+        );
       case "plan":
         return (
           <PlanView
@@ -861,6 +883,7 @@ function OrchestratorBody({
           <HomeView
             cwd={cwd}
             tasks={live.tasks}
+            settings={settings}
             maxAttempts={settings?.maxAttempts}
             busy={busy}
             act={act}

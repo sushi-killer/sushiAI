@@ -1,5 +1,6 @@
 //! JSON-file store: `<data>/settings.json`,
 //! `<data>/tasks/<id>/task.json`, `<data>/tasks/<id>/runs/<n>/*`,
+//! `<data>/tasks/<id>/helpers/<stage>-<seq>/*`,
 //! `<data>/audits/<id>/{audit.json,report.json,brief.md,events.jsonl}`.
 //! All writes to `task.json`/`settings.json` are atomic (write tmp file in
 //! the same directory, then rename) so a crash never leaves a half-written
@@ -12,6 +13,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HelperRun {
+    stage: String,
+    attempt: Option<u32>,
+}
 
 pub struct Store {
     data_dir: PathBuf,
@@ -45,6 +52,64 @@ impl Store {
         self.task_dir(id).join("runs").join(n.to_string())
     }
 
+    pub fn helper_run_dir(&self, task_id: &str, stage: &str, seq: u32) -> PathBuf {
+        self.task_dir(task_id)
+            .join("helpers")
+            .join(format!("{stage}-{seq}"))
+    }
+
+    pub fn claim_helper_run_dir(
+        &self,
+        task_id: &str,
+        stage: &str,
+        attempt: Option<u32>,
+    ) -> io::Result<PathBuf> {
+        fs::create_dir_all(self.task_dir(task_id).join("helpers"))?;
+        for seq in 1..=u32::MAX {
+            let dir = self.helper_run_dir(task_id, stage, seq);
+            match fs::create_dir(&dir) {
+                Ok(()) => {
+                    write_json_atomic(
+                        &dir.join("helper.json"),
+                        &HelperRun {
+                            stage: stage.to_string(),
+                            attempt,
+                        },
+                    )?;
+                    return Ok(dir);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::other("helper sequence exhausted"))
+    }
+
+    pub fn helper_run_dirs(
+        &self,
+        task_id: &str,
+        stage: &str,
+        attempt: Option<u32>,
+    ) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.task_dir(task_id).join("helpers")) else {
+            return Vec::new();
+        };
+        let prefix = format!("{stage}-");
+        let mut dirs: Vec<(u32, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let seq = name.to_str()?.strip_prefix(&prefix)?.parse::<u32>().ok()?;
+                let dir = entry.path();
+                let text = fs::read_to_string(dir.join("helper.json")).ok()?;
+                let helper: HelperRun = serde_json::from_str(&text).ok()?;
+                (helper.stage == stage && helper.attempt == attempt).then_some((seq, dir))
+            })
+            .collect();
+        dirs.sort_by_key(|(seq, _)| *seq);
+        dirs.into_iter().map(|(_, dir)| dir).collect()
+    }
+
     // -- settings --------------------------------------------------------
 
     pub fn load_settings(&self) -> io::Result<Settings> {
@@ -67,7 +132,10 @@ impl Store {
     pub fn save_task(&self, task: &Task) -> io::Result<()> {
         let dir = self.task_dir(&task.id);
         fs::create_dir_all(&dir)?;
-        write_json_atomic(&self.task_path(&task.id), task)
+        write_json_atomic(&self.task_path(&task.id), task)?;
+        // Every answered question lands in the decision memory (`precedents.rs`).
+        crate::precedents::sync(&self.data_dir, task);
+        Ok(())
     }
 
     pub fn load_task(&self, id: &str) -> io::Result<Option<Task>> {
@@ -96,10 +164,18 @@ impl Store {
             if !task_json.exists() {
                 continue;
             }
-            let text = fs::read_to_string(&task_json)?;
+            let text = match fs::read_to_string(&task_json) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("orch: reading task {} failed: {e}", task_json.display());
+                    continue;
+                }
+            };
             match serde_json::from_str::<Task>(&text) {
                 Ok(task) => out.push(task),
-                Err(_) => continue, // skip corrupt entries rather than fail the whole listing
+                Err(e) => {
+                    eprintln!("orch: parsing task {} failed: {e}", task_json.display());
+                }
             }
         }
         out.sort_by_key(|task| std::cmp::Reverse(task.created_at));
@@ -111,7 +187,7 @@ impl Store {
     /// (if still alive -- the child was `setsid()`ed, so it survives the
     /// daemon's own death and would otherwise run forever unsupervised),
     /// delete its leftover per-run API key file if any, then mark the
-    /// attempt `interrupted` and the task `stopped`, per spec step 10.
+    /// attempt `interrupted` and requeue its task unless already `stopped`.
     /// `settle(task, idx)` runs on each such attempt once its process is
     /// gone (the engine counts the spend it left in `events.jsonl`).
     /// Returns the tasks that were mutated.
@@ -148,6 +224,8 @@ impl Store {
                         }
                         let key_file = run_dir.join("key");
                         let _ = fs::remove_file(key_file);
+                        let _ = fs::remove_file(run_dir.join("mcp.json"));
+                        let _ = fs::remove_file(run_dir.join("b/mcp.json"));
                         attempt.status = AttemptStatus::Interrupted;
                         attempt.ended_at = Some(crate::model::now_ms());
                         settle(&mut task, idx);
@@ -155,14 +233,25 @@ impl Store {
                     }
                 }
             }
-            // A running attempt at startup means the daemon died under it (an
-            // owner's stop marks its attempt interrupted right away), so the
-            // task is queued again and resumes, rather than waiting for the
-            // owner to notice and press Start.
+            // Interrupted work resumes unless a saved stop or park says otherwise.
             if interrupted {
-                task.status = TaskStatus::Queued;
+                if task.queue.stopped_explicitly {
+                    task.status = TaskStatus::Stopped;
+                    task.question = None;
+                } else if task.queue.park.is_some() {
+                    task.status = TaskStatus::Queued;
+                    task.question = None;
+                } else if !matches!(
+                    task.status,
+                    TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
+                ) {
+                    task.status = TaskStatus::Queued;
+                }
                 task.updated_at = crate::model::now_ms();
-                self.save_task(&task)?;
+                if let Err(e) = self.save_task(&task) {
+                    eprintln!("orch: saving task {} failed: {e}", task.id);
+                    continue;
+                }
                 recovered.push(task);
             }
         }
@@ -302,7 +391,7 @@ impl Store {
     }
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -348,14 +437,20 @@ fn kill_stale_process_group(_pgid: i32, _run_dir: &Path) {}
 /// A run's wrapper shell carries its exit file as `$0`, so this tells the
 /// run's group from an unrelated process that reuses a saved pgid.
 pub fn group_started_with(pgid: i32, path: &Path) -> bool {
-    std::process::Command::new("ps")
-        .args(["-ww", "-o", "args=", "-p", &pgid.to_string()])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&*path.to_string_lossy()))
+    crate::process::argv(pgid).is_some_and(|args| {
+        args.iter()
+            .any(|arg| arg.contains(&*path.to_string_lossy()))
+    })
 }
 
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
     write_atomic(path, &json_bytes(value)?, None)
+}
+
+/// Atomically replaces a plain-text file the owner alone reads (the overseer
+/// log), mode 0600.
+pub fn write_text_private(path: &Path, text: &str) -> io::Result<()> {
+    write_atomic(path, text.as_bytes(), Some(0o600))
 }
 
 /// As `write_json_atomic`, for JSON that carries a secret: mode 0600 from the
@@ -421,6 +516,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -430,6 +526,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -465,6 +562,7 @@ mod tests {
                 verify: vec![],
                 gate_blocks: 0,
                 prefix_tokens: None,
+                first_edit_at: None,
                 review: None,
                 failure: None,
                 usage: None,
@@ -473,6 +571,9 @@ mod tests {
                 review_cost_usd: None,
                 evidence: vec![],
                 evidence_tree: None,
+                review_tree: None,
+                review_base: None,
+                review_scope: None,
                 evidence_base: None,
                 evidence_from: None,
                 advice: None,
@@ -490,9 +591,12 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -501,6 +605,9 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            metrics: None,
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -592,6 +699,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_saved_before_presets_load_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        let o = value.as_object_mut().unwrap();
+        assert!(o.remove("presets").is_some());
+        assert!(o.remove("repoPresets").is_some());
+        std::fs::write(store.settings_path(), value.to_string()).unwrap();
+        let loaded = store.load_settings().unwrap();
+        assert!(loaded.presets.is_empty());
+        assert!(loaded.repo_presets.is_empty());
+        assert!(loaded.check_presets().is_ok());
+    }
+
+    #[test]
     fn old_settings_naming_the_retired_haiku_route_load_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path()).unwrap();
@@ -633,6 +755,18 @@ mod tests {
         let done_task = sample_task("done", TaskStatus::Done, AttemptStatus::Passed);
         store.save_task(&running_task).unwrap();
         store.save_task(&done_task).unwrap();
+        let run_dir = store.run_dir(&running_task.id, running_task.attempts[0].n);
+        fs::create_dir_all(run_dir.join("b")).unwrap();
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            fs::write(run_dir.join(file), "synthetic secret").unwrap();
+        }
+        assert!(store
+            .recover_interrupted_with(|_, _| RunFate::Resume, |_, _| {})
+            .unwrap()
+            .is_empty());
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            assert!(run_dir.join(file).exists());
+        }
 
         let recovered = store.recover_interrupted(|_, _| {}).unwrap();
         assert_eq!(recovered.len(), 1);
@@ -641,6 +775,9 @@ mod tests {
         let reloaded = store.load_task("running").unwrap().unwrap();
         assert_eq!(reloaded.status, TaskStatus::Queued);
         assert_eq!(reloaded.attempts[0].status, AttemptStatus::Interrupted);
+        for file in ["key", "mcp.json", "b/mcp.json"] {
+            assert!(!run_dir.join(file).exists());
+        }
 
         // Untouched task stays as-is.
         let untouched = store.load_task("done").unwrap().unwrap();
@@ -756,5 +893,64 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn helpers_folder_claims_are_unique_and_read_in_numeric_sequence_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path()).unwrap();
+        let first = store
+            .claim_helper_run_dir("task", "review", Some(1))
+            .unwrap();
+        std::fs::write(first.join("events.jsonl"), "first").unwrap();
+        let mut claimed = vec![first.clone()];
+        for _ in 0..10 {
+            claimed.push(
+                store
+                    .claim_helper_run_dir("task", "review", Some(1))
+                    .unwrap(),
+            );
+        }
+        store
+            .claim_helper_run_dir("task", "review", Some(2))
+            .unwrap();
+        let detached = store
+            .claim_helper_run_dir("task", "brief-check", None)
+            .unwrap();
+        assert_eq!(store.helper_run_dirs("task", "review", Some(1)), claimed);
+        assert_eq!(first, tmp.path().join("tasks/task/helpers/review-1"));
+        assert_eq!(
+            std::fs::read_to_string(first.join("events.jsonl")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            store
+                .helper_run_dirs("task", "brief-check", None)
+                .as_slice(),
+            std::slice::from_ref(&detached)
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(detached.join("helper.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            meta,
+            serde_json::json!({"stage":"brief-check", "attempt":null})
+        );
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let store = &store;
+                scope.spawn(move || {
+                    store
+                        .claim_helper_run_dir("task", "advisor", Some(1))
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(store.helper_run_dirs("task", "advisor", Some(1)).len(), 4);
     }
 }

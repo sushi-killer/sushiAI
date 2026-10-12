@@ -4,6 +4,7 @@ import type { Tone } from "../ui/tone.ts";
 import { needsOwner, questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
+  BacklogBucket,
   FailureKind,
   Fingerprint,
   Message,
@@ -13,6 +14,7 @@ import type {
   Task,
   Tier,
   Variant,
+  Wait,
 } from "./types";
 
 export type TaskCreateParams = {
@@ -24,6 +26,7 @@ export type TaskCreateParams = {
   base?: string;
   start?: boolean;
   source?: string;
+  backlog?: { bucket: BacklogBucket; order?: number };
   /** The project the task belongs to: its variables and MCP servers follow. */
   projectId?: string;
 };
@@ -40,6 +43,30 @@ export function taskCreateParams(
   return trimmed ? { ...params, base: trimmed } : { ...params };
 }
 
+export function composerCreateParams(
+  text: string,
+  start: boolean,
+  base: string,
+  projectId: string | undefined,
+  form: "request" | "fallback",
+): TaskCreateParams {
+  return taskCreateParams(
+    {
+      ...(form === "request"
+        ? { request: text }
+        : {
+            title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
+            goal: text,
+          }),
+      start,
+      source: "ui",
+      projectId,
+      ...(!start ? { backlog: { bucket: "next" as const } } : {}),
+    },
+    base,
+  );
+}
+
 export function formatDuration(ms: number): string {
   const minutes = Number.isFinite(ms) ? Math.floor(ms / 60_000) : 0;
   if (minutes < 1) return "<1m";
@@ -52,6 +79,13 @@ export function formatCost(costUsd: number | undefined): string {
   return `$${(costUsd || 0).toFixed(2)}`;
 }
 
+/** Describes commits that finished on the task branch without landing. */
+export function unlandedLabel(task: Task): string {
+  const unlanded = task.unlanded;
+  if (!unlanded) return "";
+  return `${unlanded.commits} commit${unlanded.commits === 1 ? "" : "s"} not on ${unlanded.base}`;
+}
+
 /** `Variant`'s own field order - `variantLabel` walks it in this order so a
  * task with several differing flags always reads the same way. */
 const VARIANT_KEYS: Exclude<
@@ -61,10 +95,14 @@ const VARIANT_KEYS: Exclude<
   | "maxCostUsd"
   | "maxAttemptCostUsd"
   | "batchQuestions"
-  | "groundedChecks"
   | "bestOf"
   | "bestOfRoute"
   | "land"
+  | "reviewRoute"
+  | "briefCheckRoute"
+  | "judgeRoute"
+  | "maxAttempts"
+  | "heldOut"
 >[] = ["stallTimeoutSecs", "reviewEvidence"];
 
 function variantFlagText(value: boolean | string | number): string {
@@ -88,8 +126,14 @@ export function variantLabel(task: Task, experiments: Variant): string {
   const diffs = VARIANT_KEYS.filter(
     (key) => variant[key] !== experiments[key],
   ).map((key) => `${key} ${variantFlagText(variant[key])}`);
+  if ((variant.heldOut ?? true) !== (experiments.heldOut ?? true)) {
+    diffs.push(`heldOut ${variantFlagText(variant.heldOut ?? true)}`);
+  }
   if (variant.plannerRoute !== experiments.plannerRoute) {
     diffs.push(`plannerRoute ${variant.plannerRoute ?? "settings"}`);
+  }
+  if (variant.judgeRoute !== experiments.judgeRoute) {
+    diffs.push(`judgeRoute ${variant.judgeRoute ?? "settings"}`);
   }
   const tierRoutes = tierRoutesText(variant.tierRoutes);
   if (tierRoutes !== tierRoutesText(experiments.tierRoutes)) {
@@ -109,9 +153,6 @@ export function variantLabel(task: Task, experiments: Variant): string {
     (variant.batchQuestions ?? false) !== (experiments.batchQuestions ?? false)
   ) {
     diffs.push(`batchQuestions ${variant.batchQuestions ? "on" : "off"}`);
-  }
-  if (!!variant.groundedChecks !== !!experiments.groundedChecks) {
-    diffs.push(`groundedChecks ${variantFlagText(!!variant.groundedChecks)}`);
   }
   const bestOf = variant.bestOf ?? 0;
   if (bestOf >= 2 !== (experiments.bestOf ?? 0) >= 2) {
@@ -328,7 +369,8 @@ export function applyOrchestratorEvent(
     event.event === "chat" ||
     event.event === "message" ||
     event.event === "audit" ||
-    event.event === "proposal"
+    event.event === "proposal" ||
+    event.event === "overseer"
   )
     return state;
   const lines = [...(state.logLines[event.taskId] || []), event.line].slice(
@@ -597,7 +639,8 @@ export function planDrafts(tasks: Task[]): Task[] {
     (t) =>
       !t.archived &&
       (t.status === "queued" || t.status === "stopped") &&
-      !t.queueReason &&
+      !t.wait &&
+      !t.park &&
       !t.attempts.some((a) => a.stage === "implement"),
   );
 }
@@ -615,6 +658,7 @@ const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
   stall: "stalled",
   loop: "looped",
   budget: "over budget",
+  time_budget: "out of time",
   verify: "verify failed",
   conflict: "conflict",
   heldout: "held-out check failed",
@@ -625,12 +669,32 @@ const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
   error: "error",
 };
 
+/** What a waiting task shows instead of its status word. */
+export function waitLabel(wait: Wait): string {
+  switch (wait.kind) {
+    case "slot":
+      return `waits for a slot · ${wait.running} of ${wait.limit} running`;
+    case "subtaskSlot":
+      return `waits for a subtask slot · ${wait.running} of ${wait.limit} running`;
+    case "dependency":
+      return `after ${wait.titles.join(", ")}`;
+    case "file":
+      return `waits for "${wait.title}" on ${wait.path}`;
+  }
+}
+
 /** A rail row's second line: why it sits where it does, in its tone. */
 export function taskReason(
   task: Task,
   tasks: Task[],
   maxAttempts?: number,
 ): string {
+  const asking = task.status === "waiting" && questionCount(task) > 0;
+  const queueing =
+    task.status === "queued" ||
+    task.status === "drafting" ||
+    task.status === "running";
+  if (task.wait && queueing && !asking) return waitLabel(task.wait);
   const children = childrenOf(tasks, task.id);
   if (children.length > 0 && task.status !== "waiting") {
     const landed = children.filter((c) => c.status === "done").length;
@@ -644,7 +708,7 @@ export function taskReason(
     case "drafting":
       return "drafting the brief";
     case "queued":
-      return task.queueReason ? task.queueReason : "queued";
+      return task.park ? task.park.reason : "queued";
     case "running": {
       const stage = latestAttempt(task)?.stage;
       return `${stage === "plan" ? "brief" : (stage ?? "implement")} · attempt ${attemptOf(task, maxAttempts)}`;
@@ -688,8 +752,18 @@ export function taskMetaLine(
   return parts.join(" · ");
 }
 
-/** A subtask line under its parent in the rail: dot tone and a short state. */
+/** A subtask line under its parent in the rail: dot tone and a short state;
+ * the wait label replaces the status word while the task waits. */
 export function subtaskState(
+  task: Task,
+  tasks: Task[],
+  maxAttempts?: number,
+): { tone: Tone; label: string } {
+  const state = subtaskStatus(task, tasks, maxAttempts);
+  return task.wait ? { ...state, label: waitLabel(task.wait) } : state;
+}
+
+function subtaskStatus(
   task: Task,
   tasks: Task[],
   maxAttempts?: number,
@@ -720,7 +794,7 @@ export function subtaskState(
       });
       return {
         tone: "neutral",
-        label: waits || task.queueReason ? "waits" : "queued",
+        label: waits || task.park ? "waits" : "queued",
       };
     }
   }

@@ -13,6 +13,9 @@ import type {
   FailureRow,
   Message,
   Note,
+  PrecedentList,
+  OverseerEntry,
+  Pipeline,
   Proposal,
   Settings,
   SpendGroup,
@@ -60,6 +63,12 @@ export function orchestratorClientFor(host: string = LOCAL) {
       to?: string;
       groupBy: SpendGroup[];
     }) => call<SpendSummary>("costs.summary", params),
+    /** What the overseer did, newest first, across repos (or one `repo`). */
+    overseerLog: (repo?: string, limit?: number) =>
+      call<OverseerEntry[]>("overseer.log", {
+        ...(repo ? { repo } : {}),
+        ...(limit ? { limit } : {}),
+      }),
     taskEvidence: (id: string, path: string) =>
       call<{ dataUrl: string }>("task.evidence", { id, path }),
     taskOpenDeliverable: (id: string, path: string) =>
@@ -108,6 +117,14 @@ export function orchestratorClientFor(host: string = LOCAL) {
         ...(title ? { title } : {}),
         ...(branch ? { branch } : {}),
       }),
+    /** The pipeline's stages with the routes and switches in force; for one
+     * task also where each stage stands. */
+    pipelineDescribe: (params: { repo?: string; taskId?: string }) =>
+      call<Pipeline>("pipeline.describe", params),
+    /** Fixes the task's pipeline to `preset`; refused once the task has an
+     * implement attempt or its loop is live. */
+    taskPreset: (id: string, preset: string) =>
+      call<Task>("task.preset", { id, preset }),
     taskStop: (id: string) => call<Task>("task.stop", { id }),
     taskAnswer: (id: string, answer: string) =>
       call<Task>("task.answer", { id, answer }),
@@ -208,6 +225,20 @@ export function orchestratorClientFor(host: string = LOCAL) {
       call<Note>("repo.notes.add", { repo, text }),
     repoNotesRemove: (repo: string, id: string) =>
       call<{ removed: string }>("repo.notes.remove", { repo, id }).then(
+        () => undefined,
+      ),
+    precedentsList: (repo: string) =>
+      call<PrecedentList>("precedents.list", { repo }),
+    precedentsRemove: (repo: string, id: string) =>
+      call<{ removed: string }>("precedents.remove", { repo, id }).then(
+        () => undefined,
+      ),
+    precedentRuleAccept: (repo: string, id: string) =>
+      call<{ note: Note }>("precedents.rule.accept", { repo, id }).then(
+        (result) => result.note,
+      ),
+    precedentRuleDismiss: (repo: string, id: string) =>
+      call<unknown>("precedents.rule.dismiss", { repo, id }).then(
         () => undefined,
       ),
   };

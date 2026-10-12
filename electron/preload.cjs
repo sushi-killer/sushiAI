@@ -207,6 +207,7 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   projectHostSecretSet: invoke("projects:host:secret:set"),
   projectSecretClear: invoke("projects:secret:clear"),
   projectHostWithhold: invoke("projects:host:withhold"),
+  moduleInvoke: invoke("module:invoke"),
   projectHostReady: invoke("projects:host:ready"),
   projectHostOverrides: invoke("projects:host:overrides"),
   projectHostCheck: invoke("projects:host:check"),

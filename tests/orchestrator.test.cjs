@@ -98,6 +98,10 @@ test("call() rejects a method outside the protocol allowlist before touching the
     "repo.notes.list",
     "repo.notes.add",
     "repo.notes.remove",
+    "precedents.list",
+    "precedents.remove",
+    "precedents.rule.accept",
+    "precedents.rule.dismiss",
   ])
     assert.equal(ALLOWED_METHODS.has(method), true, method);
   assert.equal(ALLOWED_METHODS.has("hook.stop"), false);
@@ -190,7 +194,8 @@ test("a connecting host is waited for; one that never settles times out", async 
   const manager = fakeDaemonManager({
     hosts: { local: { state: "connecting" } },
   });
-  const service = serviceFor(manager, { readyTimeoutMs: 40 });
+  // Far above a loaded machine's timer lag for the 10 ms ready below.
+  const service = serviceFor(manager, { readyTimeoutMs: 1000 });
   const pending = service.call("task.list");
   setTimeout(() => manager.setState("local", { state: "ready" }), 10);
   await pending;
@@ -250,34 +255,50 @@ test("probe() reports readiness and never connects or retries a host", async () 
   assert.equal(hosts.services.size, 0);
 });
 
-test("task.create is enriched with the repo's enabled MCP launch config", async () => {
+test("task.create sends the project's enabled MCP servers with caller overrides", async () => {
   const manager = fakeDaemonManager({
     handlers: { "orch.task.create": (params) => ({ id: "t1", ...params }) },
   });
-  const mcpSnapshot = { mcpServers: { fs: { command: "fs-server" } } };
+  const project = {
+    id: "project-1",
+    mcp: {
+      mcpServers: {
+        fs: { command: "project-fs" },
+        lookup: { command: "project-lookup" },
+        disabled: { command: "disabled-server" },
+      },
+      disabledMcpServers: ["disabled"],
+    },
+  };
   const service = serviceFor(manager, {
-    getClaudeMcp: () => ({ launchConfig: async () => mcpSnapshot }),
+    getProjects: () => ({ resolveDirectory: async () => project }),
   });
   const result = await service.call("task.create", {
     repo: "/Users/sushi/project",
     title: "Export CSV",
+    mcp: {
+      mcpServers: { fs: { command: "caller-fs" }, extra: { command: "extra" } },
+    },
   });
   assert.equal(result.id, "t1");
   const sent = manager.requestsFor("orch.task.create")[0];
-  assert.deepEqual(sent.params.mcp, mcpSnapshot);
+  assert.deepEqual(sent.params.mcp, {
+    mcpServers: {
+      fs: { command: "caller-fs" },
+      lookup: { command: "project-lookup" },
+      extra: { command: "extra" },
+    },
+  });
+  assert.equal(sent.params.projectId, project.id);
   assert.equal(sent.params.title, "Export CSV");
 });
 
-test("task.create proceeds without mcp when the project has no readable MCP config", async () => {
+test("task.create sends no mcp when there is no project", async () => {
   const manager = fakeDaemonManager({
     handlers: { "orch.task.create": (params) => ({ id: "t2", ...params }) },
   });
   const service = serviceFor(manager, {
-    getClaudeMcp: () => ({
-      launchConfig: async () => {
-        throw new Error("no such project");
-      },
-    }),
+    getProjects: () => ({ resolveDirectory: async () => null }),
   });
   await service.call("task.create", { repo: "/nope", title: "x" });
   const sent = manager.requestsFor("orch.task.create")[0].params;
@@ -444,6 +465,53 @@ test("orch.event arrives per host: a local one as is, a remote one tagged with i
   hosts.close();
   manager.notify("local", "orch.event", { event: "task", task: task("l2") });
   assert.equal(relayed.length, 2);
+});
+
+test("a question held for the overseer raises no notice until the overseer hands it on", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, notices } = await listening(manager);
+  const waiting = (held) => ({
+    id: "t1",
+    title: "T",
+    repo: "/r",
+    status: "waiting",
+    question: {
+      text: "Which?",
+      options: ["a", "b"],
+      heldForOverseer: held,
+      heldAt: Date.now(),
+    },
+  });
+  manager.notify("local", "orch.event", { event: "task", task: waiting(true) });
+  assert.equal(notices.length, 0);
+  manager.notify("local", "orch.event", {
+    event: "task",
+    task: waiting(false),
+  });
+  assert.equal(notices.length, 1);
+  hosts.close();
+});
+
+test("a hold older than ten minutes no longer silences the notice", async () => {
+  const manager = twoHosts({ "orch.task.list": () => [] });
+  const { hosts, notices } = await listening(manager);
+  manager.notify("local", "orch.event", {
+    event: "task",
+    task: {
+      id: "t9",
+      title: "T",
+      repo: "/r",
+      status: "waiting",
+      question: {
+        text: "Which?",
+        options: ["a"],
+        heldForOverseer: true,
+        heldAt: Date.now() - 11 * 60 * 1000,
+      },
+    },
+  });
+  assert.equal(notices.length, 1);
+  hosts.close();
 });
 
 test("events and notices are kept per host: the same task id on two hosts notifies twice", async () => {

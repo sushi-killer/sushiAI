@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn review_off(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -38,7 +38,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt next to a.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;
@@ -78,6 +78,7 @@ fn a_task_with_depends_on_is_not_started_until_its_dependency_is_done() {
 
     // Created with a dependency, the second task starts on its own, but its
     // loop must not run an attempt while the first is not done.
+    // Absence check: this window gives a forbidden start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let waiting = daemon.request("task.get", serde_json::json!({"id": second_id}));
     assert_eq!(waiting["status"], "queued", "task JSON: {waiting}");
@@ -102,7 +103,7 @@ fn a_task_with_depends_on_is_not_started_until_its_dependency_is_done() {
     let worktrees = [first["worktree"].clone(), second["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -123,23 +124,9 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
 
-    // The parent's verify needs both files, so it fails on the base: the
-    // parent asks before any subtask starts, and the subtasks are meant to
-    // make it pass.
-    let asked = settle(&daemon, &parent_id);
-    assert_eq!(asked["status"], "waiting", "task JSON: {asked}");
-    assert_eq!(asked["question"]["kind"], "preexisting_failure", "{asked}");
-    assert!(
-        asked["question"]["options"]
-            .to_string()
-            .contains("keep this check"),
-        "{asked}"
-    );
-    daemon.request(
-        "task.answer",
-        serde_json::json!({"id": parent_id, "answer": "keep this check"}),
-    );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    // The parent's verify needs both files, which are absent on the base and
+    // created by the subtasks: kept by rule, no question.
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -177,7 +164,17 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
             &["cat-file", "-e", &format!("{branch}:{file}")],
         );
     }
-    assert!(b["decisions"].to_string().contains("started from"), "{b}");
+    assert!(
+        b["decisions"]
+            .to_string()
+            .contains("Rebase: carried the work onto"),
+        "{b}"
+    );
+    assert_eq!(
+        b["baseSha"],
+        git_out(repo.path(), &["rev-parse", &format!("{branch}^")]),
+        "{b}"
+    );
     let total = a["costUsd"].as_f64().unwrap() + b["costUsd"].as_f64().unwrap();
     assert!(
         parent["costUsd"].as_f64().unwrap() >= total - 1e-9,
@@ -186,18 +183,19 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, *a, *b] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
 #[test]
-fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
+fn overlapping_subtask_paths_merge_into_one_task_with_a_checklist() {
     let script_text = GRAPH_SCRIPT
+        .replace(r#"\"paths\":[\"a.txt\"]"#, r#"\"paths\":[\"src/a\"]"#)
+        .replace(r#"\"paths\":[\"b.txt\"]"#, r#"\"paths\":[\"src/a/b.rs\"]"#)
         .replace(
-            r#"\"request\":\"PART_A create a.txt\""#,
-            r#"\"request\":\"PART_A create a.txt\",\"paths\":[\"src/a\"]"#,
-        )
-        .replace(r#"\"dependsOn\":[\"a\"]"#, r#"\"paths\":[\"src/a/b.rs\"]"#);
+            "*PART_A*) echo a > a.txt; out",
+            "*PART_A*) echo a > a.txt; echo b > b.txt; out",
+        );
     assert_ne!(script_text, GRAPH_SCRIPT);
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &script_text);
@@ -214,6 +212,61 @@ fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
     let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "done", "{parent}");
+    let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
+    let children = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["parent"] == parent_id.as_str())
+        .count();
+    assert_eq!(children, 0, "{tasks}");
+    let checklist = parent["checklist"].as_array().unwrap();
+    assert_eq!(checklist.len(), 2, "{parent}");
+    assert!(checklist[0]["text"].as_str().unwrap().contains("PART_A"));
+    assert!(checklist[1]["text"].as_str().unwrap().contains("PART_B"));
+    assert!(checklist.iter().all(|i| i["passes"] == true), "{parent}");
+    assert!(
+        parent["decisions"]
+            .to_string()
+            .contains("Plan gate: merged 2 subtasks into one task with a checklist"),
+        "{parent}"
+    );
+
+    let worktree = parent["worktree"].clone();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree.as_str().unwrap());
+}
+
+#[test]
+fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
+    let script_text = GRAPH_SCRIPT
+        .replace(
+            r#"\"paths\":[\"a.txt\"]"#,
+            r#"\"paths\":[\"src/a\"],\"goal\":\"PART_A: create a.txt\",\"criteria\":[\"a.txt exists -- check: test -f a.txt\"],\"verify\":[\"test -f a.txt\"]"#,
+        )
+        .replace(
+            r#"\"paths\":[\"b.txt\"]"#,
+            r#"\"paths\":[\"src/a/b.rs\"],\"goal\":\"PART_B: create b.txt next to a.txt\",\"criteria\":[\"both files exist -- check: test -f a.txt && test -f b.txt\"],\"verify\":[\"test -f a.txt && test -f b.txt\"]"#,
+        )
+        .replace(r#",\"dependsOn\":[\"a\"]"#, "");
+    assert_ne!(script_text, GRAPH_SCRIPT);
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &script_text);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "build both parts",
+            "start": true,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "done", "{parent}");
     let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
     let children: Vec<&serde_json::Value> = tasks
         .as_array()
@@ -221,8 +274,14 @@ fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
         .iter()
         .filter(|t| t["parent"] == parent_id.as_str())
         .collect();
+    assert_eq!(children.len(), 2, "{tasks}");
     let a = children.iter().find(|t| t["title"] == "Part A").unwrap();
     let b = children.iter().find(|t| t["title"] == "Part B").unwrap();
+    for child in [*a, *b] {
+        assert_eq!(child["status"], "done", "{child}");
+        assert_eq!(child["plannedByParent"], true, "{child}");
+    }
+    assert_eq!(b["relayOf"], a["id"], "{b}");
     assert_eq!(b["dependsOn"], serde_json::json!([a["id"]]), "{b}");
     assert_eq!(b["paths"], serde_json::json!(["src/a/b.rs"]));
     assert!(
@@ -234,7 +293,7 @@ fn overlapping_subtask_paths_add_a_dependency_edge_to_the_created_children() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, *a, *b] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -246,8 +305,11 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     review_off(&daemon);
     let repo = init_git_repo();
     // Part B's worktree path is already taken, so creating Part B fails
-    // after Part A was created.
-    let parent_dir = repo.path().join(".sushiai/worktrees");
+    // after Part A was created. A relative override keeps the paths known.
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["worktreeRoot"] = serde_json::json!(".wt");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let parent_dir = repo.path().join(".wt");
     let blocked = parent_dir.join("task-part-b");
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(blocked.join("occupied.txt"), "x\n").unwrap();
@@ -279,8 +341,8 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
     assert!(!part_a_wt.exists(), "Part A's worktree was left behind");
 
     daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(&blocked);
-    let _ = std::fs::remove_dir_all(parent["worktree"].as_str().unwrap());
+    remove_dir_retrying(&blocked);
+    remove_dir_retrying(parent["worktree"].as_str().unwrap());
 }
 
 /// Two parts of a hand-built graph. Each writes its own file, or with
@@ -288,13 +350,24 @@ fn a_split_that_cannot_create_every_part_creates_none_and_runs_as_one_task() {
 /// both lines. Every run notes how many runs were live when it started.
 const PARTS_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
-mkdir -p "$PARTS_LOG/live"
-touch "$PARTS_LOG/live/$$"
+# Holds the run open for a second, or until a second run has started, for at
+# most $PEER_WAIT tenths of a second. A run that finishes at once leaves its
+# `seen` file, so the run that started first still finds it.
+peer_wait() {
+  i=0
+  while [ "$i" -lt "${PEER_WAIT:-10}" ]; do
+    [ "$(ls "$PARTS_LOG/seen" | wc -l)" -ge 2 ] && return
+    sleep 0.1
+    i=$((i+1))
+  done
+}
+mkdir -p "$PARTS_LOG/live" "$PARTS_LOG/seen"
+touch "$PARTS_LOG/live/$$" "$PARTS_LOG/seen/$$"
 ls "$PARTS_LOG/live" | wc -l | tr -d ' ' >> "$PARTS_LOG/counts"
 case "$input" in
   *"These files conflict"*) printf 'one\ntwo\n' > shared.txt ;;
-  *PART_ONE*) sleep 1; if [ -n "$SHARED" ]; then echo one > shared.txt; else echo one > one.txt; fi ;;
-  *PART_TWO*) sleep 1; if [ -n "$SHARED" ]; then echo two > shared.txt; else echo two > two.txt; fi ;;
+  *PART_ONE*) peer_wait; if [ -n "$SHARED" ]; then echo one > shared.txt; else echo one > one.txt; fi ;;
+  *PART_TWO*) peer_wait; if [ -n "$SHARED" ]; then echo two > shared.txt; else echo two > two.txt; fi ;;
 esac
 rm -f "$PARTS_LOG/live/$$"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
@@ -347,11 +420,20 @@ fn hand_built_graph(
 #[test]
 fn two_independent_children_run_concurrently_and_both_land() {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PARTS_SCRIPT);
+    // A longer part, so a loaded machine still overlaps the two runs.
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &PARTS_SCRIPT.replace("sleep 1;", "sleep 8;"),
+    );
     let log = tempfile::tempdir().unwrap();
+    // Each child waits for its peer to be live, up to one deadline, so a slow
+    // start of the second child cannot make the runs miss each other.
+    let peer_wait = (deadline().as_secs() * 10).to_string();
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("PARTS_LOG", log.path().to_str().unwrap()),
+        ("PEER_WAIT", &peer_wait),
     ]);
     review_off(&daemon);
     let repo = init_git_repo();
@@ -389,7 +471,7 @@ fn two_independent_children_run_concurrently_and_both_land() {
 
     daemon.shutdown_and_wait();
     for t in children.iter().chain([&parent]) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -452,7 +534,7 @@ fn a_child_whose_rebase_conflicts_is_retried_by_the_agent_not_dropped() {
 
     daemon.shutdown_and_wait();
     for t in children.iter().chain([&parent]) {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -514,7 +596,7 @@ fn task_create_rejects_a_dependency_cycle_and_an_unknown_id_and_creates_nothing(
 
     daemon.shutdown_and_wait();
     for t in [&parent, &waiter] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -555,14 +637,10 @@ fn a_stopped_dependency_asks_its_dependent_and_dropping_it_lets_the_dependent_ru
         }),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &slow_id, Duration::from_secs(10), |s| {
-        s == "running"
-    });
+    poll_until(&daemon, &slow_id, |s| s == "running");
     daemon.request("task.stop", serde_json::json!({"id": slow_id}));
 
-    let asked = poll_until(&daemon, &dependent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &dependent_id, |s| s == "waiting");
     let question = asked["question"]["text"].as_str().unwrap();
     assert!(
         question.contains("\"SLOW dependency\" (stopped)"),
@@ -582,7 +660,7 @@ fn a_stopped_dependency_asks_its_dependent_and_dropping_it_lets_the_dependent_ru
 
     daemon.shutdown_and_wait();
     for t in [&slow, &dependent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -623,14 +701,9 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
         }),
     );
     let child_id = child["id"].as_str().unwrap().to_string();
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "the child never ran"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the child to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
 
     let stopped = daemon.request("task.stop", serde_json::json!({"id": parent_id}));
     assert_eq!(
@@ -644,7 +717,7 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
     assert_eq!(parent_now["status"], "stopped", "{parent_now}");
 
     daemon.request("task.start", serde_json::json!({"id": parent_id}));
-    let parent_done = poll_until(&daemon, &parent_id, Duration::from_secs(30), |s| {
+    let parent_done = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "waiting")
     });
     assert_eq!(parent_done["status"], "done", "{parent_done}");
@@ -653,7 +726,7 @@ fn stopping_a_parent_stops_its_children_and_running_it_again_restarts_them() {
 
     daemon.shutdown_and_wait();
     for t in [&parent_done, &child_done] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -691,14 +764,12 @@ fn create_and_stop_first_run(
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
     let task = daemon.request("task.create", params);
-    let start = Instant::now();
-    while !log.join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the first run to start", || {
+        log.join("slept").exists().then_some(())
+    });
     let id = task["id"].as_str().unwrap();
     daemon.request("task.stop", serde_json::json!({"id": id}));
-    poll_until(daemon, id, Duration::from_secs(10), |s| s == "stopped");
+    poll_until(daemon, id, |s| s == "stopped");
     task
 }
 
@@ -732,9 +803,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
     );
     let child_id = child["id"].as_str().unwrap().to_string();
 
-    let asked = poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
     assert!(
         asked["question"]["text"]
             .as_str()
@@ -742,6 +811,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
             .contains("(stopped)"),
         "{asked}"
     );
+    // Absence check: this window gives a forbidden child start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
@@ -755,7 +825,7 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
 
     daemon.shutdown_and_wait();
     for t in [&dep, &parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -778,6 +848,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
     let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["parallel"] = serde_json::json!(1);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
@@ -787,7 +858,7 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         serde_json::json!({"settings": settings}),
     );
     stop_daemon(&socket1);
-    let _ = wait_for_exit(first, Duration::from_secs(5));
+    let _ = wait_for_exit(first);
 
     let socket = socket_of(&home);
     let child = spawn_daemon(&home, &fake_bins);
@@ -802,11 +873,9 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         serde_json::json!({"repo": repo_path, "title": "Blocker", "goal": "g",
         "verify": ["true"], "start": true}),
     );
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the blocker to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
     let parent = call(
         "task.create",
         serde_json::json!({"repo": repo_path, "title": "Parent", "goal": "g",
@@ -829,21 +898,16 @@ fn a_task_queued_for_a_slot_cannot_become_a_parent_and_implements_alone() {
         "task.stop",
         serde_json::json!({"id": blocker["id"].as_str().unwrap()}),
     );
-    let start = Instant::now();
-    let done = loop {
+    let done = wait_until("the parent to be done", || {
         let t = call("task.get", serde_json::json!({"id": parent_id}));
-        if t["status"] == "done" {
-            break t;
-        }
-        assert!(start.elapsed() < Duration::from_secs(20), "{t}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "done").then_some(t)
+    });
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
 
     stop_daemon(&socket);
-    let _ = wait_for_exit(child, Duration::from_secs(5));
+    let _ = wait_for_exit(child);
     for t in [&blocker, &parent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -864,26 +928,22 @@ fn retrying_a_stopped_dependency_finishes_the_dependency_and_its_dependent() {
         }),
     );
     let dependent_id = dependent["id"].as_str().unwrap().to_string();
-    poll_until(&daemon, &dependent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    poll_until(&daemon, &dependent_id, |s| s == "waiting");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": dependent_id, "answer": "retry the dependency"}),
     );
-    let dep_done = poll_until(&daemon, &dep_id, Duration::from_secs(20), |s| {
+    let dep_done = poll_until(&daemon, &dep_id, |s| {
         matches!(s, "done" | "failed" | "waiting")
     });
     assert_eq!(dep_done["status"], "done", "{dep_done}");
-    let dependent_done = poll_until(&daemon, &dependent_id, Duration::from_secs(20), |s| {
-        matches!(s, "done" | "failed")
-    });
+    let dependent_done = poll_until(&daemon, &dependent_id, |s| matches!(s, "done" | "failed"));
     assert_eq!(dependent_done["status"], "done", "{dependent_done}");
     assert!(dependent_done["question"].is_null(), "{dependent_done}");
 
     daemon.shutdown_and_wait();
     for t in [&dep, &dependent] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -908,14 +968,14 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
         log.path(),
         serde_json::json!({"title": "Only part", "parent": parent_id}),
     );
-    let asked = poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "waiting"
-    });
+    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
     assert!(asked["question"]["text"].is_string(), "{asked}");
     daemon.request(
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "drop the dependency"}),
     );
+    poll_until(&daemon, &parent_id, |s| s == "stopped");
+    // Absence check: this window gives a forbidden attempt time to start.
     std::thread::sleep(Duration::from_millis(1500));
     let after = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(after["status"], "stopped", "{after}");
@@ -927,7 +987,7 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
 
     daemon.shutdown_and_wait();
     for t in [&parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -1034,7 +1094,7 @@ fn a_dependents_first_brief_carries_the_landed_dependencys_results() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1059,7 +1119,7 @@ fn a_plan_brief_carries_the_results_of_a_dependency_that_was_already_done() {
     );
     // The plan attempt passed; the drafted task waits for the owner.
     assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
-    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    let brief = plan_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
     assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
     assert!(brief.contains("## Landed dependencies"), "{brief}");
     assert!(brief.contains("DEP_SUMMARY"), "{brief}");
@@ -1070,7 +1130,7 @@ fn a_plan_brief_carries_the_results_of_a_dependency_that_was_already_done() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1103,7 +1163,7 @@ fn a_plan_brief_written_before_its_dependency_lands_has_no_landed_section() {
         serde_json::json!({"request": "build on the dependency"}),
     );
     assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
-    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    let brief = plan_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
     assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
     assert!(!brief.contains("## Landed dependencies"), "{brief}");
 
@@ -1111,7 +1171,7 @@ fn a_plan_brief_written_before_its_dependency_lands_has_no_landed_section() {
     daemon.shutdown_and_wait();
     for wt in worktrees {
         if let Some(wt) = wt.as_str() {
-            let _ = std::fs::remove_dir_all(wt);
+            remove_dir_retrying(wt);
         }
     }
 }
@@ -1152,7 +1212,7 @@ fn a_dependency_with_many_changed_files_lists_twenty_and_counts_the_rest() {
     let worktrees = [dep["worktree"].clone(), child["worktree"].clone()];
     daemon.shutdown_and_wait();
     for wt in worktrees {
-        let _ = std::fs::remove_dir_all(wt.as_str().unwrap());
+        remove_dir_retrying(wt.as_str().unwrap());
     }
 }
 
@@ -1171,7 +1231,7 @@ case "$input" in
     case "$input" in
       *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Part One\",\"goal\":\"PART_ONE: create one.txt\",\"verify\":[\"test -f one.txt\"]}\n```"' ;;
       *PART_TWO*) out '"```sushi-plan\n{\"title\":\"Part Two\",\"goal\":\"PART_TWO: create two.txt\",\"verify\":[\"test -f two.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Both parts\",\"verify\":[\"__PARENT_VERIFY__\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part One\",\"request\":\"PART_ONE create one.txt\"},{\"key\":\"b\",\"title\":\"Part Two\",\"request\":\"PART_TWO create two.txt\"}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Both parts\",\"verify\":[\"__PARENT_VERIFY__\"]__PARENT_FINAL__,\"subtasks\":[{\"key\":\"a\",\"title\":\"Part One\",\"request\":\"PART_ONE create one.txt\",\"paths\":[\"one.txt\"],\"check\":\"test -f one.txt\"},{\"key\":\"b\",\"title\":\"Part Two\",\"request\":\"PART_TWO create two.txt\",\"paths\":[\"two.txt\"],\"check\":\"test -f two.txt\"}]}\n```"' ;;
     esac
     ;;
   *NEEDS-FIX*) echo fix > fix.txt; out "$report" ;;
@@ -1182,7 +1242,24 @@ esac
 
 fn split_daemon(parent_verify: &str) -> (Daemon, tempfile::TempDir) {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let body = SPLIT_SCRIPT.replace("__PARENT_VERIFY__", parent_verify);
+    let body = SPLIT_SCRIPT
+        .replace("__PARENT_VERIFY__", parent_verify)
+        .replace("__PARENT_FINAL__", "");
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    (daemon, scripts_dir)
+}
+
+/// `split_daemon` whose parent plan also names one `finalVerify` command.
+fn split_daemon_with_final(parent_verify: &str, final_check: &str) -> (Daemon, tempfile::TempDir) {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let body = SPLIT_SCRIPT
+        .replace("__PARENT_VERIFY__", parent_verify)
+        .replace(
+            "__PARENT_FINAL__",
+            &format!(",\\\"finalVerify\\\":[\\\"{final_check}\\\"]"),
+        );
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     review_off(&daemon);
@@ -1222,7 +1299,7 @@ fn children_of(daemon: &Daemon, parent: &serde_json::Value) -> Vec<serde_json::V
 
 fn remove_worktrees(tasks: &[&serde_json::Value]) {
     for t in tasks {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }
 
@@ -1262,7 +1339,7 @@ fn a_parent_check_that_fails_after_its_subtasks_landed_gets_one_agent_attempt_an
     let repo = repo_on_work_branch();
     let parent_id = create_split(&daemon, repo.path(), true);
 
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
@@ -1303,7 +1380,7 @@ fn a_parent_verify_that_fails_on_the_base_asks_before_any_subtask_starts() {
     );
     assert_eq!(
         question["options"],
-        serde_json::json!(["keep this check", "drop this check", "stop"])
+        serde_json::json!(["keep all", "drop all", "stop"])
     );
     let children = children_of(&daemon, &parent);
     assert_eq!(children.len(), 2);
@@ -1322,14 +1399,186 @@ fn a_parent_verify_that_fails_on_the_base_asks_before_any_subtask_starts() {
     // Dropping the check lets the subtasks run and the parent finish.
     daemon.request(
         "task.answer",
-        serde_json::json!({"id": parent_id, "answer": "drop this check"}),
+        serde_json::json!({"id": parent_id, "answer": "drop all"}),
     );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "done", "task JSON: {parent}");
     assert_eq!(parent["verify"], serde_json::json!([]), "{parent}");
 
+    let children = children_of(&daemon, &parent);
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_parent_final_that_fails_on_the_base_does_not_hold_back_the_children() {
+    let log = tempfile::tempdir().unwrap();
+    let ran = log.path().join("final.log");
+    // Starts, logs a line, and is still running when the children land: it
+    // outlasts the deadline twice over, so the children must not wait for it.
+    let final_check = format!(
+        "echo start >> {}; sleep {}; exit 1",
+        ran.display(),
+        deadline().as_secs() * 2
+    );
+    let (daemon, _scripts) = split_daemon_with_final("true", &final_check);
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+
+    let (parent, children) = wait_until("both children to be done", || {
+        let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+        let children = children_of(&daemon, &parent);
+        if children.len() == 2 && children.iter().all(|c| c["status"] == "done") {
+            return Some((parent, children));
+        }
+        assert_ne!(parent["status"], "waiting", "no question first: {parent}");
+        None
+    });
+    assert!(parent["question"].is_null(), "{parent}");
+    // At least the base run; the parent's own gate may already have run it.
+    let started = std::fs::read_to_string(&ran).map_or(0, |t| t.lines().count());
+    assert!(
+        started >= 1,
+        "the final's base run started in the background"
+    );
+
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+/// `commands` as the `verify` list of the split script's parent plan.
+fn verify_list(commands: &[&str]) -> String {
+    commands.join("\\\",\\\"")
+}
+
+fn decisions_of(task: &serde_json::Value) -> Vec<String> {
+    task["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn dirs_named(root: &Path, prefix: &str, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with(prefix) {
+            found.push(path.display().to_string());
+        }
+        if path.is_dir() {
+            dirs_named(&path, prefix, found);
+        }
+    }
+}
+
+#[test]
+fn a_parent_whose_checks_name_absent_planned_files_asks_nothing() {
+    let checks = [
+        "test -f one.txt",
+        "test -f two.txt",
+        "test -s one.txt",
+        "test -s two.txt",
+    ];
+    let (daemon, _scripts) = split_daemon(&verify_list(&checks));
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["autoAnswer"] = serde_json::json!(true);
+    settings["answerPolicy"] = serde_json::json!(true);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+
+    let parent = poll_until(&daemon, &parent_id, |s| {
+        matches!(s, "done" | "failed" | "stopped")
+    });
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert_eq!(
+        parent["questionHistory"].as_array().map_or(0, Vec::len),
+        0,
+        "{parent}"
+    );
+    let log = daemon.request("overseer.log", serde_json::json!({}));
+    let wakes = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "woke" && e["text"] != "Woke for done")
+        .count();
+    // The parent finishing may wake the overseer; nothing else does.
+    assert_eq!(wakes, 0, "{log}");
+    let children = children_of(&daemon, &parent);
+    let mut judged = Vec::new();
+    for id in children
+        .iter()
+        .chain([&parent])
+        .map(|t| t["id"].as_str().unwrap())
+    {
+        dirs_named(
+            &daemon.data_dir().join("tasks").join(id),
+            "feasibility-",
+            &mut judged,
+        );
+    }
+    assert!(judged.is_empty(), "no judge run: {judged:?}");
+    let decisions = decisions_of(&parent);
+    for check in checks {
+        let kept = decisions
+            .iter()
+            .filter(|d| {
+                d.contains(&format!("kept check {check},"))
+                    && d.contains("targets absent on base; the plan creates them")
+            })
+            .count();
+        assert_eq!(kept, 1, "{check}: {decisions:?}");
+    }
+    daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_parent_with_three_checks_failing_on_base_gets_one_question() {
+    let checks = [
+        "echo first; exit 1",
+        "echo second; exit 2",
+        "echo third; exit 3",
+    ];
+    let (daemon, _scripts) = split_daemon(&verify_list(&checks));
+    let repo = repo_on_work_branch();
+    let parent_id = create_split(&daemon, repo.path(), false);
+
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
+    let question = &parent["question"];
+    assert_eq!(question["kind"], "preexisting_failure", "{parent}");
+    assert_eq!(question["commands"], serde_json::json!(checks), "{parent}");
+    assert_eq!(
+        question["options"],
+        serde_json::json!(["keep all", "drop all", "stop"])
+    );
+    daemon.request(
+        "task.answer",
+        serde_json::json!({"id": parent_id, "answer": "keep all"}),
+    );
+    let kept = wait_until("the three kept-check decisions", || {
+        let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+        let kept: Vec<String> = decisions_of(&parent)
+            .into_iter()
+            .filter(|d| d.starts_with("Orchestrator: kept check "))
+            .collect();
+        (kept.len() >= 3).then_some(kept)
+    });
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+    assert_eq!(
+        parent["questionHistory"].as_array().unwrap().len(),
+        1,
+        "one question was asked: {parent}"
+    );
     let children = children_of(&daemon, &parent);
     daemon.shutdown_and_wait();
     remove_worktrees(&children.iter().chain([&parent]).collect::<Vec<_>>());
@@ -1347,7 +1596,7 @@ fn answering_stop_to_a_parents_base_check_question_stops_the_parent() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "stop"}),
     );
-    let parent = poll_until(&daemon, &parent_id, Duration::from_secs(60), |s| {
+    let parent = poll_until(&daemon, &parent_id, |s| {
         matches!(s, "done" | "failed" | "stopped")
     });
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
@@ -1369,7 +1618,9 @@ fn answering_stop_to_a_parents_base_check_question_stops_the_parent() {
 #[test]
 fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let body = SPLIT_SCRIPT.replace("__PARENT_VERIFY__", "echo no library targets; exit 101");
+    let body = SPLIT_SCRIPT
+        .replace("__PARENT_VERIFY__", "echo no library targets; exit 101")
+        .replace("__PARENT_FINAL__", "");
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let mut daemon = Daemon::spawn(&env);
@@ -1393,10 +1644,9 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
         "task.answer",
         serde_json::json!({"id": parent_id, "answer": "stop"}),
     );
-    poll_until(&daemon, &parent_id, Duration::from_secs(15), |s| {
-        s == "stopped"
-    });
-    // Give a wrongly relaunched loop time to run its preflight again.
+    poll_until(&daemon, &parent_id, |s| s == "stopped");
+    // Absence check: this window gives a wrongly relaunched loop time to run its
+    // preflight again.
     std::thread::sleep(Duration::from_millis(1500));
     let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
@@ -1438,6 +1688,7 @@ fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
     );
     let child_id = child["id"].as_str().unwrap().to_string();
 
+    // Absence check: this window gives a forbidden child start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
@@ -1445,14 +1696,428 @@ fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
     assert!(!log.path().join("slept").exists());
 
     daemon.request("task.start", serde_json::json!({"id": parent_id}));
-    let start = Instant::now();
-    while !log.path().join("slept").exists() {
-        assert!(start.elapsed() < Duration::from_secs(10), "child never ran");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the child to run", || {
+        log.path().join("slept").exists().then_some(())
+    });
 
     daemon.shutdown_and_wait();
     for t in [&parent, &child] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
+    }
+}
+
+/// A fake `npm` that appends its working directory to `$NPM_LOG` and exits 0,
+/// except when `$NPM_FAIL` is set: while `one.txt` exists and `fix.txt` does
+/// not, it prints a failure tail and exits 3.
+const FAKE_NPM: &str = r#"#!/bin/sh
+echo "$PWD" >> "$NPM_LOG"
+if [ -n "$NPM_FAIL" ] && [ -f one.txt ] && [ ! -f fix.txt ]; then
+  echo "GATE-BROKEN-$(echo TAIL) NEEDS-$(echo FIX)"
+  exit 3
+fi
+exit 0
+"#;
+
+/// `PARTS_SCRIPT` that also writes fix.txt for a run told about a gate
+/// failure and, with `BARRIER` set, makes a part wait until both parts are
+/// running, so the second to land always finds the parent branch moved.
+fn gate_script() -> String {
+    PARTS_SCRIPT
+        .replace(
+            "case \"$input\" in\n",
+            "case \"$input\" in\n  *NEEDS-FIX*) echo fix > fix.txt ;;\n",
+        )
+        .replace(
+            "rm -f \"$PARTS_LOG/live/$$\"\n",
+            "if [ -n \"$BARRIER\" ]; then\n  touch \"$PARTS_LOG/arrived.$$\"\n  i=0\n  while [ \"$(ls \"$PARTS_LOG\" | grep -c '^arrived')\" -lt 2 ] && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done\nfi\nrm -f \"$PARTS_LOG/live/$$\"\n",
+        )
+}
+
+struct GateRun {
+    daemon: Daemon,
+    repo: tempfile::TempDir,
+    npm_log: std::path::PathBuf,
+    _dirs: Vec<tempfile::TempDir>,
+}
+
+/// A daemon whose harness is `gate_script` and whose `npm` is the fake one.
+fn gate_daemon(fail: bool, gate_at: Option<&str>) -> GateRun {
+    gate_daemon_env(fail, gate_at, &[])
+}
+
+fn gate_daemon_env(fail: bool, gate_at: Option<&str>, extra: &[(&str, &str)]) -> GateRun {
+    let scripts = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let log = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake-claude.sh", &gate_script());
+    fake_harness_script(bin.path(), "npm", FAKE_NPM);
+    let npm_log = log.path().join("npm.log");
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut vars = vec![
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("PARTS_LOG", log.path().to_str().unwrap()),
+        ("NPM_LOG", npm_log.to_str().unwrap()),
+        ("NPM_FAIL", if fail { "1" } else { "" }),
+        ("PATH", &path),
+    ];
+    vars.extend_from_slice(extra);
+    let daemon = Daemon::spawn(&vars);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    if let Some(at) = gate_at {
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["gateAt"] = serde_json::json!({ repo.path().to_str().unwrap(): at });
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    }
+    GateRun {
+        daemon,
+        repo,
+        npm_log,
+        _dirs: vec![scripts, bin, log],
+    }
+}
+
+/// A path with symlinks resolved, also when its last parts are gone.
+fn canon(path: &str) -> std::path::PathBuf {
+    let mut rest = std::path::PathBuf::new();
+    let mut head = Path::new(path).to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&head) {
+            return real.join(rest);
+        }
+        let Some(name) = head.file_name().map(|n| n.to_owned()) else {
+            return Path::new(path).to_path_buf();
+        };
+        rest = Path::new(&name).join(rest);
+        head.pop();
+    }
+}
+
+/// How many times `npm` ran in each given task worktree (scratch base-check
+/// worktrees are not task worktrees and are not counted).
+fn npm_runs_in(run: &GateRun, tasks: &[&serde_json::Value]) -> Vec<usize> {
+    let log = std::fs::read_to_string(&run.npm_log).unwrap_or_default();
+    let lines: Vec<std::path::PathBuf> = log.lines().map(canon).collect();
+    tasks
+        .iter()
+        .map(|t| {
+            let wt = canon(t["worktree"].as_str().unwrap());
+            lines.iter().filter(|l| **l == wt).count()
+        })
+        .collect()
+}
+
+fn deferred_lines(task: &serde_json::Value) -> Vec<String> {
+    decisions_of(task)
+        .into_iter()
+        .filter(|d| d.contains("Deferred to parent"))
+        .collect()
+}
+
+/// A parent with `finals[0]` and two children with `finals[1..]`, started.
+fn gate_graph(run: &GateRun, finals: [&[&str]; 3]) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let parent = gate_graph_with(run, finals, ["test -f one.txt", "test -f two.txt"]);
+    let parent = settle(&run.daemon, parent["id"].as_str().unwrap());
+    let children = children_of(&run.daemon, &parent);
+    assert_eq!(children.len(), 2);
+    (parent, children)
+}
+
+/// Creates the gate graph with per-child verify commands, without waiting for it to settle.
+fn gate_graph_with(
+    run: &GateRun,
+    finals: [&[&str]; 3],
+    child_verify: [&str; 2],
+) -> serde_json::Value {
+    let repo = run.repo.path().to_str().unwrap();
+    let parent = run.daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo, "title": "Parent", "goal": "Both parts",
+            "verify": ["test -f one.txt && test -f two.txt"],
+            "finalVerify": finals[0], "start": false,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    for (i, (title, goal)) in [("One", "PART_ONE"), ("Two", "PART_TWO")]
+        .iter()
+        .enumerate()
+    {
+        run.daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo, "title": title, "goal": goal,
+                "verify": [child_verify[i]],
+                "finalVerify": finals[i + 1], "parent": parent_id,
+            }),
+        );
+    }
+    parent
+}
+
+fn finish_gate(run: GateRun, parent: &serde_json::Value, children: &[serde_json::Value]) {
+    run.daemon.shutdown_and_wait();
+    remove_worktrees(&children.iter().chain([parent]).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_two_child_graph_runs_the_shared_gate_once_at_the_parent() {
+    let run = gate_daemon(false, None);
+    let gate: &[&str] = &["npm run ci"];
+    let (parent, children) = gate_graph(&run, [gate, gate, gate]);
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    for c in &children {
+        assert_eq!(c["status"], "done", "task JSON: {c}");
+        assert_eq!(
+            deferred_lines(c),
+            ["Orchestrator: Deferred to parent: npm run ci"],
+            "{c}"
+        );
+        assert!(
+            c["finalVerify"].to_string().contains("npm run ci"),
+            "the stored finalVerify is kept: {c}"
+        );
+    }
+    let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();
+    assert_eq!(npm_runs_in(&run, &all), [0, 0, 1]);
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn a_carried_child_does_not_run_a_parent_deferred_final_at_landing() {
+    let run = gate_daemon_env(false, None, &[("BARRIER", "1")]);
+    let gate: &[&str] = &["npm run ci"];
+    // Hold One until Two is past its post-agent rebase, then hold Two until
+    // One has landed so the carry happens under the landing lock.
+    let parent = gate_graph_with(
+        &run,
+        [gate, gate, gate],
+        [
+            r#"test -f one.txt && i=0 && while [ ! -f "$PARTS_LOG/two-verifying" ]; do [ "$i" -lt 1500 ] || exit 1; sleep 0.2; i=$((i+1)); done"#,
+            r#"test -f two.txt && touch "$PARTS_LOG/two-verifying" && i=0 && while [ ! -f "$PARTS_LOG/one-landed" ]; do [ "$i" -lt 1500 ] || exit 1; sleep 0.2; i=$((i+1)); done"#,
+        ],
+    );
+    let children = children_of(&run.daemon, &parent);
+    let one = children.iter().find(|c| c["title"] == "One").unwrap();
+    poll_until(&run.daemon, one["id"].as_str().unwrap(), |s| s == "done");
+    std::fs::write(run.npm_log.parent().unwrap().join("one-landed"), b"").unwrap();
+    let parent = settle(&run.daemon, parent["id"].as_str().unwrap());
+    let children = children_of(&run.daemon, &parent);
+    assert_eq!(children.len(), 2);
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    for c in &children {
+        assert_eq!(c["status"], "done", "task JSON: {c}");
+    }
+    let carried = children
+        .iter()
+        .filter(|c| {
+            decisions_of(c)
+                .iter()
+                .any(|d| d.starts_with("Land: carried the work onto"))
+        })
+        .count();
+    assert_eq!(carried, 1, "one child lands on a moved parent branch");
+    let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();
+    assert_eq!(npm_runs_in(&run, &all), [0, 0, 1]);
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn gate_at_every_runs_the_gate_in_every_child() {
+    let run = gate_daemon(false, Some("every"));
+    let gate: &[&str] = &["npm run ci"];
+    let (parent, children) = gate_graph(&run, [gate, gate, gate]);
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    for c in &children {
+        assert_eq!(c["status"], "done", "task JSON: {c}");
+        assert!(deferred_lines(c).is_empty(), "{c}");
+    }
+    let runs = npm_runs_in(&run, &children.iter().collect::<Vec<_>>());
+    assert_eq!(runs, [1, 1]);
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn a_child_only_final_still_runs_in_the_child() {
+    let run = gate_daemon(false, None);
+    let (parent, children) = gate_graph(&run, [&[], &["npm run ci"], &[]]);
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    let one = children.iter().find(|c| c["title"] == "One").unwrap();
+    assert!(deferred_lines(one).is_empty(), "{one}");
+    assert_eq!(npm_runs_in(&run, &[one]), [1]);
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn a_parent_gate_failure_gets_one_attempt_with_the_failing_tail() {
+    let run = gate_daemon(true, None);
+    let gate: &[&str] = &["npm run ci"];
+    let (parent, children) = gate_graph(&run, [gate, gate, gate]);
+
+    let parent_id = parent["id"].as_str().unwrap();
+    let parent = poll_until(&run.daemon, parent_id, |s| {
+        matches!(s, "done" | "failed" | "stopped" | "waiting")
+    });
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert_eq!(implement_attempts(&parent).len(), 1, "task JSON: {parent}");
+    let brief = run_file(&run.daemon, parent_id, "brief.md");
+    assert!(brief.contains("npm run ci"), "{brief}");
+    assert!(brief.contains("GATE-BROKEN-TAIL"), "{brief}");
+    for c in &children {
+        assert_eq!(c["status"], "done", "task JSON: {c}");
+    }
+    finish_gate(run, &parent, &children);
+}
+
+#[test]
+fn a_parent_skips_a_command_its_child_passed_on_the_same_tree() {
+    let run = gate_daemon(false, Some("every"));
+    let repo = run.repo.path().to_str().unwrap();
+    let parent = run.daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo, "title": "Parent", "goal": "One part",
+            "verify": ["test -f one.txt"], "finalVerify": ["npm run ci"], "start": false,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    run.daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo, "title": "One", "goal": "PART_ONE",
+            "verify": ["test -f one.txt"], "finalVerify": ["npm run ci"], "parent": parent_id,
+        }),
+    );
+    let parent = settle(&run.daemon, &parent_id);
+    let children = children_of(&run.daemon, &parent);
+
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    assert_eq!(children.len(), 1);
+    assert!(
+        decisions_of(&parent)
+            .iter()
+            .any(|d| d.contains("already passed on tree")),
+        "{parent}"
+    );
+    let all: Vec<&serde_json::Value> = children.iter().chain([&parent]).collect();
+    assert_eq!(npm_runs_in(&run, &all), [1, 0]);
+    finish_gate(run, &parent, &children);
+}
+
+/// Part A writes `src/shared.txt`, which part B lists in its paths; B and C
+/// depend on A. Every part is drafted completely by the parent planner.
+const REFRESH_SCRIPT: &str = r#"#!/bin/sh
+input="$(cat)"
+out() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
+case "$input" in
+  *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *"A coding task was drafted before"*) echo refresh >> "$CALLS_LOG"; out '"{\"paths\": [\"src/shared.txt\", \"src/extra.txt\"]}"' ;;
+  *sushi-plan*) out '"```sushi-plan\n{\"title\":\"All parts\",\"goal\":\"Create the files\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt and src/shared.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"test -f a.txt\"],\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\",\"request\":\"REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"src/shared.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"REQ_B\"},{\"key\":\"c\",\"title\":\"Part C\",\"goal\":\"MAKE_C: create c.txt\",\"criteria\":[\"c.txt exists\"],\"verify\":[\"test -f c.txt\"],\"paths\":[\"c.txt\"],\"check\":\"test -f c.txt\",\"dependsOn\":[\"a\"],\"request\":\"REQ_C\"}]}\n```"' ;;
+  *MAKE_A*) mkdir -p src; echo a > a.txt; echo s > src/shared.txt; out "$report" ;;
+  *MAKE_B*) echo b > b.txt; out "$report" ;;
+  *MAKE_C*) echo c > c.txt; out "$report" ;;
+  *) out "$report" ;;
+esac
+"#;
+
+#[test]
+fn a_child_whose_paths_a_landed_dependency_touched_gets_one_refresh() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", REFRESH_SCRIPT);
+    let log = scripts_dir.path().join("calls.log");
+    std::fs::write(&log, "").unwrap();
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("CALLS_LOG", log.to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["answerPolicy"] = serde_json::json!(false);
+    settings["briefCheckRoute"] = serde_json::json!("claude-sonnet");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
+    let parent = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "build all parts",
+            "start": true,
+        }),
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = settle(&daemon, &parent_id);
+    assert_eq!(parent["status"], "done", "task JSON: {parent}");
+    let tasks = daemon.request("task.list", serde_json::json!({"repo": parent["repo"]}));
+    let children: Vec<&serde_json::Value> = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["parent"] == parent_id.as_str())
+        .collect();
+    let find = |title: &str| *children.iter().find(|t| t["title"] == title).unwrap();
+    let (a, b, c) = (find("Part A"), find("Part B"), find("Part C"));
+    for t in [a, b, c] {
+        assert_eq!(t["status"], "done", "task JSON: {t}");
+        assert_eq!(t["plannedByParent"], true, "task JSON: {t}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "exactly one refresh run"
+    );
+
+    let costs: Vec<serde_json::Value> =
+        std::fs::read_to_string(daemon.data_dir().join("costs.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let refreshed = |t: &serde_json::Value| {
+        costs
+            .iter()
+            .filter(|r| r["stage"] == "refresh" && r["taskId"] == t["id"])
+            .count()
+    };
+    assert_eq!(refreshed(b), 1, "{costs:?}");
+    assert_eq!(refreshed(c), 0, "{costs:?}");
+    assert_eq!(refreshed(a), 0, "{costs:?}");
+    let has_refresh_dir = |t: &serde_json::Value| {
+        !sushiai_orch::store::Store::new(daemon.data_dir())
+            .unwrap()
+            .helper_run_dirs(t["id"].as_str().unwrap(), "refresh", None)
+            .is_empty()
+    };
+    assert!(has_refresh_dir(b));
+    assert!(!has_refresh_dir(c));
+    // The refresh changed only the paths and said so, once.
+    assert_eq!(
+        b["paths"],
+        serde_json::json!(["src/shared.txt", "src/extra.txt"]),
+        "{b}"
+    );
+    assert_eq!(b["verify"], serde_json::json!(["test -f b.txt"]));
+    let lines = b["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d.as_str().unwrap_or("").starts_with("Refresh:"))
+        .count();
+    assert_eq!(lines, 1, "{b}");
+
+    daemon.shutdown_and_wait();
+    for t in [&parent, a, b, c] {
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }

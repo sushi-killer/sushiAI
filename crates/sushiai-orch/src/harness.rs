@@ -4,6 +4,7 @@
 //! [`RunOutcome`] as the engine reads the child's stdout.
 
 use crate::model::{price_for, Fingerprint, Harness, Price, SandboxMode};
+use crate::sandbox::TaskSandbox;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,11 +18,15 @@ pub struct RunRequest<'a> {
     pub max_budget_usd: Option<f64>,
     /// Read-only review session instead of an implement session.
     pub review: bool,
+    /// Only task implement runs use the orchd policy (including host overrides).
+    pub task_run: bool,
+    pub task_sandbox: Option<&'a TaskSandbox>,
     /// Claude only: paths to the run's `mcp.json` / `settings.json`.
     pub mcp_config: Option<&'a Path>,
     pub settings_path: Option<&'a Path>,
     /// Codex only: whether the sandbox has network access
-    /// (`sandbox_workspace_write.network_access`).
+    /// (`sandbox_workspace_write.network_access`). Task implement shell
+    /// commands use the outer profile and have open network regardless.
     pub network_allowed: bool,
     /// Codex only: MCP servers (name, `{command, args, env?}` or `{url}`)
     /// passed as `-c mcp_servers.*` flags; Claude reads its servers from
@@ -35,6 +40,9 @@ pub struct RunRequest<'a> {
     /// orchd does not own (an audited repo): those settings carry hooks,
     /// shell commands that run outside the sandbox.
     pub repo_settings: bool,
+    /// Continue this earlier session instead of starting one: Claude gets
+    /// `--resume <id>`, Codex `exec resume <id>`.
+    pub resume: Option<&'a str>,
 }
 
 /// The tools an orchd agent never needs: it implements one bounded task and
@@ -96,7 +104,8 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         "stream-json".to_string(),
         "--verbose".to_string(),
         "--setting-sources".to_string(),
-        if req.repo_settings {
+        // Project sandbox grants merge with CLI settings and can widen the policy.
+        if req.repo_settings && !(req.task_run && req.task_sandbox.is_some()) {
             "project,local"
         } else {
             ""
@@ -139,16 +148,25 @@ pub fn claude_argv(req: &RunRequest) -> Vec<String> {
         argv.push("--max-budget-usd".to_string());
         argv.push(cap.to_string());
     }
+    if let Some(session) = req.resume {
+        argv.push("--resume".to_string());
+        argv.push(session.to_string());
+    }
     argv
 }
 
 /// `codex exec --json --skip-git-repo-check -C
-/// <worktree> --sandbox workspace-write -c
+/// <worktree> --sandbox danger-full-access` for task implement runs wrapped
+/// by orchd; other non-review runs keep `workspace-write`. The config
 /// sandbox_workspace_write.network_access=<bool> [--model] [-c
 /// model_reasoning_effort="<e>"] -`; review uses `--sandbox read-only` and
 /// drops the network flag (nothing to write, nothing to reach).
 pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     let mut argv = vec!["exec".to_string()];
+    if let Some(session) = req.resume {
+        argv.push("resume".to_string());
+        argv.push(session.to_string());
+    }
     // `--image=` right after `exec`: the flag takes several values, so it
     // must not sit where it could swallow the trailing `-`.
     for image in req.images {
@@ -156,14 +174,25 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     }
     argv.push("--json".to_string());
     argv.push("--skip-git-repo-check".to_string());
-    argv.push("-C".to_string());
-    argv.push(req.worktree.to_string_lossy().to_string());
-    if req.review {
-        argv.push("--sandbox".to_string());
-        argv.push("read-only".to_string());
+    let mode = if req.review {
+        "read-only"
+    } else if task_run_uses_outer_sandbox(req) {
+        "danger-full-access"
     } else {
+        "workspace-write"
+    };
+    if req.resume.is_some() {
+        // `resume` takes neither `-C` nor `--sandbox`; the cwd is set on the
+        // process and the sandbox through config.
+        argv.push("-c".to_string());
+        argv.push(format!("sandbox_mode=\"{mode}\""));
+    } else {
+        argv.push("-C".to_string());
+        argv.push(req.worktree.to_string_lossy().to_string());
         argv.push("--sandbox".to_string());
-        argv.push("workspace-write".to_string());
+        argv.push(mode.to_string());
+    }
+    if !req.review {
         argv.push("-c".to_string());
         argv.push(format!(
             "sandbox_workspace_write.network_access={}",
@@ -183,6 +212,12 @@ pub fn codex_argv(req: &RunRequest) -> Vec<String> {
     }
     argv.push("-".to_string());
     argv
+}
+
+/// Whether orchd will wrap this task run in its native macOS profile.
+/// Codex can use full access only when that outer profile is actually present.
+pub(super) fn task_run_uses_outer_sandbox(req: &RunRequest<'_>) -> bool {
+    cfg!(target_os = "macos") && req.task_run && !req.review && req.task_sandbox.is_some()
 }
 
 pub fn build_argv(req: &RunRequest) -> Vec<String> {
@@ -311,6 +346,38 @@ pub fn build_claude_settings(
     serde_json::Value::Object(obj)
 }
 
+/// Implement settings share the task policy; other stages keep their old settings.
+pub fn build_claude_task_settings(
+    profile: Option<&serde_json::Value>,
+    sandbox: Option<&TaskSandbox>,
+    allowed_domains: &[String],
+    stop_hook: Option<StopHook<'_>>,
+) -> serde_json::Value {
+    let denied: Vec<String> = sandbox
+        .into_iter()
+        .flat_map(|policy| &policy.denied_read_roots)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let mode = if sandbox.is_some() {
+        SandboxMode::Native
+    } else {
+        SandboxMode::Host
+    };
+    let mut settings = build_claude_settings(profile, mode, allowed_domains, &denied, stop_hook);
+    if let Some(policy) = sandbox {
+        settings["sandbox"]["filesystem"]["allowWrite"] = serde_json::json!(policy.write_roots);
+        settings["sandbox"]["filesystem"]["allowRead"] = serde_json::json!(policy.read_exceptions);
+        let deny = settings["permissions"]["deny"].as_array_mut().unwrap();
+        deny.extend(
+            policy
+                .read_tool_denied_roots
+                .iter()
+                .map(|path| serde_json::json!(format!("Read(/{}/**)", path.display()))),
+        );
+    }
+    settings
+}
+
 /// POSIX single-quote quoting: the hook command (and a profile's
 /// `apiKeyHelper`) runs through a shell, and the real data dir
 /// (`Application Support`) contains a space.
@@ -322,7 +389,7 @@ pub fn shell_quote(value: &str) -> String {
 
 /// FNV-1a, 64 bit, hex: stable across Rust versions and platforms, which
 /// `DefaultHasher` is not, and short enough to print in a report row.
-fn short_hash(parts: &[&str]) -> String {
+pub(crate) fn short_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for part in parts {
         for byte in part.bytes().chain(std::iter::once(0xff)) {
@@ -373,6 +440,17 @@ fn stable_settings(settings: &serde_json::Value) -> String {
         if let Some(sandbox) = obj.get_mut("sandbox").and_then(|s| s.as_object_mut()) {
             sandbox.remove("filesystem");
         }
+        if let Some(deny) = obj
+            .get_mut("permissions")
+            .and_then(|p| p.get_mut("deny"))
+            .and_then(|d| d.as_array_mut())
+        {
+            deny.retain(|entry| {
+                !entry
+                    .as_str()
+                    .is_some_and(|rule| rule.starts_with("Read(//"))
+            });
+        }
     }
     settings.to_string()
 }
@@ -421,11 +499,16 @@ pub struct RunOutcome {
     pub error: Option<String>,
     /// The run printed nothing for its stall timeout and was killed.
     pub stalled: bool,
+    /// A helper reached its wall-clock deadline and was stopped.
+    pub timed_out: bool,
     /// The loop detector killed the run; the failure detail.
     pub looped: Option<String>,
     /// The run's estimated cost passed `RunRequest::max_budget_usd` and it
     /// was stopped (or the CLI reported `error_max_budget_usd`).
     pub over_budget: bool,
+    /// The run was still going at the attempt's wall-clock budget and was
+    /// stopped.
+    pub time_budget: bool,
     /// Claude only: input + cache creation + cache read tokens of the first
     /// `assistant` event, i.e. the whole prompt the first turn was sent,
     /// whether or not an earlier run left it in the prompt cache.
@@ -774,6 +857,82 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn codex_task_implements_use_full_access_only_with_the_outer_sandbox() {
+        let wt = Path::new("/worktree");
+        let mut req = base_req(Harness::Codex, wt);
+        req.task_run = true;
+        req.network_allowed = false;
+        assert!(codex_argv(&req).contains(&"workspace-write".to_string()));
+
+        let root = tempfile::tempdir().unwrap();
+        let policy = TaskSandbox::build(crate::sandbox::Inputs {
+            repo_root: root.path(),
+            worktree: root.path(),
+            run_dir: root.path(),
+            data_dir: &root.path().join("data"),
+            sushiai_home: &root.path().join("sushiai"),
+            worktree_root: "",
+            home: &root.path().join("home"),
+            daemon_socket: &root.path().join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        req.task_sandbox = Some(&policy);
+        let mode = if cfg!(target_os = "macos") {
+            "danger-full-access"
+        } else {
+            "workspace-write"
+        };
+        assert!(codex_argv(&req).contains(&mode.to_string()));
+        req.resume = Some("session");
+        assert!(codex_argv(&req).contains(&format!("sandbox_mode=\"{mode}\"")));
+        req.review = true;
+        assert!(codex_argv(&req).contains(&"sandbox_mode=\"read-only\"".to_string()));
+        req.resume = None;
+        assert!(codex_argv(&req).contains(&"read-only".to_string()));
+    }
+
+    #[test]
+    fn native_claude_tasks_cannot_inherit_project_sandbox_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let policy = TaskSandbox::build(crate::sandbox::Inputs {
+            repo_root: root,
+            worktree: root,
+            run_dir: root,
+            data_dir: &root.join("data"),
+            sushiai_home: &root.join("sushiai"),
+            worktree_root: "",
+            home: &root.join("home"),
+            daemon_socket: &root.join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        let mut req = base_req(Harness::Claude, root);
+        req.repo_settings = true;
+        req.task_run = true;
+        req.task_sandbox = Some(&policy);
+        let sources = |req: &RunRequest| {
+            let argv = claude_argv(req);
+            argv[argv.iter().position(|a| a == "--setting-sources").unwrap() + 1].clone()
+        };
+        assert_eq!(sources(&req), "");
+        req.task_sandbox = None;
+        assert_eq!(sources(&req), "project,local");
+        req.task_sandbox = Some(&policy);
+        req.task_run = false;
+        assert_eq!(sources(&req), "project,local");
+    }
+
+    #[test]
     fn a_silent_failed_exit_reads_as_words_without_a_code() {
         use std::os::unix::process::ExitStatusExt;
         let exited = std::process::ExitStatus::from_raw(1 << 8);
@@ -796,12 +955,68 @@ mod tests {
             effort: None,
             max_budget_usd: None,
             review: false,
+            task_run: false,
+            task_sandbox: None,
             mcp_config: None,
             settings_path: None,
             network_allowed: true,
             codex_mcp: &[],
             images: &[],
             repo_settings: true,
+            resume: None,
+        }
+    }
+
+    #[test]
+    fn a_resumed_run_carries_the_session_and_keeps_its_prompt_hash() {
+        let wt = PathBuf::from("/repo-task");
+        let claude = base_req(Harness::Claude, &wt);
+        let mut resumed = base_req(Harness::Claude, &wt);
+        resumed.resume = Some("sess-1");
+        let argv = claude_argv(&resumed);
+        let at = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[at + 1], "sess-1");
+        assert_eq!(
+            prompt_hash(&argv, None),
+            prompt_hash(&claude_argv(&claude), None)
+        );
+
+        let mut codex = base_req(Harness::Codex, &wt);
+        codex.review = true;
+        codex.resume = Some("sess-1");
+        let argv = codex_argv(&codex);
+        assert_eq!(&argv[..3], ["exec", "resume", "sess-1"]);
+        assert!(
+            !argv.iter().any(|a| a == "-C" || a == "--sandbox"),
+            "{argv:?}"
+        );
+        assert!(argv.contains(&"sandbox_mode=\"read-only\"".to_string()));
+        assert_eq!(argv.last().map(String::as_str), Some("-"));
+        codex.resume = Some("sess-2");
+        assert_eq!(
+            prompt_hash(&argv, None),
+            prompt_hash(&codex_argv(&codex), None)
+        );
+        codex.review = false;
+        for network in [false, true] {
+            codex.network_allowed = network;
+            let argv = codex_argv(&codex);
+            assert_eq!(
+                &argv[..5],
+                [
+                    "exec",
+                    "resume",
+                    "sess-2",
+                    "--json",
+                    "--skip-git-repo-check"
+                ]
+            );
+            assert!(!argv.iter().any(|a| a == "-C" || a == "--sandbox"));
+            assert!(argv
+                .windows(2)
+                .any(|w| w == ["-c", "sandbox_mode=\"workspace-write\""]));
+            assert!(argv.windows(2).any(|w| w[0] == "-c"
+                && w[1] == format!("sandbox_workspace_write.network_access={network}")));
         }
     }
 
@@ -1322,7 +1537,7 @@ mod tests {
             serde_json::json!({
                 "env": {"ANTHROPIC_API_KEY": key},
                 "hooks": {"Stop": key},
-                "permissions": {"allow": ["Bash"]},
+                "permissions": {"allow": ["Bash"], "deny": ["Bash(git push:*)", format!("Read(//{key}/**)")]},
                 "bashOutputMaxChars": if cap { 1 } else { 2 },
             })
         };

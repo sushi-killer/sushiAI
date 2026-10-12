@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::time::{Duration, Instant};
 
 /// Records each attempt's brief under `$MSG_DIR` and holds the first attempt
 /// open until the test creates `$MSG_DIR/release`; only the second attempt
@@ -58,14 +57,9 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
     );
     let (from, to) = (&sender["id"], &receiver["id"]);
     let first = scripts_dir.path().join("first.md");
-    let start = Instant::now();
-    while !first.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "the first attempt never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the first attempt to start", || {
+        first.exists().then_some(())
+    });
 
     // Sent while attempt 1 runs: kept, not delivered, attempt untouched.
     let note = serde_json::json!({"from": from, "to": to, "text": "PEER-NOTE-42"});
@@ -77,17 +71,16 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
     assert_eq!(running["status"], "running", "{running}");
     assert_eq!(running["attempts"].as_array().unwrap().len(), 1);
     // The script creates the file before `cat` has written the whole brief.
-    let mut first_brief = std::fs::read_to_string(&first).unwrap();
-    while !first_brief.contains("## Report format") {
-        assert!(start.elapsed() < Duration::from_secs(15), "{first_brief}");
-        std::thread::sleep(Duration::from_millis(20));
-        first_brief = std::fs::read_to_string(&first).unwrap();
-    }
+    let first_brief = wait_until("the first brief to be written whole", || {
+        std::fs::read_to_string(&first)
+            .ok()
+            .filter(|brief| brief.contains("## Report format"))
+    });
     assert!(first_brief.contains("Your task id is"));
     assert!(!first_brief.contains("PEER-NOTE-42"));
 
     std::fs::write(scripts_dir.path().join("release"), "").unwrap();
-    let settled = poll_task_status(&daemon, to.as_str().unwrap(), Duration::from_secs(20));
+    let settled = poll_task_status(&daemon, to.as_str().unwrap());
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = settled["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2, "{settled}");
@@ -100,6 +93,6 @@ fn a_message_reaches_a_running_task_with_its_next_attempt_only() {
 
     daemon.shutdown_and_wait();
     for t in [&sender, &receiver] {
-        let _ = std::fs::remove_dir_all(t["worktree"].as_str().unwrap());
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
     }
 }

@@ -62,15 +62,17 @@ const {
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { createMascotShortcut } = require("./mascot-shortcut.cjs");
 const { createNotices } = require("./extensions/notices.cjs");
+const { createModuleIpc } = require("./extensions/module-ipc.cjs");
 const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
-const { testWindow } = require("./test-window.cjs");
+const { testWindow, isolateTestProfile } = require("./test-window.cjs");
 
 const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
+const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
@@ -96,6 +98,7 @@ let mainWindow;
 const root = path.join(__dirname, "..");
 const dataDir = process.env.BRIDGE_DATA_DIR;
 if (dataDir) app.setPath("userData", path.resolve(dataDir));
+isolateTestProfile(app, testMode);
 // The PATH extended below is on process.env before any companion starts; the
 // supervisor passes the child only an allowlist of it.
 const companions = createCompanions({
@@ -107,7 +110,7 @@ const companions = createCompanions({
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
   companions,
-  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST],
+  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST, VAULT_MANIFEST],
   // Opting in to the Orchestrator is the owner's act.
   builtinsStartOff: [ORCHESTRATOR_MANIFEST.id],
   // Folders dropped here are read as JSON manifests and carry no code; the
@@ -402,6 +405,15 @@ notices.register("app", async (_key, actionId) => {
   devRestart = true;
   app.quit();
 });
+const moduleIpc = createModuleIpc({ handle });
+require("./vault.cjs").registerVault({
+  moduleIpc,
+  projects,
+  notices,
+  safeStorage,
+  userDataDir: app.getPath("userData"),
+  isEnabled: () => extensions.isEnabled(VAULT_MANIFEST.id),
+});
 const orchestratorNotices = createOrchestratorNotices({
   notices,
   getService: () => orchestrator,
@@ -414,7 +426,6 @@ orchestrator = registerOrchestratorExtension({
   send,
   notify: (notice) => orchestratorNotices.publish(notice),
   onTask: (task) => orchestratorNotices.onTask(task),
-  getClaudeMcp: () => claudeMcp,
   getModelProviders: () => modelProviders,
   getProjects: () => projects,
   getConnections: () => connections,

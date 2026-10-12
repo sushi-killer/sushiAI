@@ -7,6 +7,7 @@ import {
   latestImplementAttempt,
   reviewOf,
   totalDurationMs,
+  waitLabel,
 } from "./helpers.ts";
 import { elapsedLabel, plural } from "../lib/text.ts";
 import type {
@@ -69,7 +70,7 @@ export function segmentLabel(segment: TimelineSegment): string {
     : segment.stage;
 }
 
-function clock(ms: number): string {
+export function clock(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -240,7 +241,9 @@ function rowDetail(
     case "wait":
       return task.question
         ? "waiting for your answer"
-        : task.queueReason || "waiting for you";
+        : task.wait
+          ? waitLabel(task.wait)
+          : task.park?.reason || "waiting for you";
     case "verify": {
       const failed = own.filter((segment) => segment.failureKind).length;
       return failed > 0 ? `${runs} · ${failed} failed` : runs;

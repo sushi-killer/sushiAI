@@ -7,6 +7,7 @@
 
 use super::chat_tools;
 use super::*;
+use crate::overseer_state;
 use serde::Serialize;
 
 const SERVER: &str = "sushiai-orchestrator";
@@ -688,6 +689,14 @@ fn save(app: &App, repo: &str, session: &ChatSession) {
 /// the reply (or have cleared messages restored by it).
 fn finish_turn(app: &App, repo: &str, session: &ChatSession) {
     write_session(app, repo, session, true);
+    fire_deferred_wakes(app, repo);
+}
+
+/// Frees the repo's turn slot without a session write, then runs the wakes
+/// that were waiting for it.
+fn release_turn(app: &App, repo: &str) {
+    app.chat_turns.lock().unwrap().remove(repo);
+    fire_deferred_wakes(app, repo);
 }
 
 fn write_session(app: &App, repo: &str, session: &ChatSession, end_turn: bool) {
@@ -730,6 +739,16 @@ fn change_idle(
     };
     broadcast(app, &chats);
     Ok(chats)
+}
+
+/// Adds an assistant note to the repo's current chat session; false while a
+/// turn is live (the caller retries later).
+pub(super) fn post_note(app: &App, repo: &str, text: &str) -> bool {
+    change_idle(app, repo, |chats| {
+        push(chats.current_mut(), "assistant", text, ChatMode::Chat);
+        Ok(())
+    })
+    .is_ok()
 }
 
 fn push(session: &mut ChatSession, role: &str, text: &str, mode: ChatMode) {
@@ -1053,7 +1072,7 @@ pub async fn handle_create_proposal(
         turns.insert(repo.clone(), CancelToken::new());
     }
     let outcome = create_proposal(app, &repo, &message_id, &params, backlog).await;
-    app.chat_turns.lock().unwrap().remove(&repo);
+    release_turn(app, &repo);
     let (chats, created) = outcome?;
     broadcast(app, &chats);
     let (_, proposal) = find_proposal(&chats, &message_id)?;
@@ -1160,6 +1179,35 @@ pub async fn handle_cancel(
 enum Turn {
     Owner(ChatMode),
     Questions(Vec<String>),
+    /// A turn the server starts on its own (a waiting task, a finished task,
+    /// the morning digest): the prompt is built here, so it is trusted, and
+    /// the final text lands in the owner's chat session like an owner turn's.
+    Overseer {
+        read_only: bool,
+        /// Why it woke (`waiting`, `done`, `digest`) and the task it concerns,
+        /// for the overseer log.
+        reason: &'static str,
+        task_id: Option<String>,
+        /// The question holds this turn made (task id, hold time).
+        held: Vec<(String, i64)>,
+        /// The questions the turn is about (task id, `asked_at`), for the
+        /// owner-notice gate.
+        about: Vec<(String, i64)>,
+    },
+}
+
+/// Whether a wake for task `id` waits in `repo`'s queue behind the running
+/// turn (a restart wake covers every task of the repo).
+pub(super) fn wake_queued_for(app: &App, repo: &str, id: &str) -> bool {
+    app.deferred_wakes
+        .lock()
+        .unwrap()
+        .get(repo)
+        .is_some_and(|q| {
+            q.iter().any(|w| {
+                w.task_id.as_deref() == Some(id) || (w.task_id.is_none() && w.reason == "restart")
+            })
+        })
 }
 
 const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.";
@@ -1291,7 +1339,7 @@ pub async fn handle_edit(
         .iter()
         .position(|m| m.id == message_id && m.role == "user")
     else {
-        app.chat_turns.lock().unwrap().remove(&repo);
+        release_turn(app, &repo);
         return Err("that message is not one of the owner's messages in this chat".to_string());
     };
     let mode = requested_mode.unwrap_or(session.messages[index].mode);
@@ -1387,11 +1435,28 @@ pub(super) fn wake(app: &App, repo: &str) {
         return;
     };
     let Some((ids, questions)) = messages::take_for_orchestrator(app, repo) else {
-        app.chat_turns.lock().unwrap().remove(repo);
+        release_turn(app, repo);
         return;
     };
     save(app, repo, &session);
-    let prompt = format!("{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}");
+    let senders: Vec<String> = app
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| ids.contains(&m.id))
+        .map(|m| m.from.clone())
+        .collect();
+    let state = overseer_state::begin(
+        &app.data_dir,
+        repo,
+        &app.store.list_tasks().unwrap_or_default(),
+        &senders,
+    );
+    let prompt = format!(
+        "{}{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}",
+        state_header(&state)
+    );
     let app = app.arc();
     let repo = repo.to_string();
     tokio::spawn(async move {
@@ -1408,6 +1473,191 @@ pub(super) fn wake(app: &App, repo: &str) {
     });
 }
 
+/// The top of a wake prompt: the overseer's state file, which stands in for the
+/// chat history a wake does not resume.
+fn state_header(state: &str) -> String {
+    format!(
+        "Overseer state for this repo, kept by orchd between wakes. Your earlier turns are not resumed; this file is what you remember.\n\n{state}\n---\n\n"
+    )
+}
+
+/// An overseer wake skipped because the chat was busy.
+pub(super) struct DeferredWake {
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<String>,
+}
+
+/// A queued wake for tests.
+#[cfg(test)]
+pub(super) fn test_deferred_wake(reason: &'static str, task_id: &str) -> DeferredWake {
+    DeferredWake {
+        prompt: String::new(),
+        read_only: false,
+        reason,
+        task_id: Some(task_id.to_string()),
+    }
+}
+
+/// Remembers a skipped wake for `repo`, once per reason and task.
+fn defer_wake(
+    app: &App,
+    repo: &str,
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<&str>,
+) {
+    let mut all = app.deferred_wakes.lock().unwrap();
+    let queue = all.entry(repo.to_string()).or_default();
+    if !queue
+        .iter()
+        .any(|w| w.reason == reason && w.task_id.as_deref() == task_id)
+    {
+        queue.push(DeferredWake {
+            prompt,
+            read_only,
+            reason,
+            task_id: task_id.map(str::to_string),
+        });
+    }
+}
+
+/// Whether the task of a deferred wake still needs it: a waiting or reminder
+/// wake is moot once the question was answered.
+fn wake_still_needed(app: &App, w: &DeferredWake) -> bool {
+    let Some(id) = w.task_id.as_deref() else {
+        return true;
+    };
+    if !matches!(w.reason, "waiting" | "reminder") {
+        return true;
+    }
+    app.store
+        .load_task(id)
+        .ok()
+        .flatten()
+        .is_some_and(|t| t.status == TaskStatus::Waiting && t.question.is_some())
+}
+
+/// Fires the first deferred wake of `repo` that is still needed. The rest
+/// stay queued: the turn it starts fires the next one when it ends.
+pub(super) fn fire_deferred_wakes(app: &App, repo: &str) {
+    loop {
+        if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let next = {
+            let mut all = app.deferred_wakes.lock().unwrap();
+            let Some(queue) = all.get_mut(repo) else {
+                return;
+            };
+            if queue.is_empty() {
+                all.remove(repo);
+                return;
+            }
+            queue.remove(0)
+        };
+        if !wake_still_needed(app, &next) {
+            continue;
+        }
+        // Busy again re-queues it; a started wake ends the loop.
+        wake_overseer(
+            app,
+            repo,
+            next.prompt,
+            next.read_only,
+            next.reason,
+            next.task_id.as_deref(),
+        );
+        return;
+    }
+}
+
+/// Starts an overseer turn for `repo` with a server-built `prompt`; its
+/// reply is appended to the repo's current chat session. `read_only` offers
+/// only the looking tools. Returns whether it started: not when a turn is
+/// already running, no route is configured or `repo` is not a directory.
+pub(super) fn wake_overseer(
+    app: &App,
+    repo: &str,
+    prompt: String,
+    read_only: bool,
+    reason: &'static str,
+    task_id: Option<&str>,
+) -> bool {
+    if !Path::new(repo).is_dir()
+        || tokio::runtime::Handle::try_current().is_err()
+        || app.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return false;
+    }
+    let (session, route, cancel) = match begin_turn(app, repo) {
+        Ok(started) => started,
+        Err(error) => {
+            // The digest retries every minute until it starts: log it once it does.
+            if reason != "digest" {
+                let why = if error == BUSY {
+                    // Queued for the overseer is already the overseer's: the
+                    // owner hears only when it hands the question on (or the
+                    // hold's TTL ends).
+                    app.hold_for_overseer(repo, reason, task_id);
+                    defer_wake(app, repo, prompt, read_only, reason, task_id);
+                    "chat is busy, queued for the end of its turn"
+                } else {
+                    "no route"
+                };
+                app.record_overseer(overseer::Entry::new(
+                    "skipped",
+                    repo,
+                    task_id,
+                    &format!("Not woken ({reason}): {why}"),
+                ));
+            }
+            return false;
+        }
+    };
+    let about = app.wake_questions(repo, reason, task_id);
+    let held = app.hold_for_overseer(repo, reason, task_id);
+    app.record_overseer(overseer::Entry::new(
+        "woke",
+        repo,
+        task_id,
+        &format!("Woke for {reason}"),
+    ));
+    save(app, repo, &session);
+    let wake_ids: Vec<String> = task_id.map(str::to_string).into_iter().collect();
+    let state = overseer_state::begin(
+        &app.data_dir,
+        repo,
+        &app.store.list_tasks().unwrap_or_default(),
+        &wake_ids,
+    );
+    let prompt = format!("{}{prompt}", state_header(&state));
+    let app = app.arc();
+    let repo = repo.to_string();
+    let task_id = task_id.map(str::to_string);
+    tokio::spawn(async move {
+        run_turn(
+            &app,
+            repo,
+            session,
+            route,
+            prompt,
+            cancel,
+            Turn::Overseer {
+                read_only,
+                reason,
+                task_id,
+                held,
+                about,
+            },
+        )
+        .await;
+    });
+    true
+}
+
 /// The orchestrator agent's route: the one the owner picked, else the route
 /// that handles standard tasks.
 pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
@@ -1415,13 +1665,19 @@ pub(super) fn orchestrator_route(settings: &Settings) -> Option<Route> {
     find(&settings.orchestrator).or_else(|| find(settings.tiers.get(&Tier::Standard)?))
 }
 
-fn mcp_server(app: &App, task_mcp_file: Option<&Path>, mode: ChatMode) -> serde_json::Value {
+fn mcp_server(
+    app: &App,
+    task_mcp_file: Option<&Path>,
+    read_only: bool,
+    overseer: bool,
+) -> serde_json::Value {
     let mut server = json!({
         "command": app.exe_path,
         "args": ["mcp"],
         "env": {"SUSHIAI_HOME": app.home.to_string_lossy()},
     });
-    if mode.read_only() {
+    server["env"]["ORCHD_BRIDGE_SOURCE"] = json!(if overseer { "overseer" } else { "chat" });
+    if read_only {
         server["args"]
             .as_array_mut()
             .expect("args is an array")
@@ -1439,9 +1695,10 @@ fn claude_argv(
     settings_path: &Path,
     session: Option<&str>,
     mode: ChatMode,
+    read_only: bool,
     connected: &chat_tools::TurnTools,
 ) -> Vec<String> {
-    let offered: &[&str] = if mode.read_only() {
+    let offered: &[&str] = if read_only {
         &crate::mcp::READ_ONLY_TOOLS
     } else {
         &crate::mcp::ORCHESTRATOR_TOOLS
@@ -1636,11 +1893,10 @@ const MAX_TOOLS: usize = 8;
 const MAX_SUMMARY: usize = 120;
 
 /// Tools whose input names a task by `id`.
-const TASK_ID_TOOLS: [&str; 10] = [
+const TASK_ID_TOOLS: [&str; 9] = [
     "task_get",
     "task_backlog",
     "task_start",
-    "task_stop",
     "task_report",
     "task_answer",
     "task_amend",
@@ -1769,28 +2025,44 @@ async fn run_turn(
     cancel: CancelToken,
     turn: Turn,
 ) {
+    let started = now_ms();
     let mode = match &turn {
         Turn::Owner(mode) => *mode,
-        Turn::Questions(_) => ChatMode::Chat,
+        Turn::Questions(_) | Turn::Overseer { .. } => ChatMode::Chat,
     };
+    let read_only = mode.read_only()
+        || matches!(
+            turn,
+            Turn::Overseer {
+                read_only: true,
+                ..
+            }
+        );
     let dir = turn_dir(app, &repo);
     let _ = std::fs::create_dir_all(&dir);
     // Brainstorm and Plan never create tasks, so they have no task MCP to hand on.
-    let task_mcp = thread.task_mcp.as_ref().filter(|_| !mode.read_only());
+    let task_mcp = thread.task_mcp.as_ref().filter(|_| !read_only);
     let task_mcp_file = task_mcp.and_then(|mcp| {
         let file = dir.join("task-mcp.json");
         store::write_json_atomic(&file, &json!({"repo": repo, "mcp": mcp}))
             .ok()
             .map(|_| file)
     });
-    let server = mcp_server(app, task_mcp_file.as_deref(), mode);
+    let server = mcp_server(
+        app,
+        task_mcp_file.as_deref(),
+        read_only,
+        matches!(turn, Turn::Overseer { .. }),
+    );
     let settings = app.settings.read().unwrap().clone();
     // A question turn answers a task, not the owner: it gets no connected tools.
     let connected = match &turn {
         Turn::Owner(_) => chat_tools::for_turn(app, &settings).await,
-        Turn::Questions(_) => chat_tools::TurnTools::default(),
+        Turn::Questions(_) | Turn::Overseer { .. } => chat_tools::TurnTools::default(),
     };
-    let session = thread.session_id.clone();
+    // Only the owner's turns resume the harness session; a wake starts fresh.
+    let owner = matches!(turn, Turn::Owner(_));
+    let session = thread.session_id.clone().filter(|_| owner);
     let key_path = dir.join("key");
     let argv = match route.harness {
         Harness::Claude => {
@@ -1816,26 +2088,114 @@ async fn run_turn(
                 &settings_path,
                 session.as_deref(),
                 mode,
+                read_only,
                 &connected,
             )
         }
         Harness::Codex => codex_argv(&route, &repo, &server, session.as_deref(), mode, &connected),
     };
 
-    let (result, tools) = match run(app, &repo, &mut thread, &route, &argv, &text, &cancel).await {
+    // An overseer turn that hangs is cancelled, so it can neither hold a
+    // question nor block the chat for good.
+    let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timer = matches!(turn, Turn::Overseer { .. }).then(|| {
+        let (cancel, flag) = (cancel.clone(), timed_out.clone());
+        let limit = app
+            .overseer_turn_timeout_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(limit)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            cancel.cancel();
+        })
+    });
+    let (result, tools) = match run(
+        app,
+        &repo,
+        &mut thread,
+        &route,
+        &argv,
+        &text,
+        &cancel,
+        session.is_some(),
+    )
+    .await
+    {
         Ok((outcome, tools)) => (Ok(outcome), tools),
         Err(error) => (Err(error), Vec::new()),
     };
     let _ = std::fs::remove_file(&key_path);
+    if let Some(timer) = timer {
+        timer.abort();
+    }
 
     // Messages sent meanwhile are impossible (the turn slot stays held until
     // `finish_turn`, so the session can't be switched or cleared under it),
     // but the owner may have been shown a fresher note: keep this turn's
     // session.
     thread.note = None;
+    // Whether the gate keeps this overseer reply out of the chat, and the
+    // reply cut to a notice's shape when it goes in.
+    let mut blocked = false;
+    let mut notice: Option<String> = None;
+    if !owner {
+        let timed = matches!(result, Err(RunError::Cancelled))
+            && timed_out.load(std::sync::atomic::Ordering::SeqCst);
+        let (cost, mut end) = match &result {
+            Ok(o) => (
+                o.cost_usd,
+                match (
+                    o.final_text.as_ref().filter(|t| !t.trim().is_empty()),
+                    &o.error,
+                ) {
+                    (Some(reply), _) => TurnEnd::Reply(reply.clone()),
+                    (None, Some(error)) => TurnEnd::Failed(error.clone()),
+                    (None, None) => TurnEnd::Silent,
+                },
+            ),
+            Err(RunError::Cancelled) if timed => (None, TurnEnd::Failed("timed out".to_string())),
+            Err(RunError::Cancelled) => (None, TurnEnd::Stopped),
+            Err(RunError::Io(error) | RunError::NotFound(error)) => {
+                (None, TurnEnd::Failed(error.clone()))
+            }
+        };
+        let (reason, task_id) = match &turn {
+            Turn::Overseer {
+                reason, task_id, ..
+            } => (*reason, task_id.as_deref()),
+            _ => ("questions", None),
+        };
+        let outcome = match &end {
+            TurnEnd::Reply(reply) => reply.clone(),
+            TurnEnd::Stopped => "stopped".to_string(),
+            TurnEnd::Failed(_) if timed => "timed out".to_string(),
+            TurnEnd::Failed(error) => format!("failed: {error}"),
+            TurnEnd::Silent => "no reply".to_string(),
+        };
+        overseer_state::add_decision(&app.data_dir, &repo, now_ms(), reason, task_id, &outcome);
+        if let Turn::Overseer { held, about, .. } = &turn {
+            let gate = match &mut end {
+                TurnEnd::Reply(reply) => {
+                    let gate = app.overseer_gate(&repo, reason, about);
+                    if gate.is_some() && reason != "digest" {
+                        *reply = owner_notice::cap_notice(reply);
+                        notice = Some(reply.clone());
+                    }
+                    blocked = gate
+                        .as_ref()
+                        .is_some_and(|g| g.verdict != owner_notice::Verdict::Notify);
+                    gate
+                }
+                _ => None,
+            };
+            record_overseer_end(app, &repo, reason, task_id, started, cost, end, gate);
+            // Still waiting after the turn: it escalated, the owner is asked now.
+            app.release_holds(&repo, held);
+        }
+    }
     match (result, &turn) {
         (Ok(outcome), _) => {
-            if outcome.session_id.is_some() {
+            if owner && outcome.session_id.is_some() {
                 thread.session_id = outcome.session_id.clone();
             }
             match (
@@ -1843,8 +2203,10 @@ async fn run_turn(
                 outcome.error,
                 &turn,
             ) {
-                (Some(reply), _, Turn::Owner(mode)) => {
-                    apply_reply(&mut thread, &reply, tools, *mode, &|server, tool| {
+                (Some(_), _, Turn::Overseer { .. }) if blocked => {}
+                (Some(reply), _, Turn::Owner(_) | Turn::Overseer { .. }) => {
+                    let reply = notice.unwrap_or(reply);
+                    apply_reply(&mut thread, &reply, tools, mode, &|server, tool| {
                         chat_tools::proposable(app, &settings, server, tool)
                     });
                 }
@@ -1852,29 +2214,94 @@ async fn run_turn(
                     messages::reply_where_unanswered(app, ids, &reply)
                 }
                 (None, Some(error), _) => {
-                    // A session the CLI no longer knows fails every resume.
-                    thread.session_id = None;
-                    if matches!(turn, Turn::Owner(_)) {
+                    if owner {
+                        // A session the CLI no longer knows fails every resume.
+                        thread.session_id = None;
                         thread.error = Some(truncate_chars(&error, 2000));
                     }
                 }
                 (None, None, Turn::Owner(_)) => {
                     thread.error = Some("The orchestrator gave no reply.".into())
                 }
-                (None, None, Turn::Questions(_)) => {}
+                (None, None, Turn::Questions(_) | Turn::Overseer { .. }) => {}
             }
         }
         (Err(RunError::Cancelled), Turn::Owner(_)) => thread.error = Some("Stopped.".into()),
         (Err(RunError::Io(error) | RunError::NotFound(error)), Turn::Owner(_)) => {
             thread.error = Some(error)
         }
-        (Err(_), Turn::Questions(_)) => {}
+        (Err(_), Turn::Questions(_) | Turn::Overseer { .. }) => {}
     }
     finish_turn(app, &repo, &thread);
     // Questions that arrived during this turn get the next one.
     wake(app, &repo);
 }
 
+/// How an overseer turn ended, for the log.
+pub(super) enum TurnEnd {
+    Reply(String),
+    Stopped,
+    Failed(String),
+    Silent,
+}
+
+/// Logs how an overseer turn ended: stopped, failed, the digest's first line,
+/// what the agent left for the owner when it did not answer or open a pull
+/// request for the task itself, or a bare `done` that still carries the cost.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_overseer_end(
+    app: &App,
+    repo: &str,
+    reason: &str,
+    task_id: Option<&str>,
+    started: i64,
+    cost_usd: Option<f64>,
+    end: TurnEnd,
+    gate: Option<owner_notice::Gate>,
+) {
+    use owner_notice::Verdict;
+    let acted = || {
+        overseer::read(&app.data_dir, Some(repo), None)
+            .iter()
+            .any(|e| {
+                e.ts >= started
+                    && matches!(e.kind.as_str(), "answered" | "pr")
+                    && e.task_id.as_deref() == task_id
+            })
+    };
+    // What the entry says, and the full reply behind it when that differs.
+    let verdict = gate.as_ref().map(|g| g.verdict);
+    let (kind, text, detail) = match end {
+        TurnEnd::Stopped => ("skipped", "Stopped by you".to_string(), None),
+        TurnEnd::Failed(error) => ("failed", error, None),
+        TurnEnd::Reply(reply) if reason == "digest" => ("digest", reply, None),
+        TurnEnd::Reply(reply) => match verdict {
+            Some(Verdict::Notify) => ("asked_owner", reply, None),
+            Some(Verdict::Duplicate) => {
+                ("skipped", owner_notice::DUPLICATE.to_string(), Some(reply))
+            }
+            Some(Verdict::Deferred) => ("skipped", owner_notice::DEFERRED.to_string(), Some(reply)),
+            // The turn settled its questions itself: its words stay in the detail.
+            Some(Verdict::Resolved) => ("done", reply, None),
+            None if !acted() => ("asked_owner", reply, None),
+            None => ("done", reply, None),
+        },
+        TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string(), None),
+        TurnEnd::Silent => return,
+    };
+    let mut entry = overseer::Entry::new(kind, repo, task_id, &text)
+        .with_detail(detail.as_deref().unwrap_or(&text));
+    // Only a notice (or the held one) remembers its decisions.
+    let tells = matches!(kind, "asked_owner" | "digest")
+        || (kind == "skipped" && verdict == Some(Verdict::Deferred));
+    if let Some(gate) = gate.filter(|_| tells) {
+        entry = entry.with_decision(&gate.keys);
+    }
+    entry.cost_usd = cost_usd;
+    app.record_overseer(entry);
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run(
     app: &Arc<App>,
     repo: &str,
@@ -1883,10 +2310,10 @@ async fn run(
     argv: &[String],
     text: &str,
     cancel: &CancelToken,
+    thread_resumed: bool,
 ) -> Result<(harness::RunOutcome, Vec<ChatTool>), RunError> {
     let harness_kind = route.harness;
     let started_at = now_ms();
-    let thread_resumed = thread.session_id.is_some();
     let record = |outcome: &mut harness::RunOutcome| {
         finalize_cost(app, harness_kind, route.model.as_deref(), outcome);
         outcome.fingerprint = Some(outcome.build_fingerprint(harness_kind, None, String::new()));
@@ -1936,7 +2363,7 @@ async fn run(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                kill_group(pgid, &mut child).await;
+                crate::procs::kill_group(pgid, &mut child).await;
                 record(&mut outcome.clone());
                 return Err(RunError::Cancelled);
             }
@@ -2091,6 +2518,69 @@ pub async fn handle_action_decline(
     Ok(chats.thread_json())
 }
 
+/// Test support: points the Claude harness at a fake that records each
+/// prompt it is given in `.overseer-calls` in its cwd (the repo) and replies
+/// "Overseer note." Set once per process and never changed.
+#[cfg(test)]
+pub(crate) fn fake_overseer_harness() -> &'static Path {
+    static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    let (_, path) = SCRIPT.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n[ -f .overseer-no-stdin ] && exec sleep 2\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("ORCHD_CLAUDE_BIN", &path);
+        (dir, path)
+    });
+    path
+}
+
+/// How many prompts the fake harness recorded in `repo`.
+#[cfg(test)]
+pub(crate) fn fake_overseer_calls(repo: &Path) -> usize {
+    std::fs::read_to_string(repo.join(".overseer-calls"))
+        .map(|t| t.matches("=====").count())
+        .unwrap_or(0)
+}
+
+/// Whether the repo's current chat session holds a message with this text.
+#[cfg(test)]
+pub(crate) fn thread_has_text(app: &App, repo: &str, text: &str) -> bool {
+    load(app, repo)
+        .current()
+        .messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.text == text)
+}
+
+/// How many assistant messages of the repo's current chat session have this text.
+#[cfg(test)]
+pub(crate) fn thread_text_count(app: &App, repo: &str, text: &str) -> usize {
+    load(app, repo)
+        .current()
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant" && m.text == text)
+        .count()
+}
+
+/// Waits until no chat turn runs in `repo`.
+#[cfg(test)]
+pub(crate) async fn wait_idle(app: &App, repo: &str) {
+    for _ in 0..400 {
+        if !app.chat_turns.lock().unwrap().contains_key(repo) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("chat turn never ended");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,6 +2606,7 @@ mod tests {
             Path::new("/d/settings.json"),
             Some("sess"),
             ChatMode::Chat,
+            false,
             &chat_tools::TurnTools::default(),
         );
         let at = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
@@ -2731,6 +3222,7 @@ mod tests {
             final_verify: vec![],
             checks: vec![],
             held_out: None,
+            planner_tests: Default::default(),
             request: None,
             repo: "/repo".into(),
             project_id: None,
@@ -2740,6 +3232,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -2763,9 +3256,12 @@ mod tests {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
+            overseer_woken: false,
             planned_tier: None,
+            planned_by_parent: false,
             tier_fallback: None,
             variant: Default::default(),
             eval_set: None,
@@ -2774,6 +3270,9 @@ mod tests {
             source: None,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            metrics: None,
+            checklist: vec![],
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
@@ -2978,6 +3477,7 @@ mod tests {
                     Path::new("/d/settings.json"),
                     session,
                     mode,
+                    mode.read_only(),
                     &chat_tools::TurnTools::default(),
                 );
                 let at =
@@ -3014,8 +3514,8 @@ mod tests {
     #[test]
     fn only_the_chat_mode_gets_a_writing_bridge() {
         let (app, _dir, _repo) = test_app();
-        let has_read_only = |mode| {
-            mcp_server(&app, None, mode)["args"]
+        let has_read_only = |mode: ChatMode| {
+            mcp_server(&app, None, mode.read_only(), false)["args"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("--read-only"))
@@ -3127,5 +3627,26 @@ mod tests {
         assert_eq!(brainstorm.mode, ChatMode::Chat);
         let thread = chats.thread_json();
         assert!(thread.get("kind").is_none());
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+    use crate::engine::test_support::test_app;
+
+    #[test]
+    fn the_chat_mcp_config_declares_chat_or_overseer() {
+        let (app, _dir) = test_app();
+        for read_only in [false, true] {
+            assert_eq!(
+                mcp_server(&app, None, read_only, false)["env"]["ORCHD_BRIDGE_SOURCE"],
+                "chat"
+            );
+            assert_eq!(
+                mcp_server(&app, None, read_only, true)["env"]["ORCHD_BRIDGE_SOURCE"],
+                "overseer"
+            );
+        }
     }
 }

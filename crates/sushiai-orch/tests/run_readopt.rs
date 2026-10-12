@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"sess-fake"}"#;
 const MESSAGE: &str = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}},"parent_tool_use_id":null,"session_id":"sess-fake"}"#;
@@ -45,6 +44,7 @@ fn start(home: &Path, fake_bins: &[(&str, &str)], verify: &str) -> Setup {
     settings["review"] = serde_json::json!("");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket,
@@ -60,19 +60,14 @@ fn start(home: &Path, fake_bins: &[(&str, &str)], verify: &str) -> Setup {
     );
     let id = task["id"].as_str().unwrap().to_string();
     let events = data.join("tasks").join(&id).join("runs/1/events.jsonl");
-    let start = Instant::now();
-    let pgid = loop {
+    let pgid = wait_until("the run to stream", || {
         let t = request_on(&socket, "task.get", serde_json::json!({"id": id}));
         let seen = std::fs::read_to_string(&events).is_ok_and(|t| t.contains("msg_1"));
-        if let (true, Some(pgid)) = (seen, t["attempts"][0]["pgid"].as_i64()) {
-            break pgid as i32;
+        match (seen, t["attempts"][0]["pgid"].as_i64()) {
+            (true, Some(pgid)) => Some(pgid as i32),
+            _ => None,
         }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "run never streamed: {t}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    });
     Setup {
         home: home.to_path_buf(),
         first,
@@ -96,15 +91,10 @@ fn wait_for(
     what: &str,
     ok: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
+    wait_until(what, || {
         let t = request_on(socket, "task.get", serde_json::json!({"id": id}));
-        if ok(&t) {
-            return t;
-        }
-        assert!(start.elapsed() < Duration::from_secs(25), "{what}: {t}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        ok(&t).then_some(t)
+    })
 }
 
 #[test]
@@ -149,8 +139,8 @@ fn a_run_survives_a_killed_daemon_and_ends_done_without_a_requeue() {
         "the token file must go with the run"
     );
     stop_daemon(&socket);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(&s.worktree);
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(&s.worktree);
 }
 
 fn token_file(s: &Setup) -> std::path::PathBuf {
@@ -182,18 +172,14 @@ fn a_readopted_run_keeps_the_token_of_its_stop_hook() {
 
     let (second, socket) = restart(&s, &fake_bins);
     // The loop re-adopts the run: from then on the old token is known again.
-    let start_wait = Instant::now();
-    let answer = loop {
+    let answer = wait_until("the token to be restored", || {
         let answer = request_on(
             &socket,
             "hook.stop",
             serde_json::json!({"token": token.trim()}),
         );
-        if answer["decision"] == "block" || start_wait.elapsed() > Duration::from_secs(15) {
-            break answer;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (answer["decision"] == "block").then_some(answer)
+    });
     assert_eq!(
         answer["decision"], "block",
         "the token was not restored: {answer}"
@@ -202,8 +188,8 @@ fn a_readopted_run_keeps_the_token_of_its_stop_hook() {
         libc::killpg(s.pgid, libc::SIGKILL);
     }
     stop_daemon(&socket);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(&s.worktree);
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(&s.worktree);
 }
 
 #[test]
@@ -219,14 +205,7 @@ fn a_dead_run_with_no_exit_file_is_interrupted_and_requeued() {
     unsafe {
         libc::killpg(s.pgid, libc::SIGKILL);
     }
-    let start_wait = Instant::now();
-    while is_alive(s.pgid) {
-        assert!(
-            start_wait.elapsed() < Duration::from_secs(5),
-            "run did not die"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the run to die", || (!is_alive(s.pgid)).then_some(()));
 
     let (second, socket) = restart(&s, &fake_bins);
     let t = wait_for(&socket, &s.id, "task did not finish", |t| {
@@ -235,8 +214,8 @@ fn a_dead_run_with_no_exit_file_is_interrupted_and_requeued() {
     assert_eq!(t["attempts"][0]["status"], "interrupted", "{t}");
     assert_eq!(t["attempts"].as_array().unwrap().len(), 2, "{t}");
     stop_daemon(&socket);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(&s.worktree);
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(&s.worktree);
 }
 
 fn run_dir_of(s: &Setup) -> std::path::PathBuf {
@@ -267,18 +246,14 @@ fn a_graceful_stop_keeps_the_token_and_key_of_a_surviving_run() {
     assert!(token_file(&s).exists(), "the token file must stay");
     assert!(key.exists(), "the key file must stay");
     let (second, socket) = restart(&s, &fake_bins);
-    let start_wait = Instant::now();
-    let answer = loop {
+    let answer = wait_until("the token to be restored", || {
         let answer = request_on(
             &socket,
             "hook.stop",
             serde_json::json!({"token": token.trim()}),
         );
-        if answer["decision"] == "block" || start_wait.elapsed() > Duration::from_secs(15) {
-            break answer;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (answer["decision"] == "block").then_some(answer)
+    });
     assert_eq!(
         answer["decision"], "block",
         "the token was not restored: {answer}"
@@ -288,15 +263,18 @@ fn a_graceful_stop_keeps_the_token_and_key_of_a_surviving_run() {
         libc::killpg(s.pgid, libc::SIGKILL);
     }
     stop_daemon(&socket);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(&s.worktree);
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(&s.worktree);
 }
 
 #[test]
 fn a_graceful_stop_during_a_plan_run_ends_the_planner() {
     let scripts = tempfile::tempdir().unwrap();
-    let body = "#!/bin/sh\ncat > /dev/null\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-plan\"}'\nsleep 30\n";
-    let script = fake_harness_script(scripts.path(), "fake-planner.sh", body);
+    let body = format!(
+        "#!/bin/sh\ncat > /dev/null\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-plan\"}}'\nsleep {}\n",
+        deadline().as_secs() * 3
+    );
+    let script = fake_harness_script(scripts.path(), "fake-planner.sh", &body);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let home = tempfile::tempdir().unwrap();
     let socket = socket_of(home.path());
@@ -310,32 +288,32 @@ fn a_graceful_stop_during_a_plan_run_ends_the_planner() {
         "request": "plan something", "start": true}),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start_wait = Instant::now();
-    let pgid = loop {
+    let pgid = wait_until("the planner to start", || {
         let t = request_on(&socket, "task.get", serde_json::json!({"id": id}));
-        if let Some(pgid) = t["attempts"][0]["pgid"].as_i64() {
-            break pgid as i32;
-        }
-        assert!(start_wait.elapsed() < Duration::from_secs(15), "{t}");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+        t["attempts"][0]["pgid"].as_i64().map(|pgid| pgid as i32)
+    });
 
     stop_daemon(&socket);
     let _ = first.wait();
 
     // Only an implement run is re-adopted: a planner left behind would run
     // beside the one the next daemon starts.
-    let gone = Instant::now();
-    while is_alive(pgid) {
-        if gone.elapsed() > Duration::from_secs(8) {
-            unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
+    // A planner that outlives the daemon is killed when the wait panics.
+    struct KillOnPanic(i32);
+    impl Drop for KillOnPanic {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                unsafe {
+                    libc::killpg(self.0, libc::SIGKILL);
+                }
             }
-            panic!("the planner outlived the daemon");
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _planner = KillOnPanic(pgid);
+    wait_until("the planner to end with the daemon", || {
+        (!is_alive(pgid)).then_some(())
+    });
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -345,11 +323,12 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
     // The implementer reports at once. The first review hangs; the second
     // passes. The brief of a review opens with "## Review".
     let body = format!(
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*)\nif [ ! -f {m} ]; then touch {m}; sleep 30; fi\n\
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*)\nif [ ! -f {m} ]; then touch {m}; sleep {s}; fi\n\
          printf '%s\n' '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"result\":\"```sushi-review\\n{{\\\"verdict\\\":\\\"PASS\\\",\\\"findings\\\":[]}}\\n```\"}}' ;;\n\
          *) echo changed > CHANGED_MARKER.txt\nprintf '%s\n' '{INIT}'\n\
          printf '%s\n' '{{\"type\":\"result\",\"total_cost_usd\":0.02,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"```sushi-report\\n{{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}}\\n```\"}}' ;;\nesac\n",
-        m = started.display()
+        m = started.display(),
+        s = deadline().as_secs() * 3
     );
     let script = fake_harness_script(scripts.path(), "fake-claude.sh", &body);
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
@@ -361,6 +340,7 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
     settings["review"] = serde_json::json!("claude-opus");
     fit_sandbox(&mut settings);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     request_on(
         &socket,
@@ -375,14 +355,7 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
         "title": "Review survives", "goal": "g", "criteria": [], "verify": ["true"]}),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let start_wait = Instant::now();
-    while !started.exists() {
-        assert!(
-            start_wait.elapsed() < Duration::from_secs(20),
-            "the review never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the review to start", || started.exists().then_some(()));
 
     stop_daemon(&socket);
     let _ = first.wait();
@@ -411,8 +384,8 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
     );
     assert_eq!(t["attempts"][0]["status"], "passed", "{t}");
     stop_daemon(&socket);
-    let _ = wait_for_exit(second, Duration::from_secs(5));
-    let _ = std::fs::remove_dir_all(task["worktree"].as_str().unwrap());
+    let _ = wait_for_exit(second);
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
@@ -437,15 +410,11 @@ fn raw_output_files_are_private_and_deleted_once_the_attempt_is_settled() {
     wait_for(&socket, &s.id, "task did not finish", |t| {
         t["status"] == "done"
     });
-    let gone = Instant::now();
-    while dir.join("events.raw").exists() || dir.join("events.stderr.log").exists() {
-        assert!(
-            gone.elapsed() < Duration::from_secs(5),
-            "unredacted output was kept"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the unredacted output to be deleted", || {
+        (!dir.join("events.raw").exists() && !dir.join("events.stderr.log").exists()).then_some(())
+    });
     assert!(dir.join("events.jsonl").exists(), "the redacted log stays");
     stop_daemon(&socket);
-    let _ = std::fs::remove_dir_all(&s.worktree);
+    let _ = wait_for_exit(s.first);
+    remove_dir_retrying(&s.worktree);
 }

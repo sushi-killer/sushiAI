@@ -26,7 +26,7 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
   Threads, no async runtime.
 - `sushiai`: the binary. Parses arguments and calls the libraries.
-  Subcommands: `daemon`, `status`, `hook EVENT` (run by agents), `hooks install|uninstall`,
+  Subcommands: `daemon`, `status`, `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
   `hold` (internal, started by the daemon).
 
 `scripts/check-crate-deps.mjs` enforces the arrows above in CI.
@@ -183,12 +183,15 @@ full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A part
   exited session (`SESSION_STILL_RUNNING` otherwise).
 - **Keepalive.** `$/ping` answers `{}` at any time. `hello.client` is a plain string
   for audit only.
-- **Daemon control.** `daemon.shutdown` (no params) is refused on a `role: "hook"`
+- **Daemon control.** `daemon.shutdown` is refused on a `role: "hook"`
   connection. The daemon waits 200 ms so the response goes out, removes its socket,
   flushes the state and, once the runtime has stopped every task, flushes again and
-  releases the lock. From the moment it is requested the daemon refuses requests that
+  releases the lock. Once shutdown starts, the daemon refuses requests that
   change anything (`SHUTTING_DOWN`: create, input, resize, close, update, remove and
-  both syncs), so nothing is lost between the final flush and the exit. Holders and sessions are untouched. The
+  both syncs), so nothing is lost between the final flush and the exit. By default,
+  holders and sessions are untouched. With `closeSessions: true`, the daemon closes
+  its sessions and waits for their holders to stop before requesting shutdown;
+  `sushiai shutdown` uses this option for disposable test cleanup. The
   daemon never starts a replacement: whoever connects next does (`sushiai proxy`
   over SSH, the desktop locally), so only clients start daemons and the `bin`
   symlink has one writer at a time.
@@ -259,7 +262,7 @@ extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: ra
   ask, not pinned, not focused by any connection (`session.focus`, cleared when the
   connection ends), idle for the threshold since the later of `statusSince` and the last
   input, and whose child processes did not use more than 2 s of CPU in 10 minutes
-  (`BusyMeter`, sampled from `ps` at most once a minute, from one window before the
+  (`BusyMeter`, sampled through native process APIs at most once a minute, from one window before the
   threshold). The session actor evaluates it on its 1 s tick. The threshold is
   `daemon.configure {hibernateAfterSecs}` (0 = never, default 4 h, saved in
   `<home>/settings.json`); `SUSHIAI_HIBERNATE_AFTER_MS` overrides it for tests.

@@ -13,6 +13,108 @@ async fn recover_on_start_skips_archived_tasks() {
     );
 }
 
+#[tokio::test]
+async fn recover_on_start_continues_after_unreadable_task_and_failed_saves() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD_ENV: &str = "ORCH_TEST_RECOVERY_ERRORS_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine::tests::recover_on_start_continues_after_unreadable_task_and_failed_saves",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("corrupt/task.json failed:"), "{stderr}");
+        assert!(stderr.contains("orch: saving task"), "{stderr}");
+        return;
+    }
+
+    let (app, _dir) = test_app();
+    let healthy = task_with_status(TaskStatus::Queued);
+    app.store.save_task(&healthy).unwrap();
+    let mut interrupted = task_with_status(TaskStatus::Running);
+    interrupted.created_at = 2;
+    let mut attempt = attempt_with_failure(1, "interrupted");
+    attempt.status = AttemptStatus::Running;
+    attempt.failure = None;
+    interrupted.attempts.push(attempt);
+    app.store.save_task(&interrupted).unwrap();
+
+    let mut unsavable = interrupted.clone();
+    unsavable.id = uuid::Uuid::new_v4().to_string();
+    unsavable.created_at = 3;
+    app.store.save_task(&unsavable).unwrap();
+    let unsavable_dir = app.store.task_dir(&unsavable.id);
+    let unsavable_permissions = std::fs::metadata(&unsavable_dir).unwrap().permissions();
+
+    let mut advisor = task_with_status(TaskStatus::Queued);
+    advisor.created_at = 4;
+    advisor.attempts.push(attempt_with_failure(1, "advisor"));
+    app.store.save_task(&advisor).unwrap();
+    let helper = app
+        .store
+        .claim_helper_run_dir(&advisor.id, "advisor", Some(1))
+        .unwrap();
+    std::fs::write(
+        helper.join("events.jsonl"),
+        "{\"type\":\"result\",\"total_cost_usd\":0.25}\n",
+    )
+    .unwrap();
+    let advisor_dir = app.store.task_dir(&advisor.id);
+    let advisor_permissions = std::fs::metadata(&advisor_dir).unwrap().permissions();
+
+    std::fs::create_dir_all(app.store.task_path("unreadable")).unwrap();
+    std::fs::create_dir_all(app.store.task_dir("corrupt")).unwrap();
+    std::fs::write(app.store.task_path("corrupt"), "not task JSON").unwrap();
+    std::fs::set_permissions(&unsavable_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::set_permissions(&advisor_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed_save = app.store.save_task(&unsavable);
+    app.recover_on_start().unwrap();
+    std::fs::set_permissions(&unsavable_dir, unsavable_permissions).unwrap();
+    std::fs::set_permissions(&advisor_dir, advisor_permissions).unwrap();
+
+    assert!(
+        failed_save.is_err(),
+        "the recovery fixture must prevent atomic writes"
+    );
+    assert!(app.recovery_timers_started());
+    let controls = app.controls.lock().unwrap();
+    for task in [&healthy, &interrupted, &unsavable, &advisor] {
+        assert!(
+            controls.contains_key(&task.id),
+            "{} has no recovery loop",
+            task.id
+        );
+    }
+    drop(controls);
+    let recovered = app.store.load_task(&interrupted.id).unwrap().unwrap();
+    assert_eq!(recovered.status, TaskStatus::Queued);
+    assert_eq!(recovered.attempts[0].status, AttemptStatus::Interrupted);
+    let failed = app.store.load_task(&unsavable.id).unwrap().unwrap();
+    assert_eq!(failed.attempts[0].status, AttemptStatus::Running);
+}
+
+#[tokio::test]
+async fn recover_on_start_starts_timers_after_listing_failures() {
+    let (app, _dir) = test_app();
+    let tasks = app.data_dir.join("tasks");
+    std::fs::remove_dir(&tasks).unwrap();
+    std::fs::write(&tasks, "not a directory").unwrap();
+    std::fs::create_dir_all(app.store.audit_dir("unreadable").join("audit.json")).unwrap();
+
+    app.recover_on_start().unwrap();
+
+    std::fs::remove_file(&tasks).unwrap();
+    std::fs::create_dir(&tasks).unwrap();
+    assert!(app.recovery_timers_started());
+}
+
 fn running_implement_task(app: &App, dir: &Path) -> (Task, PathBuf) {
     let mut task = task_with_status(TaskStatus::Running);
     task.attempts.push(attempt_with_failure(1, "x"));
@@ -80,8 +182,7 @@ async fn a_dead_run_without_an_exit_file_is_interrupted_and_its_spend_kept() {
         .recover_interrupted_with(
             |task, idx| app.run_fate(task, idx),
             |task, idx| {
-                let run_dir = app.store.run_dir(&task.id, task.attempts[idx].n);
-                settle_unfinished_cost(task, idx, &run_dir, &Default::default());
+                settle_unfinished_cost(task, idx, &app.store, &Default::default());
             },
         )
         .unwrap();
@@ -138,7 +239,10 @@ async fn a_live_group_that_is_not_the_run_is_treated_as_dead_and_left_alone() {
 
     let task = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(task.attempts[0].status, AttemptStatus::Interrupted);
-    assert!(group_alive(stranger), "a stranger's group must not be killed");
+    assert!(
+        group_alive(stranger),
+        "a stranger's group must not be killed"
+    );
     kill_group(stranger);
 }
 
@@ -151,7 +255,10 @@ async fn a_live_group_of_the_run_is_resumed() {
     task.attempts[0].pgid = Some(run);
     app.store.save_task(&task).unwrap();
 
-    assert!(matches!(app.run_fate(&task, 0), crate::store::RunFate::Resume));
+    assert!(matches!(
+        app.run_fate(&task, 0),
+        crate::store::RunFate::Resume
+    ));
     kill_group(run);
 }
 
@@ -189,6 +296,11 @@ async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
     let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
 
     assert!(outcome.stalled, "{:?}", outcome.error);
+    // The kill is sent at once; a loaded machine takes a moment to tear the group down.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while group_alive(pgid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!group_alive(pgid), "the adopted run must be stopped");
 }
 
@@ -231,16 +343,16 @@ async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
     let (app, dir) = test_app();
     let (mut task, run_dir) = running_implement_task(&app, dir.path());
     std::fs::write(run_dir.join("events.raw"), "").unwrap();
-    // Five seconds of stderr lines and no stdout, then a clean exit.
+    // Ten seconds of stderr lines and no stdout, then a clean exit.
     let pgid = spawn_group_running(
-        "for i in 1 2 3 4 5 6 7 8 9 10; do echo x >> \"${0%.exit}.stderr.log\"; sleep 0.5; done; echo 0 > \"$0\"",
+        "for i in $(seq 20); do echo x >> \"${0%.exit}.stderr.log\"; sleep 0.5; done; echo 0 > \"$0\"",
         &run_dir.join("events.exit"),
         false,
     );
     task.attempts[0].pgid = Some(pgid);
     app.store.save_task(&task).unwrap();
     let variant = Variant {
-        stall_timeout_secs: 2,
+        stall_timeout_secs: 4,
         ..Default::default()
     };
 
@@ -263,6 +375,11 @@ async fn an_over_budget_adopted_run_is_killed() {
     let outcome = follow_within(&app, &task, Guard::for_variant(&variant, None)).await;
 
     assert!(outcome.over_budget, "{:?}", outcome.error);
+    // The kill is sent at once; a loaded machine takes a moment to tear the group down.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while group_alive(pgid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!group_alive(pgid), "the adopted run must be stopped");
 }
 

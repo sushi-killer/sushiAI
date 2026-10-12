@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { until, removeDir } = require("./helpers/deadline.cjs");
 
 const {
   createHostExec,
@@ -404,15 +405,6 @@ const MANIFEST = JSON.parse(
 const ID = MANIFEST.id;
 const SURFACE = "probe.companion-settings";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitFor(check, what, ms = 8000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await sleep(15);
-  }
-}
 
 async function rig(t, { permissions } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "sushiai-hostexec-"));
@@ -496,13 +488,13 @@ async function rig(t, { permissions } = {}) {
       try {
         process.kill(pid, "SIGKILL");
       } catch {}
-    fs.rmSync(base, { recursive: true, force: true });
+    removeDir(base);
   });
   await manager.ready;
   await companions.start();
   await manager.setEnabled(ID, true);
   await manager.approve(ID);
-  await waitFor(
+  await until(
     async () => companions.status(ID)?.state === "running",
     "running",
   );
@@ -526,13 +518,13 @@ test("hosts.changed goes to a companion with hosts.read on start and on every ch
   const r = await rig(t);
   const notes = () =>
     r.lines("notes").filter((n) => n.method === "hosts.changed");
-  await waitFor(() => notes().length === 1, "the first list");
+  await until(() => notes().length === 1, "the first list");
   assert.deepEqual(notes()[0].params.hosts, [
     { id: "h-1", name: "Devbox", host: "user@devbox" },
     { id: "h-2", name: "Edge", host: "192.0.2.7", port: 2200 },
   ]);
   r.setProfiles([...PROFILES.slice(0, 3), PROFILES[5]]);
-  await waitFor(() => notes().length === 2, "the changed list");
+  await until(() => notes().length === 2, "the changed list");
   assert.deepEqual(
     notes()[1].params.hosts.map((h) => h.id),
     ["h-1", "h-2", "h-3"],
@@ -602,10 +594,10 @@ test("a card answered after the companion restarted is void", async (t) => {
   const pending = r.manager
     .companionRow(ID, SURFACE, "hosts", "h-1")
     .catch(() => {});
-  await waitFor(() => answer, "the card");
+  await until(() => answer, "the card");
   const [first] = r.pids();
   process.kill(first, "SIGKILL");
-  await waitFor(async () => r.pids().length === 2, "a restart");
+  await until(async () => r.pids().length === 2, "a restart");
   answer(true);
   await pending;
   assert.equal(r.ran.length, 0);

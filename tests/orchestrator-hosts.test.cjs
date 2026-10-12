@@ -325,7 +325,7 @@ test("a host's running count skips the drafts that wait on the Plan", () => {
     // Queued behind another task's lease after starting: running.
     task("lease", {
       status: "queued",
-      queueReason: 'waits for "A" on src/x',
+      wait: { kind: "file", taskId: "a", title: "A", path: "src/x" },
       attempts: [attempt],
     }),
     task("backlog", { status: "queued", backlog: { bucket: "next" } }),

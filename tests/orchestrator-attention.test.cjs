@@ -149,6 +149,16 @@ test("rows carry their second line, action chips and keys, and drop an orch: tit
   // A landing task cannot be run again.
   assert.ok(!by["task:l"].actions.some((a) => a.id === "run"));
   assert.match(by["land:d"].meta, /^done · \$0\.51 · not landed · → main$/);
+  const stranded = attentionItems(
+    [task({ id: "stranded", unlanded: { commits: 2, base: "work" } })],
+    true,
+  )[0];
+  assert.equal(stranded.meta, "done · $0.00 · 2 commits not on work");
+  const single = attentionItems(
+    [task({ unlanded: { commits: 1, base: "work" } })],
+    true,
+  )[0];
+  assert.equal(single.meta, "done · $0.00 · 1 commit not on work");
   assert.deepEqual(
     by["land:d"].actions.map((a) => [a.id, a.key, !!a.primary]),
     [

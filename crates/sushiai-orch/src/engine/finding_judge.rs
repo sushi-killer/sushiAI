@@ -44,18 +44,42 @@ pub(super) fn pair_disputes<'a>(
         .collect()
 }
 
-/// The cheapest route no weaker than the implementer's floor (see
-/// `review_floor`), never the reviewer's own; on a tie, one on another
-/// harness than the reviewer's.
-pub(super) fn judge_route<'a>(
+/// Resolve the finding judge route. A configured named route is accepted
+/// unless it is the reviewer or implementer; otherwise use the existing
+/// automatic rule and return the reason the name was refused.
+pub(super) fn resolve_judge_route<'a>(
     settings: &'a Settings,
+    judge_id: Option<&str>,
     reviewer: &Route,
     implementer: &Route,
     tier: Tier,
-) -> Option<&'a Route> {
+) -> (Option<&'a Route>, Option<&'static str>) {
+    let judge_id = judge_id.unwrap_or("auto");
+    if judge_id != "auto" {
+        let named = settings.routes.iter().find(|r| r.id == judge_id);
+        let refusal = match named {
+            None => Some("is not configured"),
+            Some(route) if super::review::is_excluded(route, &[reviewer]) => {
+                Some("is the reviewer")
+            }
+            Some(route) if super::review::is_excluded(route, &[implementer]) => {
+                Some("is the implementer")
+            }
+            Some(route) => return (Some(route), None),
+        };
+        let floor = review_floor(implementer, tier);
+        let auto = cheapest_route_at(settings, floor, &[reviewer, implementer], reviewer, false)
+            .map(|(route, _)| route);
+        return (auto, refusal);
+    }
     let floor = review_floor(implementer, tier);
-    cheapest_route_at(settings, floor, Some(&reviewer.id), reviewer, None, false)
-        .map(|(route, _)| route)
+    let auto = cheapest_route_at(settings, floor, &[reviewer, implementer], reviewer, false)
+        .map(|(route, _)| route);
+    (auto, None)
+}
+
+fn refusal_decision(judge_id: &str, reason: &str) -> String {
+    format!("Orchestrator: judge route {judge_id} refused ({reason}); using auto")
 }
 
 /// The judge's reply: the last ```sushi-judge fence, else the outermost
@@ -155,14 +179,13 @@ fn judge_brief(task: &Task, finding: &str, dispute: &Dispute, evidence: &[String
 }
 
 /// Runs a read-only judge on `route` over one disputed finding of attempt
-/// `attempt_n` (`seq` = 1 for the first judge run of the attempt). `Err` is
+/// `attempt_n`. `Err` is
 /// why there is no ruling.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn judge_finding(
     app: &Arc<App>,
     task: &mut Task,
     attempt_n: u32,
-    seq: u32,
     finding: &str,
     dispute: &Dispute,
     route: &Route,
@@ -170,12 +193,10 @@ pub(super) async fn judge_finding(
 ) -> Result<FindingJudgement, String> {
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join(if seq <= 1 {
-        "finding-judge".to_string()
-    } else {
-        format!("finding-judge-{seq}")
-    });
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "finding-judge", Some(attempt_n))
+        .map_err(|e| e.to_string())?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -211,8 +232,10 @@ pub(super) async fn judge_finding(
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
+        resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &images)
     };
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         &task.id,
@@ -224,12 +247,19 @@ pub(super) async fn judge_finding(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("finding judge", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     let outcome = result.map_err(|_| "the judge run was stopped or did not start".to_string())?;
+    if outcome.timed_out {
+        task.decisions
+            .push(helper_timeout_message("finding judge", limit));
+    }
     task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    if outcome.timed_out {
+        return Err("the judge run timed out".to_string());
+    }
     if let Some(error) = outcome.error {
         return Err(format!("the judge errored: {}", head_chars(&error, 200)));
     }
@@ -250,42 +280,63 @@ pub(super) async fn judge_disputed_findings(
     idx: usize,
     attempt_n: u32,
     repeated: &[String],
+    fallback_rebuttal: Option<&str>,
     settings: &Settings,
+    judge_id: Option<&str>,
     review_route: &Route,
     implementer: &Route,
     tier: Tier,
-    judge_runs: &mut u32,
     cancel: &CancelToken,
 ) -> Vec<(String, String)> {
     let disputes = task.attempts[idx].disputes.clone();
+    let mut pairs: Vec<(String, Dispute)> = pair_disputes(repeated, &disputes)
+        .into_iter()
+        .map(|(finding, dispute)| (finding, dispute.clone()))
+        .collect();
+    if let Some(rebuttal) = fallback_rebuttal {
+        // A finding the attempt did not dispute is answered by the
+        // implementer's own report.
+        for finding in repeated {
+            if !pairs.iter().any(|(f, _)| f == finding) {
+                pairs.push((
+                    finding.clone(),
+                    Dispute {
+                        finding: finding.clone(),
+                        rebuttal: rebuttal.to_string(),
+                        evidence: Vec::new(),
+                    },
+                ));
+            }
+        }
+    }
     let mut dropped = Vec::new();
-    for (finding, dispute) in pair_disputes(repeated, &disputes) {
+    let mut refusal_logged = false;
+    for (finding, dispute) in pairs {
+        let dispute = &dispute;
         let key = finding_key(&finding);
         if task.judged_findings.contains(&key) {
             continue;
         }
         task.judged_findings.push(key);
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
-        let Some(route) = judge_route(settings, review_route, implementer, tier) else {
+        app.save_task_logged(task);
+        let (route, refusal) =
+            resolve_judge_route(settings, judge_id, review_route, implementer, tier);
+        if let Some(reason) = refusal.filter(|_| !refusal_logged) {
+            task.decisions
+                .push(refusal_decision(judge_id.unwrap_or("auto"), reason));
+            refusal_logged = true;
+            task.updated_at = now_ms();
+            app.save_task_logged(task);
+        }
+        let Some(route) = route else {
             task.decisions.push(format!(
                 "Orchestrator: disputed review finding could not be judged (no other route at strength {}): {finding}",
                 review_floor(implementer, tier)
             ));
             continue;
         };
-        *judge_runs += 1;
-        let ruling = judge_finding(
-            app,
-            task,
-            attempt_n,
-            *judge_runs,
-            &finding,
-            dispute,
-            route,
-            cancel,
-        )
-        .await;
+        let ruling = judge_finding(app, task, attempt_n, &finding, dispute, route, cancel).await;
         match ruling {
             Ok(j) if !j.finding_valid => {
                 task.assumptions.push(Assumption {
@@ -295,6 +346,7 @@ pub(super) async fn judge_disputed_findings(
                     by: "review-judge".to_string(),
                     kind: Some(QuestionKind::ReviewDispute),
                     attempt: Some(attempt_n),
+                    commands: Vec::new(),
                     overturned: false,
                     owner_answer: None,
                 });
@@ -313,7 +365,7 @@ pub(super) async fn judge_disputed_findings(
             )),
         }
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
     }
     dropped
 }
@@ -395,16 +447,137 @@ mod tests {
         let settings = Settings::default();
         let by_id = |id: &str| settings.routes.iter().find(|r| r.id == id).unwrap().clone();
         let (sonnet, opus, codex) = (by_id("claude-sonnet"), by_id("claude-opus"), by_id("codex"));
-        // Standard work: the cheapest other route at strength 2 (codex is
-        // unpriced, so it sorts after priced opus).
-        let judge = |reviewer: &Route, tier| judge_route(&settings, reviewer, &sonnet, tier);
+        // Standard work: the cheapest other route at strength 2 (codex has no
+        // model, so its strength is unknown and it never qualifies).
+        let judge = |reviewer: &Route, tier| {
+            resolve_judge_route(&settings, None, reviewer, &sonnet, tier).0
+        };
         assert_eq!(judge(&sonnet, Tier::Standard).unwrap().id, "claude-opus");
         // Hard work: only opus reaches 3, and it is not the judge when it reviews.
         assert_eq!(judge(&sonnet, Tier::Hard).unwrap().id, "claude-opus");
         assert!(judge(&opus, Tier::Hard).is_none());
         // A strong implementer raises the floor above the tier's.
-        assert!(judge_route(&settings, &opus, &opus, Tier::Standard).is_none());
+        assert!(
+            resolve_judge_route(&settings, None, &opus, &opus, Tier::Standard)
+                .0
+                .is_none()
+        );
         assert_ne!(judge(&codex, Tier::Standard).unwrap().id, "codex");
+    }
+
+    #[test]
+    fn finding_judge_never_returns_the_implementer_or_the_reviewer() {
+        let with_model = |id: &str, harness, model: &str| Route {
+            model: Some(model.into()),
+            strength: Some(2),
+            ..route(id, harness)
+        };
+        let implementer = with_model("impl", Harness::Claude, "m-impl");
+        let twin = with_model("impl-copy", Harness::Claude, "m-impl");
+        let reviewer = with_model("rev", Harness::Codex, "m-rev");
+        let other = with_model("other", Harness::Claude, "m-other");
+        let settings = Settings {
+            routes: vec![
+                implementer.clone(),
+                twin.clone(),
+                reviewer.clone(),
+                other.clone(),
+            ],
+            ..Default::default()
+        };
+        let judge = resolve_judge_route(&settings, None, &reviewer, &implementer, Tier::Standard).0;
+        assert_eq!(judge.unwrap().id, "other");
+        let settings = Settings {
+            routes: vec![implementer.clone(), twin, reviewer.clone()],
+            ..Default::default()
+        };
+        assert!(
+            resolve_judge_route(&settings, None, &reviewer, &implementer, Tier::Standard)
+                .0
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn preset_judge_is_used_and_reviewer_conflicts_fall_back_to_auto() {
+        let settings = Settings::default();
+        let reviewer = settings
+            .routes
+            .iter()
+            .find(|r| r.id == "claude-sonnet")
+            .unwrap();
+        let implementer = settings.routes.iter().find(|r| r.id == "codex").unwrap();
+        let preset = PresetValues {
+            judge: Some("claude-opus".into()),
+            ..PresetValues::default()
+        };
+        let mut variant = Variant::default();
+        preset.apply(&mut variant);
+        let (route, refused) = resolve_judge_route(
+            &settings,
+            variant.judge_route.as_deref(),
+            reviewer,
+            implementer,
+            Tier::Standard,
+        );
+        assert_eq!(route.unwrap().id, "claude-opus");
+        assert_eq!(refused, None);
+
+        let (route, refused) = resolve_judge_route(
+            &settings,
+            Some("claude-sonnet"),
+            reviewer,
+            implementer,
+            Tier::Standard,
+        );
+        assert_eq!(refused, Some("is the reviewer"));
+        assert_eq!(route.unwrap().id, "claude-opus");
+        assert_eq!(
+            refusal_decision("claude-sonnet", "is the reviewer"),
+            "Orchestrator: judge route claude-sonnet refused (is the reviewer); using auto"
+        );
+
+        let (route, refused) = resolve_judge_route(
+            &settings,
+            Some("removed-route"),
+            reviewer,
+            implementer,
+            Tier::Standard,
+        );
+        assert_eq!(refused, Some("is not configured"));
+        assert_eq!(route.unwrap().id, "claude-opus");
+    }
+
+    #[test]
+    fn judge_matching_implementer_by_harness_and_model_falls_back_to_auto() {
+        let named = Route {
+            model: Some("m-impl".into()),
+            strength: Some(2),
+            ..route("named-copy", Harness::Claude)
+        };
+        let implementer = Route {
+            id: "impl".into(),
+            model: Some("m-impl".into()),
+            ..named.clone()
+        };
+        let reviewer = Route {
+            model: Some("m-review".into()),
+            ..route("reviewer", Harness::Codex)
+        };
+        let auto = strong(route("auto", Harness::Claude), 2);
+        let settings = Settings {
+            routes: vec![named, implementer.clone(), reviewer.clone(), auto.clone()],
+            ..Default::default()
+        };
+        let (route, refused) = resolve_judge_route(
+            &settings,
+            Some("named-copy"),
+            &reviewer,
+            &implementer,
+            Tier::Standard,
+        );
+        assert_eq!(refused, Some("is the implementer"));
+        assert_eq!(route.unwrap().id, auto.id);
     }
 
     #[test]
@@ -419,14 +592,16 @@ mod tests {
         };
         let reviewer = route("c1", Harness::Claude);
         assert_eq!(
-            judge_route(&settings, &reviewer, &reviewer, Tier::Standard)
+            resolve_judge_route(&settings, None, &reviewer, &reviewer, Tier::Standard)
+                .0
                 .unwrap()
                 .id,
             "x1"
         );
         let reviewer = route("x1", Harness::Codex);
         assert_eq!(
-            judge_route(&settings, &reviewer, &reviewer, Tier::Standard)
+            resolve_judge_route(&settings, None, &reviewer, &reviewer, Tier::Standard)
+                .0
                 .unwrap()
                 .id,
             "c1"
@@ -486,5 +661,43 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert!(images[0].ends_with("artifacts/a.png"));
         assert_eq!(text, s(&["src/a.rs:4", "cargo test: ok"]));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn finding_judge_timed_out_keeps_the_finding() {
+        let (app, _dir, mut task, route) = slow_helper_task();
+        let finding = "P1: README.md:1 - missing guard".to_string();
+        task.attempts[0].disputes = vec![Dispute {
+            finding: finding.clone(),
+            rebuttal: "Already handled".into(),
+            evidence: vec![],
+        }];
+        let settings = app.settings.read().unwrap().clone();
+        let mut implementer = route.clone();
+        implementer.id = "implementer".into();
+        implementer.model = Some("other".into());
+        let dropped = judge_disputed_findings(
+            &app,
+            &mut task,
+            0,
+            1,
+            &[finding],
+            None,
+            &settings,
+            None,
+            &route,
+            &implementer,
+            Tier::Mechanical,
+            &CancelToken::new(),
+        )
+        .await;
+        assert!(dropped.is_empty());
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "finding judge");
     }
 }

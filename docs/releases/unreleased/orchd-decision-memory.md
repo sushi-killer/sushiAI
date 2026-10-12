@@ -1,0 +1,4 @@
+## Orchestrator
+
+- The overseer now remembers how you answered. When a waiting question matches an answer you gave before (the same kind of question, the same check commands and failure signals) and your newest answers for it agree, the overseer answers it the same way without a notice or a turn, and the task records `Overseer: answered like owner precedent`. It never decides permissions, protected paths, budgets, accepting an attempt, dropping a check, security or sandbox changes, pushing or merging, paid services, deletions or production deploys, and a lead's or its own earlier answer never counts.
+- The Improvements view has a DECISION MEMORY section. When you give the same answer twice, it shows a proposed rule you can Accept (it becomes a repo note) or Dismiss, and the 20 latest precedents, each with a Remove button.

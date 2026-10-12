@@ -8,9 +8,13 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+#[path = "../support/native_sandbox.rs"]
+mod native_sandbox;
+pub use native_sandbox::fit_sandbox;
 
 pub struct Daemon {
     pub child: DaemonChild,
@@ -24,6 +28,11 @@ pub struct Daemon {
 /// `Daemon` or `spawn_daemon` -- is held in one, so a test that panics, or simply forgets to
 /// shut its daemon down, cannot leave an orphan behind. Dropping reaps the process.
 pub struct DaemonChild(Child);
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 impl std::ops::Deref for DaemonChild {
     type Target = Child;
@@ -44,6 +53,65 @@ impl Drop for DaemonChild {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+}
+
+/// The one wall-clock budget every wait in this suite shares: 180 s, or
+/// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (unset, 0 or anything else
+/// means 180 s, like `tests/helpers/deadline.cjs`). Read once per test process. A test that measures
+/// timing scales its slow job and its budget from this value instead of using its own constant.
+pub fn deadline() -> Duration {
+    static DEADLINE: OnceLock<Duration> = OnceLock::new();
+    *DEADLINE.get_or_init(|| {
+        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0);
+        Duration::from_secs(secs.unwrap_or(180))
+    })
+}
+
+/// Polls `check` every 50 ms until it returns `Some` or the deadline passes (`None`).
+fn poll_deadline<T>(mut check: impl FnMut() -> Option<T>) -> Option<T> {
+    let start = Instant::now();
+    loop {
+        if let Some(value) = check() {
+            return Some(value);
+        }
+        if start.elapsed() >= deadline() {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Polls `check` until it returns `Some`; panics naming `what` after the deadline.
+pub fn wait_until<T>(what: &str, check: impl FnMut() -> Option<T>) -> T {
+    poll_deadline(check)
+        .unwrap_or_else(|| panic!("timed out after {:?} waiting for {what}", deadline()))
+}
+
+/// Removes a directory tree that a stopped daemon or its agents may have just released:
+/// success and NotFound return, ENOTEMPTY and EBUSY retry until the deadline, anything
+/// else panics. Call it after the daemon was stopped and reaped.
+pub fn remove_dir_retrying(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    let mut last = None;
+    let removed = poll_deadline(|| match std::fs::remove_dir_all(path) {
+        Ok(()) => Some(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(()),
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY | libc::EBUSY)) => {
+            last = Some(e);
+            None
+        }
+        Err(e) => panic!("removing {} failed: {e}", path.display()),
+    });
+    if removed.is_none() {
+        panic!(
+            "removing {} still failed at the deadline: {}",
+            path.display(),
+            last.map_or_else(String::new, |e| e.to_string())
+        );
     }
 }
 
@@ -123,6 +191,9 @@ impl Daemon {
         {
             let mut settings = request_on(&socket, "settings.get", serde_json::json!({}));
             settings["briefCheckRoute"] = serde_json::json!("");
+            // The plan review would launch a real codex: off, so no test
+            // ever does. The plan gate's own tests name a claude route.
+            settings["planReview"] = serde_json::json!("");
             // The answer policy answers routine questions itself; the other
             // tests wait for them. Its own tests turn it back on.
             settings["answerPolicy"] = serde_json::json!(false);
@@ -162,30 +233,45 @@ impl Daemon {
     /// Stops the daemon and waits for it to exit, then starts a new one in the same home.
     pub fn restart(&mut self, extra_env: &[(&str, &str)]) {
         stop_daemon(&self.socket);
-        let begin = Instant::now();
-        while !matches!(self.child.try_wait(), Ok(Some(_))) {
-            assert!(begin.elapsed() < Duration::from_secs(15), "no exit");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_until("the daemon to exit before its restart", || {
+            matches!(self.child.try_wait(), Ok(Some(_))).then_some(())
+        });
         self.child = spawn_daemon(self.home.path(), extra_env);
         wait_for_socket(&self.socket);
     }
 
+    /// Stops the daemon and waits until it has exited. At the deadline it kills and reaps the
+    /// daemon, then panics.
     pub fn shutdown_and_wait(mut self) {
         // Drop still runs afterwards and finds the child already reaped.
         stop_daemon(&self.socket);
-        let start = Instant::now();
-        loop {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                return;
-            }
-            if start.elapsed() > Duration::from_secs(15) {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if poll_deadline(|| self.child.try_wait().ok().flatten()).is_none() {
+            kill_and_reap(&mut self.child);
+            panic!("the daemon did not exit within {:?}", deadline());
         }
+    }
+}
+
+impl Drop for Daemon {
+    /// Stops the daemon and waits for its exit before the home is removed, so a late write by
+    /// the daemon or its agents cannot make the removal fail with ENOTEMPTY. Never panics:
+    /// this can run while a failed test unwinds.
+    fn drop(&mut self) {
+        // A failed test may leave a wedged daemon: kill it at once instead of waiting.
+        if std::thread::panicking() {
+            kill_and_reap(&mut self.child);
+        } else {
+            stop_daemon(&self.socket);
+            if poll_deadline(|| self.child.try_wait().ok().flatten()).is_none() {
+                kill_and_reap(&mut self.child);
+            }
+        }
+        let path = self.home.path().to_path_buf();
+        poll_deadline(|| match std::fs::remove_dir_all(&path) {
+            Ok(()) => Some(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(()),
+            Err(_) => None,
+        });
     }
 }
 
@@ -195,25 +281,42 @@ impl Daemon {
 /// verify runs `cargo test`: every daemon here would then fail each
 /// verify command it wraps in `sandbox-exec`, so no task could ever pass.
 pub fn native_sandbox_unavailable() -> bool {
-    static UNAVAILABLE: OnceLock<bool> = OnceLock::new();
-    *UNAVAILABLE.get_or_init(|| {
-        cfg!(target_os = "macos")
-            && !Command::new("sandbox-exec")
-                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-    })
+    native_sandbox::native_sandbox_unavailable_reason().is_some()
 }
 
-/// Switches a `settings.get` result to the `host` sandbox when the native
-/// one can't be applied here; anywhere else the tests keep exercising the
-/// real `sandbox-exec` path.
-pub fn fit_sandbox(settings: &mut serde_json::Value) {
-    if native_sandbox_unavailable() {
-        settings["sandbox"] = serde_json::json!("host");
+/// Disposable package-manager state with read-only access to the installed
+/// toolchains and dependency sources. Native profiles allow writing the new
+/// homes, never the symlink targets in the owner's homes.
+pub fn sandbox_toolchain_homes(user: &Path) -> (PathBuf, PathBuf) {
+    let owner_home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let cargo_source = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| owner_home.join(".cargo"));
+    let rustup_source = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| owner_home.join(".rustup"));
+    let cargo = user.join(".cargo");
+    let rustup = user.join(".rustup");
+    std::fs::create_dir_all(&cargo).unwrap();
+    std::fs::create_dir_all(&rustup).unwrap();
+    for (source, target, names) in [
+        (&cargo_source, &cargo, &["bin", "registry", "git"][..]),
+        (&rustup_source, &rustup, &["toolchains"][..]),
+    ] {
+        for name in names {
+            if source.join(name).exists() {
+                std::os::unix::fs::symlink(source.join(name), target.join(name)).unwrap();
+            }
+        }
     }
+    if rustup_source.join("settings.toml").is_file() {
+        std::fs::copy(
+            rustup_source.join("settings.toml"),
+            rustup.join("settings.toml"),
+        )
+        .unwrap();
+    }
+    (cargo, rustup)
 }
 
 /// The file a daemon's output goes to, inside its home, so a request that gets no answer can
@@ -232,36 +335,24 @@ fn no_answer(socket: &Path, method: &str) -> String {
 }
 
 pub fn wait_for_socket(socket: &Path) {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(15) {
-        if socket.exists() && UnixStream::connect(socket).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("the daemon did not open its socket in time");
+    wait_until("the daemon to open its socket", || {
+        (socket.exists() && UnixStream::connect(socket).is_ok()).then_some(())
+    });
 }
 
 /// Wait for a raw (non-`Daemon`) child to exit, returning its status and
 /// everything it wrote to stderr. Used for the singleton/bind-failure tests
 /// where the process under test is expected to exit quickly on its own.
-pub fn wait_for_exit(mut child: DaemonChild, timeout: Duration) -> (ExitStatus, String) {
-    let start = Instant::now();
-    loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            let mut stderr = String::new();
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_string(&mut stderr);
-            }
-            return (status, stderr);
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the daemon did not exit within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
+pub fn wait_for_exit(mut child: DaemonChild) -> (ExitStatus, String) {
+    let Some(status) = poll_deadline(|| child.try_wait().ok().flatten()) else {
+        kill_and_reap(&mut child);
+        panic!("the daemon did not exit within {:?}", deadline());
+    };
+    let mut stderr = String::new();
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut stderr);
     }
+    (status, stderr)
 }
 
 /// One JSON frame: a 4-byte big-endian length (kind byte included), the kind `J`, the text.
@@ -314,6 +405,7 @@ pub fn stop_daemon(socket: &Path) {
         "params": {"protocol": 1, "client": "orch-test"}});
     let stop = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "daemon.shutdown",
         "params": {}});
+    let _ = stream.set_read_timeout(Some(deadline()));
     let _ = stream.write_all(&frame(&hello.to_string()));
     let _ = stream.write_all(&frame(&stop.to_string()));
     let _ = stream.flush();
@@ -378,19 +470,21 @@ pub fn fake_harness_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-pub fn poll_task_status(daemon: &Daemon, task_id: &str, timeout: Duration) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
+pub fn poll_task_status(daemon: &Daemon, task_id: &str) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    poll_deadline(|| {
         let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
         let status = task["status"].as_str().unwrap_or("");
         if status != "queued" && status != "running" {
-            return task;
+            return Some(task);
         }
-        if start.elapsed() > timeout {
-            panic!("task {task_id} did not settle in time, last status: {status}: {task}");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        last = task;
+        None
+    })
+    .unwrap_or_else(|| {
+        let status = last["status"].as_str().unwrap_or("");
+        panic!("task {task_id} did not settle in time, last status: {status}: {last}");
+    })
 }
 
 /// A fake Claude harness that exercises the *real* Stop hook path: it reads
@@ -478,22 +572,23 @@ esac
 pub fn poll_until(
     daemon: &Daemon,
     task_id: &str,
-    timeout: Duration,
     pred: impl Fn(&str) -> bool,
 ) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
+    let mut last = serde_json::Value::Null;
+    poll_deadline(|| {
         let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
-        let status = task["status"].as_str().unwrap_or("").to_string();
-        if pred(&status) {
-            return task;
+        if pred(task["status"].as_str().unwrap_or("")) {
+            return Some(task);
         }
-        assert!(
-            start.elapsed() < timeout,
-            "task {task_id} did not reach the expected status in time, stuck at {status}: {task}"
+        last = task;
+        None
+    })
+    .unwrap_or_else(|| {
+        let status = last["status"].as_str().unwrap_or("");
+        panic!(
+            "task {task_id} did not reach the expected status in time, stuck at {status}: {last}"
         );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    })
 }
 
 /// First attempt leaves FIRST (verify wants SECOND) and a handoff; the
@@ -501,21 +596,42 @@ pub fn poll_until(
 pub const FAKE_RETRY_SCRIPT: &str = r#"#!/bin/sh
 cat > /dev/null
 printf '%s\n' "$*" >> "$ARGS_LOG"
+case " $* " in
+  *" --resume "*)
+    if [ "$REJECT_RESUME" = 1 ]; then echo 'session not found' >&2; exit 1; fi ;;
+esac
 if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
 json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"tried the quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+case " $* " in *" --resume "*) json=$(printf '%s' "$json" | sed 's/total_cost_usd":0.01/total_cost_usd":0.02/') ;; esac
 printf '%s\n' "$json"
 "#;
 
 pub const FAKE_CLAUDE_PASS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CLAUDE_ARGS\"\ncat > /dev/null\necho changed > CHANGED_MARKER.txt\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 
 pub fn run_file(daemon: &Daemon, task_id: &str, name: &str) -> String {
+    attempt_file(daemon, task_id, "implement", name)
+}
+
+pub fn plan_file(daemon: &Daemon, task_id: &str, name: &str) -> String {
+    attempt_file(daemon, task_id, "plan", name)
+}
+
+fn attempt_file(daemon: &Daemon, task_id: &str, stage: &str, name: &str) -> String {
+    let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
+    let attempt = task["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["stage"] == stage)
+        .unwrap_or_else(|| panic!("no {stage} attempt: {task}"));
     std::fs::read_to_string(
         daemon
             .data_dir()
             .join("tasks")
             .join(task_id)
-            .join("runs/1")
+            .join("runs")
+            .join(attempt["n"].as_u64().unwrap().to_string())
             .join(name),
     )
     .unwrap()
@@ -536,7 +652,7 @@ pub fn git_out(repo: &Path, args: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn settle(daemon: &Daemon, task_id: &str) -> serde_json::Value {
-    poll_until(daemon, task_id, Duration::from_secs(30), |s| {
+    poll_until(daemon, task_id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     })
 }

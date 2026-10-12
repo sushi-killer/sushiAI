@@ -95,6 +95,55 @@ test("taskCreateParams adds a trimmed base on the title/goal fallback path too",
   );
 });
 
+for (const form of ["request", "fallback"]) {
+  for (const start of [false, true]) {
+    test(`composerCreateParams ${form} ${start ? "starts without backlog" : "parks in NEXT"}`, async () => {
+      const { composerCreateParams } = await library;
+      const text = "Add CSV export";
+      const params = composerCreateParams(
+        text,
+        start,
+        "  feature/base-demo  ",
+        "project-1",
+        form,
+      );
+      assert.deepEqual(params, {
+        ...(form === "request"
+          ? { request: text }
+          : { title: text, goal: text }),
+        start,
+        source: "ui",
+        projectId: "project-1",
+        ...(!start ? { backlog: { bucket: "next" } } : {}),
+        base: "feature/base-demo",
+      });
+      assert.equal(Object.hasOwn(params, "backlog"), !start);
+      for (const base of ["", "   "]) {
+        const blank = composerCreateParams(text, start, base, undefined, form);
+        assert.equal(Object.hasOwn(blank, "base"), false);
+        assert.equal(Object.hasOwn(blank, "backlog"), !start);
+      }
+    });
+  }
+}
+
+test("composerCreateParams truncates fallback titles to 60 characters and keeps the goal", async () => {
+  const { composerCreateParams } = await library;
+  const text = "x".repeat(61);
+  const params = composerCreateParams(text, false, "", undefined, "fallback");
+  assert.equal(params.title, `${"x".repeat(59)}…`);
+  assert.equal(params.title.length, 60);
+  assert.equal(params.goal, text);
+  assert.equal(
+    composerCreateParams("x".repeat(60), true, "", undefined, "fallback").title,
+    "x".repeat(60),
+  );
+  assert.equal(
+    composerCreateParams(text, false, "", undefined, "request").request,
+    text,
+  );
+});
+
 test("formatDuration reads in whole minutes and never prints a zero unit", async () => {
   const { formatDuration } = await library;
   assert.equal(formatDuration(0), "<1m");
@@ -189,6 +238,24 @@ test("a waiting row shows the real question count", async () => {
     "3 questions for you",
   );
   assert.equal(waiting("Which one?"), "1 question for you");
+});
+
+test("an open question wins over a stale wait label", async () => {
+  const { taskReason } = await library;
+  const wait = { kind: "file", taskId: "t9", title: "Other", path: "a.txt" };
+  const running = taskReason(task({ status: "running", wait }), []);
+  assert.match(running, /a\.txt/);
+  assert.equal(
+    taskReason(
+      task({
+        status: "waiting",
+        wait,
+        question: { text: "Which?", options: [] },
+      }),
+      [],
+    ),
+    "1 question for you",
+  );
 });
 
 test("statusBadgeLabel names each status a short word for the list row's pill", async () => {
@@ -770,7 +837,7 @@ test("taskReason and taskMetaLine give a rail row its second and third lines", a
   assert.equal(taskMetaLine(running, 4, NOON), "6m · $0.22");
   const queued = task({
     status: "queued",
-    queueReason: "queued behind default-landing",
+    park: { reason: "queued behind default-landing", by: "lead" },
   });
   assert.equal(
     taskReason(queued, [queued], 4),
@@ -855,7 +922,7 @@ test("stageTrack marks every stage before the current one done and the rest pend
   );
 });
 
-test("planDrafts lists unstarted tasks, never lease-queued or already implementing ones", async () => {
+test("planDrafts lists unstarted tasks, never waiting or already implementing ones", async () => {
   const { planDrafts } = await library;
   const tasks = [
     task({ id: "draft", status: "queued" }),
@@ -864,7 +931,11 @@ test("planDrafts lists unstarted tasks, never lease-queued or already implementi
       status: "stopped",
       attempts: [attempt({ stage: "plan", status: "passed" })],
     }),
-    task({ id: "lease", status: "queued", queueReason: "waits for a lease" }),
+    task({
+      id: "lease",
+      status: "queued",
+      wait: { kind: "file", taskId: "a", title: "A", path: "src/x" },
+    }),
     task({
       id: "retry",
       status: "queued",
@@ -936,4 +1007,63 @@ test("the composer chip and the header name the route the same way", async () =>
     orchestratorRouteLabel(settings({ orchestrator: "gone" })),
     "gone",
   );
+});
+
+test("unlandedLabel describes commits left on the task branch", async () => {
+  const { unlandedLabel } = await library;
+  assert.equal(
+    unlandedLabel(task({ unlanded: { commits: 2, base: "work" } })),
+    "2 commits not on work",
+  );
+  assert.equal(
+    unlandedLabel(task({ unlanded: { commits: 1, base: "work" } })),
+    "1 commit not on work",
+  );
+  assert.equal(unlandedLabel(task()), "");
+});
+
+test("waitLabel maps each wait kind and taskReason and subtaskState show it", async () => {
+  const { waitLabel, taskReason, subtaskState } = await library;
+  const waits = [
+    [
+      { kind: "slot", running: 2, limit: 2 },
+      "waits for a slot · 2 of 2 running",
+    ],
+    [
+      { kind: "subtaskSlot", running: 1, limit: 1 },
+      "waits for a subtask slot · 1 of 1 running",
+    ],
+    [
+      { kind: "dependency", titles: ["Part A", "Part B"] },
+      "after Part A, Part B",
+    ],
+    [
+      { kind: "file", taskId: "a", title: "Add a", path: "src/x.rs" },
+      'waits for "Add a" on src/x.rs',
+    ],
+  ];
+  for (const [wait, label] of waits) {
+    assert.equal(waitLabel(wait), label);
+    // The label replaces queued, drafting and the subtask words.
+    for (const status of ["queued", "drafting", "running"]) {
+      const waiting = task({ status, wait });
+      assert.equal(taskReason(waiting, [waiting], 4), label);
+      assert.equal(subtaskState(waiting, [waiting], 4).label, label);
+    }
+  }
+  // A queued task that depends on an open task said "waits"; the wait label wins.
+  const dep = task({ id: "dep", status: "running" });
+  const waiter = task({
+    status: "queued",
+    dependsOn: ["dep"],
+    wait: { kind: "dependency", titles: ["Dep"] },
+  });
+  assert.deepEqual(subtaskState(waiter, [dep, waiter], 4), {
+    tone: "neutral",
+    label: "after Dep",
+  });
+  // Without a wait the old words stay.
+  const plain = task({ status: "queued" });
+  assert.equal(taskReason(plain, [plain], 4), "queued");
+  assert.equal(subtaskState(plain, [plain], 4).label, "queued");
 });

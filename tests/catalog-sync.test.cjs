@@ -8,18 +8,15 @@ const { spawn } = require("node:child_process");
 const { connectDaemon } = require("../electron/daemon/client.cjs");
 const { createCatalogSync, revStore } = require("../electron/catalog-sync.cjs");
 const { closeAppDb } = require("../electron/app-db.cjs");
+const {
+  DEADLINE_MS,
+  until,
+  pidStart,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check, what, ms = 5000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await wait(10);
-  }
-}
-
 function fakeManager(hosts) {
   const emitter = new EventEmitter();
   const calls = [];
@@ -157,6 +154,7 @@ test("a change sends one debounced full sync to every ready host and rev grows",
   sync.notifyChanged();
   assert.equal(manager.calls.length, 0, "debounced");
   await until(() => manager.calls.length === 4, "both hosts");
+  // Gives a forbidden second sync time to happen.
   await wait(80);
   assert.equal(manager.calls.length, 4, "one burst, one sync per host");
   const hosts = manager.calls
@@ -173,7 +171,7 @@ test("the rev persists across restarts of the sync", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cs-"));
   t.after(() => {
     closeAppDb(dir);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   });
   const run = async () => {
     const manager = fakeManager({ local: "mac" });
@@ -238,17 +236,22 @@ test(
     const exited = new Promise((resolve) => daemon.once("exit", resolve));
     let client;
     let created;
+    let holderPid;
+    let holderStart;
     try {
       const socketPath = path.join(home, "daemon.sock");
       client = await until(async () => {
         if (!fs.existsSync(socketPath)) return undefined;
-        return connectDaemon({ socketPath, clientName: "catalog-test" }).catch(
-          () => undefined,
-        );
+        return connectDaemon({
+          socketPath,
+          clientName: "catalog-test",
+          helloTimeoutMs: DEADLINE_MS,
+        }).catch(() => undefined);
       }, "the daemon socket");
       const manager = {
         ...fakeManager({ local: client.hello.host }),
-        request: (_host, method, params) => client.request(method, params),
+        request: (_host, method, params) =>
+          client.request(method, params, { timeoutMs: DEADLINE_MS }),
       };
       const logs = [];
       const sync = createCatalogSync({
@@ -275,43 +278,44 @@ test(
           fs.readFileSync(catalog, "utf8").includes("Alpha"),
         "catalog.json",
       );
-      created = await client.request("session.create", {
-        cmd: ["/bin/sh"],
-        cwd: fs.realpathSync(folder),
-        cols: 80,
-        rows: 24,
-        idempotencyKey: "catalog-sync-1",
-      });
-      const listed = await client.request("session.list", {});
+      created = await client.request(
+        "session.create",
+        {
+          cmd: ["/bin/sh"],
+          cwd: fs.realpathSync(folder),
+          cols: 80,
+          rows: 24,
+          idempotencyKey: "catalog-sync-1",
+        },
+        { timeoutMs: DEADLINE_MS },
+      );
+      const listed = await client.request(
+        "session.list",
+        {},
+        { timeoutMs: DEADLINE_MS },
+      );
       const info = listed.find((s) => s.id === created.id);
+      holderPid = info?.holderPid;
+      if (holderPid) holderStart = pidStart(holderPid);
       assert.equal(info.project, "p1");
       sync.stop();
     } finally {
-      // The session lives in its own holder process, which outlives the
-      // daemon: end it before the daemon goes.
+      // One ordered step: close the session and the client, stop the daemon
+      // and the session's holder, wait for their exit, then remove the home.
       if (created) {
         await client
-          ?.request("session.close", { id: created.id, graceful: false })
-          .catch(() => {});
-        // The holder exits once the daemon has taken its exit and the session
-        // is removed.
-        for (let tries = 0; tries < 30; tries++) {
-          const listed = await client
-            ?.request("session.list", {})
-            .catch(() => []);
-          if (listed.find((s) => s.id === created.id)?.status === "exited")
-            break;
-          await wait(100);
-        }
-        await client
-          ?.request("session.remove", { id: created.id })
-          .catch(() => {});
+          ?.request(
+            "session.close",
+            { id: created.id, graceful: false },
+            { timeoutMs: DEADLINE_MS },
+          )
+          .catch(() => undefined);
       }
       client?.close?.();
-      daemon.kill("SIGTERM");
-      await Promise.race([exited, wait(3000)]);
-      daemon.kill("SIGKILL");
-      fs.rmSync(home, { recursive: true, force: true });
+      await stopPid(daemon.pid);
+      if (holderPid) await stopPid(holderPid, { start: holderStart });
+      await exited;
+      removeDir(home);
     }
   },
 );

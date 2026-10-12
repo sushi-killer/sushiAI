@@ -1,11 +1,16 @@
 import { importChanges } from "./projectEnvImport.ts";
 import { FolderImport } from "./FolderImport";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { Lock, Plus, X } from "lucide-react";
 import type { ConnectionProfile, Project } from "./types";
 import { Banner, Tag, Toggle } from "./ui";
 import type { Tone } from "./ui/tone";
 import { ProjectPage } from "./ProjectPage";
+import { useExtensionRuntime } from "./extensions/runtime.ts";
+import {
+  activeProjectSections,
+  projectEnvironmentSections,
+} from "./extensions/modules.ts";
 
 type Status = "new" | "exists" | "same" | "differs";
 type Choice = "import" | "override" | "skip";
@@ -80,6 +85,8 @@ export function ProjectEnvironmentTab({
   endpoint?: string;
   targets?: ConnectionProfile[];
 }) {
+  const { snapshot } = useExtensionRuntime();
+  const sections = activeProjectSections(projectEnvironmentSections, snapshot);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [review, setReview] = useState<ReviewEntry[] | null>(null);
@@ -507,6 +514,11 @@ export function ProjectEnvironmentTab({
               "Setup only — the install step can use it; the agent never receives it (private registry). MCP only — reaches an MCP server through ${VAR}; never in the agent’s environment."
             }
           </p>
+          {sections.map(({ extensionId, Section }) => (
+            <Suspense key={extensionId} fallback={null}>
+              <Section projectId={project.id} />
+            </Suspense>
+          ))}
         </>
       ) : (
         <p className="pd-empty">Loading project environment…</p>

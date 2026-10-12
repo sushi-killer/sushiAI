@@ -24,32 +24,59 @@ pub fn wait_until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
     }
 }
 
-/// `(pid, ppid, command line)` of every process, from `ps`. Never panics: it also runs in Drop.
 pub fn processes() -> Vec<(u32, u32, String)> {
-    let Ok(out) = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let ppid = parts.next()?.parse().ok()?;
-            Some((pid, ppid, parts.collect::<Vec<_>>().join(" ")))
+    sushiai_daemon::process::list_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let info = sushiai_daemon::process::info(pid)?;
+            Some((
+                pid as u32,
+                info.parent_pid as u32,
+                sushiai_daemon::process::argv(pid)?.join(" "),
+            ))
         })
         .collect()
 }
 
 pub fn alive(pid: u32) -> bool {
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    !out.is_empty() && !out.starts_with('Z')
+    sushiai_daemon::process::alive(pid as i32)
+}
+
+/// Close the sessions of this disposable home through their owning daemon.
+pub fn shutdown_home(home: &Path) {
+    if !home.join("daemon.lock").exists() {
+        return;
+    }
+    let mut recovery = if UnixStream::connect(home.join("daemon.sock")).is_err() {
+        Command::new(BIN)
+            .arg("daemon")
+            .env("SUSHIAI_HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    } else {
+        None
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while UnixStream::connect(home.join("daemon.sock")).is_err() && Instant::now() < deadline {
+        sleep(Duration::from_millis(25));
+    }
+    let _ = Command::new(BIN)
+        .arg("shutdown")
+        .env("SUSHIAI_HOME", home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if let Some(child) = recovery.as_mut() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 pub fn kill(pid: u32, signal: &str) {
@@ -71,8 +98,7 @@ pub fn child_of(parent: u32) -> u32 {
     found.expect("child")
 }
 
-/// A temp home. On drop it kills, by pid and without panicking, the daemons it started and
-/// every holder (and its children) whose command line names this home.
+/// A temp home. Drop closes its sessions through the daemon and reaps owned children.
 pub struct Sandbox {
     pub dir: tempfile::TempDir,
     pub daemons: Vec<Child>,
@@ -125,7 +151,7 @@ impl Sandbox {
                 child.try_wait().expect("try_wait").is_none(),
                 "daemon exited early"
             );
-            UnixStream::connect(&socket).is_ok()
+            self.lock_pid() == Some(pid) && UnixStream::connect(&socket).is_ok()
         });
         pid
     }
@@ -178,24 +204,39 @@ impl Sandbox {
     }
 
     pub fn holder_pid(&self, id: &str) -> u32 {
-        let needle = format!("hold --id {id}");
         let mut found = None;
         wait_until("holder process", 5, || {
-            found = processes()
+            found = self
+                .session_pids()
                 .into_iter()
-                .find(|(_, _, cmd)| cmd.contains(&needle))
-                .map(|p| p.0);
+                .find(|(sid, _)| sid == id)
+                .map(|(_, pid)| pid);
             found.is_some()
         });
         found.expect("holder")
     }
 
     pub fn holders(&self) -> Vec<u32> {
-        let home = self.home().display().to_string();
-        processes()
+        self.session_pids()
             .into_iter()
-            .filter(|(_, _, cmd)| cmd.contains("hold --id") && cmd.contains(&home))
-            .map(|p| p.0)
+            .map(|(_, pid)| pid)
+            .filter(|pid| alive(*pid))
+            .collect()
+    }
+
+    fn session_pids(&self) -> Vec<(String, u32)> {
+        std::fs::read(self.home().join("state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|v| v["sessions"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| {
+                Some((
+                    s["id"].as_str()?.to_string(),
+                    s["holderPid"].as_u64()? as u32,
+                ))
+            })
             .collect()
     }
 }
@@ -213,31 +254,10 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        shutdown_home(self.home());
         for daemon in &mut self.daemons {
             let _ = daemon.kill();
             let _ = daemon.wait();
-        }
-        // A daemon started by hand elsewhere is nobody's child: find it through the lock file, and
-        // only kill it when the pid still names a daemon of this binary or home.
-        if let Some(pid) = self.lock_pid() {
-            let home = self.home().display().to_string();
-            let is_daemon = processes().iter().any(|(p, _, cmd)| {
-                *p == pid
-                    && cmd.ends_with(" daemon")
-                    && (cmd.starts_with(BIN) || cmd.contains(&home))
-            });
-            if is_daemon {
-                kill(pid, "-KILL");
-            }
-        }
-        let all = processes();
-        for pid in self.holders() {
-            for (child, ppid, _) in &all {
-                if *ppid == pid {
-                    kill(*child, "-KILL");
-                }
-            }
-            kill(pid, "-KILL");
         }
     }
 }

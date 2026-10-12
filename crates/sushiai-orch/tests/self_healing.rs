@@ -7,7 +7,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// One fake plays every role, told apart by the brief; each reply is a JSON
 /// string literal taken from the environment.
@@ -88,6 +87,7 @@ fn setup(env: &[(&str, &str)], review: &str) -> Setup {
     let daemon = Daemon::spawn(&vars);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["planReview"] = serde_json::json!("");
     settings["review"] = json!(review);
     daemon.request("settings.set", json!({"settings": settings}));
     Setup {
@@ -116,7 +116,7 @@ fn create(s: &Setup, extra: Value) -> String {
 }
 
 fn finished(s: &Setup, id: &str) -> Value {
-    poll_until(&s.daemon, id, Duration::from_secs(60), |st| {
+    poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     })
 }
@@ -155,7 +155,7 @@ fn orchd_assumptions(task: &Value) -> Vec<Value> {
 fn cleanup(s: Setup, task: &Value) {
     let worktree = task["worktree"].as_str().unwrap().to_string();
     s.daemon.shutdown_and_wait();
-    let _ = std::fs::remove_dir_all(worktree);
+    remove_dir_retrying(worktree);
 }
 
 #[test]
@@ -235,6 +235,29 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
 }
 
 #[test]
+fn a_final_only_command_is_not_judged_before_the_first_attempt() {
+    // A judge that would switch any command off is never asked about a
+    // command that is only in `finalVerify`: finals gate after review.
+    let feasibility =
+        js("{\"verdict\":\"unrelated\",\"reason\":\"the lint config is broken on main\"}");
+    let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
+    let check = "echo broken lint; exit 3";
+    let id = create(&s, json!({"finalVerify": [check]}));
+    let task = finished(&s, &id);
+    // The attempt ran first; only then does the final fail on the worktree
+    // and on the base, which is a question and no judge run.
+    assert_eq!(task["status"], "waiting", "{task}");
+    assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
+    assert_eq!(task["question"]["commands"], json!([check]), "{task}");
+    assert_eq!(implements(&task).len(), 1, "{task}");
+    assert_eq!(task["finalVerify"], json!([check]), "{task}");
+    assert!(task["briefCheck"]["nonGating"].is_null(), "{task}");
+    assert!(orchd_assumptions(&task).is_empty(), "{task}");
+    assert!(!decisions(&task).contains("non-gating"), "{task}");
+    cleanup(s, &task);
+}
+
+#[test]
 fn a_check_whose_program_is_missing_on_the_host_keeps_gating_and_says_so() {
     // Even a judge that would call it unrelated is never asked: exit 127 is
     // the host's PATH or toolchain, and a check must not quietly stop gating.
@@ -254,6 +277,28 @@ fn a_check_whose_program_is_missing_on_the_host_keeps_gating_and_says_so() {
     );
     assert_ne!(task["status"], "done", "{task}");
     cleanup(s, &task);
+}
+
+#[test]
+fn a_shared_check_is_never_switched_off_or_rewritten_by_the_judge() {
+    let check = "npm test --version; exit 3";
+    for ruling in [
+        "{\"verdict\":\"unrelated\",\"reason\":\"broken on main\"}",
+        "{\"verdict\":\"rewrite\",\"command\":\"true\",\"reason\":\"no runner\"}",
+    ] {
+        let feasibility = js(ruling);
+        let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
+        let id = create(&s, json!({"verify": [check]}));
+        let task = finished(&s, &id);
+        assert_eq!(task["verify"], json!([check]), "{task}");
+        assert!(task["briefCheck"]["nonGating"].is_null(), "{task}");
+        assert!(
+            decisions(&task).contains("keeps gating as written"),
+            "{task}"
+        );
+        assert!(orchd_assumptions(&task).is_empty(), "{task}");
+        cleanup(s, &task);
+    }
 }
 
 #[test]
@@ -330,7 +375,7 @@ fn a_code_gap_ruling_leaves_the_criterion_and_the_retries_go_on() {
         &s,
         json!({"criteria": ["Clicking opens the panel -- check: read the handler"]}),
     );
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(90), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     });
     assert_ne!(task["status"], "done", "{task}");
@@ -524,7 +569,7 @@ fn after_the_first_attempt_a_p1_about_the_tasks_own_work_still_blocks() {
     );
     let s = setup(&[("REVIEW_REST", &blocking)], "claude-sonnet");
     let id = create(&s, json!({}));
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(90), |st| {
+    let task = poll_until(&s.daemon, &id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
     });
     assert_ne!(task["status"], "done", "{task}");
@@ -564,9 +609,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         &s,
         json!({"criteria": ["The button is blue -- check: read the CSS"]}),
     );
-    let waiting = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| {
-        st == "waiting"
-    });
+    let waiting = poll_until(&s.daemon, &id, |st| st == "waiting");
     assert_eq!(
         waiting["question"]["kind"], "review_no_verdict",
         "{waiting}"
@@ -575,7 +618,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         "task.answer",
         json!({"id": id, "answer": "make the button green, not blue"}),
     );
-    let task = poll_until(&s.daemon, &id, Duration::from_secs(60), |st| st == "done");
+    let task = poll_until(&s.daemon, &id, |st| st == "done");
     assert_eq!(
         task["criteria"],
         json!(["The button is green -- check: read the CSS"]),

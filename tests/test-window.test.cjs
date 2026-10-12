@@ -1,6 +1,25 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { testWindow } = require("../electron/test-window.cjs");
+const path = require("node:path");
+const {
+  testWindow,
+  isolateTestProfile,
+} = require("../electron/test-window.cjs");
+
+function fakeApp(userData) {
+  const calls = { switches: [], paths: [] };
+  return {
+    calls,
+    commandLine: {
+      appendSwitch: (...args) => calls.switches.push(args),
+    },
+    getPath: (name) => {
+      assert.equal(name, "userData");
+      return userData;
+    },
+    setPath: (...args) => calls.paths.push(args),
+  };
+}
 
 test("hidden mode builds an off-screen window that still paints", () => {
   const mode = testWindow({ SUSHIAI_TEST_WINDOW: "hidden" });
@@ -34,4 +53,61 @@ test("test reports every SUSHIAI_TEST_WINDOW launch and not an unset one", () =>
   assert.equal(testWindow({ SUSHIAI_TEST_WINDOW: "hidden" }).test, true);
   assert.equal(testWindow({ SUSHIAI_TEST_WINDOW: "visible" }).test, true);
   assert.equal(testWindow({}).test, false);
+});
+
+test("hidden test mode isolates the app profile", () => {
+  const userData = "/tmp/sushiai-hidden-profile";
+  const app = fakeApp(userData);
+  const created = [];
+
+  isolateTestProfile(
+    app,
+    testWindow({ SUSHIAI_TEST_WINDOW: "hidden" }),
+    (dir) => created.push(dir),
+  );
+
+  assert.deepEqual(app.calls.switches, [["use-mock-keychain"]]);
+  assert.deepEqual(app.calls.paths, [
+    ["desktop", path.join(userData, "desktop")],
+    ["documents", path.join(userData, "documents")],
+    ["downloads", path.join(userData, "downloads")],
+  ]);
+  assert.deepEqual(
+    created,
+    app.calls.paths.map(([, dir]) => dir),
+  );
+});
+
+test("visible test mode isolates the app profile", () => {
+  const userData = "/tmp/sushiai-visible-profile";
+  const app = fakeApp(userData);
+  const created = [];
+
+  isolateTestProfile(
+    app,
+    testWindow({ SUSHIAI_TEST_WINDOW: "visible" }),
+    (dir) => created.push(dir),
+  );
+
+  assert.deepEqual(app.calls.switches, [["use-mock-keychain"]]);
+  assert.deepEqual(app.calls.paths, [
+    ["desktop", path.join(userData, "desktop")],
+    ["documents", path.join(userData, "documents")],
+    ["downloads", path.join(userData, "downloads")],
+  ]);
+  assert.deepEqual(
+    created,
+    app.calls.paths.map(([, dir]) => dir),
+  );
+});
+
+test("unset test mode leaves keychain and folder paths untouched", () => {
+  const app = fakeApp("/tmp/sushiai-normal-profile");
+  const created = [];
+
+  isolateTestProfile(app, testWindow({}), (dir) => created.push(dir));
+
+  assert.deepEqual(app.calls.switches, []);
+  assert.deepEqual(app.calls.paths, []);
+  assert.deepEqual(created, []);
 });

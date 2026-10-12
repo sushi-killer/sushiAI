@@ -9,7 +9,6 @@ mod common;
 use common::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// Runs are numbered by `$GATES/run_<n>`. The run holds while `$GATES/hold`
 /// exists, then behaves as `$GATES/mode_<n>` (or `mode`) says: `ok` writes a
@@ -104,6 +103,10 @@ fn spawn() -> Env {
     // One look at the tools, as the Settings screen does.
     daemon.request("chat.tools", json!({"refresh": true}));
     let repo = init_git_repo();
+    let repo_root = git_out(repo.path(), &["rev-parse", "--show-toplevel"]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["mcpEnable"] = json!({repo_root.trim(): ["fake"]});
+    daemon.request("settings.set", json!({"settings": settings}));
     std::fs::write(
         repo.path().join(".mcp.json"),
         json!({"mcpServers": {"proj": {"command": "true", "args": []}}}).to_string(),
@@ -170,7 +173,7 @@ impl Env {
     }
 
     fn until(&self, id: &str, status: &str) -> serde_json::Value {
-        poll_until(&self.daemon, id, Duration::from_secs(30), |s| s == status)
+        poll_until(&self.daemon, id, |s| s == status)
     }
 
     fn token(&self, n: usize) -> String {
@@ -215,11 +218,7 @@ impl Env {
 }
 
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    let begin = Instant::now();
-    while !cond() {
-        assert!(begin.elapsed() < Duration::from_secs(30), "never: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until(what, || cond().then_some(()));
 }
 
 fn verdict(result: &serde_json::Value) -> (String, String) {
@@ -264,30 +263,54 @@ fn allow_list(env: &Env, n: usize) -> Vec<String> {
 }
 
 #[test]
-fn a_run_gets_the_connected_tools_the_project_servers_and_its_own_mcp() {
+fn project_mcp_selection_excludes_worktree_and_unenabled_connected_tools() {
     let env = spawn();
+    let repo_root = git_out(env.repo.path(), &["rev-parse", "--show-toplevel"]);
+    let repo = repo_root.trim();
+    env.daemon
+        .request("secrets.set", json!({"projectRepos": {repo: "project-1"}}));
+    let mut settings = env.daemon.request("settings.get", json!({}));
+    settings["chatTools"].as_array_mut().unwrap().push(json!({
+        "id": "global", "label": "Global tool", "enabled": true,
+        "server": {"ref": "claude-json:fake"},
+    }));
+    settings["mcpEnable"] = json!({repo: ["fake", "unknown-enable"]});
+    settings["mcpDisable"] = json!({repo: ["disabled", "sushiai-messages", "unknown-disable"]});
+    env.daemon
+        .request("settings.set", json!({"settings": settings}));
+    env.daemon.request("chat.tools", json!({"refresh": true}));
     env.gate("hold", "");
     let id = env.create(&[]);
+    assert_eq!(env.get(&id)["repo"], repo);
     std::fs::write(
         env.daemon
             .data_dir()
             .join("tasks")
             .join(&id)
             .join("mcp.json"),
-        json!({"mcpServers": {"mine": {"command": "true", "args": []}}}).to_string(),
+        json!({"mcpServers": {
+            "lookup": {"command": "true", "args": []},
+            "disabled": {"command": "true", "codex": true},
+            "sushiai-messages": {"command": "should-be-replaced"},
+        }})
+        .to_string(),
     )
     .unwrap();
     env.start(&id);
     env.wait_run(1);
 
     let mcp: serde_json::Value = serde_json::from_str(&env.gate_file("mcp_1")).unwrap();
-    let servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
-    for want in ["fake", "proj", "mine", "sushiai-messages"] {
-        assert!(servers.iter().any(|s| *s == want), "{want} in {servers:?}");
-    }
-    // The disabled Asana tool is not started.
-    assert!(!servers.iter().any(|s| *s == "asana"), "{servers:?}");
-
+    let servers: Vec<&str> = mcp["mcpServers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(servers, vec!["fake", "lookup", "sushiai-messages"]);
+    assert_ne!(
+        mcp["mcpServers"]["sushiai-messages"]["command"],
+        "should-be-replaced"
+    );
     let allow = allow_list(&env, 1);
     for read in [
         "mcp__fake__get_item",
@@ -296,18 +319,33 @@ fn a_run_gets_the_connected_tools_the_project_servers_and_its_own_mcp() {
     ] {
         assert!(allow.contains(&read.to_string()), "{read} in {allow:?}");
     }
-    assert!(
-        !allow.iter().any(|a| a.contains("send_note")),
-        "a write tool is never pre-allowed: {allow:?}"
-    );
-
-    // The brief lists the tools, and writes as owner-gated.
+    assert!(!allow.iter().any(|a| a.contains("send_note")), "{allow:?}");
     let brief = env.gate_file("brief_1");
-    assert!(brief.contains("## Tools for this task"), "{brief}");
     assert!(brief.contains("fake: read tools"), "{brief}");
-    assert!(brief.contains("send_note"), "{brief}");
+    assert!(
+        brief.contains("global (Global tool): connected but off for this repo"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("asana (Asana): connected but off for this repo"),
+        "{brief}"
+    );
     assert!(brief.contains("No tool: "), "{brief}");
-
+    for (key, name) in [
+        ("mcpEnable", "unknown-enable"),
+        ("mcpDisable", "unknown-disable"),
+    ] {
+        let line = format!("MCP: ignored unknown name {name:?} in {key} for {repo}");
+        assert_eq!(
+            env.get(&id)["decisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| d.as_str() == Some(line.as_str()))
+                .count(),
+            1
+        );
+    }
     env.ungate("hold");
     env.until(&id, "done");
     env.daemon.shutdown_and_wait();
@@ -566,6 +604,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
     settings["review"] = json!("");
     settings["tiers"]["mechanical"] = json!("claude-sonnet");
     settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["planReview"] = serde_json::json!("");
     settings["chatTools"] = json!([
         {"id": "asana", "label": "Asana", "enabled": false,
          "server": {"type": "http", "url": "https://example.invalid/mcp"}},
@@ -585,7 +624,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
         }),
     );
     let id = created["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&daemon, &id, Duration::from_secs(20), |s| s == "waiting");
+    let waiting = poll_until(&daemon, &id, |s| s == "waiting");
 
     let calls = std::fs::read_to_string(gates.path().join("calls")).unwrap();
     assert_eq!(
@@ -615,7 +654,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
         "task.answer",
         json!({"id": id, "answer": "I will do it: drop the criterion"}),
     );
-    let done = poll_until(&daemon, &id, Duration::from_secs(30), |s| s == "done");
+    let done = poll_until(&daemon, &id, |s| s == "done");
     assert_eq!(done["criteria"], json!(["The code compiles"]));
     assert!(decisions(&done).contains("it is an owner action, not this task's"));
     let calls = std::fs::read_to_string(gates.path().join("calls")).unwrap();

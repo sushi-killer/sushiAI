@@ -73,6 +73,7 @@ pub mod method {
     pub const PING: &str = "$/ping";
     /// Request: stop the daemon; holders and sessions keep running and the next client starts
     /// a new daemon. Not available to a hook connection.
+    /// Optional `closeSessions: true` also stops sessions and their holders.
     pub const DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 
     // Session hibernation (additive).

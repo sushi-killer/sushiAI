@@ -16,6 +16,10 @@ impl std::fmt::Display for GitError {
 impl std::error::Error for GitError {}
 
 fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_bytes(cwd, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
+}
+
+fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -28,7 +32,22 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
+}
+
+/// Reads a committed file; absence is distinct from an unreadable revision.
+pub fn show_file(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>, GitError> {
+    let tree = run(cwd, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])?;
+    let object = format!("{}:{path}", tree.trim());
+    let exists = Command::new("git")
+        .args(["cat-file", "-e", &object])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| GitError(format!("git cat-file: {e}")))?;
+    if !exists.status.success() {
+        return Ok(None);
+    }
+    run(cwd, &["show", &object]).map(Some)
 }
 
 /// lowercase, [a-z0-9-], collapsed, max 40 chars, no leading/trailing '-'.
@@ -64,7 +83,7 @@ pub fn slugify(title: &str, max_len: usize) -> String {
     out
 }
 
-fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+pub fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     Command::new("git")
         .args([
             "show-ref",
@@ -96,19 +115,41 @@ pub fn unique_branch_name(repo_root: &Path, title: &str) -> String {
     }
 }
 
-/// Where a task's worktree goes: `<root>/<branch with / -> ->`, with `root`
-/// (the `worktreeRoot` setting) resolved against the repo root when relative.
-pub fn worktree_path(repo_root: &Path, root: &str, branch: &str) -> PathBuf {
-    let root = if root.trim().is_empty() {
-        ".sushiai/worktrees"
-    } else {
-        root.trim()
-    };
-    repo_root.join(root).join(branch.replace('/', "-"))
+/// The `worktreeRoot` value older installs stored as the default. It counts as
+/// empty: worktrees no longer live inside the repo by default.
+const LEGACY_WORKTREE_ROOT: &str = ".sushiai/worktrees";
+
+/// `<repo folder name>-<8 hex digits>`: the folder name plus a stable FNV-1a
+/// hash of the full repo-root path, so two repos with one name never share.
+fn repo_id(repo_root: &Path) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for b in repo_root.to_string_lossy().bytes() {
+        hash = (hash ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    let name = repo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    format!("{name}-{hash:08x}")
 }
 
-/// Makes the repo ignore the whole relative `worktree_root` (`/.sushiai/worktrees/`
-/// by default, `/src/.wt/` for `src/.wt`, never all of `src/`) through `.git/info/exclude`, never a tracked
+/// Where a task's worktree goes: `<root>/<branch with / -> ->`. An empty
+/// `root` (the `worktreeRoot` setting, or the legacy stored default) means
+/// `<home>/worktrees.noindex/<repo-id>`; the `.noindex` suffix keeps Spotlight
+/// from indexing worktrees, `node_modules` and build output. Any other value
+/// is resolved against the repo root when relative.
+pub fn worktree_path(repo_root: &Path, home: &Path, root: &str, branch: &str) -> PathBuf {
+    let root = root.trim();
+    let base = if root.is_empty() || root == LEGACY_WORKTREE_ROOT {
+        home.join("worktrees.noindex").join(repo_id(repo_root))
+    } else {
+        repo_root.join(root)
+    };
+    base.join(branch.replace('/', "-"))
+}
+
+/// Makes the repo ignore the whole relative `worktree_root` (`/src/.wt/` for
+/// `src/.wt`, never all of `src/`) through `.git/info/exclude`, never a tracked
 /// file. A root outside the repo needs nothing.
 pub fn exclude_worktree_root(repo_root: &Path, worktree_root: &Path) -> std::io::Result<()> {
     let Ok(rel) = worktree_root.strip_prefix(repo_root) else {
@@ -163,6 +204,17 @@ pub fn resolve_commit(repo_root: &Path, rev: &str) -> Result<String, GitError> {
     .map(|s| s.trim().to_string())
 }
 
+/// The best common ancestor of two revisions.
+pub fn merge_base_of(repo_root: &Path, a: &str, b: &str) -> Result<String, GitError> {
+    run(repo_root, &["merge-base", a, b]).map(|s| s.trim().to_string())
+}
+
+/// Patch-equivalent commits on `branch` that are not on `base`.
+pub fn cherry_count(repo_root: &Path, base: &str, branch: &str) -> Result<u32, GitError> {
+    let output = run(repo_root, &["cherry", base, branch])?;
+    Ok(output.lines().filter(|line| line.starts_with('+')).count() as u32)
+}
+
 pub struct CreatedWorktree {
     pub path: PathBuf,
     pub base_sha: String,
@@ -180,6 +232,7 @@ pub fn add_detached_worktree(repo_root: &Path, path: &Path, sha: &str) -> Result
 /// `git worktree remove --force <path>`, then `git worktree prune`. Both are
 /// best effort: the caller is cleaning up and has nothing left to do on error.
 pub fn remove_worktree(repo_root: &Path, path: &Path) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }
@@ -275,6 +328,36 @@ pub fn wip_ref(task_id: &str) -> String {
     format!("refs/orchd/wip/{task_id}")
 }
 
+/// Moves a worktree nothing has touched onto the current head of its base
+/// branch before planning: `Some(new_sha)` when it moved, `None` when the
+/// base did not move or the worktree has commits or tracked changes of its own.
+pub fn reset_untouched_to_base(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+) -> Result<Option<String>, GitError> {
+    let new_sha = run(
+        worktree,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
+    if new_sha == base_sha {
+        return Ok(None);
+    }
+    if run(worktree, &["rev-parse", "HEAD"])?.trim() != base_sha {
+        return Ok(None);
+    }
+    if !run(worktree, &["status", "--porcelain", "--untracked-files=no"])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+    Ok(Some(new_sha))
+}
+
 /// Carries the agent's uncommitted work from `base_sha` onto wherever
 /// `base_ref` points now. The work is first saved as a commit kept at
 /// [`wip_ref`], the branch moves to the new base, and the work is applied
@@ -306,6 +389,13 @@ pub fn carry_onto_moved_base(
     }
     let head = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
     if head != base_sha {
+        // Someone merged the new base into the branch: nothing to carry.
+        if run(worktree, &["merge-base", "--is-ancestor", &new_sha, "HEAD"]).is_ok() {
+            return Ok(Rebase::Moved {
+                new_sha,
+                rewritten: false,
+            });
+        }
         return skipped("the task branch has commits of its own");
     }
     let rewritten = run(
@@ -395,8 +485,151 @@ pub fn carry_onto_moved_base(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum BaseMerge {
+    Unchanged,
+    Merged { head: String },
+    Conflicts { files: Vec<String> },
+}
+
+/// Paths introduced by the incoming side since the branches diverged.
+pub fn incoming_paths(worktree: &Path, base_ref: &str) -> Result<Vec<String>, GitError> {
+    Ok(run(
+        worktree,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &format!("HEAD...{base_ref}"),
+        ],
+    )?
+    .split('\0')
+    .filter(|p| !p.is_empty())
+    .map(str::to_string)
+    .collect())
+}
+
+/// Merges a base into a clean graph branch. A conflict is always aborted;
+/// conflict markers belong only in a part's carry, never in the parent.
+pub fn merge_base(worktree: &Path, base_ref: &str) -> Result<BaseMerge, GitError> {
+    let base = resolve_commit(worktree, base_ref)?;
+    if run(worktree, &["merge-base", "--is-ancestor", &base, "HEAD"]).is_ok() {
+        return Ok(BaseMerge::Unchanged);
+    }
+    if !run(worktree, &["status", "--porcelain"])?.trim().is_empty() {
+        return Err(GitError("the graph branch has uncommitted changes".into()));
+    }
+    let merged = run(
+        worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "merge",
+            "--no-edit",
+            "--no-verify",
+            &base,
+        ],
+    );
+    if let Err(error) = merged {
+        let files: Vec<String> = run(worktree, &["diff", "--name-only", "--diff-filter=U", "-z"])?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if run(worktree, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok() {
+            run(
+                worktree,
+                &["-c", "core.hooksPath=/dev/null", "merge", "--abort"],
+            )?;
+        }
+        return if files.is_empty() {
+            Err(error)
+        } else {
+            Ok(BaseMerge::Conflicts { files })
+        };
+    }
+    Ok(BaseMerge::Merged {
+        head: head_sha(worktree)?,
+    })
+}
+
 pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(run(worktree, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// Carries a recorded, single commit together with the uncommitted work,
+/// keeping `paths` in their own commit on the new base. A conflict in those
+/// paths restores the old worktree instead of committing conflict markers.
+pub fn carry_onto_moved_base_with_commit(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+    task_id: &str,
+    commit: &str,
+    paths: &[String],
+) -> Result<(Rebase, String), GitError> {
+    let skipped = |reason: &str| {
+        Ok((
+            Rebase::Skipped {
+                reason: reason.to_string(),
+            },
+            commit.to_string(),
+        ))
+    };
+    if head_sha(worktree)? != commit
+        || run(worktree, &["rev-parse", &format!("{commit}^")])?.trim() != base_sha
+    {
+        return skipped("the task branch has commits beyond its recorded tests");
+    }
+    if resolve_commit(worktree, base_ref)? == base_sha {
+        return Ok((Rebase::Unchanged, commit.to_string()));
+    }
+    let mut changed = vec!["diff", "--quiet", commit, "--"];
+    changed.extend(paths.iter().map(String::as_str));
+    if run(worktree, &changed).is_err() {
+        return skipped("the recorded test files were changed");
+    }
+    let title = run(worktree, &["log", "-1", "--format=%s", commit])?;
+    uncommit_to(worktree, base_sha)?;
+    let carried = match carry_onto_moved_base(worktree, base_ref, base_sha, task_id) {
+        Ok(carried) => carried,
+        Err(error) => {
+            uncommit_to(worktree, commit)?;
+            return Err(error);
+        }
+    };
+    let restore = || -> Result<(), GitError> {
+        run(worktree, &["reset", "-q", "--hard", &wip_ref(task_id)])?;
+        uncommit_to(worktree, commit)
+    };
+    match &carried {
+        Rebase::Moved { .. } | Rebase::Conflicts { .. } => {
+            if let Rebase::Conflicts { files, .. } = &carried {
+                if files.iter().any(|f| paths.contains(f)) {
+                    restore()?;
+                    return skipped("the new base conflicts with the recorded test files");
+                }
+            }
+            match commit_paths(worktree, paths, title.trim(), task_id) {
+                Ok(new_commit) => Ok((carried, new_commit)),
+                Err(error) => {
+                    restore()?;
+                    Err(error)
+                }
+            }
+        }
+        Rebase::Unchanged | Rebase::Skipped { .. } => {
+            uncommit_to(worktree, commit)?;
+            Ok((carried, commit.to_string()))
+        }
+    }
 }
 
 /// Turns every commit on the worktree's branch since `base_sha` back into
@@ -527,6 +760,7 @@ pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
 /// Removes a worktree and its branch that nothing has used yet (best
 /// effort: an undone step leaves at most an unused branch or directory).
 pub fn discard_worktree(repo_root: &Path, path: &Path, branch: &str) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }
@@ -572,39 +806,68 @@ fn append_to_info_exclude(worktree: &Path, rel_paths: &[String]) -> std::io::Res
     Ok(())
 }
 
-/// Copy `.env`, `.env.local`, `.claude/settings.local.json` from the main
-/// checkout when present and gitignored there; symlink `node_modules` when
-/// the main checkout has it and the worktree doesn't. Every bootstrapped
-/// path is also recorded in the worktree's `info/exclude`, so it never shows
-/// up as a "changed file" in the gate or gets swept into `git add -A`.
+/// Gitignored files a new worktree needs but git does not carry. With a
+/// `.worktreeinclude` in the main checkout (gitignore syntax) these are the
+/// untracked files it matches that the checkout also ignores; without one,
+/// `.env`, `.env.local` and `.claude/settings.local.json` when ignored.
+fn include_candidates(main_root: &Path) -> Vec<String> {
+    let list = main_root.join(".worktreeinclude");
+    let found: Vec<String> = if list.is_file() {
+        let out = Command::new("git")
+            .args(["ls-files", "-z", "--others", "--ignored"])
+            .arg(format!("--exclude-from={}", list.display()))
+            .current_dir(main_root)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    } else {
+        [".env", ".env.local", ".claude/settings.local.json"]
+            .map(str::to_string)
+            .to_vec()
+    };
+    // Only ever copy files the main checkout itself ignores.
+    found
+        .into_iter()
+        .filter(|rel| is_git_ignored(main_root, rel))
+        .collect()
+}
+
+/// Copies the files [`include_candidates`] names into the worktree: regular
+/// files only (a symlink is skipped), never over a file the worktree already
+/// has. Every copied path is also recorded in the worktree's `info/exclude`,
+/// so it never shows up as a "changed file" in the gate or gets swept into
+/// `git add -A`.
 pub fn bootstrap_worktree(main_root: &Path, worktree: &Path) -> std::io::Result<()> {
-    let mut bootstrapped = Vec::new();
-    for rel in [".env", ".env.local", ".claude/settings.local.json"] {
-        let src = main_root.join(rel);
-        if !src.is_file() {
+    let mut copied = Vec::new();
+    for rel in include_candidates(main_root) {
+        let src = main_root.join(&rel);
+        let dst = worktree.join(&rel);
+        let is_file = std::fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file());
+        if !is_file || dst.symlink_metadata().is_ok() {
             continue;
         }
-        if !is_git_ignored(main_root, rel) {
-            continue; // only ever copy files the main checkout itself ignores
-        }
-        let dst = worktree.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
+            // A tracked symlinked directory must not send the copy outside.
+            let inside = match (parent.canonicalize(), worktree.canonicalize()) {
+                (Ok(p), Ok(w)) => p.starts_with(w),
+                _ => false,
+            };
+            if !inside {
+                continue;
+            }
         }
         std::fs::copy(&src, &dst)?;
-        bootstrapped.push(rel.to_string());
+        copied.push(rel);
     }
-
-    let main_modules = main_root.join("node_modules");
-    let worktree_modules = worktree.join("node_modules");
-    if main_modules.is_dir() && !worktree_modules.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&main_modules, &worktree_modules)?;
-        bootstrapped.push("node_modules".to_string());
-    }
-
-    if !bootstrapped.is_empty() {
-        append_to_info_exclude(worktree, &bootstrapped)?;
+    if !copied.is_empty() {
+        append_to_info_exclude(worktree, &copied)?;
     }
     Ok(())
 }
@@ -624,7 +887,15 @@ pub fn status_porcelain(cwd: &Path) -> Result<Vec<String>, GitError> {
 pub fn status_entries(cwd: &Path) -> Result<Vec<(String, String)>, GitError> {
     let out = run(
         cwd,
-        &["status", "--porcelain", "-z", "--untracked-files=all"],
+        // Read-only: a background lease poll must never take index.lock
+        // while the task's own commit runs.
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+        ],
     )?;
     let mut entries = Vec::new();
     let mut fields = out.split('\0').filter(|s| !s.is_empty());
@@ -736,12 +1007,6 @@ pub fn replace_work_with_patch(
 /// untracked non-ignored files. Built through a temporary index, so the real
 /// index and `git status` are left as they were.
 pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
-    let real = run(
-        worktree,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    )
-    .ok()
-    .map(|p| PathBuf::from(p.trim()));
     static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = std::env::temp_dir().join(format!(
         "orchd-index-{}-{}-{}",
@@ -751,18 +1016,34 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    if let Some(real) = real.filter(|p| p.is_file()) {
-        let _ = std::fs::copy(real, &tmp);
-    }
     let result = (|| {
+        use std::io::Write;
+        use std::process::Stdio;
+
         let tmp_str = tmp.to_string_lossy().to_string();
-        let git = |args: &[&str]| -> Result<String, GitError> {
-            let out = Command::new("git")
+        let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
+            let mut child = Command::new("git")
                 .args(args)
                 .current_dir(worktree)
                 .env("GIT_INDEX_FILE", &tmp_str)
-                .output()
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
                 .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            let written = if let Some(input) = input {
+                child.stdin.take().expect("piped stdin").write_all(input)
+            } else {
+                Ok(())
+            };
+            let out = child
+                .wait_with_output()
+                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            written.map_err(|e| GitError(format!("git {} stdin: {e}", args.join(" "))))?;
             if !out.status.success() {
                 return Err(GitError(format!(
                     "git {} failed: {}",
@@ -772,11 +1053,26 @@ pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
             }
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         };
-        git(&["add", "-A"])?;
-        git(&["write-tree"])
+        // Keep tracked paths (including staged ignored files), but rehash
+        // their content without trusting the real index's cached file stats.
+        let entries = run_bytes(worktree, &["ls-files", "--stage", "-z"])?;
+        git(&["update-index", "-z", "--index-info"], Some(&entries))?;
+        git(&["add", "-A"], None)?;
+        git(&["write-tree"], None)
     })();
     let _ = std::fs::remove_file(&tmp);
     result
+}
+
+/// Every file path of the commit `sha`, repo-relative (`git ls-tree -r
+/// --name-only`).
+pub fn tree_files(repo_root: &Path, sha: &str) -> Result<Vec<String>, GitError> {
+    let out = run(repo_root, &["ls-tree", "-r", "--name-only", sha])?;
+    Ok(out
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 /// `git diff --name-only <old> <new>` between two tree ids.
@@ -812,7 +1108,7 @@ pub fn own_changes_between(
 
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
-    let out = run(cwd, &["diff", "--name-only", base])?;
+    let out = run(cwd, &["--no-optional-locks", "diff", "--name-only", base])?;
     Ok(out
         .lines()
         .map(|l| l.to_string())
@@ -828,18 +1124,40 @@ pub fn diff_stat(cwd: &Path, base: &str) -> Result<String, GitError> {
 /// diff capped at 60000 chars).
 pub fn diff_full(cwd: &Path, base: &str, max_chars: usize) -> Result<String, GitError> {
     let out = run(cwd, &["diff", base])?;
+    Ok(truncate_diff(out, max_chars))
+}
+
+/// `git diff <old> <new> -- <paths>` between two tree ids, truncated like
+/// [`diff_full`]. No paths, no diff.
+pub fn diff_trees(
+    cwd: &Path,
+    old: &str,
+    new: &str,
+    paths: &[String],
+    max_chars: usize,
+) -> Result<String, GitError> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args = vec!["diff", old, new, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let out = run(cwd, &args)?;
+    Ok(truncate_diff(out, max_chars))
+}
+
+fn truncate_diff(out: String, max_chars: usize) -> String {
     if out.len() <= max_chars {
-        return Ok(out);
+        return out;
     }
     let mut end = max_chars;
     while end > 0 && !out.is_char_boundary(end) {
         end -= 1;
     }
-    Ok(format!(
+    format!(
         "{}\n... [truncated, {} bytes total]",
         &out[..end],
         out.len()
-    ))
+    )
 }
 
 /// Changed files, combining working-tree changes and committed changes
@@ -876,6 +1194,64 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
         ],
     )?;
     Ok(())
+}
+
+/// Commits exactly `paths` (already written in `cwd`) with a `Task-Id`
+/// trailer and returns HEAD. Nothing else in the index or the tree goes into
+/// the commit; when no listed path differs from HEAD there is no commit and
+/// HEAD is returned as it is. Same hook rule as [`commit`].
+pub fn commit_paths(
+    cwd: &Path,
+    paths: &[String],
+    title: &str,
+    task_id: &str,
+) -> Result<String, GitError> {
+    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    run(cwd, &add)?;
+    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
+    diff.extend(paths.iter().map(String::as_str));
+    if run(cwd, &diff).is_err() {
+        let trailer = format!("Task-Id: {task_id}");
+        let mut commit = vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            title,
+            "--trailer",
+            &trailer,
+            "--",
+        ];
+        commit.extend(paths.iter().map(String::as_str));
+        run(cwd, &commit)?;
+    }
+    head_sha(cwd)
+}
+
+/// The content of `path` at `rev` when it is a file there.
+pub fn blob_at(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Puts `paths` back as they are at `rev`, in the tree and the index.
+pub fn restore_paths(cwd: &Path, rev: &str, paths: &[String]) -> Result<(), GitError> {
+    let mut args = vec!["checkout", "-q", rev, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
 }
 
 // -- report facts -------------------------------------------------------------
@@ -1049,6 +1425,7 @@ pub fn save_wip(worktree: &Path, task_id: &str) -> Result<bool, GitError> {
 /// Removes a task's worktree directory (its branch stays) and prunes the
 /// repo's worktree list.
 pub fn remove_task_worktree(repo_root: &Path, path: &Path) {
+    crate::procs::stop_processes_under(path);
     if let Some(p) = path.to_str() {
         let _ = run(repo_root, &["worktree", "remove", "--force", p]);
     }
@@ -1089,6 +1466,11 @@ pub fn restore_worktree(
     let _ = run(repo_root, &["worktree", "prune"]);
     if path.join(".git").exists() {
         return Ok(false);
+    }
+    if !branch_exists(repo_root, branch) {
+        return Err(GitError(format!(
+            "branch {branch} no longer exists (a subtask branch is removed once it landed on its parent's branch)"
+        )));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| GitError(e.to_string()))?;
@@ -1151,6 +1533,37 @@ pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
     let _ = run(repo_root, &["branch", "-D", branch]);
 }
 
+/// Deletes, locally, each `(task id, branch)` that is fully contained in
+/// `into` (`merge-base --is-ancestor`) together with its saved-work ref. The
+/// ref is deleted with the sha that was checked, so a branch that moved
+/// meanwhile stays. `into` itself and a branch checked out in any worktree
+/// stay. Returns the branches removed.
+pub fn delete_merged_branches(
+    repo_root: &Path,
+    into: &str,
+    candidates: &[(String, String)],
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    for (task_id, branch) in candidates {
+        let full = format!("refs/heads/{branch}");
+        if branch == into || checkout_of(repo_root, branch).is_some() {
+            continue;
+        }
+        let Ok(sha) = run(repo_root, &["rev-parse", "--verify", "-q", &full]) else {
+            continue;
+        };
+        let sha = sha.trim();
+        if run(repo_root, &["merge-base", "--is-ancestor", sha, into]).is_err() {
+            continue;
+        }
+        if run(repo_root, &["update-ref", "-d", &full, sha]).is_ok() {
+            let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
+            removed.push(branch.clone());
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1173,6 +1586,37 @@ mod tests {
 
     use super::*;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn cherry_count_ignores_patch_equivalent_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        std::fs::write(repo.join("change.txt"), "same patch\n").unwrap();
+        git(&["add", "change.txt"]);
+        git(&["commit", "-q", "-m", "task change"]);
+        git(&["checkout", "-q", "-b", "landed", &base]);
+        std::fs::write(repo.join("change.txt"), "same patch\n").unwrap();
+        git(&["add", "change.txt"]);
+        git(&["commit", "-q", "-m", "landed change"]);
+        let landed = git(&["rev-parse", "HEAD"]);
+
+        assert_eq!(merge_base_of(&repo, "task", "landed").unwrap(), base);
+        assert_eq!(cherry_count(&repo, &base, "task").unwrap(), 1);
+        assert_eq!(cherry_count(&repo, &landed, "task").unwrap(), 0);
+    }
 
     #[test]
     fn worktree_tree_covers_untracked_files_but_not_ignored_and_leaves_the_index_alone() {
@@ -1200,6 +1644,77 @@ mod tests {
         std::fs::remove_dir_all(repo.join("tests")).unwrap();
         std::fs::remove_dir_all(repo.join("artifacts")).unwrap();
         assert_eq!(status_short(&repo).unwrap(), before_status);
+    }
+
+    #[test]
+    fn worktree_tree_rehashes_same_size_edits_with_unchanged_stat_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        run(repo, &["config", "core.checkStat", "minimal"]).unwrap();
+        run(repo, &["config", "core.trustctime", "false"]).unwrap();
+        let file = repo.join("README.md");
+        let times = std::fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800));
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        run(repo, &["add", "README.md"]).unwrap();
+        let index = repo.join(".git/index");
+        let original_index = std::fs::read(&index).unwrap();
+        let before = worktree_tree(repo).unwrap();
+
+        std::fs::write(&file, "world\n").unwrap();
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let after = worktree_tree(repo).unwrap();
+        assert_ne!(after, before);
+        assert_eq!(
+            run(repo, &["show", &format!("{after}:README.md")]).unwrap(),
+            "world\n"
+        );
+        assert_eq!(std::fs::read(index).unwrap(), original_index);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_tree_preserves_staged_ignored_paths_with_unusual_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        std::fs::write(repo.join(".gitignore"), "ignored-*\n").unwrap();
+        let name = std::ffi::OsString::from("ignored- space\nfile.txt");
+        #[cfg(target_os = "linux")]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            let mut bytes = name.into_vec();
+            bytes.push(0xff);
+            std::ffi::OsString::from_vec(bytes)
+        };
+        let file = repo.join(&name);
+        std::fs::write(&file, "one\n").unwrap();
+        run(repo, &["add", "-f", "."]).unwrap();
+        let index = repo.join(".git/index");
+        let original_index = std::fs::read(&index).unwrap();
+        let before = worktree_tree(repo).unwrap();
+
+        std::fs::write(file, "two\n").unwrap();
+        let after = worktree_tree(repo).unwrap();
+        assert_ne!(after, before);
+        let mut object = std::ffi::OsString::from(format!("{after}:"));
+        object.push(name);
+        let content = StdCommand::new("git")
+            .arg("show")
+            .arg(object)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(content.status.success(), "{content:?}");
+        assert_eq!(content.stdout, b"two\n");
+        assert_eq!(std::fs::read(index).unwrap(), original_index);
     }
 
     #[test]
@@ -1246,6 +1761,30 @@ mod tests {
             own_changes_between(&repo, &old_tree, &base1, &edited, &base2).unwrap(),
             vec!["own.tsx".to_string()]
         );
+    }
+
+    #[test]
+    fn diff_trees_holds_only_the_given_paths_and_truncates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        std::fs::write(repo.join("a.txt"), "a1\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b1\n").unwrap();
+        let old = worktree_tree(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b2\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        let new = worktree_tree(&repo).unwrap();
+        let only_a = diff_trees(&repo, &old, &new, &["a.txt".to_string()], 10_000).unwrap();
+        assert!(only_a.contains("+a2"), "{only_a}");
+        assert!(
+            !only_a.contains("b2") && !only_a.contains("c.txt"),
+            "{only_a}"
+        );
+        assert_eq!(diff_trees(&repo, &old, &new, &[], 10_000).unwrap(), "");
+        let cut = diff_trees(&repo, &old, &new, &["a.txt".to_string()], 20).unwrap();
+        assert!(cut.contains("[truncated,"), "{cut}");
     }
 
     #[test]
@@ -1330,6 +1869,62 @@ mod tests {
     }
 
     #[test]
+    fn delete_merged_branches_removes_only_contained_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let status = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["checkout", "-q", "-b", "task/parent"]);
+        git(&["branch", "task/chain-a"]);
+        git(&["checkout", "-q", "-b", "task/chain-b"]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "b"]);
+        git(&["checkout", "-q", "task/parent"]);
+        git(&["branch", "task/ahead", "task/chain-b"]);
+        git(&["merge", "-q", "--no-edit", "task/chain-b"]);
+        git(&["checkout", "-q", "-b", "task/unmerged"]);
+        std::fs::write(repo.join("u.txt"), "u\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "u"]);
+        git(&["checkout", "-q", "task/parent"]);
+        git(&["branch", "other"]);
+        // The checkout is on another branch, as in real use.
+        git(&["checkout", "-q", "other"]);
+
+        let pairs = |names: &[&str]| -> Vec<(String, String)> {
+            names
+                .iter()
+                .map(|n| (format!("id-{n}"), n.to_string()))
+                .collect()
+        };
+        let removed = delete_merged_branches(
+            &repo,
+            "task/parent",
+            &pairs(&[
+                "task/chain-a",
+                "task/chain-b",
+                "task/unmerged",
+                "task/parent",
+            ]),
+        );
+        assert_eq!(removed, vec!["task/chain-a", "task/chain-b"]);
+        let left = run(&repo, &["branch", "--format=%(refname:short)"]).unwrap();
+        let left: Vec<&str> = left.lines().collect();
+        assert!(left.contains(&"task/unmerged") && left.contains(&"task/parent"));
+        assert!(left.contains(&"other") && left.contains(&"task/ahead"));
+        assert!(!left.contains(&"task/chain-a") && !left.contains(&"task/chain-b"));
+    }
+
+    #[test]
     fn slugify_lowercases_and_strips_punctuation() {
         assert_eq!(slugify("Add a Save Button!", 40), "add-a-save-button");
         assert_eq!(slugify("  weird---title__here ", 40), "weird-title-here");
@@ -1339,14 +1934,44 @@ mod tests {
     }
 
     #[test]
-    fn worktree_path_lives_under_the_root_setting_with_dashed_branch() {
+    fn worktree_root_defaults_to_a_noindex_folder_under_the_home_outside_the_repo() {
         let repo = Path::new("/Users/me/Desktop/Test");
+        let home = Path::new("/h/.sushiai");
+        let id = repo_id(repo);
+        assert!(
+            id.starts_with("Test-") && id.len() == "Test-".len() + 8,
+            "{id}"
+        );
+        assert_eq!(id, repo_id(repo), "the id is stable");
+        assert_ne!(id, repo_id(Path::new("/Users/me/Other/Test")));
+        let want = home
+            .join("worktrees.noindex")
+            .join(&id)
+            .join("task-add-a-button");
+        assert_eq!(worktree_path(repo, home, "", "task/add-a-button"), want);
+        assert!(want
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .ends_with("worktrees.noindex"));
+        // The value older installs stored counts as the default.
         assert_eq!(
-            worktree_path(repo, ".sushiai/worktrees", "task/add-a-button"),
-            Path::new("/Users/me/Desktop/Test/.sushiai/worktrees/task-add-a-button")
+            worktree_path(repo, home, ".sushiai/worktrees", "task/add-a-button"),
+            want
+        );
+    }
+
+    #[test]
+    fn a_worktree_root_override_still_resolves_against_the_repo_or_as_absolute() {
+        let repo = Path::new("/Users/me/Desktop/Test");
+        let home = Path::new("/h/.sushiai");
+        assert_eq!(
+            worktree_path(repo, home, "src/.wt", "task/x"),
+            Path::new("/Users/me/Desktop/Test/src/.wt/task-x")
         );
         assert_eq!(
-            worktree_path(repo, "/tmp/wt", "task/x"),
+            worktree_path(repo, home, "/tmp/wt", "task/x"),
             Path::new("/tmp/wt/task-x")
         );
     }
@@ -1372,7 +1997,7 @@ mod tests {
         let feature_sha = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-"]);
 
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", "task/on-feature");
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/on-feature");
         let created = create_worktree(&repo_root, "task/on-feature", &wt_path, "feature").unwrap();
         assert_eq!(created.base_sha, feature_sha);
         assert!(wt_path.join("feature.txt").exists());
@@ -1398,7 +2023,7 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
-        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/carry");
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/carry");
         let created = create_worktree(&repo_root, "task/carry", &wt, "HEAD").unwrap();
 
         // The agent edits README and adds a file; meanwhile the base gains
@@ -1446,6 +2071,59 @@ mod tests {
     }
 
     #[test]
+    fn carrying_a_recorded_commit_restores_work_when_its_paths_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let base_ref = branch_of(&repo, "HEAD").unwrap();
+        let wt = tmp.path().join("task");
+        let created = create_worktree(&repo, "task/tests", &wt, "HEAD").unwrap();
+        let paths = vec!["README.md".to_string()];
+        std::fs::write(wt.join("README.md"), "planner test\n").unwrap();
+        let tests = commit_paths(&wt, &paths, "test: planner", "t1").unwrap();
+        std::fs::write(wt.join("implementation.txt"), "implementation\n").unwrap();
+        std::fs::write(repo.join("README.md"), "fixed base test\n").unwrap();
+        commit_paths(&repo, &paths, "test: base fix", "base").unwrap();
+        let new_base = head_sha(&repo).unwrap();
+
+        let (result, retained) = carry_onto_moved_base_with_commit(
+            &wt,
+            &base_ref,
+            &created.base_sha,
+            "t1",
+            &tests,
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Rebase::Skipped {
+                reason: "the new base conflicts with the recorded test files".to_string(),
+            }
+        );
+        assert_eq!(retained, tests);
+        assert_eq!(head_sha(&wt).unwrap(), tests);
+        assert_eq!(head_sha(&repo).unwrap(), new_base);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "planner test\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("implementation.txt")).unwrap(),
+            "implementation\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "fixed base test\n"
+        );
+        assert_eq!(diff_name_only(&wt, &tests).unwrap(), Vec::<String>::new());
+        assert!(run(&wt, &["status", "--porcelain"])
+            .unwrap()
+            .contains("?? implementation.txt"));
+    }
+
+    #[test]
     fn carry_onto_moved_base_skips_what_would_lose_work() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
@@ -1466,7 +2144,7 @@ mod tests {
         };
         let base = branch_of(&repo_root, "HEAD").unwrap();
         let first = git(&repo_root, &["rev-parse", "HEAD"]);
-        let wt = worktree_path(&repo_root, ".sushiai/worktrees", "task/skip");
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/skip");
         let created = create_worktree(&repo_root, "task/skip", &wt, "HEAD").unwrap();
         std::fs::write(repo_root.join("b.txt"), "b\n").unwrap();
         git(&repo_root, &["add", "."]);
@@ -1509,6 +2187,30 @@ mod tests {
         let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
         assert!(matches!(r, Rebase::Skipped { .. }), "{r:?}");
         assert!(wt.join("a.txt").exists());
+
+        // The same branch after the new base was merged into it: the base
+        // moves to that head and the branch is left as it is.
+        let base_head = git(&repo_root, &["rev-parse", "HEAD"]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "merge",
+                "-q",
+                "--no-edit",
+                &base_head,
+            ],
+        );
+        let merged = git(&wt, &["rev-parse", "HEAD"]);
+        let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
+        assert!(
+            matches!(r, Rebase::Moved { ref new_sha, rewritten: false } if *new_sha == base_head),
+            "{r:?}"
+        );
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), merged);
 
         // A base rewritten so the task's base is no longer in its history:
         // the task's own edits are carried onto the amended head.
@@ -1567,7 +2269,7 @@ mod tests {
 
         let branch = unique_branch_name(&repo_root, "Add a button");
         assert_eq!(branch, "task/add-a-button");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
         assert!(created.path.exists());
         assert!(!created.base_sha.is_empty());
@@ -1597,7 +2299,7 @@ mod tests {
         init_repo(&repo_root);
 
         let branch = unique_branch_name(&repo_root, "Hook test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         // An agent-writable pre-commit hook that would prove it ran by
@@ -1631,45 +2333,150 @@ mod tests {
         let _ = created;
     }
 
-    #[test]
-    fn bootstrap_copies_gitignored_env_and_symlinks_node_modules_and_excludes_both() {
+    /// A repo with a committed `kept.txt` and `.gitignore` ignoring the
+    /// given patterns, plus a worktree of it; returns (tmp, repo, worktree).
+    fn repo_with_worktree(ignore: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
         std::fs::create_dir_all(&repo_root).unwrap();
         init_repo(&repo_root);
-        std::fs::write(repo_root.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
-        Command::new("git")
-            .args(["add", ".gitignore"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-q", "-m", "add gitignore"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
-        std::fs::create_dir_all(repo_root.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo_root.join("node_modules/pkg/index.js"), "").unwrap();
-
+        std::fs::write(repo_root.join(".gitignore"), ignore).unwrap();
+        std::fs::write(repo_root.join("kept.txt"), "tracked\n").unwrap();
+        for args in [
+            &["add", ".gitignore", "kept.txt"][..],
+            &["commit", "-q", "-m", "add files"][..],
+        ] {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_root)
+                .status()
+                .unwrap();
+        }
         let branch = unique_branch_name(&repo_root, "Bootstrap test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
-        let created = create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
+        let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
+        create_worktree(&repo_root, &branch, &wt, "HEAD").unwrap();
+        (tmp, repo_root, wt)
+    }
 
-        bootstrap_worktree(&repo_root, &wt_path).unwrap();
+    #[test]
+    fn bootstrap_without_a_worktreeinclude_copies_the_default_files_and_links_nothing() {
+        let (_tmp, repo, wt) =
+            repo_with_worktree(".env\n.env.local\n.claude/settings.local.json\nnode_modules/\n");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        let defaults = [
+            (".env", "SECRET=1\n"),
+            (".env.local", "LOCAL=1\n"),
+            (".claude/settings.local.json", "{\"local\":true}\n"),
+        ];
+        for (path, contents) in defaults {
+            std::fs::write(repo.join(path), contents).unwrap();
+        }
+        let dependencies = [
+            "node_modules/pkg/index.js",
+            "hub/node_modules/vite/index.js",
+            "hub/web/node_modules/react/index.js",
+        ];
+        for path in dependencies {
+            let source = repo.join(path);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(source, "main checkout dependency\n").unwrap();
+        }
+        std::fs::create_dir_all(wt.join("hub/web")).unwrap();
 
-        assert!(wt_path.join(".env").exists());
-        assert_eq!(
-            std::fs::read_to_string(wt_path.join(".env")).unwrap(),
-            "SECRET=1\n"
+        bootstrap_worktree(&repo, &wt).unwrap();
+
+        let exclude = run(&wt, &["rev-parse", "--git-path", "info/exclude"]).unwrap();
+        let exclude = std::fs::read_to_string(wt.join(exclude.trim())).unwrap();
+        for (path, contents) in defaults {
+            assert_eq!(std::fs::read_to_string(wt.join(path)).unwrap(), contents);
+            assert!(exclude.lines().any(|line| line == format!("/{path}")));
+        }
+        // Nothing named node_modules is linked or created anywhere.
+        let mut stack = vec![wt.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                assert_ne!(e.file_name(), "node_modules", "{:?}", e.path());
+                if e.file_name() != ".git" && e.file_type().unwrap().is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+        // Dependencies installed into the worktree stay local and ignored.
+        for path in dependencies {
+            let installed = wt.join(path);
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            std::fs::write(installed, "worktree dependency\n").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(repo.join(path)).unwrap(),
+                "main checkout dependency\n"
+            );
+        }
+        std::fs::write(wt.join("kept.txt"), "edited\n").unwrap();
+        assert_eq!(changed_files(&wt, "HEAD").unwrap(), vec!["kept.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktreeinclude_never_copies_through_a_symlinked_directory() {
+        let (tmp, repo, wt) = repo_with_worktree("*.secret\n");
+        std::fs::write(repo.join(".worktreeinclude"), "*.secret\n").unwrap();
+        std::fs::create_dir_all(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/a.secret"), "a\n").unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, wt.join("conf")).unwrap();
+
+        bootstrap_worktree(&repo, &wt).unwrap();
+
+        assert!(
+            !outside.join("a.secret").exists(),
+            "the copy left the worktree"
         );
-        assert!(wt_path.join("node_modules/pkg/index.js").exists());
+    }
 
-        // Neither bootstrapped path is ever a "changed file".
-        let changed = changed_files(&wt_path, &created.base_sha).unwrap();
-        assert!(!changed
-            .iter()
-            .any(|f| f == ".env" || f.starts_with("node_modules")));
+    #[test]
+    fn worktreeinclude_copies_matching_ignored_files_only() {
+        let (_tmp, repo, wt) = repo_with_worktree("*.secret\n*.keep\n");
+        std::fs::write(
+            repo.join(".worktreeinclude"),
+            "*.secret\n*.keep\nkept.txt\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/a.secret"), "a\n").unwrap();
+        std::fs::write(repo.join("b.keep"), "from main\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "untracked, not ignored\n").unwrap();
+        std::fs::write(repo.join("outside.secret"), "target\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(repo.join("outside.secret"), repo.join("link.secret")).unwrap();
+        std::fs::write(wt.join("b.keep"), "already there\n").unwrap();
+        std::fs::write(wt.join("kept.txt"), "edited in worktree\n").unwrap();
+
+        bootstrap_worktree(&repo, &wt).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join("conf/a.secret")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("outside.secret")).unwrap(),
+            "target\n"
+        );
+        assert!(
+            wt.join("link.secret").symlink_metadata().is_err(),
+            "a symlink is skipped"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("b.keep")).unwrap(),
+            "already there\n",
+            "an existing worktree file is not overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("kept.txt")).unwrap(),
+            "edited in worktree\n",
+            "a tracked file is left alone"
+        );
+        assert!(!wt.join("c.txt").exists(), "not ignored, not copied");
     }
 
     #[test]
@@ -1682,7 +2489,7 @@ mod tests {
         std::fs::write(repo_root.join(".env"), "SECRET=1\n").unwrap();
 
         let branch = unique_branch_name(&repo_root, "No bootstrap test");
-        let wt_path = worktree_path(&repo_root, ".sushiai/worktrees", &branch);
+        let wt_path = worktree_path(&repo_root, &tmp.path().join("home"), "", &branch);
         create_worktree(&repo_root, &branch, &wt_path, "HEAD").unwrap();
 
         bootstrap_worktree(&repo_root, &wt_path).unwrap();

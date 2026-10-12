@@ -6,6 +6,13 @@ const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { realDaemon } = require("./helpers/real-daemon.cjs");
+const {
+  DEADLINE_MS,
+  until: deadlineUntil,
+  pidStart,
+  stopPid,
+  removeDir,
+} = require("./helpers/deadline.cjs");
 const { connectDaemon } = require("../electron/daemon/client.cjs");
 const { createDecoder, encode } = require("../electron/daemon/frame.cjs");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
@@ -694,8 +701,9 @@ test("in a checkout the newer of the release and debug binaries is used", () => 
 test("real daemon: kill -9 and the manager is ready again with the session still listed", async (t) => {
   const { binary, skip } = realDaemon();
   if (skip) return t.skip(skip);
-  const dir = tmp();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sd-"));
   const home = path.join(dir, "h");
+  const lockFile = path.join(home, "daemon.lock");
   const env = {
     HOME: dir,
     CODEX_HOME: path.join(dir, "codex"),
@@ -704,61 +712,59 @@ test("real daemon: kill -9 and the manager is ready again with the session still
     SUSHIAI_DAEMON_BIN: binary,
   };
   const manager = startManager(
-    createLocalConnector({ env, appVersion: "test" }),
-    {
-      backoffMinMs: 100,
-    },
+    createLocalConnector({
+      env,
+      appVersion: "test",
+      startTimeoutMs: DEADLINE_MS,
+    }),
+    { backoffMinMs: 100 },
   );
-  let session = null;
-  cleanups.push(async () => {
-    // Stop everything this test started: the session's holder, then the daemon,
-    // and wait until both processes are gone so the temp dir can be removed.
-    if (manager.states()[0].state !== "ready") return;
-    const alive = (pid) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    const pids = [];
-    const lock = fs.readFileSync(path.join(home, "daemon.lock"), "utf8");
-    pids.push(Number.parseInt(lock.trim(), 10));
-    const listed = await manager.request("local", "session.list", {});
-    for (const entry of listed) if (entry.holderPid) pids.push(entry.holderPid);
-    if (session)
-      await manager
-        .request("local", "session.close", { id: session.id, graceful: false })
-        .catch(() => {});
-    await manager.request("local", "daemon.shutdown", {}).catch(() => {});
-    await until(() => !pids.some(alive), 10000, "daemon and holder to stop");
-  });
-  manager.start();
-  await until(() => stateOf(manager).state === "ready", 20000, "first ready");
-  assert.equal(stateOf(manager).generation, 1);
-  assert.equal(fs.statSync(home).mode & 0o777, 0o700);
+  const request = (method, params) =>
+    manager.request("local", method, params, { timeoutMs: DEADLINE_MS });
+  const holders = new Map();
+  try {
+    manager.start();
+    await deadlineUntil(
+      () => stateOf(manager).state === "ready",
+      "the first ready",
+    );
+    assert.equal(stateOf(manager).generation, 1);
+    assert.equal(fs.statSync(home).mode & 0o777, 0o700);
 
-  session = await manager.request("local", "session.create", {
-    cmd: ["/bin/sh"],
-    cwd: dir,
-    cols: 80,
-    rows: 24,
-  });
-  const lock = fs.readFileSync(path.join(home, "daemon.lock"), "utf8");
-  const pid = Number.parseInt(lock.trim(), 10);
-  assert.ok(pid > 1);
-  const started = Date.now();
-  process.kill(pid, "SIGKILL");
-  await until(
-    () =>
-      stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
-    5000,
-    "ready after kill -9",
-  );
-  assert.ok(Date.now() - started < 5000);
-  const listed = await manager.request("local", "session.list", {});
-  assert.ok(listed.some((entry) => entry.id === session.id));
+    const session = await request("session.create", {
+      cmd: ["/bin/sh"],
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+    });
+    for (const entry of await request("session.list", {}))
+      if (entry.holderPid)
+        holders.set(entry.holderPid, pidStart(entry.holderPid));
+    const pid = Number.parseInt(fs.readFileSync(lockFile, "utf8").trim(), 10);
+    assert.ok(pid > 1);
+    const started = Date.now();
+    process.kill(pid, "SIGKILL");
+    await deadlineUntil(
+      () =>
+        stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
+      "ready after kill -9",
+    );
+    // Well below a reconnect that waits out the connector's start timeout.
+    assert.ok(Date.now() - started < DEADLINE_MS / 2);
+    const listed = await request("session.list", {});
+    for (const entry of listed)
+      if (entry.holderPid)
+        holders.set(entry.holderPid, pidStart(entry.holderPid));
+    assert.ok(listed.some((entry) => entry.id === session.id));
+  } finally {
+    // One ordered step: close the manager, stop the daemon and every holder
+    // seen, wait for their exit, then remove the temp dir.
+    manager.close();
+    if (fs.existsSync(lockFile))
+      await stopPid(Number.parseInt(fs.readFileSync(lockFile, "utf8"), 10));
+    for (const [holder, start] of holders) await stopPid(holder, { start });
+    removeDir(dir);
+  }
 });
 
 test("request forwards a per-call timeout to the client and none by default", async () => {

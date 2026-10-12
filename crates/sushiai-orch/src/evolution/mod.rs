@@ -144,15 +144,18 @@ impl App {
             let cancel = CancelToken::new();
             for cmd in failing_commands(&task) {
                 let check = verify::run_eval_check(
+                    verify::CheckContext::new(self, Some(task_id)),
                     Path::new(&task.repo),
                     &run_dir,
                     &task.base_sha,
                     &cmd,
-                    settings.sandbox,
+                    self.task_sandbox(&task.repo, &run_dir.join("eval-check"), &run_dir)
+                        .as_ref(),
                     &cancel,
                 )
                 .await;
-                if matches!(check.code, Some(c) if c != 0) {
+                if matches!(check.code, Some(c) if c != 0) && !verify::timed_out_under_load(&check)
+                {
                     base_failures.push(cmd);
                 }
             }
@@ -283,6 +286,7 @@ mod tests {
             code,
             tail: String::new(),
             ms: 0,
+            ..Default::default()
         };
         let mut a = super::super::test_support::attempt_with_failure(1, "s");
         a.verify = vec![

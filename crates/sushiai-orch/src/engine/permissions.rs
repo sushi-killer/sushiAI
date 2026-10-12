@@ -107,6 +107,23 @@ pub(super) struct TaskTools {
     /// `mcp__server__tool` names the owner allowed for this repo or task.
     pub granted: Vec<String>,
     pub env: HashMap<String, String>,
+    pub notes: Vec<String>,
+    exe_path: String,
+}
+
+fn is_full_bridge(def: &serde_json::Value, exe_path: &str) -> bool {
+    let Some(command) = def.get("command").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(args) = def.get("args").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    (command == exe_path
+        || Path::new(command)
+            .file_name()
+            .is_some_and(|name| name == "sushiai"))
+        && args.first().and_then(serde_json::Value::as_str) == Some("mcp")
+        && !args.iter().any(|arg| arg.as_str() == Some("--task"))
 }
 
 fn servers_of(file: &Path) -> BTreeMap<String, serde_json::Value> {
@@ -142,31 +159,100 @@ pub(super) fn task_tools(
             off.push((cfg.id.clone(), cfg.label.clone()));
         }
     }
-    let project_id = task.project_id.clone().or_else(|| {
-        app.secrets
-            .read()
-            .unwrap()
-            .repo_projects
-            .get(&task.repo)
-            .cloned()
-    });
+    let secrets = app.secrets.read().unwrap();
+    let project_id = secrets::project_for_repo(&secrets, &task.repo, task.project_id.as_deref())
+        .ok()
+        .flatten();
     let env = project_id.as_ref().map_or_else(HashMap::new, |id| {
-        let secrets = app.secrets.read().unwrap();
         let mut env = secrets.projects.get(id).cloned().unwrap_or_default();
         env.extend(secrets.project_mcp.get(id).cloned().unwrap_or_default());
         env
     });
+    drop(secrets);
+    let mut project = if project_id.is_some() {
+        BTreeMap::new()
+    } else {
+        servers_of(&worktree.join(".mcp.json"))
+    };
+    let mut task_servers = servers_of(&app.store.task_dir(&task.id).join("mcp.json"));
+    let enable = settings
+        .mcp_enable
+        .get(&task.repo)
+        .cloned()
+        .unwrap_or_default();
+    let disable = settings
+        .mcp_disable
+        .get(&task.repo)
+        .cloned()
+        .unwrap_or_default();
+    let mut notes = Vec::new();
+    for name in &enable {
+        if !settings.chat_tools.iter().any(|cfg| cfg.id == *name) {
+            notes.push(format!(
+                "MCP: ignored unknown name {name:?} in mcpEnable for {}",
+                task.repo
+            ));
+        }
+    }
+    let mut disabled = HashSet::new();
+    for name in &disable {
+        if name == messages::SERVER {
+            continue;
+        }
+        let mut known = project.contains_key(name) || task_servers.contains_key(name);
+        disabled.insert(name.clone());
+        for cfg in &settings.chat_tools {
+            let key = chat_tools::server_key(cfg);
+            if cfg.id == *name || key == *name {
+                known = true;
+                disabled.insert(cfg.id.clone());
+                disabled.insert(key);
+            }
+        }
+        if !known {
+            notes.push(format!(
+                "MCP: ignored unknown name {name:?} in mcpDisable for {}",
+                task.repo
+            ));
+        }
+    }
+    disabled.remove(messages::SERVER);
+    project.retain(|key, _| !disabled.contains(key));
+    task_servers.retain(|key, _| !disabled.contains(key));
+    let mut on = settings.clone();
+    let mut off = Vec::new();
+    for cfg in &mut on.chat_tools {
+        cfg.enabled = (enable.contains(&cfg.id) || enabled_here.contains(&cfg.id.as_str()))
+            && !disabled.contains(&cfg.id)
+            && !disabled.contains(&chat_tools::server_key(cfg));
+        if !cfg.enabled {
+            off.push((cfg.id.clone(), cfg.label.clone()));
+        }
+    }
+    let mut connected = chat_tools::for_task(app, &on);
+    // Plugin server keys can differ from the ids used in brief lines.
+    connected.listed.retain(|(id, _, _)| {
+        let key = on
+            .chat_tools
+            .iter()
+            .find(|cfg| &cfg.id == id)
+            .map(chat_tools::server_key);
+        !key.and_then(|key| connected.servers.get(&key))
+            .is_some_and(|def| is_full_bridge(def, &app.exe_path))
+    });
     TaskTools {
-        connected: chat_tools::for_task(app, &on),
+        connected,
         off,
-        project: servers_of(&worktree.join(".mcp.json")),
-        task: servers_of(&app.store.task_dir(&task.id).join("mcp.json")),
+        project,
+        task: task_servers,
         granted: rules
             .iter()
             .filter_map(|r| r.strip_prefix("tool:"))
             .map(str::to_string)
             .collect(),
         env,
+        exe_path: app.exe_path.clone(),
+        notes,
     }
 }
 
@@ -187,13 +273,19 @@ impl TaskTools {
     pub fn mcp_config(&self, messages_server: &serde_json::Value) -> serde_json::Value {
         let mut servers = serde_json::Map::new();
         for (key, def) in &self.project {
-            servers.insert(key.clone(), def.clone());
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.insert(key.clone(), def.clone());
+            }
         }
         for (key, def) in &self.connected.servers {
-            servers.entry(key.clone()).or_insert_with(|| def.clone());
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.entry(key.clone()).or_insert_with(|| def.clone());
+            }
         }
         for (key, def) in &self.task {
-            servers.insert(key.clone(), without_mark(def));
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.insert(key.clone(), without_mark(def));
+            }
         }
         servers.insert(messages::SERVER.to_string(), messages_server.clone());
         fn resolve(value: &mut serde_json::Value, env: &HashMap<String, String>) {
@@ -226,12 +318,12 @@ impl TaskTools {
     /// The servers a Codex run gets: the task's own that carry
     /// `"codex": true` (the task's `mcp.json` also holds the app's snapshot
     /// of every configured server, so only a marked one was meant for
-    /// Codex) and `messages_server`. Codex has no hook that asks the owner
-    /// before a write, so nothing reaches it unmarked, and never the
+    /// Codex) and, for host runs only, `messages_server`. Codex has no hook
+    /// that asks the owner before a write, so nothing reaches it unmarked, and never the
     /// orchestrator's own bridge.
     pub fn codex_servers(
         &self,
-        messages_server: &serde_json::Value,
+        messages_server: Option<&serde_json::Value>,
     ) -> Vec<(String, serde_json::Value)> {
         let mut servers: Vec<(String, serde_json::Value)> = self
             .task
@@ -240,10 +332,13 @@ impl TaskTools {
                 def.get(CODEX_MARK) == Some(&json!(true))
                     && key.as_str() != messages::SERVER
                     && key.as_str() != "sushiai-orchestrator"
+                    && !is_full_bridge(def, &self.exe_path)
             })
             .map(|(key, def)| (key.clone(), without_mark(def)))
             .collect();
-        servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        if let Some(messages_server) = messages_server {
+            servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        }
         servers
     }
 
@@ -264,6 +359,14 @@ impl TaskTools {
     pub fn lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for (id, reads, writes) in &self.connected.listed {
+            if self
+                .connected
+                .servers
+                .get(id)
+                .is_some_and(|def| is_full_bridge(def, &self.exe_path))
+            {
+                continue;
+            }
             let list = |tools: &[String]| {
                 if tools.is_empty() {
                     "none".to_string()
@@ -277,12 +380,18 @@ impl TaskTools {
                 list(writes)
             ));
         }
-        for key in self.project.keys() {
+        for (key, def) in &self.project {
+            if is_full_bridge(def, &self.exe_path) {
+                continue;
+            }
             lines.push(format!(
                 "{key}: the repository's own MCP server (reads run; a write asks the owner)"
             ));
         }
-        for key in self.task.keys() {
+        for (key, def) in &self.task {
+            if is_full_bridge(def, &self.exe_path) {
+                continue;
+            }
             lines.push(format!(
                 "{key}: this task's own MCP server (reads run; a write asks the owner)"
             ));
@@ -510,33 +619,54 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         .insert(ctx.task_id.clone(), tx);
     // The harness is silent while it waits for us: the stall clock pauses.
     let _paused = ctx.hook_running.start();
-    let mut task = app.store.load_task(&ctx.task_id).ok().flatten()?;
-    task.question = Some(question.clone());
-    task.status = TaskStatus::Waiting;
-    task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
-    let answer = tokio::select! {
+    if let Err(e) = app.update_task(&ctx.task_id, |task| {
+        task.question = Some(question.clone());
+        task.status = TaskStatus::Waiting;
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", ctx.task_id);
+        app.permission_waits.lock().unwrap().remove(&ctx.task_id);
+        return None;
+    }
+    let reply = tokio::select! {
         _ = ctx.cancel.cancelled() => None,
         a = rx => a.ok(),
     };
+    let evidence = reply.as_ref().and_then(|r| r.default_evidence.as_deref());
+    let answer = reply.as_ref().map(|r| r.text.clone());
     app.permission_waits.lock().unwrap().remove(&ctx.task_id);
-    if let Ok(Some(mut task)) = app.store.load_task(&ctx.task_id) {
+    // `task.answer` marks an agent's answer (it may only deny here).
+    let caller = app
+        .take_agent_answer(&ctx.task_id)
+        .unwrap_or(AnsweredBy::Owner);
+    if let Err(e) = app.update_task(&ctx.task_id, |task| {
         if task
             .question
             .as_ref()
             .is_some_and(|q| q.text == question.text)
         {
-            task.question = None;
             if let Some(answer) = &answer {
-                task.decisions.push(format!("Owner: {answer}"));
-                record_answered_question(&mut task, &question, answer, AnsweredBy::Owner);
+                task.question = None;
+                record_answer_for(task, Some(&question), answer, caller, evidence, None);
                 task.status = TaskStatus::Running;
+            } else if app
+                .controls
+                .lock()
+                .unwrap()
+                .get(&ctx.task_id)
+                .is_none_or(|ctrl| ctrl.cancel.is_cancelled())
+            {
+                task.status = app.cancelled_status(&task.status);
+                if task.status == TaskStatus::Stopped {
+                    app.close_stopped_task(task);
+                }
+            } else {
+                // The hook token also fires when a run ends while its task
+                // loop continues; only the expired permission question closes.
+                task.question = None;
             }
-            task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
-            app.broadcast_task(&task);
         }
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", ctx.task_id);
     }
     answer
 }
@@ -641,11 +771,8 @@ fn denied_reason(subject: &Subject, note: Option<&str>) -> String {
 }
 
 fn append_decision(app: &App, task_id: &str, line: String) {
-    if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        task.decisions.push(line);
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
+    if let Err(e) = app.update_task(task_id, |task| task.decisions.push(line)) {
+        eprintln!("orch: updating task {task_id} failed: {e}");
     }
 }
 
@@ -806,7 +933,9 @@ pub(super) fn apply_missing_answer(
             .get(missing.criterion)
             .cloned()
             .unwrap_or_default();
-        drop_criterion(task, missing.criterion);
+        let settings = app.settings.read().unwrap().clone();
+        let origin = origin_of_last_answer(task);
+        let _ = drop_criterion(&settings, task, missing.criterion, origin);
         task.decisions.push(format!(
             "Brief check: \"{text}\" needs {}; it is an owner action, not this task's",
             missing.capability
@@ -842,6 +971,11 @@ pub(super) fn tools_block(tools: &TaskTools, planning: bool) -> String {
     for line in &lines {
         text.push_str(&format!("- {line}\n"));
     }
+    for (id, label) in &tools.off {
+        text.push_str(&format!(
+            "- {id} ({label}): connected but off for this repo\n"
+        ));
+    }
     if planning {
         text.push_str("\nCriteria may only ask for what these tools can do. A step that needs a service with no tool here belongs to the owner: say so in the criterion instead of asking the agent to do it.\n\n");
     } else {
@@ -861,9 +995,9 @@ pub(super) async fn stop_for_denials(
     task: &mut Task,
     idx: usize,
     subjects: &[Subject],
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<String>>>>,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
-    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: &mut Option<SlotPermit>,
 ) -> LoopSignal {
     let names = question_text(subjects);
     let names = names
@@ -882,7 +1016,7 @@ pub(super) async fn stop_for_denials(
         ));
         task.status = TaskStatus::Failed;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return LoopSignal::Stop;
     }
@@ -898,7 +1032,7 @@ pub(super) async fn stop_for_denials(
     };
     apply_answer(app, task, subjects, &answer);
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     LoopSignal::Continue
 }
@@ -1027,6 +1161,68 @@ mod tests {
     }
 
     #[test]
+    fn task_tools_drop_full_bridges_from_every_source() {
+        let exe = "/opt/bin/renamed-daemon";
+        let full = json!({"command": exe, "args": ["mcp"], "codex": true});
+        let readonly =
+            json!({"command": "/opt/bin/sushiai", "args": ["mcp", "--read-only"], "codex": true});
+        let scoped =
+            json!({"command": "sushiai", "args": ["mcp", "--task", "other-task"], "codex": true});
+        let unrelated = json!({"command": "sushiai", "args": ["orch", "status"], "codex": true});
+        let tools = TaskTools {
+            connected: TurnTools {
+                servers: [("connected-full".into(), full.clone())].into(),
+                listed: vec![("connected-full".into(), vec!["get".into()], vec![])],
+                ..Default::default()
+            },
+            project: [
+                ("project-full".into(), full.clone()),
+                ("project-readonly".into(), readonly.clone()),
+            ]
+            .into(),
+            task: [
+                ("task-full".into(), full),
+                ("task-readonly".into(), readonly),
+                ("scoped".into(), scoped),
+                ("unrelated".into(), unrelated),
+                (
+                    messages::SERVER.into(),
+                    json!({"command": exe, "args": ["mcp"]}),
+                ),
+            ]
+            .into(),
+            off: vec![],
+            granted: vec![],
+            env: HashMap::new(),
+            notes: vec![],
+            exe_path: exe.into(),
+        };
+        let messages = json!({"command": exe, "args": ["mcp", "--task", "this-task"]});
+        let config = tools.mcp_config(&messages);
+        let servers = config["mcpServers"].as_object().unwrap();
+        let codex = tools.codex_servers(Some(&messages));
+        let lines = tools.lines().join("\n");
+        for name in [
+            "connected-full",
+            "project-full",
+            "project-readonly",
+            "task-full",
+            "task-readonly",
+        ] {
+            assert!(!servers.contains_key(name), "{config}");
+            assert!(!codex.iter().any(|(key, _)| key == name));
+            assert!(!lines.contains(name), "{lines}");
+        }
+        for name in ["scoped", "unrelated"] {
+            assert!(servers.contains_key(name), "{config}");
+            assert!(codex.iter().any(|(key, _)| key == name));
+            assert!(lines.contains(name), "{lines}");
+        }
+        assert_eq!(servers[messages::SERVER], messages);
+        assert_eq!(codex.last().unwrap(), &(messages::SERVER.into(), messages));
+    }
+
+    #[test]
     fn a_grant_reaches_the_run_but_a_write_tool_is_never_pre_allowed() {
         let tools = TaskTools {
             connected: TurnTools {
@@ -1053,6 +1249,8 @@ mod tests {
             .into(),
             granted: vec!["mcp__a__send".into(), "mcp__a__get".into()],
             env: HashMap::new(),
+            exe_path: "sushiai".into(),
+            notes: vec![],
         };
         assert_eq!(tools.allowed(), vec!["mcp__a__get", "mcp__a__send"]);
         let config = tools.mcp_config(&json!({"command": "messages"}));
@@ -1065,12 +1263,18 @@ mod tests {
         // Codex gets only the task's own servers and the messages server:
         // it has no hook to ask the owner before a connected tool writes.
         let codex: Vec<String> = tools
-            .codex_servers(&json!({"command": "messages"}))
+            .codex_servers(Some(&json!({"command": "messages"})))
             .into_iter()
             .map(|(name, _)| name)
             .collect();
         assert_eq!(codex, vec!["t".to_string(), messages::SERVER.to_string()]);
-        let t = &tools.codex_servers(&json!({}))[0].1;
+        let sandboxed: Vec<String> = tools
+            .codex_servers(None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(sandboxed, vec!["t".to_string()]);
+        let t = &tools.codex_servers(Some(&json!({})))[0].1;
         assert!(t.get("codex").is_none());
         let block = tools_block(&tools, false);
         assert!(
@@ -1079,5 +1283,241 @@ mod tests {
         );
         assert!(block.contains("No tool: "), "{block}");
         assert!(!tools_block(&tools, true).contains("No tool: "));
+    }
+
+    #[tokio::test]
+    async fn task_tools_project_id_uses_only_snapshot_and_no_id_falls_back_to_worktree() {
+        let (app, dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Queued);
+        app.store.save_task(&task).unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".mcp.json"),
+            json!({"mcpServers": {
+                "fallback": {"command": "fallback"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            app.store.task_dir(&task.id).join("mcp.json"),
+            json!({"mcpServers": {
+                "snapshot": {"command": "snapshot", "codex": true},
+                "remove": {"command": "remove", "codex": true},
+                "sushiai-messages": {"command": "fake", "codex": true}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let mut settings = Settings::default();
+        let tools = task_tools(&app, &settings, &task, &worktree);
+        assert!(tools.project.contains_key("fallback"));
+        settings.mcp_disable.insert(
+            task.repo.clone(),
+            vec!["remove".into(), messages::SERVER.into(), "missing".into()],
+        );
+        settings
+            .mcp_enable
+            .insert(task.repo.clone(), vec!["not-a-tool".into()]);
+        let tools = task_tools(&app, &settings, &task, &worktree);
+        let config = tools.mcp_config(&json!({"command": "messages"}));
+        assert_eq!(
+            config["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["fallback", "snapshot", messages::SERVER]
+        );
+        let codex = tools.codex_servers(Some(&json!({"command": "messages"})));
+        assert_eq!(
+            codex
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["snapshot", messages::SERVER]
+        );
+        assert_eq!(codex.last().unwrap().1["command"], "messages");
+        assert_eq!(
+            config["mcpServers"][messages::SERVER]["command"],
+            "messages"
+        );
+        assert_eq!(
+            tools.notes,
+            vec![
+                format!(
+                    "MCP: ignored unknown name \"not-a-tool\" in mcpEnable for {}",
+                    task.repo
+                ),
+                format!(
+                    "MCP: ignored unknown name \"missing\" in mcpDisable for {}",
+                    task.repo
+                ),
+            ]
+        );
+        app.secrets
+            .write()
+            .unwrap()
+            .repo_projects
+            .insert(task.repo.clone(), "project".into());
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+        task.project_id = Some("project".into());
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+        // A stored project id that does not match the repo is no project.
+        app.secrets.write().unwrap().repo_projects.clear();
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .contains_key("fallback"));
+        settings
+            .mcp_disable
+            .insert(task.repo.clone(), vec!["fallback".into()]);
+        task.project_id = None;
+        assert!(task_tools(&app, &settings, &task, &worktree)
+            .project
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_tools_enable_and_grants_are_repo_scoped_and_disable_matches_id_or_server_key() {
+        let (app, dir) = test_app();
+        let task = task_with_status(TaskStatus::Queued);
+        app.store.save_task(&task).unwrap();
+        let mut settings = Settings {
+            chat_tools: serde_json::from_value(json!([
+                {"id": "global", "label": "Global tool", "enabled": true, "server": {"command": "true"}},
+                {"id": "local", "label": "Local tool", "enabled": false, "server": {"command": "true"}},
+                {"id": "plug", "label": "Plugin tool", "enabled": true, "server": {"ref": "plugin:demo/server"}}
+            ])).unwrap(),
+            ..Settings::default()
+        };
+        std::fs::write(app.data_dir.join("chat-tools.json"), json!({
+            "global": {"status": "ok", "tools": [{"name": "get_item", "readOnly": true}], "checkedAt": 0},
+            "local": {"status": "ok", "tools": [{"name": "get_item", "readOnly": true}], "checkedAt": 0}
+        }).to_string()).unwrap();
+        settings
+            .mcp_enable
+            .insert(format!("{}/", task.repo), vec!["global".into()]);
+        let tools = task_tools(&app, &settings, &task, dir.path());
+        assert!(tools.connected.servers.is_empty());
+        assert!(tools_block(&tools, false)
+            .contains("global (Global tool): connected but off for this repo"));
+        assert_eq!(
+            tools.capabilities()["connectedButOffForThisTask"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        settings
+            .mcp_enable
+            .insert(task.repo.clone(), vec!["local".into()]);
+        add_rule(&app, Scope::Repo(&task.repo), "enable:global");
+        let tools = task_tools(&app, &settings, &task, dir.path());
+        assert_eq!(
+            tools
+                .connected
+                .servers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["global", "local"]
+        );
+        assert_eq!(tools.off, vec![("plug".into(), "Plugin tool".into())]);
+        add_rule(&app, Scope::Task(&task.id), "enable:local");
+        settings.mcp_enable.clear();
+        assert!(task_tools(&app, &settings, &task, dir.path())
+            .connected
+            .servers
+            .contains_key("local"));
+
+        std::fs::write(
+            app.store.task_dir(&task.id).join("mcp.json"),
+            json!({"mcpServers": {
+                "global": {"command": "task-copy", "codex": true},
+                "plugin:demo:server": {"command": "plugin-copy", "codex": true}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        for name in ["plug", "plugin:demo:server"] {
+            settings
+                .mcp_disable
+                .insert(task.repo.clone(), vec!["global".into(), name.into()]);
+            let tools = task_tools(&app, &settings, &task, dir.path());
+            assert_eq!(
+                tools
+                    .connected
+                    .servers
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["local"]
+            );
+            assert!(tools.task.is_empty());
+            assert!(tools.notes.is_empty());
+            assert!(tools.allowed().iter().all(|tool| !tool.contains("global")));
+            assert_eq!(tools.codex_servers(Some(&json!({}))).len(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod answer_caller_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_held_permission_refusal_keeps_the_caller_and_policy_evidence() {
+        for (source, caller) in [
+            (None, AnsweredBy::Owner),
+            (Some("lead"), AnsweredBy::Lead),
+            (Some("overseer"), AnsweredBy::Overseer),
+            (Some("chat"), AnsweredBy::Orchestrator),
+            (Some("policy"), AnsweredBy::Policy),
+        ] {
+            let (app, _dir) = test_app();
+            let task = task_with_status(TaskStatus::Running);
+            app.store.save_task(&task).unwrap();
+            let ctx = HookContext::new(&task, 1, Path::new(&task.worktree), &task.base_sha);
+            let loop_app = app.clone();
+            let mut events = app.subscribe();
+            let waiter = tokio::spawn(async move {
+                ask(
+                    &loop_app,
+                    &ctx,
+                    &Subject::Tool("mcp__example__write".into()),
+                    "",
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut params = json!({"id": task.id, "answer": "Deny"});
+            if let Some(source) = source {
+                params["source"] = json!(source);
+            }
+            if caller == AnsweredBy::Policy {
+                params["evidence"] = json!("waited");
+            }
+            app.handle_task_answer(params).await.unwrap();
+            assert_eq!(waiter.await.unwrap().as_deref(), Some("Deny"));
+            let task = app.store.load_task(&task.id).unwrap().unwrap();
+            assert_eq!(task.status, TaskStatus::Running);
+            assert!(task.question.is_none());
+            assert_eq!(task.question_history[0].answered_by, caller);
+            if caller == AnsweredBy::Policy {
+                assert_eq!(task.assumptions[0].evidence, "waited");
+                assert!(task.decisions[0].starts_with("Policy:"));
+            }
+            assert!(app.agent_answers.lock().unwrap().is_empty());
+            app.shutdown();
+        }
     }
 }

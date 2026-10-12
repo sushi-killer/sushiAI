@@ -20,10 +20,11 @@ import {
   formatCost,
   formatDuration,
   formatTaskTier,
-  stageTrack,
   statusBadgeLabel,
   statusTone,
+  unlandedLabel,
   variantLabel,
+  waitLabel,
 } from "./helpers";
 import type { Tone } from "../ui/tone";
 import type { Attempt, Settings, Task } from "./types";
@@ -40,7 +41,10 @@ import {
   reportSummary,
   shortBranch,
 } from "./taskDetailModel";
-import { Chip, Criterion, StageTrack, Tag } from "../ui";
+import { Chip, Criterion, Tag } from "../ui";
+import { Blueprint } from "./Blueprint";
+import { canPickTaskPreset } from "./blueprintModel";
+import { usePipeline } from "./usePipeline";
 import "./task-detail.css";
 
 const DECISION_TAGS = ["Orchestrator"] as const;
@@ -501,6 +505,58 @@ function AssumptionsList({
   );
 }
 
+/** The selected task's pipeline diagram. Its preset can be chosen until the
+ * task has an implement attempt; the inspector never edits a task. */
+function TaskBlueprint({
+  task,
+  settings,
+  busy,
+  act,
+}: {
+  task: Task;
+  settings: Settings | null;
+  busy: boolean;
+  act(action: () => Promise<Task>): void;
+}) {
+  const orchestratorClient = useOrchestratorClient();
+  const { pipeline, error } = usePipeline({ taskId: task.id }, task.updatedAt);
+  const pickable = canPickTaskPreset(task);
+  return (
+    <Blueprint
+      pipeline={pipeline}
+      routes={settings?.routes ?? []}
+      tierRoutes={{
+        mechanical:
+          task.variant?.tierRoutes?.mechanical ??
+          settings?.tiers.mechanical ??
+          "",
+        standard:
+          task.variant?.tierRoutes?.standard ?? settings?.tiers.standard ?? "",
+        hard: task.variant?.tierRoutes?.hard ?? settings?.tiers.hard ?? "",
+      }}
+      error={error}
+      preset={{
+        options: [
+          { id: "", label: "Global settings" },
+          ...(pipeline?.presets ?? []).map((p) => ({
+            id: p.id,
+            label: p.label,
+          })),
+        ],
+        value: pipeline?.presetId ?? "",
+        disabled: !pickable || busy || !pipeline,
+        note: pickable
+          ? undefined
+          : "Fixed: the task already has an implement attempt.",
+        onChange: (id) => {
+          if (id && pickable)
+            act(() => orchestratorClient.taskPreset(task.id, id));
+        },
+      }}
+    />
+  );
+}
+
 /** One task's view: header and actions, the question blocking it, its report
  * or stage track, timeline, criteria, attempts and evidence, and the rest
  * (request, subtasks, assumptions, decisions, live log) under Details. */
@@ -538,6 +594,12 @@ export function TaskDetail({
     ? tasks.find((t) => t.id === selected.parent)
     : undefined;
   const waitsFor = dependencyTitles(selected, tasks);
+  // A dependency wait repeats what `after ...` already says.
+  const waitNote =
+    selected.wait &&
+    !(selected.wait.kind === "dependency" && waitsFor.length > 0)
+      ? waitLabel(selected.wait)
+      : "";
   const done = selected.status === "done";
   const mark = selected.leadTouch;
   const statusTag: { tone: Tone; label: string } | null = done
@@ -565,6 +627,7 @@ export function TaskDetail({
   ].filter((row) => formatCost(row.cost) !== "$0.00");
   const hasDetails =
     (selected.request && selected.request !== selected.title) ||
+    !!selected.unlanded ||
     children.length > 0 ||
     (selected.assumptions ?? []).length > 0 ||
     selected.decisions.length > 0 ||
@@ -822,7 +885,7 @@ export function TaskDetail({
             Your repo may expect a branch name like feature/&lt;slug&gt;.
           </p>
         )}
-        {(parentTask || waitsFor.length > 0 || selected.queueReason) && (
+        {(parentTask || waitsFor.length > 0 || waitNote) && (
           <p className="td-facts">
             {parentTask && (
               <button className="td-link" onClick={() => onOpen(parentTask.id)}>
@@ -831,8 +894,8 @@ export function TaskDetail({
             )}
             {parentTask && waitsFor.length > 0 && " · "}
             {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
-            {selected.queueReason &&
-              `${parentTask || waitsFor.length > 0 ? " · " : ""}${selected.queueReason}`}
+            {waitNote &&
+              `${parentTask || waitsFor.length > 0 ? " · " : ""}${waitNote}`}
           </p>
         )}
         {done ? (
@@ -843,7 +906,12 @@ export function TaskDetail({
             onOpen={onOpen}
           />
         ) : (
-          <StageTrack steps={stageTrack(selected)} />
+          <TaskBlueprint
+            task={selected}
+            settings={settings}
+            busy={busy}
+            act={act}
+          />
         )}
         {/* The one thing blocking the task goes first, above everything
          * that only describes it. */}
@@ -929,6 +997,12 @@ export function TaskDetail({
                       {" · "}from {selected.baseRef}
                     </span>
                   )}
+                  {selected.unlanded && (
+                    <span className="td-branch">
+                      {" · "}
+                      {unlandedLabel(selected)}
+                    </span>
+                  )}
                   {selected.variant?.land && (
                     <span className="td-branch" title={selected.landedSha}>
                       {" · "}
@@ -971,11 +1045,15 @@ export function TaskDetail({
                               after {after.join(", ")}
                             </span>
                           )}
-                          {child.queueReason && (
-                            <span className="td-faint">
-                              {child.queueReason}
-                            </span>
-                          )}
+                          {child.wait &&
+                            !(
+                              child.wait.kind === "dependency" &&
+                              after.length > 0
+                            ) && (
+                              <span className="td-faint">
+                                {waitLabel(child.wait)}
+                              </span>
+                            )}
                           <span className="td-faint">
                             {statusBadgeLabel(child)}
                           </span>

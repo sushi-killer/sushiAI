@@ -30,12 +30,14 @@ impl App {
         let has_changed = !changed.is_empty();
         let verify_configured = !ctx.verify.is_empty();
 
-        let (hook_verify, _) = filter_scoped(
-            &self.settings.read().unwrap().scoped_checks,
-            &ctx.repo,
-            &ctx.verify,
-            &changed,
-        );
+        let scoped = self
+            .store
+            .load_task(&ctx.task_id)
+            .ok()
+            .flatten()
+            .map(|task| scoped_checks_for(&self.settings.read().unwrap(), &task))
+            .unwrap_or_default();
+        let (hook_verify, _) = filter_scoped(&scoped, &ctx.repo, &ctx.verify, &changed);
         let verify_results = if !hook_verify.is_empty() && has_changed {
             let app = self.arc();
             let run_dir = self.store.run_dir(&ctx.task_id, ctx.attempt_n);
@@ -49,6 +51,7 @@ impl App {
                 run_verify_cached(
                     &app,
                     &ctx.task_id,
+                    &ctx.repo,
                     &worktree,
                     &run_dir,
                     &base_sha,
@@ -58,7 +61,12 @@ impl App {
             )
             .await
             {
-                Ok(results) => results,
+                Ok((results, lines)) => {
+                    for line in lines {
+                        self.append_decision(&ctx.task_id, line);
+                    }
+                    results
+                }
                 Err(_) => return Ok(json!({})),
             }
         } else {

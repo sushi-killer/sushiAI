@@ -26,18 +26,24 @@ pub const TASK_TOOLS: [&str; 4] = [
 ];
 
 /// What a Brainstorm or Plan turn gets (`--read-only`): looking, never changing.
-pub const READ_ONLY_TOOLS: [&str; 4] = ["task_list", "task_get", "settings_get", "repo_notes_list"];
+pub const READ_ONLY_TOOLS: [&str; 5] = [
+    "task_list",
+    "task_get",
+    "settings_get",
+    "repo_notes_list",
+    "costs_summary",
+];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 24] = [
     "task_list",
     "task_get",
     "task_create",
     "task_backlog",
     "task_start",
     "task_report",
+    "task_pr",
     "task_lead_touch",
-    "task_stop",
     "task_answer",
     "task_amend",
     "settings_get",
@@ -53,6 +59,7 @@ pub const ORCHESTRATOR_TOOLS: [&str; 23] = [
     "repo_notes_list",
     "repo_notes_add",
     "repo_notes_remove",
+    "costs_summary",
 ];
 
 fn from_schema() -> Value {
@@ -110,10 +117,10 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative files or directories the task edits; it waits while another live task on the same base holds any of them."},
                     "branch": {"type": "string"},
                     "base": {"type": "string", "description": "Branch or commit to start from; defaults to the repo's current HEAD."},
-                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: stallTimeoutSecs (0 = off), reviewEvidence, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), groundedChecks (bool; the planner writes an executable check per criterion, the ones that fail on the base gate every attempt, and one hidden held-out check is run after verify); bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner) and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
+                    "variant": {"type": "object", "description": "Experiment flags for this task only, over the settings defaults: stallTimeoutSecs (0 = off), reviewEvidence, advisor (bool), loopDetect (bool; on by default: stops an attempt that repeats itself), bestOf (2 = on: on the hard tier the first implement attempt runs twice at once in two worktrees, on the tier route and on bestOfRoute, default the first route of the other harness; verify and the checks pick, the other-family reviewer picks when both pass, the loser is removed and both costs count; 0/1 = off); bestOfRoute (route id of the second candidate); plannerRoute (route id the plan stage runs on instead of the settings' planner), judgeRoute (route id for disputed finding judgments; auto by default), and tierRoutes (object tier -> route id, e.g. {\"hard\": \"claude-sonnet\"}, replacing the settings' tier route for implementing; must name configured routes); maxCostUsd (dollar budget; the task waits for the owner before its next run once spent, 0 = none); maxAttemptCostUsd (dollar cap on one implement attempt, stopped mid-run once its streamed usage passes it and retried, 0 = none). Create the same task twice with different variants to A/B them."},
                     "land": {"type": "boolean", "description": "Land the finished top-level task on its base branch by itself (same as variant.land, default true for a top-level task): a per-(repo, branch) queue carries its work onto the branch head, squashes it to one commit, runs verify and finalVerify on that tree, and moves the branch (git merge --ff-only in its clean checkout, else update-ref). Conflicts or failing checks come back as an ordinary failed attempt; a dirty checkout makes the task wait `landing`, retried every 2 minutes and on task.start. Never pushes, and lands on the default branch only when the repo is allowed (settings.landOnDefaultRepos, or settings.landOnDefault for every repo). settings.afterLand [{repo, run}] runs commands in the checkout after a landing."},
-                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string", "description": "Shell command run from the repo root; must fail before the work and pass after it."}}, "required": ["criterion", "run"]}, "description": "With variant.groundedChecks: executable checks per criterion. Entries with an out-of-range criterion or an empty run are dropped."},
-                    "heldOut": {"type": "object", "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "With variant.groundedChecks: one extra check the implementer never sees."},
+                    "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string", "description": "Shell command run from the repo root; must fail before the work and pass after it."}}, "required": ["criterion", "run"]}, "description": "Executable checks per criterion. Entries with an out-of-range criterion or an empty run are dropped."},
+                    "heldOut": {"type": "object", "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "One extra check the implementer never sees."},
                     "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of tasks in this repo that must be done before this one starts; it starts on its own once they are. A cycle is rejected."},
                     "parent": {"type": "string", "description": "Id of the task this one is a part of: it branches from the parent's branch and lands there when done. The parent runs no implement attempt of its own; a task that already has a running loop is rejected as a parent."},
                     "start": {"type": "boolean", "description": "Start right away (default true); false leaves the task stopped for review."},
@@ -158,6 +165,19 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             }),
         ),
         (
+            "task_pr",
+            "task.pr",
+            "Open a pull request for a done top-level task: pushes the task's branch and opens the PR on the repo's remote. Use it when a task is done and green. Never merge: merging is the owner's.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string", "description": "PR title; defaults to the task title."},
+                },
+                "required": ["id"],
+            }),
+        ),
+        (
             "task_lead_touch",
             "task.leadTouch",
             "Mark whether a done task's work needed a fix from a person or the lead session after the orchestrator said done (touched true) or was clean (touched false); omit touched to clear the mark. An owner's touched mark with a non-empty note also creates one follow-up task from that note (the same note never creates a second one). The autonomy metric behind costs.summary's leadTouch rate.",
@@ -172,29 +192,23 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             }),
         ),
         (
-            "task_stop",
-            "task.stop",
-            "Stop a running or waiting task.",
-            json!({
-                "type": "object",
-                "properties": {"id": {"type": "string"}},
-                "required": ["id"],
-            }),
-        ),
-        (
             "task_answer",
             "task.answer",
-            "Answer a task's pending question (send \"stop\" as the answer to cancel it instead).",
+            "Answer a task's pending question (send \"stop\" as the answer to cancel it instead). When an owner precedent or a repo note covers it, pass `like` naming it.",
             json!({
                 "type": "object",
-                "properties": {"id": {"type": "string"}, "answer": {"type": "string"}},
+                "properties": {
+                    "id": {"type": "string"},
+                    "answer": {"type": "string"},
+                    "like": {"type": "string", "description": "Only when an owner precedent or a repo note covers the question: name it (one line, at most 120 characters). Refused for questions the owner alone decides."},
+                },
                 "required": ["id", "answer"],
             }),
         ),
         (
             "task_amend",
             "task.amend",
-            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            "Replace a drafting, running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks, heldOut or dependsOn (each field you pass replaces the task's; at least one is required). dependsOn replaces the full list of task ids only before the first implement attempt; an empty list makes the task ready. A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. Amended checks and heldOut are re-run on the base commit and only those failing there gate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -205,6 +219,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "screenshot": {"type": "string", "description": "Replaces the repo command that captures the screenshot evidence; an empty string removes it."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
                     "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
+                    "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "The full new list of task ids; only before the first implement attempt; an empty list makes the task ready."},
                 },
                 "required": ["id"],
             }),
@@ -346,6 +361,22 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "required": ["repo", "id"],
             }),
         ),
+        (
+            "costs_summary",
+            "costs.summary",
+            "Spend and usage totals, read-only: by day, model, stage and task, with the lead-touch rate. Filter by repo, taskId, sinceDays or a from/to day (YYYY-MM-DD); groupBy adds breakdowns.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string"},
+                    "taskId": {"type": "string"},
+                    "sinceDays": {"type": "integer"},
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "groupBy": {"type": "array", "items": {"type": "string"}},
+                },
+            }),
+        ),
     ]
 }
 
@@ -417,7 +448,7 @@ fn message_params(tool: &str, mut args: Value, task: Option<&str>) -> Value {
                 "from": ORCHESTRATOR,
                 "replyTo": obj.get("question").cloned().unwrap_or(Value::Null),
                 "text": obj.get("text").cloned().unwrap_or(Value::Null),
-            })
+            });
         }
         _ => {}
     }
@@ -492,8 +523,15 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
-    let args = with_task_mcp(method, args, task_mcp);
-    let args = with_source(method, args, bridge.task.is_some());
+    let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
+    let source = bridge_source(declared_source.as_deref());
+    let args = with_task_mcp(
+        method,
+        args,
+        task_mcp,
+        bridge.task.is_none() && source == "chat",
+    );
+    let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match (bridge.call)(method, args) {
         Ok(result) => tool_ok(result),
@@ -504,8 +542,18 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
 /// A task the agent creates gets the MCP servers the app resolved for its
 /// project (`ORCHD_TASK_MCP` names a `{repo, mcp}` file the app writes), the
 /// same thing the app adds when the owner creates a task directly. Only for
-/// that repo, and never over an `mcp` the caller set itself.
-fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Value {
+/// that repo. Only an owner's chat turn may keep caller-set servers.
+fn with_task_mcp(
+    method: &str,
+    mut args: Value,
+    task_mcp: Option<Value>,
+    keep_caller_mcp: bool,
+) -> Value {
+    if method == "task.create" && !keep_caller_mcp {
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("mcp");
+        }
+    }
     let Some(task_mcp) = task_mcp else {
         return args;
     };
@@ -521,20 +569,44 @@ fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Valu
     args
 }
 
+fn bridge_source(source: Option<&str>) -> &'static str {
+    match source {
+        Some("overseer") => "overseer",
+        Some("chat") => "chat",
+        _ => "lead",
+    }
+}
+
 /// Records where a task created through this bridge started: the
 /// orchestrator chat agent (no task id) is `chat`, a task's own agent is
 /// `handoff`. A source the caller set itself is kept.
-fn with_source(method: &str, mut args: Value, from_task: bool) -> Value {
-    if method == "task.answer" {
+/// `source` names the caller outside a task: a lead, chat, or overseer turn.
+fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> Value {
+    if matches!(
+        method,
+        "task.answer" | "task.amend" | "repo.notes.add" | "repo.notes.remove"
+    ) {
         // Never trusted from the caller: it marks the answer as not the
-        // owner's, so orchd refuses an allow on an owner-only question.
+        // owner's, so orchd refuses an allow on an owner-only question (and an
+        // overseer's repo note).
         if let Some(obj) = args.as_object_mut() {
-            let source = if from_task { "mcp" } else { "chat" };
+            let source = if from_task { "mcp" } else { source };
+            obj.insert("source".to_string(), json!(source));
+        }
+    }
+    if method == "task.pr" {
+        // Task branch only: the bridge never forwards a branch, and marks the
+        // call so the backend refuses one too.
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("branch");
+            let source = if from_task { "mcp" } else { source };
             obj.insert("source".to_string(), json!(source));
         }
     }
     if method == "task.create" && args.get("source").is_none() {
         if let Some(obj) = args.as_object_mut() {
+            // A task source names who asked for the task, so an overseer
+            // turn creates one as the chat does.
             let source = if from_task { "handoff" } else { "chat" };
             obj.insert("source".to_string(), json!(source));
         }
@@ -570,7 +642,7 @@ fn handle_line(bridge: &Bridge, line: &str) -> Option<Value> {
                 "jsonrpc": "2.0",
                 "id": null,
                 "error": {"code": -32700, "message": format!("parse error: {e}")},
-            }))
+            }));
         }
     };
     let id = req.id?;
@@ -659,10 +731,57 @@ mod tests {
     }
 
     #[test]
-    fn no_tool_maps_to_task_pr() {
+    fn task_amend_schema_offers_full_dependency_replacement_before_implementing() {
+        let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
+        let amend = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "task_amend")
+            .unwrap();
+        let dependencies = &amend["inputSchema"]["properties"]["dependsOn"];
+        assert_eq!(dependencies["type"], "array");
+        assert_eq!(dependencies["items"]["type"], "string");
+        assert!(dependencies["description"]
+            .as_str()
+            .unwrap()
+            .contains("full new list"));
+        let description = amend["description"].as_str().unwrap();
+        assert!(description.contains("dependsOn"));
+        assert!(description.contains("first implement attempt"));
+        assert!(description.contains("empty list"));
+    }
+
+    #[test]
+    fn task_pr_never_forwards_a_branch() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = seen.clone();
+        let bridge = Bridge {
+            call: Box::new(move |method, args| {
+                *sink.lock().unwrap() = Some((method.to_string(), args));
+                Ok(json!({}))
+            }),
+            task: None,
+            read_only: false,
+        };
+        let call =
+            json!({"name": "task_pr", "arguments": {"id": "t1", "branch": "main", "title": "T"}});
+        dispatch(&bridge, "tools/call", &call).unwrap();
+        let (method, args) = seen.lock().unwrap().take().unwrap();
+        assert_eq!(method, "task.pr");
+        assert!(args.get("branch").is_none());
+        assert_eq!(args["id"], "t1");
+        assert_eq!(args["source"], "lead");
+    }
+
+    #[test]
+    fn task_pr_is_an_orchestrator_only_tool() {
         assert!(tool_specs()
             .iter()
-            .all(|(_, method, ..)| *method != "task.pr"));
+            .any(|(name, method, ..)| *name == "task_pr" && *method == "task.pr"));
+        assert!(ORCHESTRATOR_TOOLS.contains(&"task_pr"));
+        assert!(!TASK_TOOLS.contains(&"task_pr"));
+        assert!(!READ_ONLY_TOOLS.contains(&"task_pr"));
     }
 
     #[test]
@@ -679,8 +798,8 @@ mod tests {
                 "task_backlog",
                 "task_start",
                 "task_report",
+                "task_pr",
                 "task_lead_touch",
-                "task_stop",
                 "task_answer",
                 "task_amend",
                 "settings_get",
@@ -696,6 +815,7 @@ mod tests {
                 "repo_notes_list",
                 "repo_notes_add",
                 "repo_notes_remove",
+                "costs_summary",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);
@@ -712,7 +832,16 @@ mod tests {
 
     #[test]
     fn a_task_bridge_offers_only_messaging_and_never_a_sender_choice() {
-        let task = bridge(Some("t1"));
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let task = Bridge {
+            task: Some("t1".into()),
+            read_only: false,
+            call: Box::new(move |method, args| {
+                recorded.lock().unwrap().push((method.to_string(), args));
+                Ok(json!({}))
+            }),
+        };
         let result = dispatch(&task, "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -722,11 +851,28 @@ mod tests {
         }
         let init = dispatch(&task, "initialize", &json!({})).unwrap();
         assert_eq!(init["serverInfo"]["name"], "sushiai-messages");
-        for name in ["task_create", "task_stop", "orchestrator_reply"] {
-            let call = json!({"name": name, "arguments": {}});
+        for name in [
+            "task_create",
+            "task_start",
+            "settings_set",
+            "task_stop",
+            "orchestrator_reply",
+        ] {
+            let call = json!({"name": name, "arguments": {
+                "repo": "/tmp/example-repo", "title": "Example", "goal": "Make a change",
+                "id": "t2", "settings": {"parallel": 2}
+            }});
             let out = dispatch(&task, "tools/call", &call).unwrap();
             assert_eq!(out["isError"], true, "{name}");
+            assert!(
+                out["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown tool"),
+                "{out}"
+            );
         }
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -911,18 +1057,72 @@ mod tests {
     #[test]
     fn task_create_gets_the_project_mcp_only_for_its_own_repo() {
         let file = json!({"repo": "/r", "mcp": {"mcpServers": {"a": {}}}});
-        let got = with_task_mcp("task.create", json!({"repo": "/r"}), Some(file.clone()));
+        let got = with_task_mcp(
+            "task.create",
+            json!({"repo": "/r"}),
+            Some(file.clone()),
+            true,
+        );
         assert_eq!(got["mcp"]["mcpServers"]["a"], json!({}));
-        let other = with_task_mcp("task.create", json!({"repo": "/x"}), Some(file.clone()));
+        let other = with_task_mcp(
+            "task.create",
+            json!({"repo": "/x"}),
+            Some(file.clone()),
+            true,
+        );
         assert!(other.get("mcp").is_none());
         let own = with_task_mcp(
             "task.create",
             json!({"repo": "/r", "mcp": {"mcpServers": {}}}),
             Some(file.clone()),
+            true,
         );
         assert_eq!(own["mcp"], json!({"mcpServers": {}}));
-        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file));
+        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file), false);
         assert!(start.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_overseer_replaces_caller_mcp_with_the_project_mcp() {
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args, Some(file.clone()), false);
+        assert_eq!(got["mcp"], file["mcp"]);
+        let other = with_task_mcp(
+            "task.create",
+            json!({"repo": "/other", "mcp": {"mcpServers": {"agent": {}}}}),
+            Some(file),
+            false,
+        );
+        assert!(other.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_overseer_without_a_project_file_removes_caller_mcp() {
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args, None, false);
+        assert!(got.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_a_task_bridge_removes_caller_mcp() {
+        assert!(!TASK_TOOLS.contains(&"task_create"));
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args.clone(), None, false);
+        assert!(got.get("mcp").is_none());
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        let got = with_task_mcp("task.create", args, Some(file.clone()), false);
+        assert_eq!(got["mcp"], file["mcp"]);
+    }
+
+    #[test]
+    fn task_create_from_owner_chat_keeps_caller_mcp() {
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"owner": {}}}});
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        for file in [None, Some(file)] {
+            let got = with_task_mcp("task.create", args.clone(), file, true);
+            assert_eq!(got, args);
+        }
     }
 }
 
@@ -931,12 +1131,78 @@ mod answer_source_tests {
     use super::*;
 
     #[test]
+    fn the_bridge_source_defaults_to_lead_and_only_recognizes_chat_and_overseer() {
+        for (declared, expected) in [
+            (None, "lead"),
+            (Some(""), "lead"),
+            (Some("unknown"), "lead"),
+            (Some("lead"), "lead"),
+            (Some("chat"), "chat"),
+            (Some("overseer"), "overseer"),
+        ] {
+            let source = bridge_source(declared);
+            assert_eq!(source, expected);
+            for forged in ["owner", "policy", "lead", "chat", "overseer"] {
+                let args = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    false,
+                    source,
+                );
+                assert_eq!(args["source"], expected);
+                let task = with_source(
+                    "task.answer",
+                    json!({"id": "t", "source": forged}),
+                    true,
+                    source,
+                );
+                assert_eq!(task["source"], "mcp");
+            }
+        }
+    }
+
+    #[test]
     fn a_task_answer_always_carries_the_bridges_source_whatever_the_caller_sent() {
-        let chat = with_source("task.answer", json!({"id": "t", "source": ""}), false);
+        let chat = with_source(
+            "task.answer",
+            json!({"id": "t", "source": ""}),
+            false,
+            "chat",
+        );
         assert_eq!(chat["source"], "chat");
-        let task = with_source("task.answer", json!({"id": "t"}), true);
+        let task = with_source("task.answer", json!({"id": "t"}), true, "chat");
         assert_eq!(task["source"], "mcp");
-        let other = with_source("task.start", json!({"id": "t"}), true);
+        let overseer = with_source("task.answer", json!({"id": "t"}), false, "overseer");
+        assert_eq!(overseer["source"], "overseer");
+        let other = with_source("task.start", json!({"id": "t"}), true, "chat");
         assert!(other.get("source").is_none());
+        let create = with_source("task.create", json!({}), false, "overseer");
+        assert_eq!(create["source"], "chat");
+        assert!(crate::model::TASK_SOURCES.contains(&"chat"));
+    }
+
+    #[test]
+    fn decision_memory_repo_notes_carry_the_bridges_source_and_precedents_are_no_tools() {
+        for method in ["repo.notes.add", "repo.notes.remove"] {
+            let forged = with_source(method, json!({"source": "owner"}), false, "overseer");
+            assert_eq!(forged["source"], "overseer");
+        }
+        let specs = tool_specs();
+        assert!(specs.iter().all(|t| !t.1.starts_with("precedents.")));
+        let answer = specs.iter().find(|t| t.0 == "task_answer").unwrap();
+        assert!(answer.3["properties"].get("like").is_some());
+    }
+
+    #[test]
+    fn a_task_amend_always_carries_the_bridges_source_whatever_the_caller_sent() {
+        let overseer = with_source(
+            "task.amend",
+            json!({"id": "t", "source": ""}),
+            false,
+            "overseer",
+        );
+        assert_eq!(overseer["source"], "overseer");
+        let task = with_source("task.amend", json!({"id": "t"}), true, "overseer");
+        assert_eq!(task["source"], "mcp");
     }
 }

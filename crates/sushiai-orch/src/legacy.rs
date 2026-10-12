@@ -31,16 +31,9 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// Whether `ps` names an executable containing `orchd`. When `ps` cannot answer, the answer
-/// is no: killing a process we cannot identify is worse than leaving an old daemon running.
+/// An unidentified process is left alone.
 fn looks_like_orchd(pid: i32) -> bool {
-    match std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).contains("orchd"),
-        _ => false,
-    }
+    crate::process::executable(pid).is_some_and(|exe| exe.to_string_lossy().contains("orchd"))
 }
 
 fn terminate(pid: i32) {
@@ -65,14 +58,7 @@ fn terminate(pid: i32) {
 
 /// A zombie has exited and only waits for its parent; it counts as stopped.
 fn reaped(pid: i32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()
-        .map(|out| {
-            let stat = String::from_utf8_lossy(&out.stdout);
-            stat.trim().is_empty() || stat.trim().starts_with('Z')
-        })
-        .unwrap_or(false)
+    !crate::process::alive(pid)
 }
 
 #[cfg(test)]
@@ -91,7 +77,18 @@ mod tests {
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                other => return other.unwrap(),
+                other => {
+                    let child = other.unwrap();
+                    // The spawn can return before the fork has exec'd into `orchd`; until
+                    // then the pid still shows this test binary.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while !looks_like_orchd(child.id() as i32)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    return child;
+                }
             }
         }
         panic!("fake orchd stayed busy");

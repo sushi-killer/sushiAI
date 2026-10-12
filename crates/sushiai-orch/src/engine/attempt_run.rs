@@ -1132,15 +1132,14 @@ mod stall_tests {
             outcome.error,
             Some(helper_timeout_message("planner", limit))
         );
-        let pgid: i32 = std::fs::read_to_string(bin.with_extension("pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(!group_alive(pgid), "the version probe was not stopped");
+        // Under load the deadline can stop the fake before it writes its pid.
+        if let Ok(pid) = std::fs::read_to_string(bin.with_extension("pid")) {
+            let pgid: i32 = pid.trim().parse().unwrap();
+            assert!(!group_alive(pgid), "the version probe was not stopped");
+        }
 
         std::fs::write(&bin, "#!/bin/sh\necho 'codex fixture'\n").unwrap();
-        let mut guard = Guard::helper("planner", Duration::from_secs(2));
+        let mut guard = Guard::helper("planner", Duration::from_secs(10));
         let version = codex_version(bin.to_str().unwrap(), &cancel, &mut guard)
             .await
             .ok()

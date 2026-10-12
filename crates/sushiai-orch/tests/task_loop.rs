@@ -54,22 +54,24 @@ fn engine_loop_passes_when_verify_succeeds() {
 fn project_secrets_reach_the_agent_but_not_settings_logs_or_task_mcp() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let marker = scripts_dir.path().join("observed-env");
+    let captured_mcp = scripts_dir.path().join("observed-mcp.json");
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        &format!("#!/bin/sh\nprintf '%s|%s' \"$PROJECT_TOKEN\" \"${{SETUP_ONLY-unset}}\" > '{}'\necho \"observed $PROJECT_TOKEN\"\necho changed > CHANGED_MARKER.txt\ncat > /dev/null\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-project\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n", marker.display()),
+        &format!("#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$prev\" = --mcp-config ] && cp \"$arg\" '{}'\n  prev=\"$arg\"\ndone\nprintf '%s|%s' \"$PROJECT_TOKEN\" \"${{SETUP_ONLY-unset}}\" > '{}'\necho \"observed $PROJECT_TOKEN\"\necho changed > CHANGED_MARKER.txt\ncat > /dev/null\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-project\"}}'\necho '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"done\"}}'\n", captured_mcp.display(), marker.display()),
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
+    let repo = init_git_repo();
     daemon.request(
         "secrets.set",
         serde_json::json!({
-            "projects": {"project-test": {"PROJECT_TOKEN": "invented-project-secret-42"}}
+            "projects": {"project-test": {"PROJECT_TOKEN": "invented-project-secret-42"}},
+            "projectRepos": {repo.path().to_str().unwrap(): "project-test"}
         }),
     );
-    let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
         serde_json::json!({
@@ -93,8 +95,9 @@ fn project_secrets_reach_the_agent_but_not_settings_logs_or_task_mcp() {
     let task_mcp = std::fs::read_to_string(task_dir.join("mcp.json")).unwrap();
     assert!(task_mcp.contains("${PROJECT_TOKEN}"));
     assert!(!task_mcp.contains("invented-project-secret-42"));
-    let run_mcp = std::fs::read_to_string(task_dir.join("runs/1/mcp.json")).unwrap();
+    let run_mcp = std::fs::read_to_string(captured_mcp).unwrap();
     assert!(run_mcp.contains("invented-project-secret-42"));
+    assert!(!task_dir.join("runs/1/mcp.json").exists());
     let events = std::fs::read_to_string(task_dir.join("runs/1/events.jsonl")).unwrap();
     assert!(!events.contains("invented-project-secret-42"));
     assert!(events.contains("[REDACTED]"));
@@ -695,12 +698,17 @@ fn the_stall_clock_waits_while_the_stop_hook_runs_verify() {
 
 /// The prompt-prefix trim (`--disallowedTools`) used to be gated behind
 /// `variant.leanContext`; it is now unconditional for every Claude implement
-/// run, and mcp.json carries exactly the configured servers -- no
-/// filtering, no skills hook wired into `settings.json`.
+/// run, and mcp.json carries the configured task servers. No skills hook is
+/// wired into `settings.json`.
 #[test]
 fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_servers() {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", FAKE_CLAUDE_PASS);
+    let captured_mcp = scripts_dir.path().join("observed-mcp.json");
+    let body = FAKE_CLAUDE_PASS.replace(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$prev\" = --mcp-config ] && cp \"$arg\" '{}'\n  prev=\"$arg\"\ndone\n", captured_mcp.display()),
+    );
+    let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", &body);
     let args = scripts_dir.path().join("args");
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
@@ -737,7 +745,13 @@ fn a_claude_implement_run_trims_delegation_tools_and_keeps_the_configured_mcp_se
     hooks.sort();
     assert_eq!(hooks, ["PreToolUse", "Stop"], "{settings}");
     let mcp: serde_json::Value =
-        serde_json::from_str(&run_file(&daemon, &task_id, "mcp.json")).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(captured_mcp).unwrap()).unwrap();
+    assert!(!daemon
+        .data_dir()
+        .join("tasks")
+        .join(&task_id)
+        .join("runs/1/mcp.json")
+        .exists());
     assert_eq!(
         mcp,
         serde_json::json!({"mcpServers": {

@@ -9,6 +9,7 @@ pub(super) struct PreparedRun {
     pub key_path: PathBuf,
     pub messages_server: serde_json::Value,
     pub registered: Option<(String, Arc<HookContext>)>,
+    pub sandbox: Option<TaskSandbox>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21,14 +22,14 @@ pub(super) fn prepare_run(
     worktree: &Path,
     attempt_n: u32,
     run_dir: &Path,
-    deny_read: &[String],
     tools: &permissions::TaskTools,
 ) -> PreparedRun {
+    let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let mcp_path = run_dir.join("mcp.json");
     // The repo's project servers, the connected tools and the task's own,
     // plus orchd's messaging bridge scoped to this task.
     let messages_server = messages::task_server(app, task_id);
-    let _ = store::write_json_atomic(&mcp_path, &tools.mcp_config(&messages_server));
+    let _ = store::write_json_private(&mcp_path, &tools.mcp_config(&messages_server));
 
     let token = uuid::Uuid::new_v4().to_string();
     let settings_path = run_dir.join("settings.json");
@@ -97,11 +98,10 @@ pub(super) fn prepare_run(
             home: &home_str,
             token: &token,
         };
-        let mut claude_settings = harness::build_claude_settings(
+        let mut claude_settings = harness::build_claude_task_settings(
             profile_value.as_ref(),
-            settings.sandbox,
+            sandbox.as_ref(),
             &settings.allowed_domains,
-            deny_read,
             Some(stop_hook),
         );
         // A headless run answers no prompts, so the messaging tools and the
@@ -133,6 +133,7 @@ pub(super) fn prepare_run(
         key_path,
         messages_server,
         registered,
+        sandbox,
     }
 }
 
@@ -207,7 +208,7 @@ async fn evaluate(
     own_base: &str,
     dir: &Path,
     finished: bool,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
@@ -318,6 +319,7 @@ where
     let repo = PathBuf::from(&task.repo);
     let wt_b = PathBuf::from(format!("{}-b", task.worktree));
     let branch_b = format!("{}-b", task.branch);
+    let run_dir_b = run_dir.join("b");
     let made = {
         let (r, p, b, s) = (
             repo.clone(),
@@ -338,8 +340,13 @@ where
     };
     let made = match made {
         Ok(()) => {
-            let setup =
-                super::worktrees::setup_worktree(&repo, &wt_b, settings.sandbox, cancel).await;
+            let setup = super::worktrees::setup_worktree(
+                &repo,
+                &wt_b,
+                app.task_sandbox(&task.repo, &wt_b, &run_dir_b).as_ref(),
+                cancel,
+            )
+            .await;
             if setup.is_err() {
                 let (r, p, b) = (repo.clone(), wt_b.clone(), branch_b.clone());
                 let _ =
@@ -356,11 +363,10 @@ where
         return (a_run.await, extra);
     }
 
-    let run_dir_b = run_dir.join("b");
     let _ = std::fs::create_dir_all(&run_dir_b);
     let tools_b = permissions::task_tools(app, settings, task, &wt_b);
     let prep = prepare_run(
-        app, task, task_id, b_route, settings, &wt_b, attempt_n, &run_dir_b, deny_read, &tools_b,
+        app, task, task_id, b_route, settings, &wt_b, attempt_n, &run_dir_b, &tools_b,
     );
     let _ = std::fs::write(run_dir_b.join("brief.md"), brief_text);
     let events_a = run_dir.join("events.jsonl");
@@ -372,7 +378,8 @@ where
         .rev()
         .find(|a| a.n == attempt_n)
         .map_or_else(now_ms, |a| a.started_at);
-    let codex_mcp_b = tools_b.codex_servers(&prep.messages_server);
+    let codex_mcp_b =
+        tools_b.codex_servers((prep.sandbox.is_none()).then_some(&prep.messages_server));
     let req_b = harness::RunRequest {
         harness: b_route.harness,
         worktree: &wt_b,
@@ -381,6 +388,8 @@ where
         max_budget_usd: (variant.max_attempt_cost_usd > 0.0)
             .then_some(variant.max_attempt_cost_usd),
         review: false,
+        task_run: true,
+        task_sandbox: prep.sandbox.as_ref(),
         mcp_config: Some(&prep.mcp_path),
         settings_path: Some(&prep.settings_path),
         network_allowed: settings.codex_network,
@@ -415,6 +424,7 @@ where
         permissions::finish_staging(ctx);
     }
     let _ = std::fs::remove_file(&prep.key_path);
+    let _ = std::fs::remove_file(&prep.mcp_path);
 
     let cost_a = run_cost(app, &a_res, &events_a);
     let cost_b = run_cost(app, &b_res, &events_b);
@@ -428,8 +438,9 @@ where
         return (Err(RunError::Cancelled), extra);
     }
 
-    let sandbox = settings.sandbox;
     let scoped = scoped_checks_for(settings, task);
+    let sandbox_a = app.task_sandbox(&task.repo, worktree, run_dir);
+    let sandbox_b = app.task_sandbox(&task.repo, &wt_b, &run_dir_b);
     let (eval_a, eval_b) = tokio::join!(
         evaluate(
             app,
@@ -439,7 +450,7 @@ where
             &own_base,
             run_dir,
             run_finished(&a_res),
-            sandbox,
+            sandbox_a.as_ref(),
             &scoped,
             cancel
         ),
@@ -451,7 +462,7 @@ where
             &own_base,
             &run_dir_b,
             run_finished(&b_res),
-            sandbox,
+            sandbox_b.as_ref(),
             &scoped,
             cancel
         ),

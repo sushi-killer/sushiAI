@@ -1,3 +1,59 @@
+#[test]
+fn native_check_command_gets_electron_env_and_host_does_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let policy = TaskSandbox::build(crate::sandbox::Inputs {
+        repo_root: root,
+        worktree: root,
+        run_dir: &root.join("run"),
+        data_dir: &root.join("data"),
+        sushiai_home: &root.join("sushiai"),
+        worktree_root: "",
+        home: &root.join("home"),
+        daemon_socket: &root.join("daemon.sock"),
+        cargo_home: None,
+        rustup_home: None,
+        tmp_dir: None,
+        npm_cache: None,
+        known_project_folders: &[],
+        known_task_worktrees: &[],
+    });
+    let native = verify::build_verify_command(root, "true", Some(&policy), "base");
+    let host = verify::build_verify_command(root, "true", None, "base");
+    let electron_env = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "ELECTRON_DISABLE_SANDBOX")
+            .and_then(|(_, value)| value.map(|value| value.to_os_string()))
+    };
+    assert_eq!(electron_env(&native), Some("1".into()));
+    assert_eq!(electron_env(&host), None);
+    assert_eq!(policy.check_env_remove_prefixes, vec!["SCCACHE_"]);
+    let rustc_wrapper = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "RUSTC_WRAPPER")
+            .and_then(|(_, value)| value.map(|value| value.to_os_string()))
+    };
+    assert_eq!(
+        rustc_wrapper(&native).as_deref(),
+        Some(std::ffi::OsStr::new(""))
+    );
+    let cargo_rustc_wrapper = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CARGO_BUILD_RUSTC_WRAPPER")
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+    };
+    assert_eq!(cargo_rustc_wrapper(&native), None);
+    #[cfg(target_os = "macos")]
+    assert_eq!(native.as_std().get_program(), "sandbox-exec");
+    assert_eq!(host.as_std().get_program(), "/bin/sh");
+}
+
 #[tokio::test]
 async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
     let tmp = tempfile::tempdir().unwrap();
@@ -17,8 +73,7 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
         tmp.path(),
         &cmd,
         Duration::from_millis(300),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &cancel,
     )
@@ -59,8 +114,7 @@ async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
         tmp.path(),
         &cmd,
         Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &cancel,
     )
@@ -322,8 +376,7 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_timeout()
         tmp.path(),
         &cmd,
         Duration::from_millis(1500),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )
@@ -350,8 +403,7 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() 
         tmp.path(),
         &cmd,
         Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &cancel,
     )
@@ -375,8 +427,7 @@ async fn verify_stops_a_process_left_in_the_group_after_a_normal_exit() {
         tmp.path(),
         &cmd,
         Duration::from_secs(60),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )
@@ -516,8 +567,7 @@ fn check_slots_spawn(
             &cwd,
             &command,
             timeout,
-            SandboxMode::Host,
-            &[],
+            None,
             "",
             &CancelToken::new(),
         )
@@ -798,8 +848,7 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
         dir.path(),
         command,
         Duration::from_millis(100),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )
@@ -829,8 +878,7 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
         dir.path(),
         command,
         Duration::from_millis(100),
-        SandboxMode::Host,
-        &[],
+        None,
         "",
         &CancelToken::new(),
     )

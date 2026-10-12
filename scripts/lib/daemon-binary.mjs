@@ -23,27 +23,33 @@ export function daemonBinary(root = process.cwd()) {
 /** Stops the daemon of a script's own SUSHIAI_HOME and every holder under it.
  * The daemon outlives the app by design, so a script that started one ends it. */
 export function stopDaemon(home) {
-  const lines = execFileSync("ps", ["-axo", "pid=,command="], {
-    encoding: "utf8",
-  }).split("\n");
-  const own = lines
-    .map((line) => line.trim().match(/^(\d+)\s+(.*)$/))
-    .filter((match) => match && match[2].includes(`${home}/`));
-  let daemon = null;
+  let pid;
   try {
-    daemon = Number(
-      readFileSync(path.join(home, "daemon.lock"), "utf8").trim(),
-    );
-  } catch {
-    // no daemon was started
+    pid = Number(readFileSync(path.join(home, "daemon.lock"), "utf8").trim());
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
   }
-  for (const pid of [
-    ...own.map((match) => Number(match[1])),
-    ...(Number.isInteger(daemon) && daemon > 1 ? [daemon] : []),
-  ])
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // already gone
-    }
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  const binary = path.join(home, "bin", "sushiai");
+  const probe = () =>
+    JSON.parse(
+      execFileSync(binary, ["proc", String(pid)], { encoding: "utf8" }),
+    );
+  const started = probe();
+  if (!started || started.zombie) return;
+  execFileSync(binary, ["shutdown"], {
+    env: { ...process.env, HOME: path.dirname(home), SUSHIAI_HOME: home },
+    timeout: 30000,
+    stdio: "pipe",
+  });
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const current = probe();
+    if (!current || current.zombie || current.startTime !== started.startTime)
+      return;
+    if (Date.now() >= deadline)
+      throw new Error(`test daemon ${pid} did not stop`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
 }

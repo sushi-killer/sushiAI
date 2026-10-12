@@ -98,3 +98,16 @@ test("stopPid leaves a pid alone when its start time differs", async () => {
     child.kill("SIGKILL");
   }
 });
+
+test("native pid probe returns a stable identity and an empty result after exit", async () => {
+  const child = await spawnReady("console.log('up');setInterval(()=>{},1000)");
+  try {
+    const start = pidStart(child.pid);
+    assert.ok(start);
+    assert.equal(pidStart(child.pid), start);
+    await stopPid(child.pid, { start });
+    assert.equal(pidStart(child.pid), "");
+  } finally {
+    child.kill("SIGKILL");
+  }
+});

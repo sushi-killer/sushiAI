@@ -107,6 +107,22 @@ pub(super) struct TaskTools {
     /// `mcp__server__tool` names the owner allowed for this repo or task.
     pub granted: Vec<String>,
     pub env: HashMap<String, String>,
+    exe_path: String,
+}
+
+fn is_full_bridge(def: &serde_json::Value, exe_path: &str) -> bool {
+    let Some(command) = def.get("command").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(args) = def.get("args").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    (command == exe_path
+        || Path::new(command)
+            .file_name()
+            .is_some_and(|name| name == "sushiai"))
+        && args.first().and_then(serde_json::Value::as_str) == Some("mcp")
+        && !args.iter().any(|arg| arg.as_str() == Some("--task"))
 }
 
 fn servers_of(file: &Path) -> BTreeMap<String, serde_json::Value> {
@@ -142,22 +158,28 @@ pub(super) fn task_tools(
             off.push((cfg.id.clone(), cfg.label.clone()));
         }
     }
-    let project_id = task.project_id.clone().or_else(|| {
-        app.secrets
-            .read()
-            .unwrap()
-            .repo_projects
-            .get(&task.repo)
-            .cloned()
-    });
+    let secrets = app.secrets.read().unwrap();
+    let project_id = secrets::project_for_repo(&secrets, &task.repo, task.project_id.as_deref())
+        .ok()
+        .flatten();
     let env = project_id.as_ref().map_or_else(HashMap::new, |id| {
-        let secrets = app.secrets.read().unwrap();
         let mut env = secrets.projects.get(id).cloned().unwrap_or_default();
         env.extend(secrets.project_mcp.get(id).cloned().unwrap_or_default());
         env
     });
+    let mut connected = chat_tools::for_task(app, &on);
+    // Plugin server keys can differ from the ids used in brief lines.
+    connected.listed.retain(|(id, _, _)| {
+        let key = on
+            .chat_tools
+            .iter()
+            .find(|cfg| &cfg.id == id)
+            .map(chat_tools::server_key);
+        !key.and_then(|key| connected.servers.get(&key))
+            .is_some_and(|def| is_full_bridge(def, &app.exe_path))
+    });
     TaskTools {
-        connected: chat_tools::for_task(app, &on),
+        connected,
         off,
         project: servers_of(&worktree.join(".mcp.json")),
         task: servers_of(&app.store.task_dir(&task.id).join("mcp.json")),
@@ -167,6 +189,7 @@ pub(super) fn task_tools(
             .map(str::to_string)
             .collect(),
         env,
+        exe_path: app.exe_path.clone(),
     }
 }
 
@@ -187,13 +210,19 @@ impl TaskTools {
     pub fn mcp_config(&self, messages_server: &serde_json::Value) -> serde_json::Value {
         let mut servers = serde_json::Map::new();
         for (key, def) in &self.project {
-            servers.insert(key.clone(), def.clone());
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.insert(key.clone(), def.clone());
+            }
         }
         for (key, def) in &self.connected.servers {
-            servers.entry(key.clone()).or_insert_with(|| def.clone());
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.entry(key.clone()).or_insert_with(|| def.clone());
+            }
         }
         for (key, def) in &self.task {
-            servers.insert(key.clone(), without_mark(def));
+            if !is_full_bridge(def, &self.exe_path) {
+                servers.insert(key.clone(), without_mark(def));
+            }
         }
         servers.insert(messages::SERVER.to_string(), messages_server.clone());
         fn resolve(value: &mut serde_json::Value, env: &HashMap<String, String>) {
@@ -226,12 +255,12 @@ impl TaskTools {
     /// The servers a Codex run gets: the task's own that carry
     /// `"codex": true` (the task's `mcp.json` also holds the app's snapshot
     /// of every configured server, so only a marked one was meant for
-    /// Codex) and `messages_server`. Codex has no hook that asks the owner
-    /// before a write, so nothing reaches it unmarked, and never the
+    /// Codex) and, for host runs only, `messages_server`. Codex has no hook
+    /// that asks the owner before a write, so nothing reaches it unmarked, and never the
     /// orchestrator's own bridge.
     pub fn codex_servers(
         &self,
-        messages_server: &serde_json::Value,
+        messages_server: Option<&serde_json::Value>,
     ) -> Vec<(String, serde_json::Value)> {
         let mut servers: Vec<(String, serde_json::Value)> = self
             .task
@@ -240,10 +269,13 @@ impl TaskTools {
                 def.get(CODEX_MARK) == Some(&json!(true))
                     && key.as_str() != messages::SERVER
                     && key.as_str() != "sushiai-orchestrator"
+                    && !is_full_bridge(def, &self.exe_path)
             })
             .map(|(key, def)| (key.clone(), without_mark(def)))
             .collect();
-        servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        if let Some(messages_server) = messages_server {
+            servers.push((messages::SERVER.to_string(), messages_server.clone()));
+        }
         servers
     }
 
@@ -264,6 +296,14 @@ impl TaskTools {
     pub fn lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for (id, reads, writes) in &self.connected.listed {
+            if self
+                .connected
+                .servers
+                .get(id)
+                .is_some_and(|def| is_full_bridge(def, &self.exe_path))
+            {
+                continue;
+            }
             let list = |tools: &[String]| {
                 if tools.is_empty() {
                     "none".to_string()
@@ -277,12 +317,18 @@ impl TaskTools {
                 list(writes)
             ));
         }
-        for key in self.project.keys() {
+        for (key, def) in &self.project {
+            if is_full_bridge(def, &self.exe_path) {
+                continue;
+            }
             lines.push(format!(
                 "{key}: the repository's own MCP server (reads run; a write asks the owner)"
             ));
         }
-        for key in self.task.keys() {
+        for (key, def) in &self.task {
+            if is_full_bridge(def, &self.exe_path) {
+                continue;
+            }
             lines.push(format!(
                 "{key}: this task's own MCP server (reads run; a write asks the owner)"
             ));
@@ -1047,6 +1093,67 @@ mod tests {
     }
 
     #[test]
+    fn task_tools_drop_full_bridges_from_every_source() {
+        let exe = "/opt/bin/renamed-daemon";
+        let full = json!({"command": exe, "args": ["mcp"], "codex": true});
+        let readonly =
+            json!({"command": "/opt/bin/sushiai", "args": ["mcp", "--read-only"], "codex": true});
+        let scoped =
+            json!({"command": "sushiai", "args": ["mcp", "--task", "other-task"], "codex": true});
+        let unrelated = json!({"command": "sushiai", "args": ["orch", "status"], "codex": true});
+        let tools = TaskTools {
+            connected: TurnTools {
+                servers: [("connected-full".into(), full.clone())].into(),
+                listed: vec![("connected-full".into(), vec!["get".into()], vec![])],
+                ..Default::default()
+            },
+            project: [
+                ("project-full".into(), full.clone()),
+                ("project-readonly".into(), readonly.clone()),
+            ]
+            .into(),
+            task: [
+                ("task-full".into(), full),
+                ("task-readonly".into(), readonly),
+                ("scoped".into(), scoped),
+                ("unrelated".into(), unrelated),
+                (
+                    messages::SERVER.into(),
+                    json!({"command": exe, "args": ["mcp"]}),
+                ),
+            ]
+            .into(),
+            off: vec![],
+            granted: vec![],
+            env: HashMap::new(),
+            exe_path: exe.into(),
+        };
+        let messages = json!({"command": exe, "args": ["mcp", "--task", "this-task"]});
+        let config = tools.mcp_config(&messages);
+        let servers = config["mcpServers"].as_object().unwrap();
+        let codex = tools.codex_servers(Some(&messages));
+        let lines = tools.lines().join("\n");
+        for name in [
+            "connected-full",
+            "project-full",
+            "project-readonly",
+            "task-full",
+            "task-readonly",
+        ] {
+            assert!(!servers.contains_key(name), "{config}");
+            assert!(!codex.iter().any(|(key, _)| key == name));
+            assert!(!lines.contains(name), "{lines}");
+        }
+        for name in ["scoped", "unrelated"] {
+            assert!(servers.contains_key(name), "{config}");
+            assert!(codex.iter().any(|(key, _)| key == name));
+            assert!(lines.contains(name), "{lines}");
+        }
+        assert_eq!(servers[messages::SERVER], messages);
+        assert_eq!(codex.last().unwrap(), &(messages::SERVER.into(), messages));
+    }
+
+    #[test]
     fn a_grant_reaches_the_run_but_a_write_tool_is_never_pre_allowed() {
         let tools = TaskTools {
             connected: TurnTools {
@@ -1073,6 +1180,7 @@ mod tests {
             .into(),
             granted: vec!["mcp__a__send".into(), "mcp__a__get".into()],
             env: HashMap::new(),
+            exe_path: "sushiai".into(),
         };
         assert_eq!(tools.allowed(), vec!["mcp__a__get", "mcp__a__send"]);
         let config = tools.mcp_config(&json!({"command": "messages"}));
@@ -1085,12 +1193,18 @@ mod tests {
         // Codex gets only the task's own servers and the messages server:
         // it has no hook to ask the owner before a connected tool writes.
         let codex: Vec<String> = tools
-            .codex_servers(&json!({"command": "messages"}))
+            .codex_servers(Some(&json!({"command": "messages"})))
             .into_iter()
             .map(|(name, _)| name)
             .collect();
         assert_eq!(codex, vec!["t".to_string(), messages::SERVER.to_string()]);
-        let t = &tools.codex_servers(&json!({}))[0].1;
+        let sandboxed: Vec<String> = tools
+            .codex_servers(None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(sandboxed, vec!["t".to_string()]);
+        let t = &tools.codex_servers(Some(&json!({})))[0].1;
         assert!(t.get("codex").is_none());
         let block = tools_block(&tools, false);
         assert!(

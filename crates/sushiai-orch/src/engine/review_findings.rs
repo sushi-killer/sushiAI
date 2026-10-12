@@ -224,12 +224,13 @@ pub(super) async fn handle_repeated_findings(
                 .run_dir(&task.id, attempt_n)
                 .join(format!("finding-scenario-{id}"));
             let _ = std::fs::create_dir_all(&dir);
+            let sandbox = app.task_sandbox(&task.repo, worktree, &dir);
             let results = run_verify_commands(
                 CheckContext::new(app, Some(&task.id)),
                 worktree,
                 &dir,
                 std::slice::from_ref(&run),
-                settings.sandbox,
+                sandbox.as_ref(),
                 &task.base_sha,
                 cancel,
             )

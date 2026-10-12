@@ -10,6 +10,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const childProcess = require("node:child_process");
+const { resolveBinary } = require("./daemon/local.cjs");
 const { ClaudeMcp } = require("./claude-mcp.cjs");
 const { appDb, readStore, transaction, writeStore } = require("./app-db.cjs");
 const { posixCommand, REMOTE_PATH, REMOTE_BIN } = require("./host-install.cjs");
@@ -1161,12 +1162,15 @@ async function stopLegacyOrchd(
 
 function commOf(pid) {
   try {
-    return childProcess
-      .execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+    const result = childProcess.execFileSync(
+      resolveBinary(),
+      ["proc", String(pid)],
+      {
         encoding: "utf8",
         timeout: 5000,
-      })
-      .trim();
+      },
+    );
+    return JSON.parse(result)?.executable ?? "";
   } catch {
     return "";
   }

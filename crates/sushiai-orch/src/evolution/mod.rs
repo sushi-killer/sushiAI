@@ -149,7 +149,8 @@ impl App {
                     &run_dir,
                     &task.base_sha,
                     &cmd,
-                    settings.sandbox,
+                    self.task_sandbox(&task.repo, &run_dir.join("eval-check"), &run_dir)
+                        .as_ref(),
                     &cancel,
                 )
                 .await;

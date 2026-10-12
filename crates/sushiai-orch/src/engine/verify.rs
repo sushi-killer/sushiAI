@@ -41,11 +41,10 @@ impl VerifyEnvironment {
         &self,
         cwd: &Path,
         cmd: &str,
-        sandbox: SandboxMode,
-        allow_write: &[PathBuf],
+        sandbox: Option<&TaskSandbox>,
         base_sha: &str,
     ) -> tokio::process::Command {
-        build_verify_command_in(cwd, cmd, sandbox, allow_write, base_sha, self)
+        build_verify_command_in(cwd, cmd, sandbox, base_sha, self)
     }
 }
 
@@ -69,46 +68,36 @@ pub(super) fn verify_timeout() -> Duration {
     Duration::from_secs(VERIFY_TIMEOUT_SECS.load(Ordering::SeqCst))
 }
 
-/// Every path a verify command is allowed to write under when sandboxed:
-/// the worktree and its own run dir, plus the usual OS/package-manager temp
-/// and cache locations a build/test command routinely touches. Network is
-/// deliberately left open (verify commands may need to hit a registry, run
-/// a dev server, etc.) -- only the filesystem is restricted.
-pub(super) fn verify_allow_write_paths(worktree: &Path, run_dir: &Path) -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let tmp_dir = std::env::var("TMPDIR").unwrap_or_default();
-    let mut paths = vec![
-        worktree.to_path_buf(),
-        run_dir.to_path_buf(),
-        PathBuf::from("/dev"),
-        PathBuf::from(format!("{home}/.npm")),
-        PathBuf::from(format!("{home}/.cache")),
-        PathBuf::from(format!("{home}/.cargo/registry")),
-    ];
-    #[cfg(target_os = "macos")]
-    paths.extend([
-        PathBuf::from("/private/var/folders"),
-        PathBuf::from("/private/tmp"),
-        PathBuf::from(format!("{home}/Library/Caches")),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    paths.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
-    if !tmp_dir.is_empty() {
-        paths.push(PathBuf::from(tmp_dir));
+/// Seatbelt's later rules reopen this run and worktree under denied roots.
+pub fn to_sbpl(sandbox: &TaskSandbox) -> String {
+    let quoted = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    for path in &sandbox.denied_read_roots {
+        profile.push_str(&format!("(deny file-read* (subpath {}))\n", quoted(path)));
     }
-    paths
-}
-
-#[cfg(target_os = "macos")]
-fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
-    let mut profile =
-        String::from("(version 1)\n(allow default)\n(deny file-write* (subpath \"/\"))\n");
-    for p in allow_write {
+    for path in &sandbox.read_exceptions {
+        profile.push_str(&format!("(allow file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_metadata_paths {
         profile.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            p.to_string_lossy().replace('"', "")
+            "(allow file-read-metadata (literal {}))\n",
+            quoted(path)
         ));
     }
+    for path in &sandbox.read_metadata_subpaths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (subpath {}))\n",
+            quoted(path)
+        ));
+    }
+    profile.push_str("(deny file-write* (subpath \"/\"))\n");
+    for path in &sandbox.write_roots {
+        profile.push_str(&format!("(allow file-write* (subpath {}))\n", quoted(path)));
+    }
+    profile.push_str(&format!(
+        "(deny network-outbound (remote unix-socket (path-literal {})))\n",
+        quoted(&sandbox.daemon_socket),
+    ));
     profile
 }
 
@@ -118,26 +107,24 @@ fn build_verify_sandbox_profile(allow_write: &[PathBuf]) -> String {
 pub(super) fn build_verify_command(
     cwd: &Path,
     cmd: &str,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
 ) -> tokio::process::Command {
-    VerifyEnvironment::for_worktree(cwd).build_command(cwd, cmd, sandbox, allow_write, base_sha)
+    VerifyEnvironment::for_worktree(cwd).build_command(cwd, cmd, sandbox, base_sha)
 }
 
 fn build_verify_command_in(
     cwd: &Path,
     cmd: &str,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     environment: &VerifyEnvironment,
 ) -> tokio::process::Command {
     let mut command;
     #[cfg(target_os = "macos")]
     {
-        if sandbox == SandboxMode::Native {
-            let profile = build_verify_sandbox_profile(allow_write);
+        if let Some(sandbox) = sandbox {
+            let profile = to_sbpl(sandbox);
             command = tokio::process::Command::new("sandbox-exec");
             command
                 .arg("-p")
@@ -152,19 +139,13 @@ fn build_verify_command_in(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (sandbox, allow_write);
+        let _ = sandbox;
         command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(cmd);
     }
-    if sandbox == SandboxMode::Native {
-        // An empty value beats a rustc-wrapper from the owner's cargo config:
-        // Seatbelt denies the sccache client, and the profile grants no exception.
-        command.env("RUSTC_WRAPPER", "");
-        for (key, _) in
-            std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("SCCACHE_"))
-        {
-            command.env_remove(key);
-        }
+    if let Some(sandbox) = sandbox {
+        // The sandbox policy owns the sandboxed-check variables.
+        sandbox.apply_check_env(command.as_std_mut());
     } else if let Some(cache) = &environment.compiler_cache {
         cache.apply(&mut command);
     }
@@ -532,30 +513,18 @@ pub(super) fn timed_out_under_load(outcome: &VerifyOutcome) -> bool {
 pub(super) async fn run_verify_commands(
     ctx: CheckContext<'_>,
     cwd: &Path,
-    run_dir: &Path,
+    _run_dir: &Path,
     commands: &[String],
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     cancel: &CancelToken,
 ) -> Vec<VerifyOutcome> {
     let cache_run = CacheRun::for_commands(cwd, commands).await;
-    let allow_write = verify_allow_write_paths(cwd, run_dir);
     let mut results = Vec::new();
     for cmd in commands {
         let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
-        results.push(
-            run_one_verify_command(
-                ctx,
-                cwd,
-                cmd,
-                timeout,
-                sandbox,
-                &allow_write,
-                base_sha,
-                cancel,
-            )
-            .await,
-        );
+        results
+            .push(run_one_verify_command(ctx, cwd, cmd, timeout, sandbox, base_sha, cancel).await);
     }
     if let Some(line) = cache_run.finish(ctx.gate).await {
         if let Some(result) = results.last_mut() {
@@ -573,7 +542,7 @@ pub(super) async fn run_eval_check(
     run_dir: &Path,
     sha: &str,
     cmd: &str,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
     let path = run_dir.join("eval-check");
@@ -598,11 +567,9 @@ pub(super) async fn run_eval_check(
     if let Err(e) = super::worktrees::setup_worktree(repo, &path, sandbox, cancel).await {
         return failed(e);
     }
-    let allow_write = verify_allow_write_paths(&path, run_dir);
     let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
     let cache_run = CacheRun::for_commands(&path, &[cmd.to_string()]).await;
-    let mut out =
-        run_one_verify_command(ctx, &path, cmd, timeout, sandbox, &allow_write, sha, cancel).await;
+    let mut out = run_one_verify_command(ctx, &path, cmd, timeout, sandbox, sha, cancel).await;
     if let Some(line) = cache_run.finish("eval checks").await {
         ctx.decision(line, &mut out.decisions);
     }
@@ -614,9 +581,11 @@ pub(super) async fn run_eval_check(
 /// Cached by a hash of `git diff <base>` + the untracked-file list: if
 /// nothing has changed since the last run, reuse completed failures. Passes
 /// come from the bounded tree cache; interrupted result sets are not stored.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_verify_cached(
     app: &Arc<App>,
     task_id: &str,
+    repo: &str,
     worktree: &Path,
     run_dir: &Path,
     base: &str,
@@ -635,9 +604,9 @@ pub(super) async fn run_verify_cached(
         .get(task_id)
         .filter(|(h, results)| *h == hash && results.iter().map(|r| &r.command).eq(commands.iter()))
         .map(|(_, results)| results.clone());
-    let sandbox = app.settings.read().unwrap().sandbox;
+    let sandbox = app.task_sandbox(repo, worktree, run_dir);
     let cache_run = CacheRun::for_commands(worktree, commands).await;
-    let runner = CheckRunner::new(app, worktree, run_dir, sandbox, base, cancel).for_task(task_id);
+    let runner = CheckRunner::new(app, worktree, sandbox.as_ref(), base, cancel).for_task(task_id);
     let mut results = Vec::new();
     let mut lines = Vec::new();
     for (i, command) in commands.iter().enumerate() {
@@ -984,11 +953,11 @@ pub(super) async fn baseline_checks(
         .await
         .unwrap_or_default();
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
-    let sandbox = app.settings.read().unwrap().sandbox;
-    let run_dir = app.store.task_dir(task_id);
+    let run_dir = app.store.task_dir(task_id).join("runs/baseline");
+    let sandbox = app.task_sandbox(&task.repo, worktree, &run_dir);
     let cache_run = CacheRun::for_commands(worktree, &commands).await;
-    let runner = CheckRunner::new(app, worktree, &run_dir, sandbox, &task.base_sha, cancel)
-        .for_task(task_id);
+    let runner =
+        CheckRunner::new(app, worktree, sandbox.as_ref(), &task.base_sha, cancel).for_task(task_id);
     let mut results = Vec::new();
     let mut decisions = Vec::new();
     for ((slot, criterion, _), command) in todo.iter().zip(&commands) {
@@ -1103,7 +1072,7 @@ pub(super) async fn run_held_out(
     check: &Check,
     worktree: &Path,
     run_dir: &Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) -> (VerifyOutcome, Option<String>) {
     let label = brief::held_out_label(check.criterion);
@@ -1177,8 +1146,7 @@ pub(super) async fn run_one_verify_command(
     cwd: &Path,
     cmd: &str,
     timeout: Duration,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
@@ -1227,17 +1195,8 @@ pub(super) async fn run_one_verify_command(
             };
         }
         let tree = check_tree(cwd).await;
-        let mut result = execute_verify_command(
-            ctx,
-            cwd,
-            cmd,
-            timeout,
-            sandbox,
-            allow_write,
-            base_sha,
-            cancel,
-        )
-        .await;
+        let mut result =
+            execute_verify_command(ctx, cwd, cmd, timeout, sandbox, base_sha, cancel).await;
         drop(permit);
         if attempt == 0 && is_interrupted(&result) && !cancel.is_cancelled() {
             if timed_out_under_load(&result) {
@@ -1314,13 +1273,12 @@ async fn execute_verify_command(
     cwd: &Path,
     cmd: &str,
     timeout: Duration,
-    sandbox: SandboxMode,
-    allow_write: &[PathBuf],
+    sandbox: Option<&TaskSandbox>,
     base_sha: &str,
     cancel: &CancelToken,
 ) -> VerifyOutcome {
     let (load, cores) = (ctx.app.check_load.read().unwrap())();
-    let command = build_verify_command(cwd, cmd, sandbox, allow_write, base_sha);
+    let command = build_verify_command(cwd, cmd, sandbox, base_sha);
     let mut result = run_verify_command(cwd, cmd, command, timeout, cancel.cancelled()).await;
     result.load = load;
     result.cores = cores;
@@ -1506,7 +1464,19 @@ mod grounded_checks_tests {
             counter.display()
         )];
         let cancel = CancelToken::new();
-        let run = || run_verify_cached(&app, "task", &repo, dir.path(), &base, &commands, &cancel);
+        let repo_name = repo.to_string_lossy().into_owned();
+        let run = || {
+            run_verify_cached(
+                &app,
+                "task",
+                &repo_name,
+                &repo,
+                dir.path(),
+                &base,
+                &commands,
+                &cancel,
+            )
+        };
         let (first, lines) = run().await;
         assert_eq!(first[0].code, Some(143));
         assert_eq!(
@@ -1597,7 +1567,7 @@ mod grounded_checks_tests {
             &check,
             dir.path(),
             dir.path(),
-            SandboxMode::Host,
+            None,
             &CancelToken::new(),
         )
         .await;
@@ -1629,8 +1599,7 @@ mod grounded_checks_tests {
         std::fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
         sh(&["add", "."]);
         sh(&["commit", "-q", "-m", "init"]);
-        let (app, _dir) = test_app();
-        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let (app, _dir) = test_app_fitting_sandbox();
         let mut task = task_with_status(TaskStatus::Running);
         task.criteria = vec!["a".into(), "b".into(), "c".into()];
         let check = |criterion, run: &str| Check {
@@ -1802,21 +1771,37 @@ mod scoped_task_tests {
 
     #[test]
     fn a_native_sandbox_check_overrides_a_configured_rustc_wrapper() {
-        let wrapper = |sandbox| {
+        let root = Path::new("/");
+        let policy = TaskSandbox::build(SandboxInputs {
+            repo_root: root,
+            worktree: root,
+            run_dir: &root.join("run"),
+            data_dir: &root.join("data"),
+            sushiai_home: &root.join("sushiai"),
+            worktree_root: "",
+            home: &root.join("home"),
+            daemon_socket: &root.join("daemon.sock"),
+            cargo_home: None,
+            rustup_home: None,
+            tmp_dir: None,
+            npm_cache: None,
+            known_project_folders: &[],
+            known_task_worktrees: &[],
+        });
+        let wrapper = |sandbox: Option<&TaskSandbox>| {
             let environment = VerifyEnvironment {
                 path: "/usr/bin:/bin".into(),
                 compiler_cache: None,
             };
-            let command =
-                build_verify_command_in(Path::new("/"), "true", sandbox, &[], "base", &environment);
+            let command = build_verify_command_in(root, "true", sandbox, "base", &environment);
             command
                 .as_std()
                 .get_envs()
                 .find(|(key, _)| *key == "RUSTC_WRAPPER")
                 .map(|(_, value)| value.map(|v| v.to_os_string()))
         };
-        assert_eq!(wrapper(SandboxMode::Native), Some(Some("".into())));
-        assert_eq!(wrapper(SandboxMode::Host), None);
+        assert_eq!(wrapper(Some(&policy)), Some(Some("".into())));
+        assert_eq!(wrapper(None), None);
     }
 
     #[tokio::test]

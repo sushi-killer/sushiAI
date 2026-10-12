@@ -8,13 +8,14 @@ mod mcp;
 mod open;
 mod orch_cli;
 mod orch_module;
+mod proc;
 
 use anyhow::{bail, Context, Result};
 use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -50,6 +51,17 @@ fn main() -> Result<()> {
             "{}",
             sushiai_daemon::status_blocking(sushiai_daemon::Home::from_env())?
         ),
+        Some("proc") => proc::run(args)?,
+        Some("shutdown") => {
+            let mut conn =
+                daemon_client::Conn::direct(&sushiai_daemon::Home::from_env().socket(), "shutdown")
+                    .map_err(anyhow::Error::msg)?;
+            conn.call(
+                "daemon.shutdown",
+                serde_json::json!({"closeSessions": true}),
+            )
+            .map_err(|e| anyhow::Error::msg(e.message()))?;
+        }
         Some("mcp") => std::process::exit(mcp::run(args)),
         Some("orch") => std::process::exit(orch_cli::run(args)),
         Some("proxy") => proxy::run(&sushiai_daemon::Home::from_env())?,

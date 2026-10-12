@@ -18,9 +18,12 @@ pub mod mcp;
 pub mod model;
 pub mod overseer;
 pub mod overseer_state;
+#[path = "../../process.rs"]
+pub mod process;
 pub mod procs;
 pub mod prompts;
 pub mod report;
+pub mod sandbox;
 pub mod skill;
 pub mod store;
 pub mod timeline;

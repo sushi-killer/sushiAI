@@ -110,9 +110,8 @@ pub(super) async fn passed_on_tree(
 pub(super) struct CheckRunner<'a> {
     ctx: CheckContext<'a>,
     cwd: &'a Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&'a TaskSandbox>,
     timeout: Duration,
-    allow_write: Vec<PathBuf>,
     base: &'a str,
     cancel: &'a CancelToken,
 }
@@ -121,8 +120,7 @@ impl<'a> CheckRunner<'a> {
     pub(super) fn new(
         app: &'a App,
         cwd: &'a Path,
-        run_dir: &Path,
-        sandbox: SandboxMode,
+        sandbox: Option<&'a TaskSandbox>,
         base: &'a str,
         cancel: &'a CancelToken,
     ) -> Self {
@@ -131,7 +129,6 @@ impl<'a> CheckRunner<'a> {
             cwd,
             sandbox,
             timeout: Duration::from_secs(app.settings.read().unwrap().verify_timeout_secs),
-            allow_write: verify_allow_write_paths(cwd, run_dir),
             base,
             cancel,
         }
@@ -173,7 +170,6 @@ impl<'a> CheckRunner<'a> {
             command,
             self.timeout,
             self.sandbox,
-            &self.allow_write,
             self.base,
             self.cancel,
         )
@@ -192,13 +188,12 @@ impl<'a> CheckRunner<'a> {
 pub(super) async fn run_checks(
     app: &App,
     cwd: &Path,
-    run_dir: &Path,
     commands: &[String],
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     base: &str,
     cancel: &CancelToken,
 ) -> (Vec<VerifyOutcome>, Vec<String>) {
-    CheckRunner::new(app, cwd, run_dir, sandbox, base, cancel)
+    CheckRunner::new(app, cwd, sandbox, base, cancel)
         .run(commands)
         .await
 }
@@ -259,8 +254,7 @@ mod tests {
             counter.display()
         )];
         let cancel = CancelToken::new();
-        let mut runner =
-            CheckRunner::new(&app, &repo, dir.path(), SandboxMode::Host, "base", &cancel);
+        let mut runner = CheckRunner::new(&app, &repo, None, "base", &cancel);
         runner.timeout = Duration::from_secs(2);
         let (results, lines) = runner.run(&commands).await;
         assert!(is_interrupted(&results[0]));
@@ -292,17 +286,7 @@ mod tests {
         let counter = dir.path().join("counter");
         let commands = vec![format!("echo run >> '{}'", counter.display())];
         let cancel = CancelToken::new();
-        let run = || {
-            run_checks(
-                &app,
-                &repo,
-                dir.path(),
-                &commands,
-                SandboxMode::Host,
-                "base",
-                &cancel,
-            )
-        };
+        let run = || run_checks(&app, &repo, &commands, None, "base", &cancel);
         let (_, lines) = run().await;
         assert!(lines.is_empty());
         let (results, lines) = run().await;
@@ -326,17 +310,7 @@ mod tests {
             counter.display()
         )];
         let cancel = CancelToken::new();
-        let run = || {
-            run_checks(
-                &app,
-                &repo,
-                dir.path(),
-                &commands,
-                SandboxMode::Host,
-                "base",
-                &cancel,
-            )
-        };
+        let run = || run_checks(&app, &repo, &commands, None, "base", &cancel);
         let original = check_tree(&repo).await.unwrap();
         let (outcomes, _) = run().await;
         assert_eq!(outcomes[0].code, Some(0));
@@ -399,7 +373,7 @@ mod tests {
                 &repo,
                 dir.path(),
                 &commands,
-                SandboxMode::Host,
+                None,
                 "base",
                 &cancel,
             )
@@ -428,17 +402,7 @@ mod tests {
             counter.display()
         )];
         let cancel = CancelToken::new();
-        let run = || {
-            run_checks(
-                &app,
-                &repo,
-                dir.path(),
-                &commands,
-                SandboxMode::Host,
-                "base",
-                &cancel,
-            )
-        };
+        let run = || run_checks(&app, &repo, &commands, None, "base", &cancel);
         let (outcomes, lines) = run().await;
         assert_eq!(outcomes[0].code, Some(0));
         assert_eq!(lines.len(), 1);
@@ -457,14 +421,7 @@ mod tests {
         init_git_repo(&repo);
         let task = task_with_status(TaskStatus::Running);
         let cancel = CancelToken::new();
-        let runner = CheckRunner::new(
-            &app,
-            &repo,
-            dir.path(),
-            SandboxMode::Host,
-            &task.base_sha,
-            &cancel,
-        );
+        let runner = CheckRunner::new(&app, &repo, None, &task.base_sha, &cancel);
         let mut check = Check {
             criterion: 2,
             run: "true".into(),

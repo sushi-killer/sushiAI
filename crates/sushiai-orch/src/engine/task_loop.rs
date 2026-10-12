@@ -97,11 +97,7 @@ pub(super) async fn run_task_loop(
         };
         // A new (or recreated) worktree runs its setup before anything else
         // uses it; a failing setup fails the task with no attempt.
-        let sandbox = app.settings.read().unwrap().sandbox;
-        if let Err(e) = app
-            .ensure_worktree_setup(&task, recreated, sandbox, &cancel)
-            .await
-        {
+        if let Err(e) = app.ensure_worktree_setup(&task, recreated, &cancel).await {
             if cancel.is_cancelled() {
                 mark_stopped_if_not_already(&app, &task_id).await;
             } else {
@@ -255,7 +251,6 @@ pub(super) async fn run_task_loop(
             let attempt_n = task.attempts[idx].n;
             let run_dir = app.store.run_dir(&task_id, attempt_n);
             let _ = std::fs::create_dir_all(&run_dir);
-            let settings = app.settings.read().unwrap().clone();
             let worktree = PathBuf::from(&task.worktree);
             match finish_attempt(
                 &app,
@@ -265,7 +260,6 @@ pub(super) async fn run_task_loop(
                 attempt_n,
                 &worktree,
                 &run_dir,
-                &settings,
                 &mut attempt_budget,
                 &pending_answer,
                 &cancel,
@@ -922,13 +916,13 @@ pub(super) async fn run_task_loop(
                 key_path,
                 messages_server,
                 registered,
+                sandbox,
             } = prepare_run(
-                &app, &task, &task_id, &route, &settings, &worktree, attempt_n, &run_dir,
-                &deny_read, &tools,
+                &app, &task, &task_id, &route, &settings, &worktree, attempt_n, &run_dir, &tools,
             );
 
             let network_allowed = settings.codex_network;
-            let codex_mcp = tools.codex_servers(&messages_server);
+            let codex_mcp = tools.codex_servers((sandbox.is_none()).then_some(&messages_server));
             let req = harness::RunRequest {
                 harness: route.harness,
                 worktree: &worktree,
@@ -937,6 +931,8 @@ pub(super) async fn run_task_loop(
                 max_budget_usd: (task.variant().max_attempt_cost_usd > 0.0)
                     .then(|| task.variant().max_attempt_cost_usd),
                 review: false,
+                task_run: true,
+                task_sandbox: sandbox.as_ref(),
                 mcp_config: Some(&mcp_path),
                 settings_path: Some(&settings_path),
                 network_allowed,
@@ -1037,6 +1033,7 @@ pub(super) async fn run_task_loop(
         // B); recovery also deletes it for an attempt interrupted by an
         // unclean shutdown.
         let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_file(run_dir.join("mcp.json"));
 
         // `run_harness` may have persisted `session_id`/`pgid` mid-run;
         // reload so we don't clobber that with our stale in-memory copy --
@@ -1803,7 +1800,6 @@ pub(super) async fn run_task_loop(
             &mut task,
             &worktree,
             &run_dir.join("checklist"),
-            settings.sandbox,
             &cancel,
         )
         .await
@@ -1845,6 +1841,7 @@ pub(super) async fn run_task_loop(
         let (mut verify_results, cache_line) = run_verify_cached(
             &app,
             &task_id,
+            &task.repo,
             &worktree,
             &run_dir,
             &base_sha,
@@ -1884,6 +1881,7 @@ pub(super) async fn run_task_loop(
                     let (results, cache_line) = run_verify_cached(
                         &app,
                         &task_id,
+                        &task.repo,
                         &worktree,
                         &run_dir,
                         &base_sha,
@@ -1994,12 +1992,13 @@ pub(super) async fn run_task_loop(
         let gated = gated_checks(&task);
         if !gated.is_empty() {
             let commands: Vec<String> = gated.iter().map(|c| c.run.clone()).collect();
+            let sandbox = app.task_sandbox(&task.repo, &worktree, &run_dir);
             let results = run_verify_commands(
                 CheckContext::new(&app, Some(&task.id)),
                 &worktree,
                 &run_dir.join("checks"),
                 &commands,
-                settings.sandbox,
+                sandbox.as_ref(),
                 &task.base_sha,
                 &cancel,
             )
@@ -2036,7 +2035,7 @@ pub(super) async fn run_task_loop(
                     &held,
                     &worktree,
                     &run_dir.join("checks"),
-                    settings.sandbox,
+                    app.task_sandbox(&task.repo, &worktree, &run_dir).as_ref(),
                     &cancel,
                 )
                 .await;
@@ -2082,13 +2081,14 @@ pub(super) async fn run_task_loop(
 
         // The planner named the command that captures the images: orchd
         // runs it itself, so an attempt is never failed for a missing image.
+        let sandbox = app.task_sandbox(&task.repo, &worktree, &run_dir);
         capture_screenshots(
             &app,
             &mut task,
             idx,
             &worktree,
             &run_dir,
-            settings.sandbox,
+            sandbox.as_ref(),
             &cancel,
         )
         .await;
@@ -3120,7 +3120,7 @@ pub(super) async fn finish_after_review(
             worktree,
             &run_dir.join("final"),
             &final_commands,
-            settings.sandbox,
+            app.task_sandbox(&task.repo, worktree, run_dir).as_ref(),
             &task.base_sha,
             cancel,
         )
@@ -3370,7 +3370,6 @@ pub(super) async fn finish_after_review(
         attempt_n,
         worktree,
         run_dir,
-        settings,
         attempt_budget,
         pending_answer,
         cancel,
@@ -3391,7 +3390,6 @@ pub(super) async fn finish_attempt(
     attempt_n: u32,
     worktree: &Path,
     run_dir: &Path,
-    settings: &Settings,
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
@@ -3498,7 +3496,8 @@ pub(super) async fn finish_attempt(
                     run_dir,
                     &sha,
                     &cmd,
-                    settings.sandbox,
+                    app.task_sandbox(&task.repo, &run_dir.join("eval-check"), run_dir)
+                        .as_ref(),
                     cancel,
                 )
                 .await;

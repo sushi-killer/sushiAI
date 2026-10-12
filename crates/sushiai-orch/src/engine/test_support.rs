@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "../../tests/support/native_sandbox.rs"]
+mod native_sandbox;
+
 // -- task.archive / task.unarchive --------------------------------------
 //
 // These drive `App::dispatch` directly (no real socket, no real harness
@@ -19,6 +22,23 @@ pub(super) fn test_app() -> (Arc<App>, tempfile::TempDir) {
         "orchd".to_string(),
     )
     .unwrap();
+    app.assume_harnesses_installed();
+    (app, dir)
+}
+
+/// Test fixture for behavioral cases that start task checks. When Seatbelt
+/// cannot be applied from this process, keep the assertions running with a
+/// host policy instead of trying to nest a native profile.
+pub(super) fn test_app_fitting_sandbox() -> (Arc<App>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let store = Store::new(&data_dir).unwrap();
+    let mut settings = serde_json::to_value(store.load_settings().unwrap()).unwrap();
+    native_sandbox::fit_sandbox(&mut settings);
+    store
+        .save_settings(&serde_json::from_value(settings).unwrap())
+        .unwrap();
+    let app = App::new(data_dir, dir.path().join("home"), "orchd".to_string()).unwrap();
     app.assume_harnesses_installed();
     (app, dir)
 }

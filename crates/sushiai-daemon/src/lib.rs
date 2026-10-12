@@ -12,6 +12,8 @@ mod holder;
 mod home;
 mod launch_store;
 mod module;
+#[path = "../../process.rs"]
+pub mod process;
 mod procs;
 mod registry;
 mod server;

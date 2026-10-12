@@ -1111,7 +1111,6 @@ pub(super) async fn run_checklist(
     task: &mut Task,
     worktree: &Path,
     run_dir: &Path,
-    sandbox: SandboxMode,
     cancel: &CancelToken,
 ) -> Option<String> {
     let runnable: Vec<usize> = (0..task.checklist.len())
@@ -1124,12 +1123,13 @@ pub(super) async fn run_checklist(
         .iter()
         .map(|&i| task.checklist[i].check.clone())
         .collect();
+    let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let results = run_verify_commands(
         CheckContext::new(app, Some(&task.id)),
         worktree,
         run_dir,
         &commands,
-        sandbox,
+        sandbox.as_ref(),
         &task.base_sha,
         cancel,
     )

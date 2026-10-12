@@ -568,7 +568,6 @@ pub(super) async fn run_on_base(
         if missing.is_empty() || cancel.is_cancelled() {
             break;
         }
-        let sandbox = app.settings.read().unwrap().sandbox;
         let scratch = app
             .data_dir
             .join("base-runs")
@@ -588,8 +587,12 @@ pub(super) async fn run_on_base(
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
         let _ = std::fs::create_dir_all(run_dir);
+        let sandbox = app.task_sandbox(repo, &wt, run_dir);
         let setup = match setup {
-            Ok(()) => super::worktrees::setup_worktree(Path::new(repo), &wt, sandbox, cancel).await,
+            Ok(()) => {
+                super::worktrees::setup_worktree(Path::new(repo), &wt, sandbox.as_ref(), cancel)
+                    .await
+            }
             err => err,
         };
         let ran = match setup {
@@ -599,7 +602,7 @@ pub(super) async fn run_on_base(
                     &wt,
                     run_dir,
                     &missing,
-                    sandbox,
+                    sandbox.as_ref(),
                     base_sha,
                     cancel,
                 )

@@ -166,8 +166,13 @@ pub async fn run_setup(
             Path::new(&home).join("Library/Caches/sushiai/npm"),
         );
     }
+    // A sandboxed `build` already set RUSTC_WRAPPER (empty): the policy owns it.
+    let sandboxed = cmd
+        .as_std()
+        .get_envs()
+        .any(|(key, _)| key == "RUSTC_WRAPPER");
     cmd.envs(&plan.env);
-    if !plan.env.contains_key("RUSTC_WRAPPER") {
+    if !sandboxed && !plan.env.contains_key("RUSTC_WRAPPER") {
         if let Some(cache) =
             crate::engine::compiler_cache::CompilerCache::for_worktree(worktree, path)
         {

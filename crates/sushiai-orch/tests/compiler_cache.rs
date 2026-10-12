@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use sushiai_orch::engine::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
 use sushiai_orch::engine::verify::{run_verify_command, VerifyEnvironment};
-use sushiai_orch::model::SandboxMode;
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -20,7 +19,7 @@ fn assert_no_cache_env(command: &tokio::process::Command) {
 }
 
 async fn verify(wt: &Path, env: &VerifyEnvironment, script: &str) {
-    let command = env.build_command(wt, script, SandboxMode::Host, &[], "");
+    let command = env.build_command(wt, script, None, "");
     assert!(!command
         .as_std()
         .get_envs()
@@ -47,7 +46,7 @@ async fn absent_sccache_leaves_verify_env_and_decisions_unchanged() {
         false,
     );
     assert!(env.compiler_cache.is_none());
-    let command = env.build_command(tmp.path(), "printf ok", SandboxMode::Host, &[], "base");
+    let command = env.build_command(tmp.path(), "printf ok", None, "base");
     assert_no_cache_env(&command);
     let gate = CacheRun::begin(env.compiler_cache.clone()).await;
     verify(tmp.path(), &env, "printf ok").await;
@@ -78,7 +77,7 @@ async fn setup_opt_out_disables_wrapper_stats_and_server_even_with_sccache() {
         false,
     );
     assert!(env.compiler_cache.is_none());
-    assert_no_cache_env(&env.build_command(tmp.path(), "true", SandboxMode::Host, &[], ""));
+    assert_no_cache_env(&env.build_command(tmp.path(), "true", None, ""));
     let gate = CacheRun::begin(env.compiler_cache.clone()).await;
     verify(tmp.path(), &env, "true").await;
     assert_eq!(gate.finish("final checks").await, None);
@@ -95,7 +94,7 @@ async fn setup_opt_out_disables_wrapper_stats_and_server_even_with_sccache() {
         &env.path,
         Duration::from_secs(5),
         |script| {
-            let command = env.build_command(tmp.path(), script, SandboxMode::Host, &[], "");
+            let command = env.build_command(tmp.path(), script, None, "");
             assert_no_cache_env(&command);
             command
         },
@@ -118,13 +117,7 @@ async fn owner_wrapper_is_kept_without_starting_or_reporting_our_cache() {
         true,
     );
     assert!(env.compiler_cache.is_none());
-    let mut command = env.build_command(
-        tmp.path(),
-        "printf '%s' \"$RUSTC_WRAPPER\"",
-        SandboxMode::Host,
-        &[],
-        "",
-    );
+    let mut command = env.build_command(tmp.path(), "printf '%s' \"$RUSTC_WRAPPER\"", None, "");
     assert_no_cache_env(&command);
     command.env("RUSTC_WRAPPER", "owner-wrapper");
     let result = run_verify_command(
@@ -175,7 +168,7 @@ esac"#,
             "stats":{"compile_requests":requests,"cache_hits":{"counts":{"Rust":hits},"adv_counts":{"rustc":hits}}}
         }).to_string()).unwrap();
     };
-    let command = env.build_command(&wt, "true", SandboxMode::Host, &[], "");
+    let command = env.build_command(&wt, "true", None, "");
     let values: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
     assert_eq!(
         values[std::ffi::OsStr::new("RUSTC_WRAPPER")],

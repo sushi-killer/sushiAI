@@ -703,13 +703,17 @@ pub(super) async fn run_parent(
             &checks,
         )
         .await;
-        let sandbox = app.settings.read().unwrap().sandbox;
+        let sandbox = app.task_sandbox(
+            &task.repo,
+            Path::new(&task.worktree),
+            &app.store.task_dir(task_id).join("runs/parent"),
+        );
         let results = run_verify_commands(
             CheckContext::new(app, Some(&task.id)).with_gate("parent gate"),
             Path::new(&task.worktree),
             &app.store.task_dir(task_id).join("runs").join("parent"),
             &checks,
-            sandbox,
+            sandbox.as_ref(),
             &task.base_sha,
             cancel,
         )
@@ -735,7 +739,11 @@ pub(super) async fn run_parent(
             }
         }
     };
-    let sandbox = app.settings.read().unwrap().sandbox;
+    let sandbox = app.task_sandbox(
+        &task.repo,
+        Path::new(&task.worktree),
+        &app.store.task_dir(task_id).join("runs/parent"),
+    );
     // Once, after verify and finalVerify: the gated checks, then the held-out
     // one. The line for a failure names its kind and criterion, and never the
     // held-out command.
@@ -751,7 +759,7 @@ pub(super) async fn run_parent(
             wt,
             &dir,
             &commands,
-            sandbox,
+            sandbox.as_ref(),
             &task.base_sha,
             cancel,
         )
@@ -780,7 +788,7 @@ pub(super) async fn run_parent(
                 &held,
                 wt,
                 &dir,
-                sandbox,
+                sandbox.as_ref(),
                 cancel,
             )
             .await;
@@ -1189,6 +1197,7 @@ pub(super) async fn carry_and_check(
             let (results, cache_line) = run_verify_cached(
                 app,
                 &task.id,
+                &task.repo,
                 worktree,
                 run_dir,
                 &new_sha,
@@ -1221,13 +1230,13 @@ pub(super) async fn carry_and_check(
                 scope_task_checks(app, task, worktree, &task.base_sha, extra_final).await;
             record_check_decisions(task, skipped);
             if !extra_final.is_empty() {
-                let sandbox = app.settings.read().unwrap().sandbox;
+                let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
                 let finals = run_verify_commands(
                     CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
                     worktree,
                     &run_dir.join("final-land"),
                     &extra_final,
-                    sandbox,
+                    sandbox.as_ref(),
                     &task.base_sha,
                     cancel,
                 )
@@ -1669,17 +1678,7 @@ mod tests {
             counter.display()
         )];
         let cancel = CancelToken::new();
-        let run = |base| {
-            run_checks(
-                &app,
-                &repo,
-                dir.path(),
-                &commands,
-                SandboxMode::Host,
-                base,
-                &cancel,
-            )
-        };
+        let run = |base| run_checks(&app, &repo, &commands, None, base, &cancel);
         let (outcomes, lines) = run("base-a").await;
         assert_eq!(outcomes[0].code, Some(0));
         assert!(lines.is_empty());
@@ -1703,17 +1702,7 @@ mod tests {
         init_git_repo(&repo);
         let commands = vec!["exit 137".into(), "false".into(), "true".into()];
         let cancel = CancelToken::new();
-        let run = || {
-            run_checks(
-                &app,
-                &repo,
-                dir.path(),
-                &commands,
-                SandboxMode::Host,
-                "base",
-                &cancel,
-            )
-        };
+        let run = || run_checks(&app, &repo, &commands, None, "base", &cancel);
         let (first, lines) = run().await;
         assert_eq!(first[0].code, Some(137));
         assert_eq!(first[1].code, Some(1));

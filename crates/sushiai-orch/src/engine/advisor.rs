@@ -86,6 +86,8 @@ pub(super) async fn run_advisor_before_retry(
         effort: advisor.effort.as_deref(),
         max_budget_usd: None,
         review: true,
+        task_run: false,
+        task_sandbox: None,
         mcp_config: Some(&mcp_path),
         settings_path: Some(&settings_path),
         network_allowed: false,

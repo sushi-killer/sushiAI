@@ -14,16 +14,15 @@ fn has_worktree(path: &str) -> bool {
 pub(super) async fn setup_worktree(
     repo: &Path,
     worktree: &Path,
-    sandbox: SandboxMode,
+    sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) -> Result<(), String> {
-    let allow_write = verify::verify_allow_write_paths(worktree, worktree);
     crate::worktree_env::run_setup(
         repo,
         worktree,
         &augmented_path(),
         verify::verify_timeout(),
-        |script| verify::build_verify_command(worktree, script, sandbox, &allow_write, ""),
+        |script| verify::build_verify_command(worktree, script, sandbox, ""),
         cancel.cancelled(),
     )
     .await
@@ -104,7 +103,6 @@ impl App {
         &self,
         task: &Task,
         recreated: bool,
-        sandbox: SandboxMode,
         cancel: &CancelToken,
     ) -> Result<(), String> {
         let marker = self.store.task_dir(&task.id).join("worktree-setup.done");
@@ -114,10 +112,15 @@ impl App {
         if marker.exists() || !(recreated || task.attempts.is_empty()) {
             return Ok(());
         }
+        let sandbox = self.task_sandbox(
+            &task.repo,
+            Path::new(&task.worktree),
+            &self.store.task_dir(&task.id).join("runs/setup"),
+        );
         setup_worktree(
             Path::new(&task.repo),
             Path::new(&task.worktree),
-            sandbox,
+            sandbox.as_ref(),
             cancel,
         )
         .await?;

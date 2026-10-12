@@ -248,8 +248,14 @@ fn review_runs_stop_after_round_two_with_the_last_result() {
     let attempts = implements(&settled);
     assert_eq!(attempts.len(), 3, "{settled}");
     // Attempt 1: one run. Attempt 2: a judge drop re-ran the review once and
-    // the second run's drop would have asked for a third. Attempt 3: one.
-    assert_eq!(rig.count("review.brief."), 4);
+    // the second run's drop would have asked for a third. Attempt 3: a narrow
+    // run that passed, then one whole-change run because the marker file
+    // changed since the last full review (still within the two-run bound).
+    assert_eq!(rig.count("review.brief."), 5);
+    assert!(
+        !exists(&rig.run_dir(&id, 3).join("review-3")),
+        "no third run"
+    );
     let two = rig.run_dir(&id, 2);
     assert!(exists(&two.join("review")) && exists(&two.join("review-2")));
     assert!(!exists(&two.join("review-3")), "no third run");

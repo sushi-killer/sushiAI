@@ -31,9 +31,19 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// An unidentified process is left alone.
+/// An unidentified process is left alone. The executable path or the name it was started
+/// under (what `ps -o comm=` showed) must say `orchd`; on Linux `/proc/<pid>/exe` alone
+/// did not identify a freshly started copy.
 fn looks_like_orchd(pid: i32) -> bool {
-    crate::process::executable(pid).is_some_and(|exe| exe.to_string_lossy().contains("orchd"))
+    let named = |s: &str| {
+        Path::new(s)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("orchd"))
+    };
+    crate::process::executable(pid).is_some_and(|exe| named(&exe.to_string_lossy()))
+        || crate::process::argv(pid)
+            .and_then(|argv| argv.into_iter().next())
+            .is_some_and(|argv0| named(&argv0))
 }
 
 fn terminate(pid: i32) {

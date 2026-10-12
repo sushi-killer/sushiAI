@@ -597,7 +597,7 @@ fn run_retry_task(second_file: &str) -> (Daemon, serde_json::Value, String) {
 }
 
 #[test]
-fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
+fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence_helpers_folder() {
     let (daemon, settled, task_id) = run_retry_task("tests/panel.test.txt");
     assert_eq!(settled["status"], "done", "{settled}");
     let implement: Vec<_> = settled["attempts"]
@@ -623,7 +623,7 @@ fn a_retry_that_changed_only_tests_reuses_the_accepted_evidence() {
             .data_dir()
             .join("tasks")
             .join(&task_id)
-            .join("runs/2/review/brief.md"),
+            .join("helpers/review-2/brief.md"),
     )
     .unwrap();
     assert!(brief.contains(paths[0]), "{brief}");

@@ -263,14 +263,12 @@ impl App {
 
     /// One decision line per distinct refusal.
     fn append_lease_line(&self, task_id: &str, line: String) {
-        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
-            if task.decisions.contains(&line) {
-                return;
+        if let Err(e) = self.update_task(task_id, |task| {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
             }
-            task.decisions.push(line);
-            task.updated_at = now_ms();
-            let _ = self.store.save_task(&task);
-            self.broadcast_task(&task);
+        }) {
+            eprintln!("orch: updating task {task_id} failed: {e}");
         }
     }
 }
@@ -284,7 +282,7 @@ pub(super) fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool) -> b
                 task.decisions
                     .push("Queue: the paths it needs are free, starting".to_string());
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
             }
             true
@@ -299,7 +297,7 @@ pub(super) fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool) -> b
             task.queue.waited_on_lease = true;
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
             false
         }

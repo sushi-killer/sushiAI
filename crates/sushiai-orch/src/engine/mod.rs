@@ -333,6 +333,8 @@ pub struct App {
     chat_turns: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// How long an overseer turn may run before it is cancelled (ms).
     overseer_turn_timeout_ms: std::sync::atomic::AtomicU64,
+    /// How long any task helper may run (ms).
+    helper_timeout_ms: std::sync::atomic::AtomicU64,
     /// Keyed by audit id: the `repo.audit` runs still in flight.
     audits: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
@@ -397,6 +399,8 @@ pub struct App {
     /// Keyed by parent task id: held while one child lands on the parent's
     /// branch, so landings onto one branch happen one at a time.
     landing_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    task_locks: StdMutex<HashMap<String, Arc<StdMutex<()>>>>,
+    recovery_timers_started: AtomicBool,
     /// Keyed by repo: one base-commit check runs at a time per repo, so a
     /// rerun of a failed base check never competes with another one.
     base_check_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -533,17 +537,20 @@ async fn persist_attempt_field(
     attempt_n: u32,
     f: impl FnOnce(&mut Attempt),
 ) {
-    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-        if let Some(a) = t.attempts.iter_mut().find(|a| a.n == attempt_n) {
+    if let Err(e) = app.update_task(task_id, |task| {
+        if let Some(a) = task.attempts.iter_mut().find(|a| a.n == attempt_n) {
             f(a);
-            t.updated_at = now_ms();
-            let _ = app.store.save_task(&t);
-            app.broadcast_task(&t);
         }
+    }) {
+        eprintln!("orch: updating task {task_id} attempt {attempt_n} failed: {e}");
     }
 }
 
 impl App {
+    fn helper_timeout(&self) -> Duration {
+        Duration::from_millis(self.helper_timeout_ms.load(Ordering::SeqCst))
+    }
+
     pub fn new(data_dir: PathBuf, home: PathBuf, exe_path: String) -> std::io::Result<Arc<App>> {
         crate::prompts::set_data_dir(&data_dir);
         let store = Store::new(&data_dir)?;
@@ -565,6 +572,7 @@ impl App {
             controls: std::sync::Mutex::new(HashMap::new()),
             chat_turns: std::sync::Mutex::new(HashMap::new()),
             overseer_turn_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
+            helper_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),
@@ -589,6 +597,8 @@ impl App {
             check_load: RwLock::new(verify::machine_load),
             check_decisions: StdMutex::new(HashMap::new()),
             landing_locks: StdMutex::new(HashMap::new()),
+            task_locks: StdMutex::new(HashMap::new()),
+            recovery_timers_started: AtomicBool::new(false),
             base_check_locks: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
@@ -609,6 +619,43 @@ impl App {
             .get()
             .and_then(|w| w.upgrade())
             .expect("App is always constructed behind an Arc")
+    }
+
+    fn task_lock(&self, id: &str) -> Arc<StdMutex<()>> {
+        self.task_locks
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    pub(crate) fn save_task_logged(&self, task: &Task) {
+        let lock = self.task_lock(&task.id);
+        let _guard = lock.lock().unwrap();
+        if let Err(e) = self.store.save_task(task) {
+            eprintln!("orch: saving task {} failed: {e}", task.id);
+        }
+    }
+
+    pub(crate) fn update_task(&self, id: &str, f: impl FnOnce(&mut Task)) -> Result<Task, String> {
+        let lock = self.task_lock(id);
+        let _guard = lock.lock().unwrap();
+        let mut task = self
+            .store
+            .load_task(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        f(&mut task);
+        task.updated_at = now_ms();
+        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        self.broadcast_task(&task);
+        Ok(task)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_timers_started(&self) -> bool {
+        self.recovery_timers_started.load(Ordering::SeqCst)
     }
 
     pub fn broadcast_task(&self, task: &Task) {
@@ -762,11 +809,8 @@ impl App {
     /// already hold `&mut Task` push the line onto their own copy instead, so
     /// it rides along with their next save instead of racing a reload.
     fn append_decision(&self, task_id: &str, line: String) {
-        if let Ok(Some(mut task)) = self.store.load_task(task_id) {
-            record_check_decisions(&mut task, vec![line]);
-            task.updated_at = now_ms();
-            let _ = self.store.save_task(&task);
-            self.broadcast_task(&task);
+        if let Err(e) = self.update_task(task_id, |task| record_check_decisions(task, vec![line])) {
+            eprintln!("orch: updating task {task_id} failed: {e}");
         }
     }
 

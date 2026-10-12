@@ -471,16 +471,14 @@ pub(super) fn narrow_basis(task: &Task, attempt_n: u32) -> Option<&Attempt> {
     })
 }
 
-/// Review run `round` of an attempt (1 = the first). A re-run after a reply
-/// without a verdict (`after_no_verdict`) carries a note, and every run after
-/// the first writes to its own `review-<round>` subdirectory so the earlier
-/// reply stays on disk.
+/// A review of an attempt in a new helper folder. A re-run after a reply
+/// without a verdict (`after_no_verdict`) carries a note.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_review(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
-    task: &Task,
+    task: &mut Task,
     worktree: &Path,
     base_sha: &str,
     verify_results: &[VerifyOutcome],
@@ -491,7 +489,6 @@ pub(super) async fn run_review(
     cancel: &CancelToken,
     cost_usd: &mut f64,
     fingerprint: &mut Option<Fingerprint>,
-    round: u32,
     after_no_verdict: bool,
     dropped: &[(String, String)],
     force_full: bool,
@@ -586,14 +583,10 @@ pub(super) async fn run_review(
         brief_text.push_str(&brief::review_retry_note());
     }
 
-    // Its own subdirectory: a review's events/brief/settings must never
-    // land in the implement attempt's `runs/<n>/` files.
-    let run_dir = app.store.run_dir(task_id, attempt_n).join(if round <= 1 {
-        "review".to_string()
-    } else {
-        format!("review-{round}")
-    });
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(task_id, "review", Some(attempt_n))
+        .map_err(|e| ReviewFailure::Harness(e.to_string()))?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -615,6 +608,7 @@ pub(super) async fn run_review(
     }
 
     let req = review_request(review_route, worktree, &mcp_path, &settings_path, &images);
+    let limit = app.helper_timeout();
     match run_harness(
         app,
         task_id,
@@ -626,13 +620,23 @@ pub(super) async fn run_review(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("reviewer", limit),
     )
     .await
     {
         Ok(outcome) => {
+            if outcome.timed_out {
+                task.decisions
+                    .push(helper_timeout_message("reviewer", limit));
+            }
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             *fingerprint = outcome.fingerprint.clone();
+            if outcome.timed_out {
+                return Err(ReviewFailure::Harness(format!(
+                    "review did not run ({})",
+                    outcome.error.as_deref().unwrap_or_default()
+                )));
+            }
             let text = outcome.final_text.unwrap_or_default();
             if let Some((mut result, recorded_as_pass)) = brief::parse_review_with_rule(&text) {
                 let scope = match &narrow {
@@ -876,5 +880,44 @@ mod is_test_path_tests {
         ] {
             assert!(!is_test_path(path), "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reviewer_timed_out_takes_the_harness_failure_path() {
+        let (app, _dir, mut task, route) = slow_helper_task();
+        let id = task.id.clone();
+        let worktree = PathBuf::from(&task.worktree);
+        let base = task.base_sha.clone();
+        let mut cost = 0.0;
+        let mut fingerprint = None;
+        let result = run_review(
+            &app,
+            &id,
+            1,
+            &mut task,
+            &worktree,
+            &base,
+            &[],
+            "",
+            &[],
+            &route,
+            &[],
+            &CancelToken::new(),
+            &mut cost,
+            &mut fingerprint,
+            false,
+            &[],
+            false,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ReviewFailure::Harness(ref e)) if e.contains("reviewer timed out after 0.25s"))
+        );
+        assert_helper_timeout(&task, "reviewer");
     }
 }

@@ -44,12 +44,19 @@ open every image you produced before you describe it.
 To screenshot one orchestrator task's detail view, skip the steps above and run
 `node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>`
 (build prerequisites still apply). `<seed.json>` is a JSON array of task
-objects, or `{tasks, proposals, notes}` to also seed evolution proposals and repo notes: each
+objects, or `{tasks, proposals, notes, settings}` to also seed evolution proposals,
+repo notes and daemon settings. Optional `settings` overrides are merged over the
+daemon's `settings.get` result and saved through `settings.set`, retrying until
+the daemon answers, after the extension is enabled and before the panel mounts;
+the full settings retain the required routes and tiers. Each
 proposal is completed with an id (unless it has one), `repo` = this repo and
 `createdAt`, then written to `<home>/orchestrator/evolution/proposals/<id>.json`, where
 the orchestrator's store reads it. Each note (`text`, optional `id`, `source` - default `owner`, or `proposal:<id>` - and `createdAt`) is written under this repo's root in `<home>/orchestrator/repo-notes.json`, the one file keyed by repo that the orchestrator reads. Task objects - only `title` is required, `status`/`tier`/`decisions`/`criteria`/
 `attempts` (with `costUsd`) all default; `status` must be done, failed,
-stopped or waiting. `evidence: {"<attempt n>": [image paths]}` copies screenshots into that attempt's evidence dir. Give a seed a `key` to let others name it in `parent`,
+stopped or waiting. Optional `pausedInHours` (a number) becomes
+`pausedUntil = now + pausedInHours * 3600000` and is omitted from the stored task,
+so a usage-limit pause stays relative to each run rather than a fixed date.
+`evidence: {"<attempt n>": [image paths]}` copies screenshots into that attempt's evidence dir. Give a seed a `key` to let others name it in `parent`,
 `dependsOn` (a task graph), `followUps` or `followUpOf`. The tasks are written into the throwaway daemon home (with the module's
 enabled flag) before the app starts its sushiai daemon there - no harness run, no API key. It opens the
 panel, picks the task by title, saves

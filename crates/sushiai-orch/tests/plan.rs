@@ -64,6 +64,8 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
     assert_eq!(attempts.len(), 2, "one plan attempt, one implement attempt");
     assert_eq!(attempts[0]["stage"], "plan");
     assert_eq!(attempts[1]["stage"], "implement");
+    assert_eq!(attempts[0]["n"], 1);
+    assert_eq!(attempts[1]["n"], 2);
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -503,7 +505,7 @@ fn a_visual_flag_on_a_command_checked_criterion_does_not_demand_an_image() {
         .filter(|a| a["stage"] == "implement")
         .collect();
     assert_eq!(implement.len(), 1, "{settled}");
-    assert_eq!(implement[0]["n"], 1, "{settled}");
+    assert_eq!(implement[0]["n"], 2, "{settled}");
     assert!(implement[0]["failure"].is_null(), "{settled}");
     assert!(
         attempts.iter().all(|a| a["failure"]["kind"] != "evidence"),

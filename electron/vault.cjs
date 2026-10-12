@@ -146,7 +146,7 @@ function vaultConfig(input) {
 /** Wires the module in. Resolves `ready` once the one-time move of the old
  * per-project settings out of the project store is over. */
 function registerVault({
-  handle,
+  moduleIpc,
   projects,
   notices,
   safeStorage,
@@ -291,53 +291,55 @@ function registerVault({
 
   notices.register(NOTICE_SOURCE, async () => {});
 
-  handle("vault:token:status", () => ({ saved: Boolean(readToken()) }));
-  handle("vault:token:set", (token) => setToken(token));
-  handle("vault:token:clear", () => clearToken());
-  handle("projects:vault:get", async (id) => {
-    await ready;
-    return configOf(id);
-  });
-  handle("projects:vault:set", async (id, config) => {
-    await ready;
-    if (!(await projects.get(id))) throw new Error("Unknown project.");
-    const next = config === null ? null : vaultConfig(config);
-    const stored = readStore(userDataDir, PROJECTS_STORE);
-    const previous = Object.hasOwn(stored, id) ? stored[id] : null;
-    const rest = { ...stored };
-    delete rest[id];
-    writeStore(
-      userDataDir,
-      PROJECTS_STORE,
-      next ? { ...rest, [id]: next } : rest,
-    );
-    for (const old of [previous, next])
-      if (old?.paths) cache.delete(cacheKey(old));
-    projects.environmentChanged();
-    return next;
-  });
-  // A fresh read for the owner's Check: it replaces the cached one and sends
-  // no notice. Names and a count only, never a value.
-  handle("projects:vault:check", async (id) => {
-    await ready;
-    const project = await projects.get(id);
-    if (!project) throw new Error("Unknown project.");
-    const config = await configOf(id);
-    if (!config?.paths?.length)
-      throw new Error("The project has no Vault paths.");
-    const started = generation;
-    const result = await readAll(readToken(), config);
-    if (started === generation)
-      cache.set(cacheKey(config), {
-        at: Date.now(),
-        result: Promise.resolve(result),
-        notified: new Set(),
-      });
-    if (!result.ok) return { ok: false, reason: result.reason };
-    if (noticed.delete(project.id))
-      notices.retract(NOTICE_SOURCE, `vault:${project.id}`);
-    const names = Object.keys(result.values).sort();
-    return { ok: true, names, count: names.length };
+  moduleIpc.register(VAULT_MANIFEST.id, {
+    "token.status": () => ({ saved: Boolean(readToken()) }),
+    "token.set": (token) => setToken(token),
+    "token.clear": () => clearToken(),
+    "project.get": async (id) => {
+      await ready;
+      return configOf(id);
+    },
+    "project.set": async (id, config) => {
+      await ready;
+      if (!(await projects.get(id))) throw new Error("Unknown project.");
+      const next = config === null ? null : vaultConfig(config);
+      const stored = readStore(userDataDir, PROJECTS_STORE);
+      const previous = Object.hasOwn(stored, id) ? stored[id] : null;
+      const rest = { ...stored };
+      delete rest[id];
+      writeStore(
+        userDataDir,
+        PROJECTS_STORE,
+        next ? { ...rest, [id]: next } : rest,
+      );
+      for (const old of [previous, next])
+        if (old?.paths) cache.delete(cacheKey(old));
+      projects.environmentChanged();
+      return next;
+    },
+    // A fresh read for the owner's Check: it replaces the cached one and sends
+    // no notice. Names and a count only, never a value.
+    "project.check": async (id) => {
+      await ready;
+      const project = await projects.get(id);
+      if (!project) throw new Error("Unknown project.");
+      const config = await configOf(id);
+      if (!config?.paths?.length)
+        throw new Error("The project has no Vault paths.");
+      const started = generation;
+      const result = await readAll(readToken(), config);
+      if (started === generation)
+        cache.set(cacheKey(config), {
+          at: Date.now(),
+          result: Promise.resolve(result),
+          notified: new Set(),
+        });
+      if (!result.ok) return { ok: false, reason: result.reason };
+      if (noticed.delete(project.id))
+        notices.retract(NOTICE_SOURCE, `vault:${project.id}`);
+      const names = Object.keys(result.values).sort();
+      return { ok: true, names, count: names.length };
+    },
   });
   return { ready };
 }

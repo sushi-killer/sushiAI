@@ -11,28 +11,38 @@ impl App {
         // First, so a resumed loop never parks beside a stale hold.
         self.release_stale_holds();
         let prices = self.settings.read().unwrap().prices.clone();
-        let recovered = self.store.recover_interrupted_with(
+        match self.store.recover_interrupted_with(
             |task, idx| self.run_fate(task, idx),
             |task, idx| {
-                let run_dir = self.store.run_dir(&task.id, task.attempts[idx].n);
-                settle_unfinished_cost(task, idx, &run_dir, &prices);
+                settle_unfinished_cost(task, idx, &self.store, &prices);
             },
-        )?;
-        for t in recovered {
-            if !t.archived && t.status == TaskStatus::Stopped && t.question.is_some() {
-                // Broadcast below, once the stopped task's question is closed.
-                continue;
+        ) {
+            Ok(recovered) => {
+                for t in recovered {
+                    if !t.archived && t.status == TaskStatus::Stopped && t.question.is_some() {
+                        continue;
+                    }
+                    self.broadcast_task(&t);
+                }
             }
-            self.broadcast_task(&t);
+            Err(e) => eprintln!("orch: recovering interrupted tasks failed: {e}"),
         }
         // Spend recorded before per-run cost records existed; a no-op once done.
         crate::costs::backfill(&self.data_dir);
-        for a in self.store.recover_interrupted_audits()? {
-            audit::broadcast(self, &a);
+        match self.store.recover_interrupted_audits() {
+            Ok(audits) => {
+                for a in audits {
+                    audit::broadcast(self, &a);
+                }
+            }
+            Err(e) => eprintln!("orch: recovering interrupted audits failed: {e}"),
         }
         // A run that is still going holds its concurrency slot already: its
         // loop starts before the queued ones compete for the rest.
-        let mut tasks = self.store.list_tasks()?;
+        let mut tasks = self.store.list_tasks().unwrap_or_else(|e| {
+            eprintln!("orch: listing tasks for recovery failed: {e}");
+            Vec::new()
+        });
         tasks.sort_by_key(|t| resumable_attempt(self, t).is_none());
         for mut t in tasks {
             if t.archived {
@@ -42,7 +52,7 @@ impl App {
                 if t.question.is_some() {
                     self.close_stopped_task(&mut t);
                     t.updated_at = now_ms();
-                    self.store.save_task(&t)?;
+                    self.save_task_logged(&t);
                     self.broadcast_task(&t);
                 }
                 continue;
@@ -54,10 +64,9 @@ impl App {
                     | TaskStatus::Drafting
                     | TaskStatus::Landing
             ) {
-                let id = t.id.clone();
-                if settle_interrupted_advisor(&mut t, |n| self.store.run_dir(&id, n), &prices) {
+                if settle_interrupted_advisor(&mut t, &self.store, &prices) {
                     t.updated_at = now_ms();
-                    self.store.save_task(&t)?;
+                    self.save_task_logged(&t);
                     self.broadcast_task(&t);
                 }
                 if t.status == TaskStatus::Drafting && t.queue.backlog.is_some() {
@@ -73,11 +82,16 @@ impl App {
         self.spawn_wait_sla_timer();
         self.wake_overseer_for_waiting_after_restart();
         self.spawn_lead_touch_check();
+        self.recovery_timers_started.store(true, Ordering::SeqCst);
         // A dependency question can have become moot while the daemon was
         // down; the graph clears it now, not at the next graph event.
         let mut repos: Vec<String> = self
             .store
-            .list_tasks()?
+            .list_tasks()
+            .unwrap_or_else(|e| {
+                eprintln!("orch: listing tasks for graph recovery failed: {e}");
+                Vec::new()
+            })
             .into_iter()
             .filter(|t| !t.archived)
             .map(|t| t.repo)

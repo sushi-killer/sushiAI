@@ -38,10 +38,11 @@ fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
 /// For an attempt that ended before all its spend was recorded (stopped, or
 /// the daemon died under it): adds whatever its runs left in their events
 /// -- see [`replay_run_cost`] -- to the attempt and the task. That covers
-/// the attempt's review run too (`runs/<n>/review`), kept in
+/// the attempt's review helper runs too, kept in
 /// `review_cost_usd`. Claude only, for the attempt's own runs; the review
 /// may run on either harness.
-pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path, prices: &Prices) {
+pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store, prices: &Prices) {
+    let run_dir = store.run_dir(&task.id, task.attempts[idx].n);
     let attempt = &task.attempts[idx];
     if attempt.harness == Harness::Claude {
         let mut total = None;
@@ -51,7 +52,7 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path
             output: 0,
             cached: 0,
         };
-        for path in uncounted_event_files(run_dir, attempt) {
+        for path in uncounted_event_files(&run_dir, attempt) {
             let Some(outcome) = replay_run_cost(&path, prices) else {
                 continue;
             };
@@ -77,21 +78,26 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path
             task.cost_usd += cost;
         }
     }
-    settle_interrupted_review(task, idx, run_dir, prices);
+    settle_interrupted_review(task, idx, store, prices);
 }
 
-/// An attempt reviews once, and its review_cost_usd is saved right after: when the daemon
-/// died during the review, its spend is replayed from `runs/<n>/review`.
+/// A review's cost is saved right after it ends. Replay the attempt's helper
+/// runs when the daemon died before any review cost was saved.
 pub(super) fn settle_interrupted_review(
     task: &mut Task,
     idx: usize,
-    run_dir: &Path,
+    store: &Store,
     prices: &Prices,
 ) {
     let attempt = &task.attempts[idx];
     if attempt.stage == Stage::Implement && attempt.review_cost_usd.is_none() {
-        if let Some(o) = replay_run_cost(&run_dir.join("review").join("events.jsonl"), prices) {
-            let cost = o.cost_usd.unwrap_or(0.0);
+        let cost = store
+            .helper_run_dirs(&task.id, "review", Some(attempt.n))
+            .iter()
+            .filter_map(|dir| replay_run_cost(&dir.join("events.jsonl"), prices))
+            .map(|o| o.cost_usd.unwrap_or(0.0))
+            .reduce(|a, b| a + b);
+        if let Some(cost) = cost {
             task.attempts[idx].review_cost_usd = Some(cost);
             task.cost_usd += cost;
         }
@@ -101,13 +107,9 @@ pub(super) fn settle_interrupted_review(
 /// On daemon start, for a task that was between attempts: an advisor run
 /// about its last failed attempt that the daemon died under. Its cost was
 /// never saved (`advisor_cost_usd` is saved the moment one ends), so it is
-/// replayed from `runs/<n>/advisor/events.jsonl`. Returns whether it added
+/// replayed from its advisor helper folders. Returns whether it added
 /// anything.
-pub(super) fn settle_interrupted_advisor(
-    task: &mut Task,
-    run_dir_of: impl Fn(u32) -> PathBuf,
-    prices: &Prices,
-) -> bool {
+pub(super) fn settle_interrupted_advisor(task: &mut Task, store: &Store, prices: &Prices) -> bool {
     let Some(idx) = task
         .attempts
         .iter()
@@ -119,11 +121,15 @@ pub(super) fn settle_interrupted_advisor(
     if attempt.status != AttemptStatus::Failed || attempt.advisor_cost_usd.is_some() {
         return false;
     }
-    let events = run_dir_of(attempt.n).join("advisor").join("events.jsonl");
-    let Some(o) = replay_run_cost(&events, prices) else {
+    let cost = store
+        .helper_run_dirs(&task.id, "advisor", Some(attempt.n))
+        .iter()
+        .filter_map(|dir| replay_run_cost(&dir.join("events.jsonl"), prices))
+        .map(|o| o.cost_usd.unwrap_or(0.0))
+        .reduce(|a, b| a + b);
+    let Some(cost) = cost else {
         return false;
     };
-    let cost = o.cost_usd.unwrap_or(0.0);
     task.attempts[idx].advisor_cost_usd = Some(cost);
     task.cost_usd += cost;
     true
@@ -247,7 +253,7 @@ pub(super) async fn wait_while_over_budget(
     }
     task.status = resume_status;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     if permit.is_none() {
         let acquired = tokio::select! {

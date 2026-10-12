@@ -484,7 +484,7 @@ impl<'a> CheckContext<'a> {
             if let Some(task) = stored.as_mut() {
                 record_check_decisions(task, vec![line]);
                 task.updated_at = now_ms();
-                let _ = self.app.store.save_task(task);
+                self.app.save_task_logged(task);
                 self.app.broadcast_task(task);
             }
         }

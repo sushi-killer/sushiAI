@@ -1046,7 +1046,7 @@ fn a_plan_brief_carries_the_results_of_a_dependency_that_was_already_done() {
     );
     // The plan attempt passed; the drafted task waits for the owner.
     assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
-    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    let brief = plan_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
     assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
     assert!(brief.contains("## Landed dependencies"), "{brief}");
     assert!(brief.contains("DEP_SUMMARY"), "{brief}");
@@ -1090,7 +1090,7 @@ fn a_plan_brief_written_before_its_dependency_lands_has_no_landed_section() {
         serde_json::json!({"request": "build on the dependency"}),
     );
     assert_eq!(child["attempts"][0]["stage"], "plan", "task JSON: {child}");
-    let brief = run_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
+    let brief = plan_file(&daemon, child["id"].as_str().unwrap(), "plan/brief.md");
     assert!(brief.contains("sushi-plan"), "not the plan brief: {brief}");
     assert!(!brief.contains("## Landed dependencies"), "{brief}");
 
@@ -2019,14 +2019,10 @@ fn a_child_whose_paths_a_landed_dependency_touched_gets_one_refresh() {
     assert_eq!(refreshed(c), 0, "{costs:?}");
     assert_eq!(refreshed(a), 0, "{costs:?}");
     let has_refresh_dir = |t: &serde_json::Value| {
-        let runs = daemon
-            .data_dir()
-            .join("tasks")
-            .join(t["id"].as_str().unwrap())
-            .join("runs");
-        std::fs::read_dir(runs)
-            .map(|dirs| dirs.flatten().any(|d| d.path().join("refresh").is_dir()))
-            .unwrap_or(false)
+        !sushiai_orch::store::Store::new(daemon.data_dir())
+            .unwrap()
+            .helper_run_dirs(t["id"].as_str().unwrap(), "refresh", None)
+            .is_empty()
     };
     assert!(has_refresh_dir(b));
     assert!(!has_refresh_dir(c));

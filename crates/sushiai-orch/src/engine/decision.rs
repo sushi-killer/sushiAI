@@ -503,7 +503,7 @@ pub(super) async fn fail_or_accept(
     let protected = app.settings.read().unwrap().protected_paths.clone();
     let should_continue = advance_after_failure(task, *attempt_budget, &protected);
     if should_continue {
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return FailSignal::Continue;
     }
@@ -524,7 +524,7 @@ pub(super) async fn fail_or_accept(
         a.failure = None;
         task.status = TaskStatus::Running;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return FailSignal::Accept;
     }

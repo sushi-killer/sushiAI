@@ -194,7 +194,7 @@ pub(super) async fn wait_for_harness(
     }
     task.status = resume_status;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     if permit.is_none() {
         let acquired = tokio::select! {

@@ -4,7 +4,7 @@
 //
 //   node .agents/skills/ui-evidence/scripts/orchestrator-panel.mjs <seed.json> <task title>
 //
-// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes} (see
+// <seed.json> is a JSON array of task objects, or {tasks, proposals, notes, settings} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
 // else defaults. The tasks are written as task.json files into the throwaway
 // daemon home's orchestrator dir, with the module's enabled flag, before the
@@ -17,6 +17,9 @@
 // any were seeded the run also saves artifacts/orchestrator-repo-notes.png,
 // a crop of the REPO NOTES list. Only finished/waiting statuses are accepted, because the orchestrator resumes
 // queued/running/drafting tasks on start - a fixture must never run a harness.
+// A task's pausedInHours becomes pausedUntil relative to the run's start.
+// Settings overrides are merged over settings.get and saved with settings.set
+// after enabling the extension, before the panel mounts.
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -66,6 +69,7 @@ function taskJson(seed, repo, now, id, ids) {
     followUps,
     followUpOf,
     evidence: _evidence,
+    pausedInHours,
     ...rest
   } = seed;
   return {
@@ -81,6 +85,9 @@ function taskJson(seed, repo, now, id, ids) {
     createdAt: now,
     updatedAt: now,
     ...rest,
+    ...(typeof pausedInHours === "number"
+      ? { pausedUntil: now + pausedInHours * 3_600_000 }
+      : {}),
     ...(parent ? { parent: byKey(parent) } : {}),
     ...(dependsOn ? { dependsOn: dependsOn.map(byKey) } : {}),
     ...(followUps ? { followUps: followUps.map(byKey) } : {}),
@@ -101,9 +108,10 @@ async function loadSeed(seedPath) {
       tasks: raw.tasks,
       proposals: raw.proposals ?? [],
       notes: raw.notes ?? [],
+      settings: raw.settings,
     };
   throw new Error(
-    "seed file must be a JSON array of tasks or {tasks, proposals, notes}",
+    "seed file must be a JSON array of tasks or {tasks, proposals, notes, settings}",
   );
 }
 
@@ -121,7 +129,7 @@ if (!seedPath || !title) {
   let app = null;
 
   try {
-    const { tasks, proposals, notes } = await loadSeed(seedPath);
+    const { tasks, proposals, notes, settings } = await loadSeed(seedPath);
     const now = Date.now();
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
@@ -204,6 +212,24 @@ if (!seedPath || !title) {
     await page.getByRole("button", { name: "Disable Orchestrator" }).waitFor();
     await page.getByRole("button", { name: "Extensions", exact: true }).click();
 
+    if (settings) {
+      await page.evaluate(async (overrides) => {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          try {
+            const current = await window.bridge.orchestrator("settings.get");
+            await window.bridge.orchestrator("settings.set", {
+              settings: { ...current, ...overrides },
+            });
+            return;
+          } catch (error) {
+            if (Date.now() >= deadline) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+      }, settings);
+    }
+
     // The first-run workspace already runs in this repo, so the seeded tasks'
     // own `repo` field matches its `cwd` (`task.list` filters on equality).
     await page.getByRole("button", { name: "Add panel" }).first().click();
@@ -247,6 +273,20 @@ if (!seedPath || !title) {
       );
     }
     // The first page (Home) is what the panel shows before a task is picked.
+    report.autonomy = await page
+      .locator(".home-autonomy")
+      .evaluateAll(([line]) =>
+        line
+          ? {
+              labels: [...line.children].map((item) => item.textContent.trim()),
+              iconCount: line.querySelectorAll("svg").length,
+              width: line.clientWidth,
+              overflow: line.scrollWidth - line.clientWidth,
+              flexWrap: getComputedStyle(line).flexWrap,
+              fontSize: getComputedStyle(line).fontSize,
+            }
+          : null,
+      );
     await page
       .locator(".orch-main")
       .screenshot({ path: shot("orchestrator-home") });

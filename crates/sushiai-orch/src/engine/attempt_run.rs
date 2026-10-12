@@ -7,6 +7,7 @@ pub(super) struct CostTag {
     pub stage: &'static str,
     pub route_id: String,
     pub repo: Option<String>,
+    pub has_attempt: bool,
 }
 
 impl CostTag {
@@ -15,6 +16,14 @@ impl CostTag {
             stage,
             route_id: route_id.to_string(),
             repo: None,
+            has_attempt: true,
+        }
+    }
+
+    pub fn task_without_attempt(stage: &'static str, route_id: &str) -> Self {
+        Self {
+            has_attempt: false,
+            ..Self::task(stage, route_id)
         }
     }
 
@@ -23,6 +32,7 @@ impl CostTag {
             stage,
             route_id: route_id.to_string(),
             repo: Some(repo.to_string()),
+            has_attempt: false,
         }
     }
 }
@@ -111,13 +121,25 @@ pub(super) enum RunTrack {
 /// one it adopted.
 pub(super) struct Guard {
     stall: Option<Stall>,
-    /// The wall-clock deadline of an implement run, and its length in
-    /// minutes for the message.
-    wall: Option<(tokio::time::Instant, f64)>,
+    wall: Option<(tokio::time::Instant, WallLimit)>,
     detector: Option<LoopDetector>,
     /// Dollars one attempt may spend; `None` = no cap.
     cap: Option<f64>,
     last_output: tokio::time::Instant,
+}
+
+enum WallLimit {
+    Attempt(f64),
+    Helper(String, Duration),
+}
+
+pub(super) fn helper_timeout_message(helper: &str, limit: Duration) -> String {
+    let seconds = if limit.is_zero() {
+        "0.0".to_string()
+    } else {
+        limit.as_secs_f64().to_string()
+    };
+    format!("{helper} timed out after {seconds}s")
 }
 
 /// Why a guard stopped a run.
@@ -126,6 +148,7 @@ pub(super) enum Trip {
     Looped(String),
     OverBudget(String),
     TimeBudget(String),
+    TimedOut(String),
 }
 
 impl Trip {
@@ -144,12 +167,16 @@ impl Trip {
                 outcome.time_budget = true;
                 outcome.error = Some(error);
             }
+            Trip::TimedOut(error) => {
+                outcome.timed_out = true;
+                outcome.error = Some(error);
+            }
         }
     }
 }
 
 impl Guard {
-    /// No watch: a nested run.
+    /// No watch: an unguarded run.
     pub fn off() -> Self {
         Guard {
             stall: None,
@@ -157,6 +184,16 @@ impl Guard {
             detector: None,
             cap: None,
             last_output: tokio::time::Instant::now(),
+        }
+    }
+
+    pub fn helper(name: &str, limit: Duration) -> Self {
+        Self {
+            wall: Some((
+                tokio::time::Instant::now() + limit,
+                WallLimit::Helper(name.to_string(), limit),
+            )),
+            ..Self::off()
         }
     }
 
@@ -181,7 +218,7 @@ impl Guard {
         if mins > 0.0 {
             let left_ms = started_at_ms as f64 + mins * 60_000.0 - now_ms() as f64;
             let left = Duration::from_millis(left_ms.max(0.0) as u64);
-            self.wall = Some((tokio::time::Instant::now() + left, mins));
+            self.wall = Some((tokio::time::Instant::now() + left, WallLimit::Attempt(mins)));
         }
         self
     }
@@ -199,7 +236,9 @@ impl Guard {
             .as_ref()
             .map_or(Duration::from_secs(365 * 24 * 3600), |s| s.limit);
         let silent = self.last_output + limit;
-        self.wall.map_or(silent, |(wall, _)| wall.min(silent))
+        self.wall
+            .as_ref()
+            .map_or(silent, |(wall, _)| (*wall).min(silent))
     }
 
     pub(super) fn heard(&mut self) {
@@ -212,11 +251,16 @@ impl Guard {
     /// limit must sit above them. While a hook runs no stall fires, and the
     /// moment it ends counts as activity: the window starts then.
     pub(super) fn stall_expired(&mut self) -> Option<Trip> {
-        if let Some((wall, mins)) = self.wall {
-            if tokio::time::Instant::now() >= wall {
-                return Some(Trip::TimeBudget(format!(
-                    "The attempt ran past its {mins} minute time budget; the run was stopped."
-                )));
+        if let Some((wall, limit)) = &self.wall {
+            if tokio::time::Instant::now() >= *wall {
+                return Some(match limit {
+                    WallLimit::Attempt(mins) => Trip::TimeBudget(format!(
+                        "The attempt ran past its {mins} minute time budget; the run was stopped."
+                    )),
+                    WallLimit::Helper(name, limit) => {
+                        Trip::TimedOut(helper_timeout_message(name, *limit))
+                    }
+                });
             }
         }
         let stall = self.stall.as_ref()?;
@@ -370,7 +414,7 @@ fn apply_agent_cache(
 /// `track` gates the mid-run `pgid`/`session_id` persistence below:
 /// `Attempt`/`Resumable` for a session that *is* `task.attempts[_]` with
 /// number `attempt_n` (the implement or plan attempt itself); `No` for a nested session
-/// that merely borrows that attempt's number for its run directory (review,
+/// that belongs to the attempt but writes to its own helper folder (review,
 /// orchestrator triage) -- otherwise its own pgid/session id would
 /// overwrite the real attempt's, leaving it stuck `running` with a session
 /// id `--resume` should never see and a pgid recovery would `killpg` on a
@@ -418,9 +462,28 @@ pub(super) async fn run_harness(
     // Asked before the run, not after, so a stand-in binary that logs its
     // argv per invocation ends with the run's own.
     let codex_version = match req.harness {
-        Harness::Codex => codex_version(&bin).await,
+        Harness::Codex => match codex_version(&bin, cancel, &mut guard).await {
+            Ok(version) => version,
+            Err(trip) => {
+                let mut outcome = harness::RunOutcome::default();
+                trip.apply(&mut outcome);
+                record_run(
+                    app,
+                    task_id,
+                    attempt_n,
+                    &tag,
+                    (req.harness, req.model, false),
+                    &outcome,
+                    started_at,
+                );
+                return Ok(outcome);
+            }
+        },
         Harness::Claude => None,
     };
+    if cancel.is_cancelled() {
+        return Err(RunError::Cancelled);
+    }
     let mut cmd;
     let (project_env, redaction_env) = run_secrets(app, task_id);
     let files = RunFiles::of(events_path);
@@ -520,6 +583,7 @@ pub(super) async fn run_harness(
 
     type Source = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
     let wrapper_gone = Arc::new(AtomicBool::new(false));
+    let stdin = child.stdin.take();
     let (stdout, stderr): (Source, Source) = if track_attempt {
         let pgid = pgid.unwrap_or(0);
         (
@@ -537,11 +601,6 @@ pub(super) async fn run_harness(
             ),
         )
     } else {
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(brief_text.as_bytes()).await;
-            drop(stdin);
-        }
         (
             Box::new(child.stdout.take().expect("piped stdout")),
             Box::new(child.stderr.take().expect("piped stderr")),
@@ -549,6 +608,14 @@ pub(super) async fn run_harness(
     };
     let mut out_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
     let mut err_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
+    let feed_stdin = async {
+        if let Some(mut stdin) = stdin {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(brief_text.as_bytes()).await;
+        }
+    };
+    tokio::pin!(feed_stdin);
+    let mut stdin_done = track_attempt;
 
     let mut outcome = harness::RunOutcome::default();
     let harness_kind = req.harness;
@@ -560,6 +627,9 @@ pub(super) async fn run_harness(
 
     loop {
         tokio::select! {
+            _ = &mut feed_stdin, if !stdin_done => {
+                stdin_done = true;
+            }
             _ = cancel.cancelled() => {
                 if track == RunTrack::Resumable && app.runs_survive_shutdown() {
                     // A daemon shutdown leaves the run going: the next daemon
@@ -787,7 +857,7 @@ pub(super) fn record_run(
             task_id: is_task.then(|| task_id.to_string()),
             run_id: (!is_task && !task_id.is_empty()).then(|| task_id.to_string()),
             stage: tag.stage.to_string(),
-            attempt: is_task.then_some(attempt_n),
+            attempt: (is_task && tag.has_attempt).then_some(attempt_n),
             route_id: tag.route_id.clone(),
             harness,
             model,
@@ -842,27 +912,74 @@ fn fingerprint_of(
 }
 
 /// `codex --version`, asked once per binary per daemon start.
-async fn codex_version(bin: &str) -> Option<String> {
+async fn codex_version(
+    bin: &str,
+    cancel: &CancelToken,
+    guard: &mut Guard,
+) -> Result<Option<String>, Trip> {
+    use tokio::io::AsyncReadExt;
+
     static CACHE: OnceLock<StdMutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(known) = cache.lock().unwrap().get(bin) {
-        return known.clone();
+        return Ok(known.clone());
     }
-    let version = tokio::process::Command::new(bin)
-        .arg("--version")
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("--version")
         .env("PATH", augmented_path())
         .stdin(std::process::Stdio::null())
-        .output()
-        .await
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    let pgid = child.id().map(|pid| pid as i32);
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let result = {
+        let output = async {
+            let mut bytes = Vec::new();
+            let (status, read) = tokio::join!(child.wait(), stdout.read_to_end(&mut bytes));
+            (status, read, bytes)
+        };
+        tokio::pin!(output);
+        loop {
+            tokio::select! {
+                output = &mut output => break Ok(Some(output)),
+                _ = cancel.cancelled() => break Ok(None),
+                _ = tokio::time::sleep_until(guard.deadline()), if guard.armed() => {
+                    if let Some(trip) = guard.stall_expired() {
+                        break Err(trip);
+                    }
+                }
+            }
+        }
+    };
+    let (status, read, bytes) = match result {
+        Ok(Some(output)) => output,
+        stopped => {
+            crate::procs::kill_group(pgid, &mut child).await;
+            return stopped.map(|_| None);
+        }
+    };
+    let version = status
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|status| status.success() && read.is_ok())
+        .map(|_| String::from_utf8_lossy(&bytes).trim().to_string())
         .filter(|v| !v.is_empty());
     cache
         .lock()
         .unwrap()
         .insert(bin.to_string(), version.clone());
-    version
+    Ok(version)
 }
 
 fn cancelled_fingerprint_path(events_path: &Path) -> PathBuf {
@@ -981,6 +1098,152 @@ mod stall_tests {
 
     fn ago(secs: u64) -> tokio::time::Instant {
         tokio::time::Instant::now() - Duration::from_secs(secs)
+    }
+
+    #[tokio::test]
+    async fn codex_version_timed_out_uses_the_helper_deadline_and_is_not_cached() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex");
+        std::fs::write(&bin, "#!/bin/sh\necho $$ > \"$0.pid\"\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // App startup normally resolves the login PATH before a task runs.
+        let _ = augmented_path();
+        let cancel = CancelToken::new();
+        let limit = Duration::from_millis(250);
+        let mut guard = Guard::helper("planner", limit);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            codex_version(bin.to_str().unwrap(), &cancel, &mut guard),
+        )
+        .await
+        .expect("the version probe must honor the helper deadline");
+        let trip = match result {
+            Err(trip) => trip,
+            Ok(version) => panic!("the version probe should time out, got {version:?}"),
+        };
+        let mut outcome = harness::RunOutcome::default();
+        trip.apply(&mut outcome);
+        assert!(outcome.timed_out);
+        assert_eq!(
+            outcome.error,
+            Some(helper_timeout_message("planner", limit))
+        );
+        let pgid: i32 = std::fs::read_to_string(bin.with_extension("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!group_alive(pgid), "the version probe was not stopped");
+
+        std::fs::write(&bin, "#!/bin/sh\necho 'codex fixture'\n").unwrap();
+        let mut guard = Guard::helper("planner", Duration::from_secs(2));
+        let version = codex_version(bin.to_str().unwrap(), &cancel, &mut guard)
+            .await
+            .ok()
+            .expect("the later version probe must succeed");
+        assert_eq!(version.as_deref(), Some("codex fixture"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_codex_version_probe_stops_its_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex");
+        let pidfile = bin.with_extension("pid");
+        std::fs::write(&bin, "#!/bin/sh\necho $$ > \"$0.pid\"\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = augmented_path();
+        let cancel = CancelToken::new();
+        let mut guard = Guard::off();
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                codex_version(bin.to_str().unwrap(), &cancel, &mut guard),
+                async {
+                    while !pidfile.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    cancel.cancel();
+                }
+            )
+        })
+        .await
+        .expect("the probe must stop when the task is cancelled");
+        assert_eq!(result.ok().expect("cancellation is not a timeout"), None);
+        let pgid: i32 = std::fs::read_to_string(pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!group_alive(pgid), "the cancelled probe was not stopped");
+    }
+
+    #[tokio::test]
+    async fn helper_timed_out_while_stdin_is_full() {
+        let (app, _dir, task, route) = slow_helper_task();
+        let worktree = PathBuf::from(&task.worktree);
+        std::fs::write(worktree.join(".overseer-no-stdin"), "").unwrap();
+        let run_dir = app
+            .store
+            .claim_helper_run_dir(&task.id, "test-helper", None)
+            .unwrap();
+        let mcp = run_dir.join("mcp.json");
+        let settings = run_dir.join("settings.json");
+        let req = review_request(&route, &worktree, &mcp, &settings, &[]);
+        let prompt = "x".repeat(1024 * 1024);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_harness(
+                &app,
+                &task.id,
+                0,
+                RunTrack::No,
+                &worktree,
+                &req,
+                CostTag::task_without_attempt("brief_check", &route.id),
+                &prompt,
+                &run_dir.join("events.jsonl"),
+                &CancelToken::new(),
+                Guard::helper("test-helper", app.helper_timeout()),
+            ),
+        )
+        .await
+        .expect("the helper deadline must cover blocked stdin")
+        .ok()
+        .expect("the helper must start");
+        assert!(outcome.timed_out);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("test-helper timed out after 0.25s")
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_timed_out_uses_the_wall_deadline_even_after_output() {
+        let limit = Duration::from_millis(50);
+        let mut guard = Guard::helper("judge", limit);
+        assert!(guard.armed());
+        let deadline = guard.deadline();
+        guard.heard();
+        assert_eq!(guard.deadline(), deadline);
+        assert!(guard.stall_expired().is_none());
+        tokio::time::sleep_until(deadline).await;
+        let trip = guard.stall_expired().expect("wall deadline expired");
+        assert!(matches!(trip, Trip::TimedOut(_)));
+        let mut outcome = harness::RunOutcome::default();
+        trip.apply(&mut outcome);
+        assert!(outcome.timed_out);
+        assert!(!outcome.stalled && !outcome.time_budget && !outcome.over_budget);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("judge timed out after 0.05s")
+        );
+
+        let mut both = Guard::helper("judge", Duration::from_secs(10));
+        both.stall = guarded(1).0.stall;
+        assert!(both.deadline() < tokio::time::Instant::now() + Duration::from_secs(2));
     }
 
     #[test]

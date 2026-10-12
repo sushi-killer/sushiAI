@@ -90,8 +90,12 @@ pub(super) async fn owner_accepts(
     };
     let attempt_n = task.attempts[idx].n;
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(task_id, attempt_n).join("accept-check");
-    let _ = std::fs::create_dir_all(&run_dir);
+    let Ok(run_dir) = app
+        .store
+        .claim_helper_run_dir(task_id, "accept-check", Some(attempt_n))
+    else {
+        return false;
+    };
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -125,6 +129,7 @@ pub(super) async fn owner_accepts(
     let brief_text = brief::build_accept_brief(task, &question.text, &question.options, answer);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
     let events_path = run_dir.join("events.jsonl");
+    let limit = app.helper_timeout();
     let run_result = run_harness(
         app,
         task_id,
@@ -136,12 +141,16 @@ pub(super) async fn owner_accepts(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("accept-check", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     match run_result {
         Ok(o) => {
+            if o.timed_out {
+                task.decisions
+                    .push(helper_timeout_message("accept-check", limit));
+            }
             if let Some(cost) = o.cost_usd {
                 task.cost_usd += cost;
             }
@@ -194,7 +203,7 @@ async fn park_for_answer(
     permit.take();
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     // The wake may hold the question for the overseer; the broadcast that
     // shows the waiting task carries that, so the app never sees it unheld first.
     wake_orchestrator_for_waiting(app, task);
@@ -227,7 +236,7 @@ async fn park_for_answer(
             record_answer_for(task, question.as_ref(), answer, caller, evidence.as_deref());
             task.status = TaskStatus::Queued;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
         }
         None => {
@@ -242,7 +251,7 @@ async fn park_for_answer(
                 if changed {
                     task.status = next;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(task);
+                    app.save_task_logged(task);
                     app.broadcast_task(task);
                 }
             }
@@ -369,7 +378,7 @@ impl App {
             q.held_for_overseer = true;
             q.held_at = Some(at);
             held.push((task.id.clone(), at));
-            let _ = self.store.save_task(&task);
+            self.save_task_logged(&task);
             self.broadcast_task(&task);
         }
         held
@@ -394,7 +403,7 @@ impl App {
                 if let Some(q) = task.question.as_mut() {
                     q.release();
                 }
-                let _ = self.store.save_task(&task);
+                self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
         }
@@ -409,7 +418,7 @@ impl App {
                 .filter(|q| q.held_for_overseer && !keep(q))
             {
                 q.release();
-                let _ = self.store.save_task(&task);
+                self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
         }
@@ -461,7 +470,7 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
     let prompt = overseer_prompt("overseer_done", task);
     // Marked either way: this is the one transition, not a retry loop.
     task.overseer_woken = true;
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     chat::wake_overseer(app, &task.repo, prompt, false, "done", Some(&task.id));
 }
 
@@ -493,7 +502,7 @@ async fn run_triage(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
-    task: &Task,
+    task: &mut Task,
     worktree: &Path,
     question: &str,
     options: &[String],
@@ -523,8 +532,10 @@ async fn run_triage(
     }
     let route = app.chat_route(&settings)?;
 
-    let run_dir = app.store.run_dir(task_id, attempt_n).join("triage");
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(task_id, "triage", Some(attempt_n))
+        .ok()?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -558,6 +569,7 @@ async fn run_triage(
     let brief_text = brief::build_triage_brief(task, question, options);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
     let events_path = run_dir.join("events.jsonl");
+    let limit = app.helper_timeout();
     let run_result = run_harness(
         app,
         task_id,
@@ -569,11 +581,14 @@ async fn run_triage(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("triage", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
 
+    if run_result.as_ref().is_ok_and(|o| o.timed_out) {
+        task.decisions.push(helper_timeout_message("triage", limit));
+    }
     match run_result {
         // The task was stopped mid-triage: don't manufacture an escalation
         // for it, just skip triage and let the normal wait pick up the
@@ -718,7 +733,7 @@ async fn wait_for_triaged_answer(
                 task.question = None;
                 task.status = TaskStatus::Queued;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return Some(Answered {
                     text: decision.answer,
@@ -838,7 +853,7 @@ pub(super) async fn ask_plan_question_with_triage(
                 task.question = None;
                 task.status = TaskStatus::Drafting;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return Some(decision.answer);
             }
@@ -846,7 +861,7 @@ pub(super) async fn ask_plan_question_with_triage(
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 let (text, options) = if keep_text {
                     (question_text.to_string(), options)
@@ -1210,5 +1225,62 @@ mod answer_caller_tests {
         assert!(!is_orchestrator_answer_decision("Lead: stop"));
         assert!(!is_orchestrator_answer_decision("Owner: q -> a"));
         assert!(!is_orchestrator_answer_decision(&no_planner_tier_line("r")));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn triage_timed_out_escalates_to_the_owner() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        let id = task.id.clone();
+        let worktree = PathBuf::from(&task.worktree);
+        let options = vec!["retry".into(), "stop".into()];
+        let result = run_triage(
+            &app,
+            &id,
+            1,
+            &mut task,
+            &worktree,
+            "What now?",
+            &options,
+            false,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result.decision.action,
+            brief::TriageAction::Escalate
+        ));
+        assert_eq!(result.decision.question, "What now?");
+        assert_helper_timeout(&task, "triage");
+    }
+
+    #[tokio::test]
+    async fn accept_check_timed_out_does_not_accept_the_attempt() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        let id = task.id.clone();
+        let question = Question::new(
+            "Accept?",
+            vec!["retry".into(), "stop".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        assert!(
+            !owner_accepts(
+                &app,
+                &id,
+                &mut task,
+                0,
+                &question,
+                "ship it",
+                &CancelToken::new()
+            )
+            .await
+        );
+        assert_helper_timeout(&task, "accept-check");
     }
 }

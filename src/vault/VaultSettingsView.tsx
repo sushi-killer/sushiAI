@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { tokenStatus, tokenSet, tokenClear } from "./client";
 import "./vault.css";
 
 /** The Settings tab of the Vault module: the read-only token, written here
@@ -10,10 +11,10 @@ export function VaultSettingsView() {
   const [error, setError] = useState("");
   useEffect(() => {
     let live = true;
-    window.bridge
-      ?.vaultTokenStatus()
-      .then((status) => live && setSaved(status.saved))
-      .catch(() => {});
+    if (window.bridge)
+      tokenStatus()
+        .then((status) => live && setSaved(status.saved))
+        .catch(() => {});
     return () => {
       live = false;
     };
@@ -35,8 +36,7 @@ export function VaultSettingsView() {
       className="vault-token"
       onSubmit={(event) => {
         event.preventDefault();
-        if (token.trim())
-          void run(() => window.bridge!.vaultTokenSet(token.trim()));
+        if (token.trim()) void run(() => tokenSet(token.trim()));
       }}
     >
       <div className="vault-token-head">
@@ -65,7 +65,7 @@ export function VaultSettingsView() {
             className="secondary"
             type="button"
             disabled={busy}
-            onClick={() => void run(() => window.bridge!.vaultTokenClear())}
+            onClick={() => void run(() => tokenClear())}
           >
             Remove
           </button>

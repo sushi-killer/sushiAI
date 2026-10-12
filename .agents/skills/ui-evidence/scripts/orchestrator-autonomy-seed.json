@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    { "title": "Autonomy fixture", "status": "done" },
+    {
+      "title": "Waiting for usage limit",
+      "status": "stopped",
+      "pausedInHours": 3
+    }
+  ],
+  "settings": {
+    "autopilot": true,
+    "autoAnswer": true,
+    "waitRemindEveryHours": 4,
+    "waitDefaultAfterHours": 24
+  }
+}

@@ -291,7 +291,7 @@ pub(super) async fn ask_plan_question(
         ));
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
         wake_orchestrator_for_waiting(app, &task);
     }
@@ -333,7 +333,7 @@ pub(super) async fn ask_plan_question(
                 }
                 task.status = TaskStatus::Drafting;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
         }
@@ -348,7 +348,7 @@ pub(super) async fn ask_plan_question(
                 if changed {
                     task.status = next;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
+                    app.save_task_logged(&task);
                     app.broadcast_task(&task);
                 }
             }
@@ -400,11 +400,10 @@ async fn end_plan_stage(app: &Arc<App>, task_id: &str, idx: Option<usize>) -> Pl
                 if a.status == AttemptStatus::Running {
                     a.status = AttemptStatus::Interrupted;
                     a.ended_at = Some(now_ms());
-                    let run_dir = app.store.run_dir(task_id, a.n);
                     let prices = app.settings.read().unwrap().prices.clone();
-                    settle_unfinished_cost(&mut t, idx, &run_dir, &prices);
+                    settle_unfinished_cost(&mut t, idx, &app.store, &prices);
                     t.updated_at = now_ms();
-                    let _ = app.store.save_task(&t);
+                    app.save_task_logged(&t);
                     app.broadcast_task(&t);
                 }
             }
@@ -563,7 +562,7 @@ fn store_draft(
     task.attempts[idx].ended_at = Some(now_ms());
     task.attempts[idx].summary = Some(format!("Drafted: {}", draft.title));
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
 }
 
@@ -573,12 +572,13 @@ enum Uncorrected {
     Fresh(String),
     /// The task was cancelled; the plan attempt at this index is open.
     Cancelled(usize),
+    Failed,
 }
 
 /// A brief-check contradiction in plan attempt `idx`'s draft: resumes that
 /// attempt's planner session with a short correction turn and stores the
-/// corrected draft. Never fails the task: no session, a failed run or an
-/// unparseable reply is `Fresh`.
+/// corrected draft. No session, a failed run or an unparseable reply is
+/// `Fresh`; a timed-out planner fails the task.
 async fn correct_draft(
     app: &Arc<App>,
     task_id: &str,
@@ -598,12 +598,12 @@ async fn correct_draft(
         return Err(fresh("the cost budget is reached"));
     }
     let settings = app.settings.read().unwrap().clone();
-    let attempt_n = task.attempts.len() as u32 + 1;
+    let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
     task.attempts
         .push(new_plan_attempt(attempt_n, route, "brief correction"));
     let at = task.attempts.len() - 1;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
+    app.save_task_logged(&task);
     app.broadcast_task(&task);
 
     let worktree = PathBuf::from(&task.worktree);
@@ -618,6 +618,7 @@ async fn correct_draft(
     let brief_text =
         brief::build_plan_correction_brief(conflict, &task.variant(), task.parent.is_none());
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         task_id,
@@ -629,7 +630,7 @@ async fn correct_draft(
         &brief_text,
         &run_dir.join("events.jsonl"),
         cancel,
-        Guard::off(),
+        Guard::helper("planner", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -639,7 +640,7 @@ async fn correct_draft(
     let fail = |task: &mut Task, kind: FailureKind, why: String| {
         record_failure(task, at, kind, why.clone());
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         Err(Uncorrected::Fresh(why))
     };
@@ -666,6 +667,21 @@ async fn correct_draft(
         task.cost_usd += cost;
     }
     task.attempts[at].fingerprint = o.fingerprint.clone();
+    if o.timed_out {
+        task.decisions
+            .push(helper_timeout_message("planner", limit));
+        record_failure(
+            &mut task,
+            at,
+            FailureKind::Error,
+            o.error.clone().unwrap_or_default(),
+        );
+        task.status = TaskStatus::Failed;
+        task.updated_at = now_ms();
+        app.save_task_logged(&task);
+        app.broadcast_task(&task);
+        return Err(Uncorrected::Failed);
+    }
     if let Some(err) = o.error {
         return fail(
             &mut task,
@@ -762,7 +778,7 @@ pub(super) async fn run_plan_stage(
             if let Ok(Some(mut t)) = app.store.load_task(task_id) {
                 t.status = TaskStatus::Failed;
                 t.updated_at = now_ms();
-                let _ = app.store.save_task(&t);
+                app.save_task_logged(&t);
                 app.broadcast_task(&t);
             }
             return end_plan_stage(app, task_id, None).await;
@@ -784,7 +800,7 @@ pub(super) async fn run_plan_stage(
         }
 
         let request_text = task.request.clone().unwrap_or_default();
-        let attempt_n = task.attempts.len() as u32 + 1;
+        let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
         let worktree = PathBuf::from(&task.worktree);
         let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
         let _ = std::fs::create_dir_all(&run_dir);
@@ -793,7 +809,7 @@ pub(super) async fn run_plan_stage(
         task.attempts.push(attempt);
         let idx = task.attempts.len() - 1;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
 
         let (mcp_path, settings_path, key_path) =
@@ -829,7 +845,7 @@ pub(super) async fn run_plan_stage(
                 }
                 // The first run's cost, saved before the reload after the
                 // retry would drop it; recovery then counts only the retry.
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
             }
             let brief_text = match (retry == 0, task.parent.is_some()) {
                 (true, false) => {
@@ -871,6 +887,7 @@ pub(super) async fn run_plan_stage(
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));
+            let limit = app.helper_timeout();
             let run_result = run_harness(
                 app,
                 task_id,
@@ -882,7 +899,7 @@ pub(super) async fn run_plan_stage(
                 &brief_text,
                 &events_path,
                 cancel,
-                Guard::off(),
+                Guard::helper("planner", limit),
             )
             .await;
             if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
@@ -890,6 +907,10 @@ pub(super) async fn run_plan_stage(
             }
             match run_result {
                 Ok(o) => {
+                    if o.timed_out {
+                        task.decisions
+                            .push(helper_timeout_message("planner", limit));
+                    }
                     if let Some(cost) = o.cost_usd {
                         let a = &mut task.attempts[idx];
                         a.cost_usd = Some(a.cost_usd.unwrap_or(0.0) + cost);
@@ -914,7 +935,7 @@ pub(super) async fn run_plan_stage(
                         record_failure(&mut task, idx, FailureKind::Error, err);
                         task.status = TaskStatus::Failed;
                         task.updated_at = now_ms();
-                        let _ = app.store.save_task(&task);
+                        app.save_task_logged(&task);
                         app.broadcast_task(&task);
                         hard_failure = true;
                         break;
@@ -933,7 +954,7 @@ pub(super) async fn run_plan_stage(
                     record_failure(&mut task, idx, FailureKind::Error, msg);
                     task.status = TaskStatus::Failed;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
+                    app.save_task_logged(&task);
                     app.broadcast_task(&task);
                     hard_failure = true;
                     break;
@@ -958,7 +979,7 @@ pub(super) async fn run_plan_stage(
                     .to_string(),
             );
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             continue;
         }
@@ -975,12 +996,12 @@ pub(super) async fn run_plan_stage(
                 // unparseable round in a row means this isn't going anywhere.
                 task.status = TaskStatus::Failed;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 return end_plan_stage(app, task_id, Some(idx)).await;
             }
             clarify_rounds += 1;
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             let question =
                 "The planner could not draft this task: edit it or answer with more detail";
@@ -1010,7 +1031,7 @@ pub(super) async fn run_plan_stage(
                         t.request = Some(combined);
                         t.status = TaskStatus::Drafting;
                         t.updated_at = now_ms();
-                        let _ = app.store.save_task(&t);
+                        app.save_task_logged(&t);
                         app.broadcast_task(&t);
                     }
                     continue;
@@ -1024,7 +1045,7 @@ pub(super) async fn run_plan_stage(
         // Do the draft's own requirements contradict each other? One
         // redraft, once per task; the check runs again on the new draft.
         let mut draft = draft;
-        match check_brief(app, task_id, attempt_n, true, cancel).await {
+        match check_brief(app, task_id, true, cancel).await {
             BriefAction::Redraft(conflict) => {
                 // The planner's own session fixes the contradiction when it
                 // can; otherwise a fresh draft reads the request again.
@@ -1034,11 +1055,12 @@ pub(super) async fn run_plan_stage(
                         // The task has had its one redraft: a second
                         // conflict is kept for the implement brief.
                         if let BriefAction::Cancelled =
-                            check_brief(app, task_id, attempt_n, true, cancel).await
+                            check_brief(app, task_id, true, cancel).await
                         {
                             return end_plan_stage(app, task_id, Some(idx)).await;
                         }
                     }
+                    Err(Uncorrected::Failed) => return end_plan_stage(app, task_id, None).await,
                     Err(Uncorrected::Cancelled(at)) => {
                         return end_plan_stage(app, task_id, Some(at)).await;
                     }
@@ -1051,7 +1073,7 @@ pub(super) async fn run_plan_stage(
                                 "Brief check: the planner session was not resumed ({why}); drafting from scratch"
                             ));
                             t.updated_at = now_ms();
-                            let _ = app.store.save_task(&t);
+                            app.save_task_logged(&t);
                             app.broadcast_task(&t);
                         }
                         continue;
@@ -1100,7 +1122,7 @@ pub(super) async fn run_plan_stage(
                 });
             }
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             asked = Vec::new();
             if !blocking.is_empty() {
@@ -1202,7 +1224,7 @@ pub(super) async fn run_plan_stage(
                     if let Ok(Some(mut t)) = app.store.load_task(task_id) {
                         t.verify = vec![answer];
                         t.updated_at = now_ms();
-                        let _ = app.store.save_task(&t);
+                        app.save_task_logged(&t);
                         app.broadcast_task(&t);
                     }
                 }
@@ -1220,7 +1242,7 @@ pub(super) async fn run_plan_stage(
                 app.close_stopped_task(&mut t);
             }
             t.updated_at = now_ms();
-            let _ = app.store.save_task(&t);
+            app.save_task_logged(&t);
             app.broadcast_task(&t);
         }
         return if auto_start_after_plan {
@@ -1405,4 +1427,60 @@ async fn split_into_subtasks(
     }
     app.broadcast_task(&parent);
     Ok(())
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn planner_timed_out_fails_the_task_with_an_error() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        task.status = TaskStatus::Drafting;
+        task.attempts.clear();
+        task.request = Some("Ship the change".into());
+        app.store.save_task(&task).unwrap();
+        let pending = Arc::new(StdMutex::new(None));
+        let mut permit = None;
+        let result = run_plan_stage(
+            &app,
+            &task.id,
+            &pending,
+            &CancelToken::new(),
+            &mut permit,
+            true,
+        )
+        .await;
+        assert!(matches!(result, PlanOutcome::Ended));
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.attempts[0].failure.as_ref().unwrap().kind,
+            FailureKind::Error
+        );
+        assert_eq!(
+            task.attempts[0].failure.as_ref().unwrap().detail,
+            "planner timed out after 0.25s"
+        );
+        assert_helper_timeout(&task, "planner");
+    }
+
+    #[tokio::test]
+    async fn planner_correction_timed_out_fails_instead_of_redrafting() {
+        let (app, _dir, mut task, route) = slow_helper_task();
+        task.attempts[0].stage = Stage::Plan;
+        task.attempts[0].session_id = Some("s".into());
+        app.store.save_task(&task).unwrap();
+        let result =
+            correct_draft(&app, &task.id, 0, &route, "conflict", &CancelToken::new()).await;
+        assert!(matches!(result, Err(Uncorrected::Failed)));
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.attempts[1].failure.as_ref().unwrap().kind,
+            FailureKind::Error
+        );
+        assert_ne!(task.attempts[0].n, task.attempts[1].n);
+        assert_helper_timeout(&task, "planner");
+    }
 }

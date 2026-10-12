@@ -96,17 +96,20 @@ async fn run_check(
     app: &Arc<App>,
     task: &Task,
     route: &Route,
-    attempt_n: u32,
     cancel: &CancelToken,
-) -> Result<(Verdict, Option<MissingTool>), RunError> {
+) -> Result<(Verdict, Option<MissingTool>, Option<String>), RunError> {
     let settings = app.settings.read().unwrap().clone();
     let tools = permissions::task_tools(app, &settings, task, Path::new(&task.worktree));
     let brief_text = build_check_brief(&task.goal, &task.criteria, &tools.capabilities());
-    let (reply, cost) = run_judge(
+    let JudgeRun {
+        reply,
+        cost,
+        timeout_note,
+    } = run_judge(
         app,
         task,
         route,
-        attempt_n,
+        None,
         "brief_check",
         "brief-check",
         &brief_text,
@@ -117,32 +120,40 @@ async fn run_check(
     Ok(match reply {
         Ok(text) => {
             let missing = parse_missing_tool(&text, task.criteria.len(), &tools.off);
-            (parse_verdict(&text), missing)
+            (parse_verdict(&text), missing, timeout_note)
         }
-        Err(why) => (Verdict::Unusable(why), None),
+        Err(why) => (Verdict::Unusable(why), None, timeout_note),
     })
 }
 
+pub(super) struct JudgeRun {
+    pub reply: Result<String, String>,
+    pub cost: f64,
+    pub timeout_note: Option<String>,
+}
+
 /// One cheap read-only run of `route` on `prompt` in the task's worktree,
-/// files under `<run dir>/<name>`. Returns the reply (`Err` is a run that
-/// ended in an error, `Ok` its final text) and the run's cost, which the
-/// caller adds to its own copy of the task; only a cancelled run's partial
+/// files in a claimed helper folder for `name`. Returns the reply (`Err` is a run that
+/// ended in an error, `Ok` its final text), cost and optional timeout decision. The
+/// caller adds them to its own copy of the task; only a cancelled run's partial
 /// cost is added to the stored task here.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_judge(
     app: &Arc<App>,
     task: &Task,
     route: &Route,
-    attempt_n: u32,
+    attempt_n: Option<u32>,
     stage: &'static str,
     name: &str,
     prompt: &str,
     cancel: &CancelToken,
-) -> Result<(Result<String, String>, f64), RunError> {
+) -> Result<JudgeRun, RunError> {
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join(name);
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, name, attempt_n)
+        .map_err(|e| RunError::Io(e.to_string()))?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -165,18 +176,23 @@ pub(super) async fn run_judge(
         resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &[])
     };
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         &task.id,
-        attempt_n,
+        attempt_n.unwrap_or(0),
         RunTrack::No,
         &worktree,
         &req,
-        CostTag::task(stage, &route.id),
+        if attempt_n.is_some() {
+            CostTag::task(stage, &route.id)
+        } else {
+            CostTag::task_without_attempt(stage, &route.id)
+        },
         prompt,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper(name, limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -193,22 +209,37 @@ pub(super) async fn run_judge(
         }
         Err(e) => return Err(e),
     };
+    let timeout_note = outcome
+        .timed_out
+        .then(|| helper_timeout_message(name, limit));
     let cost = outcome.cost_usd.unwrap_or(0.0);
-    if let Some(error) = outcome.error {
-        return Ok((Err(format!("the run failed ({error})")), cost));
+    if outcome.timed_out {
+        return Ok(JudgeRun {
+            reply: Err("the run timed out".to_string()),
+            cost,
+            timeout_note,
+        });
     }
-    Ok((Ok(outcome.final_text.unwrap_or_default()), cost))
+    if let Some(error) = outcome.error {
+        return Ok(JudgeRun {
+            reply: Err(format!("the run failed ({error})")),
+            cost,
+            timeout_note,
+        });
+    }
+    Ok(JudgeRun {
+        reply: Ok(outcome.final_text.unwrap_or_default()),
+        cost,
+        timeout_note,
+    })
 }
 
 pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     if cost <= 0.0 {
         return;
     }
-    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-        t.cost_usd += cost;
-        t.updated_at = now_ms();
-        let _ = app.store.save_task(&t);
-        app.broadcast_task(&t);
+    if let Err(e) = app.update_task(task_id, |task| task.cost_usd += cost) {
+        eprintln!("orch: updating task {task_id} cost failed: {e}");
     }
 }
 
@@ -261,7 +292,6 @@ pub(super) fn redraft_request_note(conflict: &str) -> String {
 pub(super) async fn check_brief(
     app: &Arc<App>,
     task_id: &str,
-    attempt_n: u32,
     can_redraft: bool,
     cancel: &CancelToken,
 ) -> BriefAction {
@@ -274,22 +304,26 @@ pub(super) async fn check_brief(
     let Some((route_id, route, fallback)) = check_route_for(app, &task.variant()) else {
         return BriefAction::Proceed;
     };
-    let (verdict, missing) = match &route {
-        Some(route) => match run_check(app, &task, route, attempt_n, cancel).await {
+    let (verdict, missing, timeout_note) = match &route {
+        Some(route) => match run_check(app, &task, route, cancel).await {
             Ok(v) => v,
             Err(RunError::Cancelled) => return BriefAction::Cancelled,
-            Err(RunError::Io(msg) | RunError::NotFound(msg)) => (Verdict::Unusable(msg), None),
+            Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
+                (Verdict::Unusable(msg), None, None)
+            }
         },
         None => (
             Verdict::Unusable(format!(
                 "no route on an installed agent CLI for {route_id}; the check is off"
             )),
             None,
+            None,
         ),
     };
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return BriefAction::Proceed;
     };
+    task.decisions.extend(timeout_note);
     let mut action = BriefAction::Proceed;
     if let Some(note) = fallback {
         task.decisions.push(format!("Brief check: {note}"));
@@ -328,7 +362,7 @@ pub(super) async fn check_brief(
     }
     task.brief_check.done = !matches!(action, BriefAction::Redraft(_));
     task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
+    app.save_task_logged(&task);
     app.broadcast_task(&task);
     action
 }
@@ -389,7 +423,6 @@ fn reply_list(v: &serde_json::Value, key: &str) -> Option<Vec<String>> {
 pub(super) async fn refresh_after_dependencies(
     app: &Arc<App>,
     task_id: &str,
-    attempt_n: u32,
     cancel: &CancelToken,
 ) -> bool {
     let Ok(Some(task)) = app.store.load_task(task_id) else {
@@ -413,7 +446,7 @@ pub(super) async fn refresh_after_dependencies(
             t.brief_check.refreshed = true;
             t.decisions.extend(decision);
             t.updated_at = now_ms();
-            let _ = app.store.save_task(&t);
+            app.save_task_logged(&t);
             app.broadcast_task(&t);
         }
     };
@@ -446,18 +479,25 @@ pub(super) async fn refresh_after_dependencies(
             "finalVerify": task.final_verify,
         })
     );
-    let reply = match run_judge(
-        app, &task, &route, attempt_n, "refresh", "refresh", &prompt, cancel,
+    let (reply, timeout_note) = match run_judge(
+        app, &task, &route, None, "refresh", "refresh", &prompt, cancel,
     )
     .await
     {
-        Ok((reply, cost)) => {
+        Ok(JudgeRun {
+            reply,
+            cost,
+            timeout_note,
+        }) => {
             add_task_cost(app, task_id, cost);
-            reply
+            (reply, timeout_note)
         }
         Err(RunError::Cancelled) => return true,
-        Err(RunError::Io(msg) | RunError::NotFound(msg)) => Err(msg),
+        Err(RunError::Io(msg) | RunError::NotFound(msg)) => (Err(msg), None),
     };
+    if let Some(line) = timeout_note {
+        settle(Some(line), &|_| {});
+    }
     let note = fallback.map(|n| format!("Refresh: {n}"));
     let parsed = reply.and_then(|text| {
         let (start, end) = (text.find('{'), text.rfind('}'));
@@ -638,7 +678,7 @@ mod tests {
         let miss = child_with(&["src/other.txt"]);
 
         for t in [&hit, &miss] {
-            let cancelled = refresh_after_dependencies(&app, &t.id, 1, &CancelToken::new()).await;
+            let cancelled = refresh_after_dependencies(&app, &t.id, &CancelToken::new()).await;
             assert!(!cancelled);
         }
         let refresh_lines = |t: &Task| {
@@ -665,5 +705,29 @@ mod tests {
                 .brief_check
                 .refreshed
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn brief_check_timed_out_continues_without_a_usable_answer() {
+        let (app, _dir, task, _) = slow_helper_task();
+        assert!(matches!(
+            check_brief(&app, &task.id, false, &CancelToken::new()).await,
+            BriefAction::Proceed
+        ));
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert!(task.brief_check.done);
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Brief check: no usable answer") && d.ends_with("continuing")));
+        assert_helper_timeout(&task, "brief-check");
+        let cost = crate::costs::read_all(&app.data_dir);
+        assert_eq!(cost.len(), 1);
+        assert!(cost[0].attempt.is_none());
     }
 }

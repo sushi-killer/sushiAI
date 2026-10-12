@@ -71,23 +71,33 @@ pub fn costs_path(data: &Path) -> PathBuf {
 /// run.
 pub fn append(data: &Path, record: &CostRecord) {
     debug_assert!(STAGES.contains(&record.stage.as_str()), "{}", record.stage);
-    let Ok(mut line) = serde_json::to_string(record) else {
-        return;
+    let mut line = match serde_json::to_string(record) {
+        Ok(line) => line,
+        Err(e) => {
+            eprintln!("orch: serializing cost record failed: {e}");
+            return;
+        }
     };
     line.push('\n');
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(costs_path(data))
-    {
-        let _ = file.write_all(line.as_bytes());
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(e) = result {
+        eprintln!("orch: appending cost record failed: {e}");
     }
 }
 
 /// Every record; a corrupt line is skipped.
 pub fn read_all(data: &Path) -> Vec<CostRecord> {
     std::fs::read_to_string(costs_path(data))
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("orch: reading cost records failed: {e}");
+            }
+            String::new()
+        })
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
@@ -524,17 +534,45 @@ fn attempt_records(task: &Task) -> Vec<CostRecord> {
 }
 
 fn read_dir_json<T: serde::de::DeserializeOwned>(dir: &Path, file: Option<&str>) -> Vec<T> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "orch: listing {} for cost backfill failed: {e}",
+                    dir.display()
+                );
+            }
+            return Vec::new();
+        }
     };
     entries
-        .flatten()
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(e) => {
+                eprintln!(
+                    "orch: reading entry in {} for cost backfill failed: {e}",
+                    dir.display()
+                );
+                None
+            }
+        })
         .filter_map(|e| {
             let path = match file {
                 Some(f) => e.path().join(f),
                 None => e.path(),
             };
-            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!(
+                        "orch: reading {} for cost backfill failed: {e}",
+                        path.display()
+                    );
+                    return None;
+                }
+            };
+            serde_json::from_str(&text).ok()
         })
         .collect()
 }

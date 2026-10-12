@@ -165,3 +165,46 @@ pub(super) fn init_git_repo(dir: &std::path::Path) {
     git_in(dir, &["add", "."]);
     git_in(dir, &["commit", "-q", "-m", "init"]);
 }
+
+/// A task worktree whose shared fake harness waits for the helper guard.
+pub(super) fn slow_helper_task() -> (Arc<App>, tempfile::TempDir, Task, Route) {
+    chat::fake_overseer_harness();
+    let (app, dir) = test_app();
+    app.helper_timeout_ms.store(250, Ordering::SeqCst);
+    let worktree = dir.path().join("repo");
+    std::fs::create_dir(&worktree).unwrap();
+    init_git_repo(&worktree);
+    std::fs::write(worktree.join(".overseer-slow"), "").unwrap();
+    let mut task = task_with_status(TaskStatus::Running);
+    task.repo = worktree.display().to_string();
+    task.worktree = task.repo.clone();
+    task.base_sha = git_in(&worktree, &["rev-parse", "HEAD"]);
+    task.criteria = vec!["Keep the API".into()];
+    task.attempts = vec![attempt_with_failure(1, "failure")];
+    let route = {
+        let mut settings = app.settings.write().unwrap();
+        settings.planner = "claude-sonnet".into();
+        settings.brief_check_route = "claude-sonnet".into();
+        settings.orchestrator = "claude-sonnet".into();
+        settings.auto_answer = true;
+        settings
+            .routes
+            .iter()
+            .find(|r| r.id == "claude-sonnet")
+            .unwrap()
+            .clone()
+    };
+    app.store.save_task(&task).unwrap();
+    (app, dir, task, route)
+}
+
+pub(super) fn assert_helper_timeout(task: &Task, helper: &str) {
+    let line = helper_timeout_message(helper, Duration::from_millis(250));
+    assert_eq!(
+        task.decisions.iter().filter(|d| d.contains(&line)).count(),
+        1,
+        "{:?}",
+        task.decisions
+    );
+    assert_eq!(chat::fake_overseer_calls(Path::new(&task.worktree)), 1);
+}

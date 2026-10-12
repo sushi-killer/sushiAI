@@ -961,26 +961,12 @@ export interface Bridge {
     host: string,
     withheld: boolean,
   ): Promise<{ withheld: boolean }>;
-  /** The read-only Vault token, kept encrypted; never handed back. */
-  vaultTokenStatus(): Promise<{ saved: boolean }>;
-  vaultTokenSet(token: string): Promise<{ saved: true }>;
-  vaultTokenClear(): Promise<{ saved: false }>;
-  /** The project's Vault config, or null when it has none. */
-  projectVaultGet(
-    id: string,
-  ): Promise<{ address: string; mount: string; paths: string[] } | null>;
-  /** Sets the project's Vault paths (mount defaults to `secret`); null
-   * removes them. Resolves to what was stored. */
-  projectVaultSet(
-    id: string,
-    config: { address: string; mount?: string; paths: string[] } | null,
-  ): Promise<{ address: string; mount: string; paths: string[] } | null>;
-  /** Reads the project's Vault paths now: names and a count, never values. */
-  projectVaultCheck(
-    id: string,
-  ): Promise<
-    { ok: true; names: string[]; count: number } | { ok: false; reason: string }
-  >;
+  /** Built-in modules only; not part of the extension contract. */
+  moduleInvoke(
+    moduleId: string,
+    method: string,
+    ...args: unknown[]
+  ): Promise<unknown>;
   projectHostOverrides(
     id: string,
     host: string,

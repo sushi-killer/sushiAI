@@ -156,14 +156,13 @@ fn judge_brief(task: &Task, finding: &str, dispute: &Dispute, evidence: &[String
 }
 
 /// Runs a read-only judge on `route` over one disputed finding of attempt
-/// `attempt_n` (`seq` = 1 for the first judge run of the attempt). `Err` is
+/// `attempt_n`. `Err` is
 /// why there is no ruling.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn judge_finding(
     app: &Arc<App>,
     task: &mut Task,
     attempt_n: u32,
-    seq: u32,
     finding: &str,
     dispute: &Dispute,
     route: &Route,
@@ -171,12 +170,10 @@ pub(super) async fn judge_finding(
 ) -> Result<FindingJudgement, String> {
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join(if seq <= 1 {
-        "finding-judge".to_string()
-    } else {
-        format!("finding-judge-{seq}")
-    });
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "finding-judge", Some(attempt_n))
+        .map_err(|e| e.to_string())?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -215,6 +212,7 @@ pub(super) async fn judge_finding(
         resume: None,
         ..review_request(route, &worktree, &mcp_path, &settings_path, &images)
     };
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         &task.id,
@@ -226,12 +224,19 @@ pub(super) async fn judge_finding(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("finding judge", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     let outcome = result.map_err(|_| "the judge run was stopped or did not start".to_string())?;
+    if outcome.timed_out {
+        task.decisions
+            .push(helper_timeout_message("finding judge", limit));
+    }
     task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    if outcome.timed_out {
+        return Err("the judge run timed out".to_string());
+    }
     if let Some(error) = outcome.error {
         return Err(format!("the judge errored: {}", head_chars(&error, 200)));
     }
@@ -256,7 +261,6 @@ pub(super) async fn judge_disputed_findings(
     review_route: &Route,
     implementer: &Route,
     tier: Tier,
-    judge_runs: &mut u32,
     cancel: &CancelToken,
 ) -> Vec<(String, String)> {
     let disputes = task.attempts[idx].disputes.clone();
@@ -268,7 +272,7 @@ pub(super) async fn judge_disputed_findings(
         }
         task.judged_findings.push(key);
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         let Some(route) = judge_route(settings, review_route, implementer, tier) else {
             task.decisions.push(format!(
                 "Orchestrator: disputed review finding could not be judged (no other route at strength {}): {finding}",
@@ -276,18 +280,7 @@ pub(super) async fn judge_disputed_findings(
             ));
             continue;
         };
-        *judge_runs += 1;
-        let ruling = judge_finding(
-            app,
-            task,
-            attempt_n,
-            *judge_runs,
-            &finding,
-            dispute,
-            route,
-            cancel,
-        )
-        .await;
+        let ruling = judge_finding(app, task, attempt_n, &finding, dispute, route, cancel).await;
         match ruling {
             Ok(j) if !j.finding_valid => {
                 task.assumptions.push(Assumption {
@@ -316,7 +309,7 @@ pub(super) async fn judge_disputed_findings(
             )),
         }
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
     }
     dropped
 }
@@ -518,5 +511,41 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert!(images[0].ends_with("artifacts/a.png"));
         assert_eq!(text, s(&["src/a.rs:4", "cargo test: ok"]));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn finding_judge_timed_out_keeps_the_finding() {
+        let (app, _dir, mut task, route) = slow_helper_task();
+        let finding = "P1: README.md:1 - missing guard".to_string();
+        task.attempts[0].disputes = vec![Dispute {
+            finding: finding.clone(),
+            rebuttal: "Already handled".into(),
+            evidence: vec![],
+        }];
+        let settings = app.settings.read().unwrap().clone();
+        let mut implementer = route.clone();
+        implementer.id = "implementer".into();
+        implementer.model = Some("other".into());
+        let dropped = judge_disputed_findings(
+            &app,
+            &mut task,
+            0,
+            1,
+            &[finding],
+            &settings,
+            &route,
+            &implementer,
+            Tier::Mechanical,
+            &CancelToken::new(),
+        )
+        .await;
+        assert!(dropped.is_empty());
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "finding judge");
     }
 }

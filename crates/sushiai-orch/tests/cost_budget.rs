@@ -140,7 +140,7 @@ esac
 }
 
 /// Runs `task` on [`side_run_hang_script`] with `settings.review = review`,
-/// kills the daemon once the hung run's `runs/<events>` has its message on
+/// kills the daemon once the hung run's `helpers/<events>` has its message on
 /// disk, restarts it and returns the settled task and the runs log.
 fn kill_during_side_run_and_restart(
     hang_on: &str,
@@ -180,7 +180,7 @@ fn kill_during_side_run_and_restart(
     params["start"] = serde_json::json!(true);
     let created = call1("task.create", params);
     let id = created["id"].as_str().unwrap().to_string();
-    let events = data.join("tasks").join(&id).join("runs").join(events);
+    let events = data.join("tasks").join(&id).join("helpers").join(events);
     wait_until("the side run to stream its message", || {
         std::fs::read_to_string(&events)
             .is_ok_and(|t| t.contains("msg_side"))
@@ -209,12 +209,12 @@ fn kill_during_side_run_and_restart(
 }
 
 #[test]
-fn a_daemon_restart_mid_review_keeps_the_review_s_estimated_cost() {
+fn a_daemon_restart_mid_review_keeps_the_review_s_estimated_cost_in_helpers_folder() {
     let (settled, runs) = kill_during_side_run_and_restart(
         "## Review*",
         "claude-opus",
         serde_json::json!({"title": "Reviewed", "goal": "g", "verify": ["true"]}),
-        "1/review/events.jsonl",
+        "review-1/events.jsonl",
     );
     // The implement run was over: the next daemon resumes the same attempt and
     // only the review runs again; the one it died under is paid for too.
@@ -233,13 +233,13 @@ fn a_daemon_restart_mid_review_keeps_the_review_s_estimated_cost() {
 }
 
 #[test]
-fn a_daemon_restart_mid_advisor_keeps_the_advisor_s_estimated_cost() {
+fn a_daemon_restart_mid_advisor_keeps_the_advisor_s_estimated_cost_in_helpers_folder() {
     let (settled, runs) = kill_during_side_run_and_restart(
         "*An implement attempt at this task failed*",
         "",
         serde_json::json!({"title": "Advised", "goal": "g", "verify": ["test -f SECOND"],
             "variant": {"advisor": true}}),
-        "1/advisor/events.jsonl",
+        "advisor-1/events.jsonl",
     );
     let failed = &settled["attempts"][0];
     let advisor = failed["advisorCostUsd"].as_f64().unwrap();
@@ -253,7 +253,7 @@ fn a_daemon_restart_mid_advisor_keeps_the_advisor_s_estimated_cost() {
 }
 
 #[test]
-fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost() {
+fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost_in_helpers_folder() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(
         scripts_dir.path(),
@@ -279,7 +279,7 @@ fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost() {
         .data_dir()
         .join("tasks")
         .join(&task_id)
-        .join("runs/1/review/events.jsonl");
+        .join("helpers/review-1/events.jsonl");
     wait_until("a review to run", || {
         std::fs::read_to_string(&events)
             .is_ok_and(|t| t.contains("msg_side"))

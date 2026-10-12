@@ -134,8 +134,6 @@ impl App {
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        // A plan attempt and the first implement attempt can share a number:
-        // the stage tells them apart.
         let wanted = if p.stage == "plan" {
             Stage::Plan
         } else {
@@ -167,27 +165,47 @@ impl App {
         let run_dir = self.store.run_dir(&p.id, p.attempt);
         let fingerprint_harness =
             |f: &Option<Fingerprint>| f.as_ref().map_or(attempt.harness, |f| f.harness);
-        let (path, harness) = match p.stage.as_str() {
-            "plan" => (run_dir.join("plan").join("events.jsonl"), attempt.harness),
-            "implement" => (run_dir.join("events.jsonl"), attempt.harness),
+        let (paths, harness) = match p.stage.as_str() {
+            "plan" => (
+                vec![run_dir.join("plan").join("events.jsonl")],
+                attempt.harness,
+            ),
+            "implement" => (vec![run_dir.join("events.jsonl")], attempt.harness),
             "review" => (
-                run_dir.join("review").join("events.jsonl"),
+                self.store
+                    .helper_run_dirs(&p.id, "review", Some(p.attempt))
+                    .into_iter()
+                    .map(|dir| dir.join("events.jsonl"))
+                    .collect(),
                 fingerprint_harness(&attempt.review_fingerprint),
             ),
             _ => (
-                run_dir.join("advisor").join("events.jsonl"),
+                self.store
+                    .helper_run_dirs(&p.id, "advisor", Some(p.attempt))
+                    .into_iter()
+                    .map(|dir| dir.join("events.jsonl"))
+                    .collect(),
                 fingerprint_harness(&attempt.advisor_fingerprint),
             ),
         };
         let (lines, truncated) = tokio::task::spawn_blocking(move || {
-            let bytes =
-                std::fs::read(&path).map_err(|_| "no stored log for this stage".to_string())?;
-            let text = String::from_utf8_lossy(&bytes);
-            let mut outcome = harness::RunOutcome::default();
-            let mut lines: Vec<String> = text
-                .lines()
-                .filter_map(|l| harness::feed_stream_line(harness, l, &mut outcome))
-                .collect();
+            let mut lines = Vec::new();
+            let mut found = false;
+            for path in paths {
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                found = true;
+                let text = String::from_utf8_lossy(&bytes);
+                let mut outcome = harness::RunOutcome::default();
+                lines.extend(
+                    text.lines()
+                        .filter_map(|l| harness::feed_stream_line(harness, l, &mut outcome)),
+                );
+            }
+            if !found {
+                return Err("no stored log for this stage".to_string());
+            }
             let truncated = lines.len() > TASK_LOG_MAX_LINES;
             if truncated {
                 lines.drain(..lines.len() - TASK_LOG_MAX_LINES);
@@ -406,8 +424,9 @@ impl App {
             })
             .await?;
         if let Some(cmd) = p.screenshot.as_ref().filter(|c| !c.trim().is_empty()) {
-            task.brief_check.screenshot = Some(cmd.trim().to_string());
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            task = self.update_task(&task.id, |task| {
+                task.brief_check.screenshot = Some(cmd.trim().to_string());
+            })?;
         }
         let id = task.id.clone();
         if let Some(mcp) = &p.mcp {
@@ -712,7 +731,7 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
-        let mut task = self
+        let task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
@@ -757,15 +776,14 @@ impl App {
         if task.attempts.is_empty() && !is_parent(&task, &all) {
             return Err("the task has no finished attempt to land".to_string());
         }
-        let mut variant = task.variant();
-        variant.land = true;
-        task.variant = Some(variant);
-        task.status = TaskStatus::Landing;
-        task.decisions
-            .push(format!("Land: requested, landing on {branch}"));
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        self.update_task(&p.id, |task| {
+            let mut variant = task.variant();
+            variant.land = true;
+            task.variant = Some(variant);
+            task.status = TaskStatus::Landing;
+            task.decisions
+                .push(format!("Land: requested, landing on {branch}"));
+        })?;
         self.spawn_task_loop(p.id.clone(), true);
         let latest = self
             .store
@@ -820,13 +838,21 @@ impl App {
             self.stop_children(&task.id, &task.repo);
         }
         if !live && task.status == TaskStatus::Landing {
+            let decisions_before = task.decisions.len();
             task.status = TaskStatus::Stopped;
             self.close_stopped_task(&mut task);
             task.updated_at = now_ms();
             self.release_worktree(&mut task, "stopped while waiting to land")
                 .await;
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
+            task = self.update_task(&p.id, |fresh| {
+                fresh.status = TaskStatus::Stopped;
+                fresh.question = task.question.clone();
+                fresh.worktree_removed = task.worktree_removed;
+                fresh.deliverables = task.deliverables.clone();
+                fresh
+                    .decisions
+                    .extend_from_slice(&task.decisions[decisions_before..]);
+            })?;
             // Its lease lapses: whoever waited for it can go.
             self.advance_graph(&task.repo);
         }
@@ -840,12 +866,11 @@ impl App {
                 TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
             )
         {
-            self.close_stopped_task(&mut task);
-            task.queue.queue_reason = None;
-            task.status = TaskStatus::Stopped;
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
+            task = self.update_task(&p.id, |task| {
+                self.close_stopped_task(task);
+                task.queue.queue_reason = None;
+                task.status = TaskStatus::Stopped;
+            })?;
             self.advance_graph(&task.repo);
         }
         if active && live {
@@ -887,17 +912,15 @@ impl App {
         if answer.is_empty() {
             return Err("answer is required".to_string());
         }
-        let mut task = self
+        let task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         let assumption = task
             .assumptions
-            .get_mut(p.index)
+            .get(p.index)
             .ok_or_else(|| format!("task has no assumption {}", p.index))?;
-        assumption.overturned = true;
-        assumption.owner_answer = Some(answer.to_string());
         let text = format!(
             "The owner overturned an assumption made for them ({}). Question: {}\nThe assumption: {}\nThe owner's answer: {answer}\nUse the owner's answer.",
             assumption.by, assumption.question, assumption.answer
@@ -905,9 +928,12 @@ impl App {
         if task.status != TaskStatus::Done {
             messages::send(self, ORCHESTRATOR, Some(&task.id), &text, None)?;
         }
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        let task = self.update_task(&p.id, |task| {
+            if let Some(assumption) = task.assumptions.get_mut(p.index) {
+                assumption.overturned = true;
+                assumption.owner_answer = Some(answer.to_string());
+            }
+        })?;
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -941,7 +967,7 @@ impl App {
             (Some("policy"), None) => return Err("a policy answer needs its evidence".to_string()),
             _ => None,
         };
-        let mut task = self
+        let task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
@@ -1022,19 +1048,18 @@ impl App {
                 ctrl.cancel.cancel();
             }
             self.agent_answers.lock().unwrap().remove(&p.id);
-            let question = task.question.take();
-            record_answer_for(
-                &mut task,
-                question.as_ref(),
-                "stop",
-                caller,
-                default_evidence.as_deref(),
-            );
-            task.status = TaskStatus::Stopped;
-            self.close_stopped_task(&mut task);
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
+            let task = self.update_task(&p.id, |task| {
+                let question = task.question.take();
+                record_answer_for(
+                    task,
+                    question.as_ref(),
+                    "stop",
+                    caller,
+                    default_evidence.as_deref(),
+                );
+                task.status = TaskStatus::Stopped;
+                self.close_stopped_task(task);
+            })?;
             self.stop_children(&task.id, &task.repo);
             self.advance_graph(&task.repo);
             return serde_json::to_value(&task).map_err(|e| e.to_string());
@@ -1091,91 +1116,84 @@ impl App {
             // No live parked loop (e.g. after a daemon restart): apply the
             // decision synchronously and relaunch (spec step 9: "status
             // queued, loop continues").
-            let question = task.question.clone();
-            record_answer_for(
-                &mut task,
-                question.as_ref(),
-                &p.answer,
-                caller,
-                default_evidence.as_deref(),
-            );
-            self.agent_answers.lock().unwrap().remove(&p.id);
-            if let Some(n) = task
-                .question
-                .as_ref()
-                .and_then(|q| impossible_drop_target(q, &p.answer))
-            {
-                let settings = self.settings.read().unwrap().clone();
-                let origin = origin_of_last_answer(&task);
-                let _ = drop_criterion(&settings, &mut task, n, origin);
-            }
-            if let Some(q) = task.question.clone() {
-                // A base-check question: the task starts again only with the
-                // answer applied, and the owner's answer is remembered.
-                if q.kind == QuestionKind::PreexistingFailure && !q.commands.is_empty() {
-                    let base_sha = task.base_sha.clone();
-                    record_owner_base_check(
-                        &mut task,
-                        &q.commands,
-                        &base_sha,
-                        &p.answer,
-                        default_evidence.is_some(),
-                    );
+            self.update_task(&p.id, |task| {
+                let question = task.question.clone();
+                record_answer_for(
+                    task,
+                    question.as_ref(),
+                    &p.answer,
+                    caller,
+                    default_evidence.as_deref(),
+                );
+                self.agent_answers.lock().unwrap().remove(&p.id);
+                if let Some(n) = task
+                    .question
+                    .as_ref()
+                    .and_then(|q| impossible_drop_target(q, &p.answer))
+                {
                     let settings = self.settings.read().unwrap().clone();
-                    let origin = origin_of_last_answer(&task);
-                    apply_base_check_answer(&settings, &mut task, &q, &p.answer, origin);
-                    if is_option(&p.answer, PRE_EXISTING_DROP) {
-                        self.verify_cache.lock().unwrap().remove(&task.id);
+                    let origin = origin_of_last_answer(task);
+                    let _ = drop_criterion(&settings, task, n, origin);
+                }
+                if let Some(q) = task.question.clone() {
+                    // A base-check question: the task starts again only with the
+                    // answer applied, and the owner's answer is remembered.
+                    if q.kind == QuestionKind::PreexistingFailure && !q.commands.is_empty() {
+                        let base_sha = task.base_sha.clone();
+                        record_owner_base_check(
+                            task,
+                            &q.commands,
+                            &base_sha,
+                            &p.answer,
+                            default_evidence.is_some(),
+                        );
+                        let settings = self.settings.read().unwrap().clone();
+                        let origin = origin_of_last_answer(task);
+                        apply_base_check_answer(&settings, task, &q, &p.answer, origin);
+                        if is_option(&p.answer, PRE_EXISTING_DROP) {
+                            self.verify_cache.lock().unwrap().remove(&task.id);
+                        }
                     }
                 }
-            }
-            // The owner accepted the last attempt: the relaunched loop
-            // commits it instead of starting another (`pending_acceptance`).
-            if let Some(q) = task.question.clone().filter(|q| {
-                q.kind == QuestionKind::AttemptsFailing
-                    && is_accept_option(&p.answer)
-                    && q.options.iter().any(|o| is_accept_option(o))
-            }) {
-                if let Some(a) = task
-                    .attempts
-                    .iter()
-                    .rfind(|a| a.stage == Stage::Implement)
-                    .filter(|a| {
-                        matches!(
-                            a.failure.as_ref().map(|f| f.kind),
-                            Some(FailureKind::Review | FailureKind::Evidence)
-                        )
-                    })
-                {
-                    let n = a.n;
-                    record_owner_accept(
-                        &mut task,
-                        &q.text,
-                        &p.answer,
-                        "owner picked the option",
-                        n,
-                    );
+                // The owner accepted the last attempt: the relaunched loop
+                // commits it instead of starting another (`pending_acceptance`).
+                if let Some(q) = task.question.clone().filter(|q| {
+                    q.kind == QuestionKind::AttemptsFailing
+                        && is_accept_option(&p.answer)
+                        && q.options.iter().any(|o| is_accept_option(o))
+                }) {
+                    if let Some(a) = task
+                        .attempts
+                        .iter()
+                        .rfind(|a| a.stage == Stage::Implement)
+                        .filter(|a| {
+                            matches!(
+                                a.failure.as_ref().map(|f| f.kind),
+                                Some(FailureKind::Review | FailureKind::Evidence)
+                            )
+                        })
+                    {
+                        let n = a.n;
+                        record_owner_accept(task, &q.text, &p.answer, "owner picked the option", n);
+                    }
                 }
-            }
-            if task
-                .question
-                .as_ref()
-                .is_some_and(|q| is_budget_raise(q, &p.answer))
-            {
-                task.budget_raises += 1;
-            }
-            if task
-                .question
-                .as_ref()
-                .is_some_and(|q| is_daily_budget_run_anyway(q, &p.answer))
-            {
-                task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
-            }
-            task.question = None;
-            task.status = TaskStatus::Queued;
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
+                if task
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| is_budget_raise(q, &p.answer))
+                {
+                    task.budget_raises += 1;
+                }
+                if task
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| is_daily_budget_run_anyway(q, &p.answer))
+                {
+                    task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
+                }
+                task.question = None;
+                task.status = TaskStatus::Queued;
+            })?;
             self.start_task_loop(p.id.clone());
         }
         let latest = self
@@ -1363,27 +1381,40 @@ impl App {
             }
         }
         let dependencies_amended = amendment.depends_on.is_some();
-        amendment.apply(&mut task);
-        if dependencies_amended
-            && task.status == TaskStatus::Waiting
-            && task
-                .question
-                .as_ref()
-                .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
-        {
-            task.question = None;
-            task.status = TaskStatus::Queued;
-        }
+        amendment.clone().apply(&mut task);
         if task.variant().grounded_checks {
             baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
         }
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        let updated = self.update_task(&id, |fresh| {
+            amendment.apply(fresh);
+            if dependencies_amended
+                && fresh.status == TaskStatus::Waiting
+                && fresh
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
+            {
+                fresh.question = None;
+                fresh.status = TaskStatus::Queued;
+            }
+            for check in fresh.checks.iter_mut().chain(fresh.held_out.iter_mut()) {
+                if let Some(baselined) = task.checks.iter().chain(task.held_out.iter()).find(|c| {
+                    c.criterion == check.criterion && c.run == check.run && c.baseline.is_some()
+                }) {
+                    check.baseline = baselined.baseline;
+                }
+            }
+            for decision in &task.decisions {
+                if !fresh.decisions.contains(decision) {
+                    fresh.decisions.push(decision.clone());
+                }
+            }
+        })?;
         if dependencies_amended {
-            if task.status == TaskStatus::Queued && task.queue.backlog.is_none() {
+            if updated.status == TaskStatus::Queued && updated.queue.backlog.is_none() {
                 self.start_task_loop(id.clone());
             }
-            self.advance_graph(&task.repo);
+            self.advance_graph(&updated.repo);
         }
         Ok(json!({"id": id, "amended": fields, "pending": false}))
     }
@@ -1405,7 +1436,7 @@ impl App {
         let preset = settings
             .preset(&p.preset)
             .ok_or_else(|| format!("unknown preset \"{}\"", p.preset))?;
-        let mut task = self
+        let task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
@@ -1434,10 +1465,7 @@ impl App {
         preset.values.apply(&mut variant);
         variant.check()?;
         variant.check_routes(&settings.routes)?;
-        task.variant = Some(variant);
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        let task = self.update_task(&p.id, |task| task.variant = Some(variant))?;
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -1512,11 +1540,16 @@ impl App {
         if self.controls.lock().unwrap().contains_key(&p.id) {
             return Err("cannot archive a task with a live loop".to_string());
         }
-        task.archived = true;
+        let decisions_before = task.decisions.len();
         self.release_worktree(&mut task, "archived").await;
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        let task = self.update_task(&p.id, |fresh| {
+            fresh.archived = true;
+            fresh.worktree_removed = task.worktree_removed;
+            fresh.deliverables = task.deliverables.clone();
+            fresh
+                .decisions
+                .extend_from_slice(&task.decisions[decisions_before..]);
+        })?;
         // An archived child no longer holds its parent back.
         self.advance_graph(&task.repo);
         serde_json::to_value(&task).map_err(|e| e.to_string())
@@ -1537,15 +1570,19 @@ impl App {
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        task.archived = false;
+        let decisions_before = task.decisions.len();
         if matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed) {
             if let Err(e) = self.ensure_worktree(&mut task).await {
                 task.decisions.push(format!("Worktree: {e}"));
             }
         }
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        let task = self.update_task(&p.id, |fresh| {
+            fresh.archived = false;
+            fresh.worktree_removed = task.worktree_removed;
+            fresh
+                .decisions
+                .extend_from_slice(&task.decisions[decisions_before..]);
+        })?;
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 }

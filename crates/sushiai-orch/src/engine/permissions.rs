@@ -510,12 +510,14 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         .insert(ctx.task_id.clone(), tx);
     // The harness is silent while it waits for us: the stall clock pauses.
     let _paused = ctx.hook_running.start();
-    let mut task = app.store.load_task(&ctx.task_id).ok().flatten()?;
-    task.question = Some(question.clone());
-    task.status = TaskStatus::Waiting;
-    task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
+    if let Err(e) = app.update_task(&ctx.task_id, |task| {
+        task.question = Some(question.clone());
+        task.status = TaskStatus::Waiting;
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", ctx.task_id);
+        app.permission_waits.lock().unwrap().remove(&ctx.task_id);
+        return None;
+    }
     let reply = tokio::select! {
         _ = ctx.cancel.cancelled() => None,
         a = rx => a.ok(),
@@ -527,7 +529,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
     let caller = app
         .take_agent_answer(&ctx.task_id)
         .unwrap_or(AnsweredBy::Owner);
-    if let Ok(Some(mut task)) = app.store.load_task(&ctx.task_id) {
+    if let Err(e) = app.update_task(&ctx.task_id, |task| {
         if task
             .question
             .as_ref()
@@ -535,7 +537,7 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
         {
             if let Some(answer) = &answer {
                 task.question = None;
-                record_answer_for(&mut task, Some(&question), answer, caller, evidence);
+                record_answer_for(task, Some(&question), answer, caller, evidence);
                 task.status = TaskStatus::Running;
             } else if app
                 .controls
@@ -546,17 +548,16 @@ async fn ask(app: &Arc<App>, ctx: &HookContext, subject: &Subject, detail: &str)
             {
                 task.status = app.cancelled_status(&task.status);
                 if task.status == TaskStatus::Stopped {
-                    app.close_stopped_task(&mut task);
+                    app.close_stopped_task(task);
                 }
             } else {
                 // The hook token also fires when a run ends while its task
                 // loop continues; only the expired permission question closes.
                 task.question = None;
             }
-            task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
-            app.broadcast_task(&task);
         }
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", ctx.task_id);
     }
     answer
 }
@@ -661,11 +662,8 @@ fn denied_reason(subject: &Subject, note: Option<&str>) -> String {
 }
 
 fn append_decision(app: &App, task_id: &str, line: String) {
-    if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        task.decisions.push(line);
-        task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
-        app.broadcast_task(&task);
+    if let Err(e) = app.update_task(task_id, |task| task.decisions.push(line)) {
+        eprintln!("orch: updating task {task_id} failed: {e}");
     }
 }
 
@@ -904,7 +902,7 @@ pub(super) async fn stop_for_denials(
         ));
         task.status = TaskStatus::Failed;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return LoopSignal::Stop;
     }
@@ -920,7 +918,7 @@ pub(super) async fn stop_for_denials(
     };
     apply_answer(app, task, subjects, &answer);
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     LoopSignal::Continue
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
 import { Tag } from "../ui";
+import { projectGet, projectSet, projectCheck, type Config } from "./client";
 import "./vault.css";
 
 type Draft = { address: string; mount: string; paths: string[] };
@@ -11,8 +12,6 @@ type Check =
   | { phase: "failed"; reason: string };
 
 const PLACEHOLDERS = ["royal-ark/shared", "royal-ark/herald"];
-
-type Config = { address: string; mount: string; paths: string[] };
 
 function draftOf(vault: Config | null): Draft {
   return {
@@ -48,14 +47,14 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
     setSaved(null);
     setDraft(draftOf(null));
     setCheck({ phase: "idle" });
-    window.bridge
-      ?.projectVaultGet(projectId)
-      .then((config) => {
-        if (!live) return;
-        setSaved(config);
-        setDraft(draftOf(config));
-      })
-      .catch(() => {});
+    if (window.bridge)
+      projectGet(projectId)
+        .then((config) => {
+          if (!live) return;
+          setSaved(config);
+          setDraft(draftOf(config));
+        })
+        .catch(() => {});
     return () => {
       live = false;
     };
@@ -84,7 +83,7 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
       const address = draft.address.trim();
       const mount = draft.mount.trim();
       const paths = draft.paths.map((path) => path.trim()).filter(Boolean);
-      const config = await window.bridge.projectVaultSet(
+      const config = await projectSet(
         projectId,
         !address && !paths.length
           ? null
@@ -104,7 +103,7 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
     if (!window.bridge) return;
     setCheck({ phase: "running" });
     try {
-      const result = await window.bridge.projectVaultCheck(projectId);
+      const result = await projectCheck(projectId);
       setCheck(
         result.ok
           ? { phase: "ok", names: result.names, count: result.count }

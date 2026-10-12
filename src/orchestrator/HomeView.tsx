@@ -1,5 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowRight, ChartColumn, RefreshCw } from "lucide-react";
+import {
+  ArrowRight,
+  Bell,
+  ChartColumn,
+  Clock3,
+  MessageSquare,
+  Pause,
+  RefreshCw,
+  Workflow,
+} from "lucide-react";
 import { Character } from "../mascot/Character";
 import { useOrchestratorClient } from "./hostContext";
 import {
@@ -24,7 +33,8 @@ import {
 import { elapsedLabel } from "../lib/text";
 import { ownerTasks, projectName } from "./ownerAttention";
 import { weekSummary } from "./stats";
-import type { SpendSummary, Task } from "./types";
+import { autonomySummary } from "./autonomy";
+import type { Settings, SpendSummary, Task } from "./types";
 import { AttentionItem, Chip, StageTrack } from "../ui";
 import { TaskMark, cleanTitle } from "./taskTitle";
 import "./home.css";
@@ -41,7 +51,13 @@ const EMPTY_TRACK: StageStep[] = STAGES.map((stage) => ({
   state: "pending",
 }));
 
-function FirstRun({ onTry }: { onTry: (text: string) => void }) {
+function FirstRun({
+  onTry,
+  autonomy,
+}: {
+  onTry: (text: string) => void;
+  autonomy: ReactNode;
+}) {
   return (
     <div className="home-first-run">
       <img src="./sushi.svg" width={44} height={44} alt="" />
@@ -65,6 +81,7 @@ function FirstRun({ onTry }: { onTry: (text: string) => void }) {
           ))}
         </div>
       </div>
+      {autonomy}
     </div>
   );
 }
@@ -91,6 +108,38 @@ function AnalyticsLine({
         >
           Analytics <ArrowRight size={12} />
         </button>
+      )}
+    </div>
+  );
+}
+
+const AUTONOMY_ICONS = [Workflow, MessageSquare, Bell, Clock3];
+
+function AutonomyLine({
+  summary,
+}: {
+  summary: ReturnType<typeof autonomySummary>;
+}) {
+  if (!summary) return null;
+  return (
+    <div className="home-autonomy">
+      {summary.items.map((item, index) => {
+        const Icon = AUTONOMY_ICONS[index];
+        return (
+          <span
+            key={index}
+            className={item.on ? "home-autonomy-on" : undefined}
+          >
+            <Icon size={12} aria-hidden="true" />
+            {item.label}
+          </span>
+        );
+      })}
+      {summary.pause && (
+        <span>
+          <Pause size={12} aria-hidden="true" />
+          {summary.pause.label}
+        </span>
       )}
     </div>
   );
@@ -171,6 +220,7 @@ function NoteForm({
 export function HomeView({
   cwd,
   tasks,
+  settings,
   maxAttempts,
   busy,
   act,
@@ -183,6 +233,7 @@ export function HomeView({
 }: {
   cwd: string;
   tasks: Task[];
+  settings: Settings | null;
   maxAttempts?: number;
   busy: boolean;
   act: (action: () => Promise<Task>) => void;
@@ -218,7 +269,10 @@ export function HomeView({
   }, [cwd, refresh, orchestratorClient]);
 
   const live = tasks.filter((t) => !t.archived);
-  if (live.length === 0) return <FirstRun onTry={onTry} />;
+  const autonomy = (
+    <AutonomyLine summary={autonomySummary(settings, tasks, cwd, Date.now())} />
+  );
+  if (live.length === 0) return <FirstRun onTry={onTry} autonomy={autonomy} />;
   const owner = ownerTasks(live);
   const groups = railGroups(live);
   const analytics = (
@@ -242,6 +296,7 @@ export function HomeView({
           </div>
         </div>
         {hostStrip}
+        {autonomy}
         {analytics}
       </div>
     );
@@ -355,6 +410,7 @@ export function HomeView({
           ))}
         </div>
       )}
+      {autonomy}
       {analytics}
     </div>
   );

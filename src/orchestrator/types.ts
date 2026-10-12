@@ -94,6 +94,12 @@ export type Settings = {
   /** The orchestrator answers a stuck agent's question before it reaches
    * the owner, logged in the task as `"Orchestrator: ..."`. */
   autoAnswer: boolean;
+  /** Local digest hour; null turns it off, absent on older daemons. */
+  digestHour?: number | null;
+  /** Waiting-question reminder interval in hours; 0 or absent = off. */
+  waitRemindEveryHours?: number;
+  /** Hours before using a question's cautious answer; 0 or absent = off. */
+  waitDefaultAfterHours?: number;
   /** Routine questions are answered by rules and a cheap judge (at most three
    * per task) and recorded as assumptions; `false` asks the owner every time. */
   answerPolicy: boolean;
@@ -547,6 +553,8 @@ export type Task = {
   /** Set while the task sits in the planning backlog; `task.start` or the
    * autopilot clears it. */
   backlog?: Backlog;
+  /** Usage-limit pause end, ms epoch; absent when the task is not paused. */
+  pausedUntil?: number;
   /** Owner and orchestrator decisions, newest last - includes "Owner: ..."
    * answers to a question. */
   decisions: string[];

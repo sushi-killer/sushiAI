@@ -756,7 +756,7 @@ pub(super) async fn wait_on_broken_base(
                 a.failure = None;
                 task.status = TaskStatus::Running;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return BaseBreak::Dropped;
             }
@@ -774,7 +774,7 @@ pub(super) async fn wait_on_broken_base(
         BaseRetry::Stopped => return BaseBreak::Stopped,
     }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     BaseBreak::Retry
 }
@@ -1317,7 +1317,7 @@ pub(super) async fn apply_pending_amendment(
     if task.variant().grounded_checks {
         baseline_on_base(app, task, cancel).await;
     }
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
 }
 

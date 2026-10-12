@@ -519,9 +519,14 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
-    let args = with_task_mcp(method, args, task_mcp);
     let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
     let source = bridge_source(declared_source.as_deref());
+    let args = with_task_mcp(
+        method,
+        args,
+        task_mcp,
+        bridge.task.is_none() && source == "chat",
+    );
     let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     match (bridge.call)(method, args) {
@@ -533,8 +538,18 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
 /// A task the agent creates gets the MCP servers the app resolved for its
 /// project (`ORCHD_TASK_MCP` names a `{repo, mcp}` file the app writes), the
 /// same thing the app adds when the owner creates a task directly. Only for
-/// that repo, and never over an `mcp` the caller set itself.
-fn with_task_mcp(method: &str, mut args: Value, task_mcp: Option<Value>) -> Value {
+/// that repo. Only an owner's chat turn may keep caller-set servers.
+fn with_task_mcp(
+    method: &str,
+    mut args: Value,
+    task_mcp: Option<Value>,
+    keep_caller_mcp: bool,
+) -> Value {
+    if method == "task.create" && !keep_caller_mcp {
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("mcp");
+        }
+    }
     let Some(task_mcp) = task_mcp else {
         return args;
     };
@@ -1008,18 +1023,72 @@ mod tests {
     #[test]
     fn task_create_gets_the_project_mcp_only_for_its_own_repo() {
         let file = json!({"repo": "/r", "mcp": {"mcpServers": {"a": {}}}});
-        let got = with_task_mcp("task.create", json!({"repo": "/r"}), Some(file.clone()));
+        let got = with_task_mcp(
+            "task.create",
+            json!({"repo": "/r"}),
+            Some(file.clone()),
+            true,
+        );
         assert_eq!(got["mcp"]["mcpServers"]["a"], json!({}));
-        let other = with_task_mcp("task.create", json!({"repo": "/x"}), Some(file.clone()));
+        let other = with_task_mcp(
+            "task.create",
+            json!({"repo": "/x"}),
+            Some(file.clone()),
+            true,
+        );
         assert!(other.get("mcp").is_none());
         let own = with_task_mcp(
             "task.create",
             json!({"repo": "/r", "mcp": {"mcpServers": {}}}),
             Some(file.clone()),
+            true,
         );
         assert_eq!(own["mcp"], json!({"mcpServers": {}}));
-        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file));
+        let start = with_task_mcp("task.start", json!({"repo": "/r"}), Some(file), false);
         assert!(start.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_overseer_replaces_caller_mcp_with_the_project_mcp() {
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args, Some(file.clone()), false);
+        assert_eq!(got["mcp"], file["mcp"]);
+        let other = with_task_mcp(
+            "task.create",
+            json!({"repo": "/other", "mcp": {"mcpServers": {"agent": {}}}}),
+            Some(file),
+            false,
+        );
+        assert!(other.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_overseer_without_a_project_file_removes_caller_mcp() {
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args, None, false);
+        assert!(got.get("mcp").is_none());
+    }
+
+    #[test]
+    fn task_create_from_a_task_bridge_removes_caller_mcp() {
+        assert!(!TASK_TOOLS.contains(&"task_create"));
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"agent": {}}}});
+        let got = with_task_mcp("task.create", args.clone(), None, false);
+        assert!(got.get("mcp").is_none());
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        let got = with_task_mcp("task.create", args, Some(file.clone()), false);
+        assert_eq!(got["mcp"], file["mcp"]);
+    }
+
+    #[test]
+    fn task_create_from_owner_chat_keeps_caller_mcp() {
+        let args = json!({"repo": "/r", "mcp": {"mcpServers": {"owner": {}}}});
+        let file = json!({"repo": "/r", "mcp": {"mcpServers": {"project": {}}}});
+        for file in [None, Some(file)] {
+            let got = with_task_mcp("task.create", args.clone(), file, true);
+            assert_eq!(got, args);
+        }
     }
 }
 

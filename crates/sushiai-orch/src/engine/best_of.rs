@@ -147,10 +147,9 @@ pub(super) fn second_route(
     task: &Task,
     settings: &Settings,
     route: &Route,
-    attempt_n: u32,
 ) -> Result<Option<Route>, String> {
     let variant = task.variant();
-    if variant.best_of < 2 || task.tier != Tier::Hard || attempt_n != 1 {
+    if variant.best_of < 2 || task.tier != Tier::Hard || implement_attempt_count(task) != 1 {
         return Ok(None);
     }
     let other = match variant.best_of_route.as_deref() {
@@ -458,8 +457,21 @@ where
     match (eval_a.passed, eval_b.passed) {
         (true, true) => {
             match run_pick(
-                app, task, task_id, attempt_n, settings, a_route, b_route, worktree, &wt_b,
-                base_sha, run_dir, &eval_a, &eval_b, deny_read, cancel,
+                app,
+                task,
+                task_id,
+                attempt_n,
+                settings,
+                a_route,
+                b_route,
+                worktree,
+                &wt_b,
+                base_sha,
+                &mut extra.decisions,
+                &eval_a,
+                &eval_b,
+                deny_read,
+                cancel,
             )
             .await
             {
@@ -587,7 +599,7 @@ async fn run_pick(
     worktree: &Path,
     wt_b: &Path,
     base_sha: &str,
-    run_dir: &Path,
+    decisions: &mut Vec<String>,
     eval_a: &Eval,
     eval_b: &Eval,
     deny_read: &[String],
@@ -629,8 +641,12 @@ async fn run_pick(
             diff: &diff_b,
         },
     );
-    let dir = run_dir.join("pick");
-    let _ = std::fs::create_dir_all(&dir);
+    let Ok(dir) = app
+        .store
+        .claim_helper_run_dir(task_id, "pick", Some(attempt_n))
+    else {
+        return Ok((None, 0.0));
+    };
     let mcp_path = dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let _ = std::fs::write(dir.join("brief.md"), &brief_text);
@@ -648,6 +664,7 @@ async fn run_pick(
     }
     let events = dir.join("events.jsonl");
     let req = review_request(&route, worktree, &mcp_path, &settings_path, &[]);
+    let limit = app.helper_timeout();
     let res = run_harness(
         app,
         task_id,
@@ -659,17 +676,101 @@ async fn run_pick(
         &brief_text,
         &events,
         cancel,
-        Guard::off(),
+        Guard::helper("best-of pick", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     match res {
         Ok(outcome) => {
             let cost = outcome.cost_usd.unwrap_or(0.0);
+            if outcome.timed_out {
+                decisions.push(helper_timeout_message("best-of pick", limit));
+                return Ok((None, cost));
+            }
             let text = outcome.final_text.unwrap_or_default();
             Ok((brief::parse_pick(&text), cost))
         }
         Err(RunError::Cancelled) => Err(RunError::Cancelled),
         Err(RunError::Io(_) | RunError::NotFound(_)) => Ok((None, 0.0)),
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn best_of_pick_timed_out_keeps_the_normal_no_answer_path() {
+        let (app, _dir, task, route) = slow_helper_task();
+        let mut settings = app.settings.read().unwrap().clone();
+        settings.review = route.id.clone();
+        let worktree = PathBuf::from(&task.worktree);
+        let eval = Eval {
+            passed: true,
+            verify_ok: true,
+            failing: 0,
+            verify: vec![],
+            tally: CheckTally::default(),
+        };
+        let mut decisions = Vec::new();
+        let (pick, _) = run_pick(
+            &app,
+            &task,
+            &task.id,
+            1,
+            &settings,
+            &route,
+            &route,
+            &worktree,
+            &worktree,
+            &task.base_sha,
+            &mut decisions,
+            &eval,
+            &eval,
+            &[],
+            &CancelToken::new(),
+        )
+        .await
+        .ok()
+        .expect("the picker must start");
+        assert!(pick.is_none());
+        assert_eq!(decisions, ["best-of pick timed out after 0.25s"]);
+        assert_eq!(
+            app.store.helper_run_dirs(&task.id, "pick", Some(1)).len(),
+            1
+        );
+        assert!(!app.store.run_dir(&task.id, 1).join("pick").exists());
+    }
+
+    #[test]
+    fn best_of_first_implement_attempt_ignores_plan_numbers() {
+        let settings = Settings::default();
+        let route = settings
+            .routes
+            .iter()
+            .find(|r| r.harness == Harness::Claude)
+            .unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.tier = Tier::Hard;
+        task.variant = Some(Variant {
+            best_of: 2,
+            ..Default::default()
+        });
+        task.attempts = vec![Attempt {
+            stage: Stage::Plan,
+            ..attempt_with_failure(1, "plan")
+        }];
+        task.attempts
+            .push(attempt_with_failure(2, "first implement"));
+        assert_eq!(
+            second_route(&task, &settings, route)
+                .unwrap()
+                .unwrap()
+                .harness,
+            Harness::Codex
+        );
+        task.attempts
+            .push(attempt_with_failure(3, "second implement"));
+        assert!(second_route(&task, &settings, route).unwrap().is_none());
     }
 }

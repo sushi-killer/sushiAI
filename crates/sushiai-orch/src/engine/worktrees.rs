@@ -214,7 +214,7 @@ impl App {
                 Some(bytes) => {
                     freed += bytes;
                     task.updated_at = now_ms();
-                    let _ = self.store.save_task(&task);
+                    self.save_task_logged(&task);
                     self.broadcast_task(&task);
                     entries.push(entry("removed", bytes));
                 }
@@ -292,7 +292,7 @@ impl App {
             for a in &mut task.attempts {
                 a.evidence.retain(|p| Path::new(p).exists());
             }
-            let _ = self.store.save_task(task);
+            self.save_task_logged(task);
         }
         (entries, total)
     }

@@ -123,12 +123,9 @@ fn attempt_segments(store: &Store, task: &Task, a: &Attempt, rules: &WorkBuckets
         };
         let verify_ms = ms(false);
         let final_ms = ms(true);
+        let review_dirs = store.helper_run_dirs(&task.id, "review", Some(a.n));
         let has_review = a.review.is_some() || a.review_cost_usd.is_some();
-        let review_ms = if has_review {
-            side_run_ms(&run_dir.join("review"))
-        } else {
-            0
-        };
+        let review_ms = review_dirs.iter().map(|dir| side_run_ms(dir)).sum::<i64>();
         let implement_end = (end - verify_ms - review_ms - final_ms).max(a.started_at);
 
         let mut implement = seg("implement", a.n, a.started_at, implement_end);
@@ -201,10 +198,15 @@ fn attempt_segments(store: &Store, task: &Task, a: &Attempt, rules: &WorkBuckets
         }
     }
 
+    let advisor_dirs = store.helper_run_dirs(&task.id, "advisor", Some(a.n));
     if a.advisor_cost_usd.is_some() {
-        let dir = run_dir.join("advisor");
-        let start = mtime_ms(&dir.join("brief.md")).unwrap_or(end);
-        let mut s = seg("advisor", a.n, start, start + side_run_ms(&dir));
+        let start = advisor_dirs
+            .iter()
+            .filter_map(|dir| mtime_ms(&dir.join("brief.md")))
+            .min()
+            .unwrap_or(end);
+        let ms: i64 = advisor_dirs.iter().map(|dir| side_run_ms(dir)).sum();
+        let mut s = seg("advisor", a.n, start, start + ms);
         s.cost_usd = a.advisor_cost_usd.unwrap_or(0.0);
         s.outcome = if a.advice.is_some() {
             "advised"

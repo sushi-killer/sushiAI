@@ -383,12 +383,7 @@ impl PreflightJob {
 /// and each failure goes to the feasibility judge. The result only goes into
 /// the app's map; nothing is saved here. A no-op while a job of this task is
 /// running or finished. `loop_cancel` stops the job.
-pub(super) fn spawn_base_preflight(
-    app: &Arc<App>,
-    task: &Task,
-    attempt_n: u32,
-    loop_cancel: &CancelToken,
-) {
+pub(super) fn spawn_base_preflight(app: &Arc<App>, task: &Task, loop_cancel: &CancelToken) {
     let mut jobs = app.base_preflights.lock().unwrap();
     if jobs
         .get(&task.id)
@@ -417,7 +412,7 @@ pub(super) fn spawn_base_preflight(
                 job_cancel.cancel();
             })
         };
-        let result = run_base_preflight(&app, &task, attempt_n, &cancel).await;
+        let result = run_base_preflight(&app, &task, &cancel).await;
         watcher.abort();
         if let Some(result) = result {
             let _ = tx.send(Some(Arc::new(result)));
@@ -429,7 +424,6 @@ pub(super) fn spawn_base_preflight(
 async fn run_base_preflight(
     app: &Arc<App>,
     task: &Task,
-    attempt_n: u32,
     cancel: &CancelToken,
 ) -> Option<BasePreflight> {
     let mut out = BasePreflight::default();
@@ -446,10 +440,13 @@ async fn run_base_preflight(
             commands.push(c.clone());
         }
     }
-    let run_dir = app
+    let run_dir = match app
         .store
-        .run_dir(&task.id, attempt_n)
-        .join("feasibility-base");
+        .claim_helper_run_dir(&task.id, "feasibility-base", None)
+    {
+        Ok(dir) => dir,
+        Err(_) => return Some(out),
+    };
     let ran = run_on_base(
         app,
         Some(&task.id),
@@ -478,27 +475,30 @@ async fn run_base_preflight(
     record_check_outcomes(app, &mut scratch, &results);
     let kept = keep_planned_checks(app, &mut scratch, &failing);
     out.decisions = scratch.decisions[task.decisions.len()..].to_vec();
-    for (i, failed) in results
+    for failed in results
         .iter()
         .filter(|r| r.code != Some(0) && !timed_out_under_load(r) && !kept.contains(&r.command))
-        .enumerate()
     {
         let prompt = feasibility_prompt(task, failed);
-        let name = format!("feasibility-{i}");
         let reply = run_judge(
             app,
             task,
             &route,
-            attempt_n,
+            None,
             "brief_check",
-            &name,
+            "feasibility",
             &prompt,
             cancel,
         )
         .await;
         match reply {
             Err(RunError::Cancelled) => return None,
-            Ok((reply, cost)) => {
+            Ok(JudgeRun {
+                reply,
+                cost,
+                timeout_note,
+            }) => {
+                out.decisions.extend(timeout_note);
                 out.cost += cost;
                 if let Some(r) = reply
                     .ok()
@@ -550,7 +550,7 @@ pub(super) async fn settle_base_preflight(
         );
     }
     apply_base_preflight(app, task, &result);
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     true
 }
@@ -720,19 +720,23 @@ pub(super) async fn heal_repeated_unmet(
     };
     let old = task.criteria[rep.criterion].clone();
     let prompt = ruling_prompt(task, &rep);
-    let name = format!("criterion-judge-{}", task.brief_check.judged.len());
     let reply = run_judge(
         app,
         task,
         &route,
-        attempt_n,
+        Some(attempt_n),
         "brief_check",
-        &name,
+        "criterion-judge",
         &prompt,
         cancel,
     )
     .await?;
-    let (reply, cost) = reply;
+    let JudgeRun {
+        reply,
+        cost,
+        timeout_note,
+    } = reply;
+    task.decisions.extend(timeout_note);
     task.cost_usd += cost;
     let ruling = match reply {
         Ok(text) => parse_ruling(&text),
@@ -1064,19 +1068,23 @@ pub(super) async fn heal_answers(
         return Ok(false);
     };
     let prompt = answer_prompt(task, &answers);
-    let name = format!("answer-check-{seen}");
     let reply = run_judge(
         app,
         task,
         &route,
-        attempt_n,
+        Some(attempt_n),
         "brief_check",
-        &name,
+        "answer-check",
         &prompt,
         cancel,
     )
     .await?;
-    let (reply, cost) = reply;
+    let JudgeRun {
+        reply,
+        cost,
+        timeout_note,
+    } = reply;
+    task.decisions.extend(timeout_note);
     task.cost_usd += cost;
     let amendments = match reply {
         Ok(text) => parse_amendments(&text, task.criteria.len()),
@@ -1334,5 +1342,60 @@ mod answer_caller_tests {
                 task.decisions[6].clone()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn feasibility_timed_out_keeps_the_command_unchanged() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        task.verify = vec!["false".into()];
+        let result = run_base_preflight(&app, &task, &CancelToken::new())
+            .await
+            .unwrap();
+        assert!(result.settled);
+        assert!(result.rulings.is_empty());
+        task.decisions.extend(result.decisions);
+        assert_eq!(task.verify, ["false"]);
+        assert_helper_timeout(&task, "feasibility");
+        let costs = crate::costs::read_all(&app.data_dir);
+        assert_eq!(costs.len(), 1);
+        assert!(costs[0].attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn criterion_judge_timed_out_keeps_the_criterion() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        let review: ReviewResult = serde_json::from_value(
+            json!({"verdict":"FAIL", "findings":["Unmet criterion: Keep the API (missing)"]}),
+        )
+        .unwrap();
+        task.attempts[0].review = Some(review.clone());
+        task.attempts.push(attempt_with_failure(2, "failure"));
+        let criteria = task.criteria.clone();
+        assert!(matches!(
+            heal_repeated_unmet(&app, &mut task, 1, &review, &CancelToken::new()).await,
+            Ok(false)
+        ));
+        assert_eq!(task.criteria, criteria);
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "criterion-judge");
+    }
+
+    #[tokio::test]
+    async fn answer_check_timed_out_keeps_the_criteria() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        task.decisions.push("Owner: Which API? -> Remove it".into());
+        let criteria = task.criteria.clone();
+        assert!(matches!(
+            heal_answers(&app, &mut task, 1, &CancelToken::new()).await,
+            Ok(false)
+        ));
+        assert_eq!(task.criteria, criteria);
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "answer-check");
     }
 }

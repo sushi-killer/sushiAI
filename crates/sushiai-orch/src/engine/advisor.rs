@@ -58,8 +58,10 @@ pub(super) async fn run_advisor_before_retry(
             .unwrap_or_default();
     let brief_text = brief::build_advisor_brief(task, &diff, &failure_detail);
 
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join("advisor");
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "advisor", Some(attempt_n))
+        .ok()?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -92,6 +94,7 @@ pub(super) async fn run_advisor_before_retry(
         repo_settings: true,
         resume: None,
     };
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         &task.id,
@@ -103,7 +106,7 @@ pub(super) async fn run_advisor_before_retry(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("advisor", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -121,6 +124,10 @@ pub(super) async fn run_advisor_before_retry(
         }
         Err(RunError::Io(_) | RunError::NotFound(_)) => return None,
     };
+    if outcome.timed_out {
+        task.decisions
+            .push(helper_timeout_message("advisor", limit));
+    }
     let cost = outcome.cost_usd.unwrap_or(0.0);
     task.attempts[failed].advisor_cost_usd = Some(cost);
     task.attempts[failed].advisor_fingerprint = outcome.fingerprint.clone();
@@ -130,4 +137,31 @@ pub(super) async fn run_advisor_before_retry(
         task.attempts[failed].advice = Some(truncate_chars(advice, MAX_ADVICE_CHARS));
     }
     Some(cost)
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn advisor_timed_out_gives_no_advice_and_is_not_retried() {
+        let (app, _dir, mut task, route) = slow_helper_task();
+        let settings = app.settings.read().unwrap().clone();
+        let worktree = PathBuf::from(&task.worktree);
+        let base = task.base_sha.clone();
+        let cancel = CancelToken::new();
+        let cost = run_advisor_before_retry(
+            &app, &mut task, &settings, &route, &worktree, &base, true, &cancel,
+        )
+        .await;
+        assert!(cost.is_some());
+        assert!(task.attempts[0].advice.is_none());
+        assert!(task.attempts[0].advisor_cost_usd.is_some());
+        assert!(run_advisor_before_retry(
+            &app, &mut task, &settings, &route, &worktree, &base, true, &cancel
+        )
+        .await
+        .is_none());
+        assert_helper_timeout(&task, "advisor");
+    }
 }

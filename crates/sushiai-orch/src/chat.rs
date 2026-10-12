@@ -2415,7 +2415,7 @@ pub(crate) fn fake_overseer_harness() -> &'static Path {
         let path = dir.path().join("fake-claude.sh");
         std::fs::write(
             &path,
-            "#!/bin/sh\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
+            "#!/bin/sh\n[ -f .overseer-no-stdin ] && exec sleep 2\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;

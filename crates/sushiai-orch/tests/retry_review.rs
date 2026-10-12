@@ -56,15 +56,11 @@ struct Run {
 }
 
 impl Run {
-    fn brief(&self, attempt: u32, review_dir: &str) -> Option<String> {
-        std::fs::read_to_string(
-            self.daemon
-                .data_dir()
-                .join("tasks")
-                .join(&self.task_id)
-                .join(format!("runs/{attempt}/{review_dir}/brief.md")),
-        )
-        .ok()
+    fn brief(&self, attempt: u32, round: usize) -> Option<String> {
+        let dirs = sushiai_orch::store::Store::new(self.daemon.data_dir())
+            .unwrap()
+            .helper_run_dirs(&self.task_id, "review", Some(attempt));
+        std::fs::read_to_string(dirs.get(round - 1)?.join("brief.md")).ok()
     }
 
     fn reviews_run(&self) -> usize {
@@ -147,11 +143,11 @@ fn a_retry_review_sees_only_the_open_findings_and_the_tasks_own_changes() {
     }
     assert_ne!(attempts[0]["reviewTree"], attempts[1]["reviewTree"]);
 
-    let first = run.brief(1, "review").unwrap();
+    let first = run.brief(1, 1).unwrap();
     assert!(first.contains("## Acceptance criteria"), "{first}");
     assert!(first.contains("## Diff"), "{first}");
 
-    let narrow = run.brief(2, "review").unwrap();
+    let narrow = run.brief(2, 1).unwrap();
     assert!(narrow.contains("P1: a.txt:1 - fix it"), "{narrow}");
     assert!(narrow.contains("Unmet criterion: Beta is done"), "{narrow}");
     let settled_at = narrow.find("## Settled criteria").expect(&narrow);
@@ -183,7 +179,7 @@ fn a_retry_review_sees_only_the_open_findings_and_the_tasks_own_changes() {
     assert_eq!(beta["status"], "met", "{settled}");
 
     // The delta stayed inside the file the finding names: no second review.
-    assert!(run.brief(2, "review-2").is_none());
+    assert!(run.brief(2, 2).is_none());
     assert_eq!(run.reviews_run(), 2);
     run.finish();
 }
@@ -194,14 +190,14 @@ fn a_narrow_pass_with_a_file_no_finding_names_gets_one_full_review() {
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
     assert_eq!(attempts.len(), 2, "{settled}");
-    let narrow = run.brief(2, "review").unwrap();
+    let narrow = run.brief(2, 1).unwrap();
     assert!(narrow.contains("## Settled criteria"), "{narrow}");
-    let full = run.brief(2, "review-2").expect("a full review ran");
+    let full = run.brief(2, 2).expect("a full review ran");
     assert!(full.contains("## Diff"), "{full}");
     assert!(full.contains("## Acceptance criteria"), "{full}");
     assert!(!full.contains("## Settled criteria"), "{full}");
     assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
-    assert!(run.brief(2, "review-3").is_none(), "at most one escalation");
+    assert!(run.brief(2, 3).is_none(), "at most one escalation");
     assert_eq!(run.reviews_run(), 3);
     let decisions = settled["decisions"].to_string();
     assert!(
@@ -220,6 +216,6 @@ fn a_full_review_that_fails_after_a_narrow_pass_fails_the_attempt() {
     assert_eq!(attempts[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
     assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
-    assert!(run.brief(2, "review-2").is_some());
+    assert!(run.brief(2, 2).is_some());
     run.finish();
 }

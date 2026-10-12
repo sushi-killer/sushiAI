@@ -78,6 +78,12 @@ const CI_ENTRIES: [&[&str]; 11] = [
     &["make", "ci"],
 ];
 
+const SHARED_CHECK_NAMES: [&str; 4] = ["ci", "test", "lint", "build"];
+
+fn flat_command(command: &str) -> String {
+    command.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(super) fn is_assignment(token: &str) -> bool {
     token.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
@@ -86,9 +92,8 @@ pub(super) fn is_assignment(token: &str) -> bool {
     })
 }
 
-/// Whether one shell segment runs a CI entry: its leading `cd <dir>` and
-/// `VAR=x` words are skipped, the rest starts with an entry's tokens.
-fn segment_runs_ci(segment: &str) -> bool {
+/// Whether one shell segment runs a CI entry or a declared repo check.
+fn segment_runs_ci(segment: &str, scripts: &[(String, String)], targets: &[String]) -> bool {
     let mut tokens: Vec<&str> = segment.split_whitespace().collect();
     loop {
         match tokens.as_slice() {
@@ -98,50 +103,116 @@ fn segment_runs_ci(segment: &str) -> bool {
             _ => break,
         };
     }
-    CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
+    if CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
+        || scripts
+            .iter()
+            .any(|(_, body)| !body.is_empty() && *body == tokens.join(" "))
+    {
+        return true;
+    }
+    let Some((runner, words)) = tokens.split_first() else {
+        return false;
+    };
+    match *runner {
+        "npm" | "pnpm" | "yarn" => {
+            let explicit_run = words
+                .first()
+                .is_some_and(|word| matches!(*word, "run" | "run-script"));
+            let words = if explicit_run { &words[1..] } else { words };
+            let name = words.iter().copied().find(|word| !word.starts_with('-'));
+            (*runner != "npm" || explicit_run || name == Some("test"))
+                && scripts
+                    .iter()
+                    .any(|(script, _)| Some(script.as_str()) == name)
+        }
+        "make" => {
+            let mut words = words.iter().copied();
+            while let Some(word) = words.next() {
+                if matches!(word, "-C" | "-f" | "-I" | "-o" | "-W") {
+                    words.next();
+                } else if !word.starts_with('-')
+                    && !is_assignment(word)
+                    && targets.iter().any(|target| target == word)
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
 pub(super) fn runs_ci_entry(command: &str) -> bool {
-    command
-        .replace("&&", "\n")
-        .replace("||", "\n")
-        .replace([';', '|'], "\n")
-        .replace(['(', ')'], " ")
-        .lines()
-        .any(segment_runs_ci)
+    runs_repo_check(command, &[], &[])
+}
+
+fn runs_repo_check(command: &str, scripts: &[(String, String)], targets: &[String]) -> bool {
+    scripts.iter().any(|(_, body)| body == command)
+        || command
+            .replace("&&", "\n")
+            .replace("||", "\n")
+            .replace([';', '|'], "\n")
+            .replace(['(', ')'], " ")
+            .lines()
+            .any(|segment| segment_runs_ci(segment, scripts, targets))
 }
 
 /// Whether `command` is a check the owner or the repo stands behind: the
 /// repo's CI entry, a `scopedChecks` or `afterLand` entry of the settings, or
 /// a command written in the owner's own task request. Only the owner may drop
 /// such a check; a planner-invented, task-specific one stays droppable.
-// ponytail: a heuristic over the command text. Flag-first spellings
-// (`npm run --silent ci`), `pnpm run test`, wrappers beyond cd/env/timeout and
-// shell functions are missed. Upgrade path: read the repo's package.json
-// scripts (and Makefile targets) and match a command against what `ci` and
-// `test` really run.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
-    let flat = |c: &str| c.split_whitespace().collect::<Vec<_>>().join(" ");
-    let command = flat(command);
+    let command = flat_command(command);
     if command.is_empty() {
         return false;
     }
-    runs_ci_entry(&command)
+    let repo = Path::new(&task.repo);
+    let scripts: Vec<(String, String)> = std::fs::read_to_string(repo.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|package| {
+            package.get("scripts")?.as_object().map(|scripts| {
+                scripts
+                    .iter()
+                    .filter(|(name, _)| SHARED_CHECK_NAMES.contains(&name.as_str()))
+                    .filter_map(|(name, body)| Some((name.clone(), flat_command(body.as_str()?))))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let mut targets = Vec::new();
+    if let Ok(makefile) = std::fs::read_to_string(repo.join("Makefile")) {
+        for line in makefile.lines().filter(|line| !line.starts_with('\t')) {
+            let line = line.split('#').next().unwrap_or_default();
+            if let Some((names, rest)) = line.split_once(':') {
+                if names.contains('=') || rest.trim_start_matches(':').starts_with('=') {
+                    continue;
+                }
+                targets.extend(
+                    names
+                        .split_whitespace()
+                        .filter(|name| SHARED_CHECK_NAMES.contains(name))
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+    runs_repo_check(&command, &scripts, &targets)
         || scoped_checks_for(settings, task).iter().any(|e| {
             e.repo
                 .as_deref()
                 .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
-                && (glob_match(&e.command, &command) || flat(&e.command) == command)
+                && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
         })
-        || settings
-            .after_land
-            .iter()
-            .any(|a| crate::model::same_repo_path(&a.repo, &task.repo) && flat(&a.run) == command)
+        || settings.after_land.iter().any(|a| {
+            crate::model::same_repo_path(&a.repo, &task.repo) && flat_command(&a.run) == command
+        })
         || task
             .request
             .as_deref()
-            .is_some_and(|r| flat(r).contains(&command))
+            .is_some_and(|r| flat_command(r).contains(&command))
 }
 
 /// The refusal for a non-owner who tries to drop `command`, a shared check.
@@ -484,7 +555,7 @@ pub(super) async fn try_policy_answer(
     task.question = None;
     task.status = TaskStatus::Queued;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     Some(answer)
 }
@@ -543,8 +614,10 @@ async fn judge_impossible(
     }
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(&task.id, attempt_n).join("answer-judge");
-    let _ = std::fs::create_dir_all(&run_dir);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "answer-judge", Some(attempt_n))
+        .ok()?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -571,6 +644,7 @@ async fn judge_impossible(
         resume: None,
         ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
     };
+    let limit = app.helper_timeout();
     let result = run_harness(
         app,
         &task.id,
@@ -582,13 +656,17 @@ async fn judge_impossible(
         &brief_text,
         &events_path,
         cancel,
-        Guard::off(),
+        Guard::helper("answer judge", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     // A cancelled or failed judge run asks the owner; the wait that follows
     // sees the cancellation itself.
     let outcome = result.ok()?;
+    if outcome.timed_out {
+        task.decisions
+            .push(helper_timeout_message("answer judge", limit));
+    }
     task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
     if outcome.error.is_some() {
         return None;
@@ -643,6 +721,130 @@ mod tests {
 
     fn opts(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn shared_check_recognizes_repo_scripts_and_make_targets() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("package.json"),
+            json!({"scripts": {
+                "ci": "npm run lint && npm run test",
+                "test": "node --test",
+                "lint": "eslint   .",
+                "build": "vite build",
+                "dev": "vite"
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("Makefile"),
+            "lint:\n\teslint .\ndeploy:\n\t./deploy.sh\n",
+        )
+        .unwrap();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.path().to_string_lossy().into_owned();
+        let settings = Settings::default();
+        for command in [
+            "npm run --silent ci",
+            "pnpm run test",
+            "npm run lint",
+            "yarn lint",
+            "eslint .",
+            "make -j4 lint",
+            "npm run-script --silent build",
+            "pnpm --silent build",
+            "yarn run --silent lint",
+            "npm --silent test",
+            "vite build",
+            "npm run lint && npm run test",
+            "echo before; eslint .",
+            "cd /tmp && env CI=1 timeout 30 npm run --silent lint",
+            "env CI=1 timeout 30 eslint .",
+            "make -C /tmp -f checks.mk -I includes -o old -W changed MODE=ci -j4 lint",
+        ] {
+            assert!(is_shared_check(&settings, &task, command), "{command}");
+        }
+        for command in [
+            "npm run dev",
+            "npm ci",
+            "npm build",
+            "make deploy",
+            "vite",
+            "eslint . --fix",
+            "make -C lint deploy",
+            "make -f lint -I lint -o lint -W lint deploy",
+            "echo eslint .",
+        ] {
+            assert!(!is_shared_check(&settings, &task, command), "{command}");
+        }
+    }
+
+    #[test]
+    fn shared_check_ignores_missing_and_invalid_repo_entries() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.path().to_string_lossy().into_owned();
+        let settings = Settings::default();
+        assert!(!is_shared_check(&settings, &task, "npm run lint"));
+        assert!(!is_shared_check(&settings, &task, "make lint"));
+        std::fs::write(
+            repo.path().join("Makefile"),
+            "lint := eslint .\nbuild ::= vite build\n# lint: ignored\n\techo lint:\nNAME = lint: ignored\n",
+        )
+        .unwrap();
+        for package in [
+            "invalid JSON",
+            r#"{"scripts": []}"#,
+            r#"{"scripts": {"lint": null, "build": 12, "dev": "eslint ."}}"#,
+            r#"{"scripts": {"lint": ""}}"#,
+        ] {
+            std::fs::write(repo.path().join("package.json"), package).unwrap();
+            for command in [
+                "npm run build",
+                "eslint .",
+                "make lint",
+                "make build",
+                "cd /tmp",
+            ] {
+                assert!(
+                    !is_shared_check(&settings, &task, command),
+                    "{package}: {command}"
+                );
+            }
+        }
+        std::fs::write(
+            repo.path().join("package.json"),
+            r#"{"scripts": {"dev": "vite"}}"#,
+        )
+        .unwrap();
+        assert!(!is_shared_check(&settings, &task, "npm run lint"));
+        std::fs::write(repo.path().join("Makefile"), b"\xfflint:\n").unwrap();
+        assert!(!is_shared_check(&settings, &task, "make lint"));
+        assert!(is_shared_check(&settings, &task, "cargo test"));
+    }
+
+    #[test]
+    fn shared_check_recognizes_multiple_make_targets_and_skips_option_arguments() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("Makefile"),
+            "lint build: inputs\n\t./check\n",
+        )
+        .unwrap();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.path().to_string_lossy().into_owned();
+        let settings = Settings::default();
+        assert!(is_shared_check(&settings, &task, "make -j4 build"));
+        assert!(is_shared_check(&settings, &task, "make deploy lint"));
+        for option in ["-C", "-f", "-I", "-o", "-W"] {
+            assert!(!is_shared_check(
+                &settings,
+                &task,
+                &format!("make {option} lint deploy")
+            ));
+        }
     }
 
     #[test]
@@ -829,5 +1031,30 @@ mod answer_caller_tests {
                 caller != AnsweredBy::Owner
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn answer_judge_timed_out_leaves_the_decision_to_the_owner() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        let criteria = task.criteria.clone();
+        let question = Question::new(
+            "Criterion 0 cannot be met as written: Keep the API. Evidence: the file is gone",
+            vec!["retry".into(), "drop criterion".into()],
+            QuestionKind::Impossible,
+            AskedBy::Implement,
+        );
+        assert!(
+            judge_impossible(&app, &mut task, &question, 1, &CancelToken::new())
+                .await
+                .is_none()
+        );
+        assert_eq!(task.criteria, criteria);
+        assert!(task.assumptions.is_empty());
+        assert_helper_timeout(&task, "answer judge");
     }
 }

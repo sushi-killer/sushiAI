@@ -62,6 +62,7 @@ const {
 const { registerMascot, watchPresenting } = require("./mascot.cjs");
 const { createMascotShortcut } = require("./mascot-shortcut.cjs");
 const { createNotices } = require("./extensions/notices.cjs");
+const { createModuleIpc } = require("./extensions/module-ipc.cjs");
 const { createOrchestratorNotices } = require("./orchestrator-notices.cjs");
 const { DEV_RESTART_EXIT_CODE, watchCore } = require("./dev-restart.cjs");
 const { testWindow } = require("./test-window.cjs");
@@ -403,8 +404,9 @@ notices.register("app", async (_key, actionId) => {
   devRestart = true;
   app.quit();
 });
+const moduleIpc = createModuleIpc({ handle });
 require("./vault.cjs").registerVault({
-  handle,
+  moduleIpc,
   projects,
   notices,
   safeStorage,

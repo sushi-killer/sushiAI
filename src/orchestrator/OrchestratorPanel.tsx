@@ -55,13 +55,13 @@ import { useOrchestratorHosts } from "./useHosts";
 import { useWorkspaceRepos } from "./workspaceRepos";
 import {
   applyOrchestratorEvent,
+  composerCreateParams,
   emptyLiveState,
   daemonDown,
   errorText,
   formatDuration,
   planDrafts,
   sortTasks,
-  taskCreateParams,
   taskTone,
   unreadChatCount,
   upsertMessage,
@@ -120,22 +120,13 @@ async function createTask(
   try {
     return await orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams({ request: text, start, source: "ui", projectId }, base),
+      composerCreateParams(text, start, base, projectId, "request"),
     );
   } catch (e) {
     if (!errorText(e).includes("planner is disabled")) throw e;
     return orchestratorClient.taskCreate(
       cwd,
-      taskCreateParams(
-        {
-          title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
-          goal: text,
-          start,
-          source: "ui",
-          projectId,
-        },
-        base,
-      ),
+      composerCreateParams(text, start, base, projectId, "fallback"),
     );
   }
 }
@@ -892,6 +883,7 @@ function OrchestratorBody({
           <HomeView
             cwd={cwd}
             tasks={live.tasks}
+            settings={settings}
             maxAttempts={settings?.maxAttempts}
             busy={busy}
             act={act}

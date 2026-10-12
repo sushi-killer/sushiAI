@@ -248,6 +248,7 @@ mod tests {
     #[tokio::test]
     async fn a_timed_out_gate_runs_twice_then_runs_afresh() {
         let (app, dir) = test_app();
+        *app.check_load.write().unwrap() = || (0.0, 4);
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
@@ -260,7 +261,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut runner =
             CheckRunner::new(&app, &repo, dir.path(), SandboxMode::Host, "base", &cancel);
-        runner.timeout = Duration::from_millis(100);
+        runner.timeout = Duration::from_secs(2);
         let (results, lines) = runner.run(&commands).await;
         assert!(is_interrupted(&results[0]));
         assert_eq!(results[0].code, None);

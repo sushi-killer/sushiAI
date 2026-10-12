@@ -1,5 +1,6 @@
 //! JSON-file store: `<data>/settings.json`,
 //! `<data>/tasks/<id>/task.json`, `<data>/tasks/<id>/runs/<n>/*`,
+//! `<data>/tasks/<id>/helpers/<stage>-<seq>/*`,
 //! `<data>/audits/<id>/{audit.json,report.json,brief.md,events.jsonl}`.
 //! All writes to `task.json`/`settings.json` are atomic (write tmp file in
 //! the same directory, then rename) so a crash never leaves a half-written
@@ -12,6 +13,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HelperRun {
+    stage: String,
+    attempt: Option<u32>,
+}
 
 pub struct Store {
     data_dir: PathBuf,
@@ -43,6 +50,64 @@ impl Store {
 
     pub fn run_dir(&self, id: &str, n: u32) -> PathBuf {
         self.task_dir(id).join("runs").join(n.to_string())
+    }
+
+    pub fn helper_run_dir(&self, task_id: &str, stage: &str, seq: u32) -> PathBuf {
+        self.task_dir(task_id)
+            .join("helpers")
+            .join(format!("{stage}-{seq}"))
+    }
+
+    pub fn claim_helper_run_dir(
+        &self,
+        task_id: &str,
+        stage: &str,
+        attempt: Option<u32>,
+    ) -> io::Result<PathBuf> {
+        fs::create_dir_all(self.task_dir(task_id).join("helpers"))?;
+        for seq in 1..=u32::MAX {
+            let dir = self.helper_run_dir(task_id, stage, seq);
+            match fs::create_dir(&dir) {
+                Ok(()) => {
+                    write_json_atomic(
+                        &dir.join("helper.json"),
+                        &HelperRun {
+                            stage: stage.to_string(),
+                            attempt,
+                        },
+                    )?;
+                    return Ok(dir);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::other("helper sequence exhausted"))
+    }
+
+    pub fn helper_run_dirs(
+        &self,
+        task_id: &str,
+        stage: &str,
+        attempt: Option<u32>,
+    ) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.task_dir(task_id).join("helpers")) else {
+            return Vec::new();
+        };
+        let prefix = format!("{stage}-");
+        let mut dirs: Vec<(u32, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let seq = name.to_str()?.strip_prefix(&prefix)?.parse::<u32>().ok()?;
+                let dir = entry.path();
+                let text = fs::read_to_string(dir.join("helper.json")).ok()?;
+                let helper: HelperRun = serde_json::from_str(&text).ok()?;
+                (helper.stage == stage && helper.attempt == attempt).then_some((seq, dir))
+            })
+            .collect();
+        dirs.sort_by_key(|(seq, _)| *seq);
+        dirs.into_iter().map(|(_, dir)| dir).collect()
     }
 
     // -- settings --------------------------------------------------------
@@ -96,10 +161,18 @@ impl Store {
             if !task_json.exists() {
                 continue;
             }
-            let text = fs::read_to_string(&task_json)?;
+            let text = match fs::read_to_string(&task_json) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("orch: reading task {} failed: {e}", task_json.display());
+                    continue;
+                }
+            };
             match serde_json::from_str::<Task>(&text) {
                 Ok(task) => out.push(task),
-                Err(_) => continue, // skip corrupt entries rather than fail the whole listing
+                Err(e) => {
+                    eprintln!("orch: parsing task {} failed: {e}", task_json.display());
+                }
             }
         }
         out.sort_by_key(|task| std::cmp::Reverse(task.created_at));
@@ -162,7 +235,10 @@ impl Store {
                     task.status = TaskStatus::Queued;
                 }
                 task.updated_at = crate::model::now_ms();
-                self.save_task(&task)?;
+                if let Err(e) = self.save_task(&task) {
+                    eprintln!("orch: saving task {} failed: {e}", task.id);
+                    continue;
+                }
                 recovered.push(task);
             }
         }
@@ -782,5 +858,64 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn helpers_folder_claims_are_unique_and_read_in_numeric_sequence_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path()).unwrap();
+        let first = store
+            .claim_helper_run_dir("task", "review", Some(1))
+            .unwrap();
+        std::fs::write(first.join("events.jsonl"), "first").unwrap();
+        let mut claimed = vec![first.clone()];
+        for _ in 0..10 {
+            claimed.push(
+                store
+                    .claim_helper_run_dir("task", "review", Some(1))
+                    .unwrap(),
+            );
+        }
+        store
+            .claim_helper_run_dir("task", "review", Some(2))
+            .unwrap();
+        let detached = store
+            .claim_helper_run_dir("task", "brief-check", None)
+            .unwrap();
+        assert_eq!(store.helper_run_dirs("task", "review", Some(1)), claimed);
+        assert_eq!(first, tmp.path().join("tasks/task/helpers/review-1"));
+        assert_eq!(
+            std::fs::read_to_string(first.join("events.jsonl")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            store
+                .helper_run_dirs("task", "brief-check", None)
+                .as_slice(),
+            std::slice::from_ref(&detached)
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(detached.join("helper.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            meta,
+            serde_json::json!({"stage":"brief-check", "attempt":null})
+        );
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let store = &store;
+                scope.spawn(move || {
+                    store
+                        .claim_helper_run_dir("task", "advisor", Some(1))
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(store.helper_run_dirs("task", "advisor", Some(1)).len(), 4);
     }
 }

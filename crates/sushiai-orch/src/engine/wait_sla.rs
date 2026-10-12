@@ -71,16 +71,20 @@ impl App {
             }
             if auto_answer && reminder_due(asked_at, task.queue.wait_reminded_at, remind, now) {
                 // Only a question still waiting, and the same one, is reminded.
-                let Ok(Some(mut fresh)) = self.store.load_task(&task.id) else {
-                    continue;
-                };
-                if fresh.status != TaskStatus::Waiting
-                    || fresh.question.as_ref().and_then(|q| q.asked_at) != Some(asked_at)
-                {
+                let mut reminded = false;
+                if let Err(e) = self.update_task(&task.id, |fresh| {
+                    if fresh.status == TaskStatus::Waiting
+                        && fresh.question.as_ref().and_then(|q| q.asked_at) == Some(asked_at)
+                    {
+                        fresh.queue.wait_reminded_at = Some(now);
+                        reminded = true;
+                    }
+                }) {
+                    eprintln!("orch: updating task {} failed: {e}", task.id);
+                }
+                if !reminded {
                     continue;
                 }
-                fresh.queue.wait_reminded_at = Some(now);
-                let _ = self.store.save_task(&fresh);
                 // A busy chat queues the wake for the end of its turn.
                 chat::wake_overseer(
                     self,
@@ -105,7 +109,10 @@ impl App {
         let mut repos: Vec<String> = self
             .store
             .list_tasks()
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                eprintln!("orch: listing waiting tasks after restart failed: {e}");
+                Vec::new()
+            })
             .into_iter()
             .filter(|t| {
                 !t.archived

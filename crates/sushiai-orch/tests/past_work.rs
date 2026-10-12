@@ -97,7 +97,7 @@ fn plan_brief(daemon: &Daemon, repo: &Path, request: &str, extra: Value) -> Stri
     poll_until(daemon, &id, |s| {
         matches!(s, "done" | "failed" | "stopped" | "waiting")
     });
-    run_file(daemon, &id, "plan/brief.md")
+    plan_file(daemon, &id, "plan/brief.md")
 }
 
 fn section(brief: &str) -> &str {

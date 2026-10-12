@@ -236,7 +236,7 @@ async fn parent_base_preflight(
         let kept = keep_planned_checks(app, task, &names);
         if !kept.is_empty() {
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
         }
         failed.retain(|f| !kept.contains(&f.command));
@@ -263,7 +263,7 @@ async fn parent_base_preflight(
             task.status = TaskStatus::Stopped;
             app.close_stopped_task(task);
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
             app.stop_children(&task_id, &task.repo);
             return false;
@@ -282,7 +282,7 @@ async fn parent_base_preflight(
             app.verify_cache.lock().unwrap().remove(&task_id);
         }
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
     }
 }
@@ -337,7 +337,7 @@ async fn parent_finals_on_base(
     let kept = keep_planned_checks(app, task, &names);
     if !kept.is_empty() {
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
     }
     on_base.retain(|b| !kept.contains(&b.command) && !is_kept(task, &b.command));
@@ -370,7 +370,7 @@ async fn parent_finals_on_base(
         task.status = TaskStatus::Stopped;
         app.close_stopped_task(task);
         task.updated_at = now_ms();
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         app.stop_children(&task_id, &task.repo);
         return ParentGate::End;
@@ -408,17 +408,17 @@ async fn parent_finals_on_base(
             BaseRetry::Conflict(detail) => {
                 task.status = TaskStatus::Running;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return ParentGate::Conflict(detail);
             }
             BaseRetry::Stopped => return ParentGate::End,
         }
-        let _ = app.store.save_task(task);
+        app.save_task_logged(task);
         app.broadcast_task(task);
         return ParentGate::Again;
     }
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     ParentGate::Go(
         results
@@ -447,14 +447,14 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
             Landing::Waiting => {
                 task.status = TaskStatus::Landing;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return ParentEnd::Finished;
             }
             Landing::Failed { kind, detail } => {
                 task.status = TaskStatus::Running;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 return ParentEnd::Attempt {
                     failure: detail,
@@ -463,7 +463,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
                 };
             }
             Landing::Cancelled => {
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 mark_stopped_if_not_already(app, &task_id).await;
                 return ParentEnd::Finished;
             }
@@ -488,7 +488,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
             let failure = format!("Orchestrator: could not commit the parent's carried work: {e}");
             task.decisions.push(failure.clone());
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
             return ParentEnd::Attempt {
                 failure,
@@ -511,7 +511,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     )
     .await;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
     ParentEnd::Finished
@@ -539,7 +539,7 @@ pub(super) async fn run_parent(
     if heal_grep_dashes(&mut task) {
         app.verify_cache.lock().unwrap().remove(task_id);
         task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
     }
     let all = app.repo_tasks(&task.repo);
@@ -554,7 +554,7 @@ pub(super) async fn run_parent(
             if task.status != TaskStatus::Queued {
                 task.status = TaskStatus::Queued;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
             return ParentEnd::Finished;
@@ -581,7 +581,7 @@ pub(super) async fn run_parent(
             mark_stopped_if_not_already(app, task_id).await;
             return ParentEnd::Finished;
         }
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
     }
     // The parent's own commands, run on the base while no child has started.
@@ -602,7 +602,7 @@ pub(super) async fn run_parent(
     if task.depends_on != dependencies_before {
         task.status = TaskStatus::Queued;
         task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
         return ParentEnd::Finished;
     }
@@ -632,7 +632,7 @@ pub(super) async fn run_parent(
                 child.question = None;
                 child.status = TaskStatus::Queued;
                 child.updated_at = now_ms();
-                let _ = app.store.save_task(&child);
+                app.save_task_logged(&child);
                 app.broadcast_task(&child);
                 app.spawn_child_loop(&all, &child);
             }
@@ -648,7 +648,7 @@ pub(super) async fn run_parent(
         if task.status != TaskStatus::Running {
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
         return ParentEnd::Finished;
@@ -664,7 +664,7 @@ pub(super) async fn run_parent(
     }
     task.status = TaskStatus::Running;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
+    app.save_task_logged(&task);
     app.broadcast_task(&task);
     let (mut task, results, skipped) = loop {
         // An amendment made at any point (also while this loop waited for a
@@ -815,7 +815,7 @@ pub(super) async fn run_parent(
         // A check that fails after the subtasks landed gets one agent
         // attempt on the parent's branch, not the end of the graph.
         task.updated_at = now_ms();
-        let _ = app.store.save_task(&task);
+        app.save_task_logged(&task);
         app.broadcast_task(&task);
         return ParentEnd::Attempt {
             failure,
@@ -1258,7 +1258,10 @@ impl App {
     }
 
     pub(super) fn repo_tasks(&self, repo: &str) -> Vec<Task> {
-        let mut tasks = self.store.list_tasks().unwrap_or_default();
+        let mut tasks = self.store.list_tasks().unwrap_or_else(|e| {
+            eprintln!("orch: listing graph tasks failed: {e}");
+            Vec::new()
+        });
         tasks.retain(|t| t.repo == repo);
         tasks
     }
@@ -1324,12 +1327,12 @@ impl App {
                 // waited for finished meanwhile.
                 Waits::Ready | Waits::Nothing if in_graph => {
                     if asking {
-                        let mut task = task.clone();
-                        task.question = None;
-                        task.status = TaskStatus::Queued;
-                        task.updated_at = now_ms();
-                        let _ = self.store.save_task(&task);
-                        self.broadcast_task(&task);
+                        if let Err(e) = self.update_task(&task.id, |task| {
+                            task.question = None;
+                            task.status = TaskStatus::Queued;
+                        }) {
+                            eprintln!("orch: updating task {} failed: {e}", task.id);
+                        }
                     }
                     if task.parent.is_some() {
                         self.spawn_child_loop(&all, task);
@@ -1340,12 +1343,12 @@ impl App {
                 // Everything that had ended was restarted and still runs:
                 // the question is moot, the task just waits again.
                 Waits::Pending if asking => {
-                    let mut task = task.clone();
-                    task.question = None;
-                    task.status = TaskStatus::Queued;
-                    task.updated_at = now_ms();
-                    let _ = self.store.save_task(&task);
-                    self.broadcast_task(&task);
+                    if let Err(e) = self.update_task(&task.id, |task| {
+                        task.question = None;
+                        task.status = TaskStatus::Queued;
+                    }) {
+                        eprintln!("orch: updating task {} failed: {e}", task.id);
+                    }
                     if unstarted_children {
                         self.spawn_task_loop(task.id.clone(), true)
                     }
@@ -1416,27 +1419,21 @@ impl App {
                     .any(|a| a.kind == Some(QuestionKind::DependencyEnded))
             {
                 let answer = "retry the dependency";
-                record_policy_answer(
-                    &mut task,
-                    &question,
-                    answer,
-                    "policy",
-                    "a dependency that ended is retried once",
-                    0,
-                );
-                if self
-                    .answer_dependency_question(task.clone(), answer, None, None)
-                    .is_ok()
-                {
-                    return;
+                match self.answer_dependency_question(task.clone(), answer, None, None) {
+                    Ok(_) => return,
+                    Err(e) => eprintln!(
+                        "orch: answering dependency for task {} failed: {e}",
+                        task.id
+                    ),
                 }
-                task.assumptions.pop();
-                task.decisions.pop();
-                task.question_history.pop();
             }
         }
-        let _ = self.store.save_task(&task);
-        self.broadcast_task(&task);
+        if let Err(e) = self.update_task(&task.id, |fresh| {
+            fresh.question = task.question.clone();
+            fresh.status = TaskStatus::Waiting;
+        }) {
+            eprintln!("orch: updating task {} failed: {e}", task.id);
+        }
     }
 
     /// Stops every child of `parent_id` that has not finished: a live loop
@@ -1462,10 +1459,12 @@ impl App {
             if live {
                 continue;
             }
-            child.status = TaskStatus::Stopped;
-            child.updated_at = now_ms();
-            let _ = self.store.save_task(&child);
-            self.broadcast_task(&child);
+            if let Err(e) = self.update_task(&child.id, |child| {
+                self.close_stopped_task(child);
+                child.status = TaskStatus::Stopped;
+            }) {
+                eprintln!("orch: updating task {} failed: {e}", child.id);
+            }
         }
     }
 
@@ -1475,7 +1474,7 @@ impl App {
     /// task goes back to waiting for the rest.
     pub(super) fn answer_dependency_question(
         &self,
-        mut task: Task,
+        task: Task,
         answer: &str,
         caller: Option<AnsweredBy>,
         default_evidence: Option<&str>,
@@ -1491,16 +1490,6 @@ impl App {
         if !choice.starts_with("retry") && !choice.starts_with("drop") {
             return Err("answer retry the dependency, drop the dependency, or stop".to_string());
         }
-        if let Some(caller) = caller {
-            let question = task.question.clone();
-            record_answer_for(
-                &mut task,
-                question.as_ref(),
-                answer.trim(),
-                caller,
-                default_evidence,
-            );
-        }
         if choice.starts_with("retry") {
             for dep in ended.iter().filter(|t| !t.archived) {
                 if self.controls.lock().unwrap().contains_key(&dep.id) {
@@ -1508,55 +1497,67 @@ impl App {
                 }
                 // Queued before its loop runs, so nothing reads it as
                 // ended again while it retries.
-                let mut dep = dep.clone();
-                dep.question = None;
-                dep.status = TaskStatus::Queued;
-                dep.updated_at = now_ms();
-                self.store.save_task(&dep).map_err(|e| e.to_string())?;
-                self.broadcast_task(&dep);
-                self.spawn_task_loop(dep.id.clone(), true);
+                let dep = self.update_task(&dep.id, |dep| {
+                    dep.question = None;
+                    dep.status = TaskStatus::Queued;
+                })?;
+                self.spawn_task_loop(dep.id, true);
             }
         } else if choice.starts_with("drop") {
-            task.depends_on
-                .retain(|id| !ended.iter().any(|t| &t.id == id));
-            for mut child in ended
-                .into_iter()
+            for child in ended
+                .iter()
                 .filter(|t| t.parent.as_deref() == Some(task.id.as_str()))
             {
-                child.parent = None;
-                child.decisions.push(format!(
-                    "{}: dropped from \"{}\"",
-                    answerer_label(&task).unwrap_or("Policy"),
-                    task.title
-                ));
-                child.updated_at = now_ms();
-                self.store.save_task(&child).map_err(|e| e.to_string())?;
-                self.broadcast_task(&child);
+                self.update_task(&child.id, |child| {
+                    child.parent = None;
+                    child.decisions.push(format!(
+                        "{}: dropped from \"{}\"",
+                        caller.filter(|_| default_evidence.is_none()).map_or(
+                            "Policy",
+                            |by| match by {
+                                AnsweredBy::Owner => "Owner",
+                                AnsweredBy::Lead => "Lead",
+                                AnsweredBy::Overseer | AnsweredBy::Orchestrator => "Orchestrator",
+                                _ => "Policy",
+                            }
+                        ),
+                        task.title
+                    ));
+                })?;
             }
         }
-        task.question = None;
         let fresh = self.repo_tasks(&task.repo);
-        if was_parent && !is_parent(&task, &fresh) {
-            // Left without children it would implement the whole request.
-            task.decisions.push(
-                "Orchestrator: no subtasks are left, so this task was stopped instead of implementing the whole request itself"
-                    .to_string(),
-            );
-            task.status = TaskStatus::Stopped;
-            self.close_stopped_task(&mut task);
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
+        let task = self.update_task(&task.id, |current| {
+            if choice.starts_with("drop") {
+                current.depends_on.retain(|id| !ended.iter().any(|t| &t.id == id));
+            }
+            let question = current.question.clone();
+            if let Some(caller) = caller {
+                record_answer_for(current, question.as_ref(), answer.trim(), caller, default_evidence);
+            } else if let Some(question) = task.question.as_ref() {
+                record_policy_answer(
+                    current, question, answer, "policy",
+                    "a dependency that ended is retried once", 0,
+                );
+            }
+            current.question = None;
+            if was_parent && !is_parent(current, &fresh) {
+                current.decisions.push(
+                    "Orchestrator: no subtasks are left, so this task was stopped instead of implementing the whole request itself".to_string(),
+                );
+                current.status = TaskStatus::Stopped;
+                self.close_stopped_task(current);
+            } else {
+                current.status = if is_parent(current, &fresh) {
+                    TaskStatus::Running
+                } else {
+                    TaskStatus::Queued
+                };
+            }
+        })?;
+        if task.status == TaskStatus::Stopped {
             return serde_json::to_value(&task).map_err(|e| e.to_string());
         }
-        task.status = if is_parent(&task, &fresh) {
-            TaskStatus::Running
-        } else {
-            TaskStatus::Queued
-        };
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
         // Its loop waits for whatever is still pending, or goes ahead.
         self.spawn_task_loop(task.id.clone(), true);
         let latest = self

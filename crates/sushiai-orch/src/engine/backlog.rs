@@ -84,7 +84,7 @@ impl App {
         let task = {
             // Held so a start cannot slip in between the check and the save.
             let _admit = self.autopilot_admission.lock().unwrap();
-            let mut task = self
+            let task = self
                 .store
                 .load_task(&id)
                 .map_err(|e| e.to_string())?
@@ -104,14 +104,11 @@ impl App {
                         .unwrap_or_default()
                 ));
             }
-            task.queue.backlog = match bucket {
+            let backlog = match bucket {
                 Some(bucket) => Some(self.backlog_slot(&task.repo, Some(&id), bucket, order)?),
                 None => None,
             };
-            task.updated_at = now_ms();
-            self.store.save_task(&task).map_err(|e| e.to_string())?;
-            self.broadcast_task(&task);
-            task
+            self.update_task(&id, |task| task.queue.backlog = backlog)?
         };
         let value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         self.advance_autopilot();
@@ -121,19 +118,25 @@ impl App {
     /// The one start path of `task.start` and the autopilot: a backlog task
     /// leaves the backlog with a decision line saying who started it.
     pub(super) fn start_task(&self, id: &str, by: Starter) {
-        if let Ok(Some(mut task)) = self.store.load_task(id) {
-            if task.queue.backlog.take().is_some() {
-                task.decisions.push(
-                    match by {
-                        Starter::Owner => "Owner: started from the backlog",
-                        Starter::Autopilot => "Autopilot: started from the next backlog",
-                    }
-                    .to_string(),
-                );
-                task.updated_at = now_ms();
-                if self.store.save_task(&task).is_ok() {
-                    self.broadcast_task(&task);
+        if self
+            .store
+            .load_task(id)
+            .ok()
+            .flatten()
+            .is_some_and(|task| task.queue.backlog.is_some())
+        {
+            if let Err(e) = self.update_task(id, |task| {
+                if task.queue.backlog.take().is_some() {
+                    task.decisions.push(
+                        match by {
+                            Starter::Owner => "Owner: started from the backlog",
+                            Starter::Autopilot => "Autopilot: started from the next backlog",
+                        }
+                        .to_string(),
+                    );
                 }
+            }) {
+                eprintln!("orch: updating task {id} failed: {e}");
             }
         }
         self.spawn_task_loop(id.to_string(), true);

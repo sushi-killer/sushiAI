@@ -441,6 +441,8 @@ pub struct RunOutcome {
     pub error: Option<String>,
     /// The run printed nothing for its stall timeout and was killed.
     pub stalled: bool,
+    /// A helper reached its wall-clock deadline and was stopped.
+    pub timed_out: bool,
     /// The loop detector killed the run; the failure detail.
     pub looped: Option<String>,
     /// The run's estimated cost passed `RunRequest::max_budget_usd` and it

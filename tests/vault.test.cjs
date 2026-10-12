@@ -12,6 +12,7 @@ const {
   PROJECTS_STORE,
 } = require("../electron/vault.cjs");
 const { VAULT_MANIFEST } = require("../electron/extensions/builtin-vault.cjs");
+const { createModuleIpc } = require("../electron/extensions/module-ipc.cjs");
 const { sessionLaunchEnv } = require("../electron/project-session.cjs");
 const { OrchestratorService } = require("../electron/orchestrator.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
@@ -155,6 +156,9 @@ async function setup(
   });
   const projects = new Projects({ userDataDir: home, safeStorage });
   const handlers = new Map();
+  const moduleIpc = createModuleIpc({
+    handle: (channel, callback) => handlers.set(channel, callback),
+  });
   const notices = fakeNotices();
   const cwd = path.join(home, "work", "demo");
   await fs.mkdir(cwd, { recursive: true });
@@ -171,7 +175,7 @@ async function setup(
   });
   await beforeRegister?.(projects, home, project);
   const { ready } = registerVault({
-    handle: (channel, callback) => handlers.set(channel, callback),
+    moduleIpc,
     projects,
     notices,
     safeStorage,
@@ -179,11 +183,12 @@ async function setup(
     isEnabled,
   });
   await ready;
-  const ipc = async (channel, ...args) => handlers.get(channel)(...args);
+  const ipc = async (method, ...args) =>
+    handlers.get("module:invoke")(VAULT_MANIFEST.id, method, ...args);
   // Only the refused-storage tests pass no token, and they store nothing.
   if (token) {
     await projects.setSecret(project.id, "HAND", "hand-value");
-    await ipc("vault:token:set", token);
+    await ipc("token.set", token);
   }
   return { home, projects, notices, ipc, handlers, project, cwd };
 }
@@ -191,7 +196,7 @@ async function setup(
 test("two paths merge in order and a hand-entered value wins, at every stage", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -206,7 +211,7 @@ test("two paths merge in order and a hand-entered value wins, at every stage", a
 test("an ssh host gets no Vault value and the reader is never asked", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -222,7 +227,7 @@ test("an ssh host gets no Vault value and the reader is never asked", async (t) 
 test("reads are cached and shared until the token changes", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -234,13 +239,13 @@ test("reads are cached and shared until the token changes", async (t) => {
   assert.deepEqual(counts(), [1, 1], "concurrent calls share one read");
   assert.deepEqual(await read(), expected);
   assert.deepEqual(counts(), [1, 1], "a repeated call is served from cache");
-  await ipc("vault:token:set", TOKEN);
+  await ipc("token.set", TOKEN);
   assert.deepEqual(await read(), expected);
   assert.deepEqual(counts(), [2, 2], "saving the token reads again");
-  await ipc("vault:token:clear");
+  await ipc("token.clear");
   assert.deepEqual(await read(), { HAND: "hand-value" });
   assert.deepEqual(counts(), [2, 2], "no token, no request");
-  await ipc("vault:token:set", TOKEN);
+  await ipc("token.set", TOKEN);
   assert.deepEqual(await read(), expected);
   assert.deepEqual(counts(), [3, 3], "the token is back: read again");
 });
@@ -249,7 +254,7 @@ for (const [name, configure, body] of [
   [
     "a 403",
     async (vault, ipc) => {
-      await ipc("vault:token:set", "hvs.synthetic-wrong-token");
+      await ipc("token.set", "hvs.synthetic-wrong-token");
       return vault.address;
     },
     "Vault: no access (403)",
@@ -259,7 +264,7 @@ for (const [name, configure, body] of [
   test(`${name} drops Vault values, keeps hand-entered ones and notifies once`, async (t) => {
     const vault = await fakeVault(t);
     const { projects, notices, ipc, project, cwd } = await setup(t);
-    await ipc("projects:vault:set", project.id, {
+    await ipc("project.set", project.id, {
       address: await configure(vault, ipc),
       paths: PATHS,
     });
@@ -316,7 +321,7 @@ test("each failure has its own reason, and a good read retracts the notice", asy
     [["broken/x"], "Vault: error (500)"],
     [["garbled"], "Vault: unreadable reply"],
   ]) {
-    await ipc("projects:vault:set", project.id, {
+    await ipc("project.set", project.id, {
       address: vault.address,
       paths,
     });
@@ -324,14 +329,14 @@ test("each failure has its own reason, and a good read retracts the notice", asy
       await projects.environmentFor(project.id, "agent", "local"),
       { HAND: "hand-value" },
     );
-    assert.deepEqual(await ipc("projects:vault:check", project.id), {
+    assert.deepEqual(await ipc("project.check", project.id), {
       ok: false,
       reason: body,
     });
     bodies.push(body);
   }
-  await ipc("vault:token:clear");
-  assert.deepEqual(await ipc("projects:vault:check", project.id), {
+  await ipc("token.clear");
+  assert.deepEqual(await ipc("project.check", project.id), {
     ok: false,
     reason: "Vault: no token saved",
   });
@@ -342,8 +347,8 @@ test("each failure has its own reason, and a good read retracts the notice", asy
     bodies,
   );
   assert.deepEqual(notices.retracted, []);
-  await ipc("vault:token:set", TOKEN);
-  await ipc("projects:vault:set", project.id, {
+  await ipc("token.set", TOKEN);
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -360,13 +365,13 @@ test("each failure has its own reason, and a good read retracts the notice", asy
 test("a check reads fresh, gives names only and replaces the cached read", async (t) => {
   const vault = await fakeVault(t);
   const { projects, ipc, project } = await setup(t);
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
   await projects.environmentFor(project.id, "agent", "local");
   const names = Object.keys(MERGED).sort();
-  assert.deepEqual(await ipc("projects:vault:check", project.id), {
+  assert.deepEqual(await ipc("project.check", project.id), {
     ok: true,
     names,
     count: names.length,
@@ -386,13 +391,13 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
   }
   t.after(() => Object.assign(console, originals));
   const { home, projects, notices, ipc, project } = await setup(t);
-  await ipc("vault:token:clear");
+  await ipc("token.clear");
   const replies = [
-    await ipc("vault:token:status"),
-    await ipc("vault:token:set", TOKEN),
-    await ipc("vault:token:status"),
+    await ipc("token.status"),
+    await ipc("token.set", TOKEN),
+    await ipc("token.status"),
   ];
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });
@@ -401,12 +406,12 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
       (await projects.environmentFor(project.id, stage, "local")).SECRET_VALUE,
       SYNTHETIC,
     );
-  replies.push(await ipc("projects:vault:check", project.id));
-  replies.push(await ipc("projects:vault:get", project.id));
+  replies.push(await ipc("project.check", project.id));
+  replies.push(await ipc("project.get", project.id));
   replies.push(await projects.get(project.id));
   // A refused path whose reply echoes the token and a value.
   const leaky = await projects.upsert({ name: "Leaky" });
-  await ipc("projects:vault:set", leaky.id, {
+  await ipc("project.set", leaky.id, {
     address: vault.address,
     paths: ["app/over ride", "denied/x"],
   });
@@ -414,10 +419,10 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
     await projects.environmentFor(leaky.id, "agent", "local"),
     {},
   );
-  replies.push(await ipc("projects:vault:check", leaky.id));
+  replies.push(await ipc("project.check", leaky.id));
   assert.equal(notices.published.length, 1);
-  replies.push(await ipc("vault:token:clear"));
-  replies.push(await ipc("vault:token:status"));
+  replies.push(await ipc("token.clear"));
+  replies.push(await ipc("token.status"));
   const check = replies[3];
   assert.equal(check.ok, true);
   assert.ok(check.names.includes("SECRET_VALUE"));
@@ -447,10 +452,10 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
 
 test("the token store holds only safeStorage ciphertext and clear deletes it", async (t) => {
   const { home, ipc } = await setup(t, { token: null });
-  assert.deepEqual(await ipc("vault:token:status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), { saved: false });
   for (const bad of ["", "   ", 42, "has space", "x".repeat(5000)])
-    await assert.rejects(ipc("vault:token:set", bad), /Enter a Vault token/);
-  assert.deepEqual(await ipc("vault:token:set", `  ${TOKEN}\n`), {
+    await assert.rejects(ipc("token.set", bad), /Enter a Vault token/);
+  assert.deepEqual(await ipc("token.set", `  ${TOKEN}\n`), {
     saved: true,
   });
   const stored = readStore(home, STORE);
@@ -463,20 +468,20 @@ test("the token store holds only safeStorage ciphertext and clear deletes it", a
     fakeSafeStorage().decryptString(Buffer.from(stored.token.ct, "base64")),
     TOKEN,
   );
-  assert.deepEqual(await ipc("vault:token:status"), { saved: true });
-  assert.deepEqual(await ipc("vault:token:clear"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), { saved: true });
+  assert.deepEqual(await ipc("token.clear"), { saved: false });
   assert.equal(
     appDb(home)
       .prepare("SELECT COUNT(*) AS n FROM store WHERE name = ?")
       .get(STORE).n,
     0,
   );
-  assert.deepEqual(await ipc("vault:token:status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), { saved: false });
 
   // A token that no longer decrypts counts as none.
   const { writeStore } = require("../electron/app-db.cjs");
   writeStore(home, STORE, { token: { v: 1, ct: "bm90LWZha2U=" } });
-  assert.deepEqual(await ipc("vault:token:status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), { saved: false });
 });
 
 for (const [name, overrides] of [
@@ -489,13 +494,13 @@ for (const [name, overrides] of [
       token: null,
     });
     await assert.rejects(
-      ipc("vault:token:set", TOKEN),
+      ipc("token.set", TOKEN),
       /Secure storage is unavailable\./,
     );
     assert.deepEqual(Object.keys(readStore(home, STORE)), []);
   });
 
-test("projects:vault:set checks its input, defaults the mount and survives upsert", async (t) => {
+test("project.set checks its input, defaults the mount and survives upsert", async (t) => {
   const { projects, ipc, project } = await setup(t, { token: null });
   const base = { address: "http://127.0.0.1:8200", paths: ["app/one"] };
   for (const bad of [
@@ -518,21 +523,18 @@ test("projects:vault:set checks its input, defaults the mount and survives upser
     "http://127.0.0.1:8200",
   ])
     await assert.rejects(
-      ipc("projects:vault:set", project.id, bad),
+      ipc("project.set", project.id, bad),
       undefined,
       JSON.stringify(bad),
     );
-  await assert.rejects(
-    ipc("projects:vault:set", "missing", base),
-    /Unknown project/,
-  );
+  await assert.rejects(ipc("project.set", "missing", base), /Unknown project/);
   const expected = {
     address: "https://vault.invalid:8200",
     mount: "secret",
     paths: ["team/app", "team/shared"],
   };
   assert.deepEqual(
-    await ipc("projects:vault:set", project.id, {
+    await ipc("project.set", project.id, {
       address: " https://vault.invalid:8200/ ",
       paths: [" team/app ", "team/shared"],
     }),
@@ -541,13 +543,13 @@ test("projects:vault:set checks its input, defaults the mount and survives upser
   await projects.upsert({ id: project.id, name: "Renamed" });
   assert.equal((await projects.get(project.id)).name, "Renamed");
   assert.equal("vault" in (await projects.get(project.id)), false);
-  assert.deepEqual(await ipc("projects:vault:get", project.id), expected);
+  assert.deepEqual(await ipc("project.get", project.id), expected);
   assert.deepEqual(
-    await ipc("projects:vault:set", project.id, { ...base, mount: "kv/team" }),
+    await ipc("project.set", project.id, { ...base, mount: "kv/team" }),
     { ...base, mount: "kv/team" },
   );
-  assert.equal(await ipc("projects:vault:set", project.id, null), null);
-  assert.equal(await ipc("projects:vault:get", project.id), null);
+  assert.equal(await ipc("project.set", project.id, null), null);
+  assert.equal(await ipc("project.get", project.id), null);
 });
 
 test("a stored project with the old vault field moves into the module", async (t) => {
@@ -568,7 +570,7 @@ test("a stored project with the old vault field moves into the module", async (t
     },
   });
   assert.equal(project.id, projectId);
-  assert.deepEqual(await ipc("projects:vault:get", project.id), old);
+  assert.deepEqual(await ipc("project.get", project.id), old);
   assert.equal("vault" in (await projects.get(project.id)), false);
   const row = appDb(home)
     .prepare("SELECT data FROM projects WHERE id = ?")
@@ -587,7 +589,7 @@ test("with the module off the project keeps only hand-entered values and Vault i
   const { projects, ipc, project } = await setup(t, {
     isEnabled: () => enabled,
   });
-  await ipc("projects:vault:set", project.id, {
+  await ipc("project.set", project.id, {
     address: vault.address,
     paths: PATHS,
   });

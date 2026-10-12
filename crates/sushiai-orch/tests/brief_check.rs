@@ -189,3 +189,46 @@ fn a_route_that_names_nothing_falls_back_to_the_cheapest_available_route() {
     );
     r.daemon.shutdown_and_wait();
 }
+
+#[test]
+fn helpers_folder_brief_check_does_not_borrow_implement_attempt_one() {
+    let r = run(CLEAR_RESULT, None, explicit());
+    assert_eq!(r.task["status"], "done", "{}", r.task);
+    assert_eq!(r.calls, ["check", "implement"]);
+    let id = r.task["id"].as_str().unwrap();
+    let task_dir = r.daemon.data_dir().join("tasks").join(id);
+    let helper = task_dir.join("helpers/brief-check-1");
+    for file in ["brief.md", "events.jsonl", "mcp.json", "helper.json"] {
+        assert!(helper.join(file).is_file(), "missing {file}");
+        assert!(!task_dir.join("runs/1/brief-check").join(file).exists());
+    }
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(helper.join("helper.json")).unwrap())
+            .unwrap();
+    assert_eq!(meta["stage"], "brief-check");
+    assert!(meta["attempt"].is_null());
+    let attempts = r.task["attempts"].as_array().unwrap();
+    assert_eq!(attempts[0]["stage"], "implement");
+    assert_eq!(attempts[0]["n"], 1);
+    let ns: std::collections::HashSet<u64> =
+        attempts.iter().map(|a| a["n"].as_u64().unwrap()).collect();
+    assert_eq!(ns.len(), attempts.len(), "{}", r.task);
+    let records = sushiai_orch::costs::read_all(r.daemon.data_dir());
+    let check = records.iter().find(|c| c.stage == "brief_check").unwrap();
+    assert!(check.attempt.is_none());
+    assert_eq!(check.task_id.as_deref(), Some(id));
+    assert!(task_dir.join("runs/1/brief.md").is_file());
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn helpers_folder_planned_and_implement_attempts_have_distinct_numbers() {
+    let r = run(CLEAR_RESULT, None, planned());
+    assert_eq!(r.task["status"], "done", "{}", r.task);
+    let attempts = r.task["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["stage"], "plan");
+    assert_eq!(attempts[1]["stage"], "implement");
+    assert_ne!(attempts[0]["n"], attempts[1]["n"]);
+    r.daemon.shutdown_and_wait();
+}

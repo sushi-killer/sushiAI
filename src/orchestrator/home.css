@@ -49,6 +49,30 @@
   margin-top: 4px;
 }
 
+.home-autonomy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm) var(--gap-lg);
+  padding-top: var(--gap-sm);
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+.home-autonomy > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+}
+.home-autonomy svg {
+  flex-shrink: 0;
+}
+.home-autonomy-on {
+  color: var(--text-muted);
+}
+.home-autonomy-on svg {
+  color: var(--accent);
+}
+
 /* The week, one line, with a way into Analytics. */
 .home-analytics {
   display: flex;

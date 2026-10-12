@@ -106,7 +106,7 @@ pub(super) async fn pause_for_rate_limit(
     task.decisions.push(line);
     task.status = TaskStatus::Queued;
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     permit.take();
     let resumed = tokio::select! {
@@ -124,7 +124,7 @@ pub(super) async fn pause_for_rate_limit(
         }
     }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     resumed
 }

@@ -1,7 +1,9 @@
 #[test]
 fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
     let tmp = tempfile::tempdir().unwrap();
-    let plan = tmp.path().join("plan");
+    let store = Store::new(tmp.path()).unwrap();
+    let task = task_with_status(TaskStatus::Drafting);
+    let plan = store.run_dir(&task.id, 1).join("plan");
     std::fs::create_dir_all(&plan).unwrap();
     let result = |cost: f64| {
         format!(
@@ -12,14 +14,14 @@ fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
     std::fs::write(plan.join("events-retry.jsonl"), result(0.5)).unwrap();
     let prices = Settings::default().prices;
     let settle = |saved: Option<f64>| {
-        let mut task = task_with_status(TaskStatus::Drafting);
+        let mut task = task.clone();
         task.cost_usd = saved.unwrap_or(0.0);
         task.attempts = vec![Attempt {
             stage: Stage::Plan,
             cost_usd: saved,
             ..attempt_with_failure(1, "x")
         }];
-        settle_unfinished_cost(&mut task, 0, tmp.path(), &prices);
+        settle_unfinished_cost(&mut task, 0, &store, &prices);
         (task.attempts[0].cost_usd, task.cost_usd)
     };
     // No cost saved yet: every plan run's file counts.
@@ -75,4 +77,52 @@ fn backfill_turns_task_costs_into_records_once() {
     // from being derived again.
     assert_eq!(crate::costs::backfill(&app.data_dir), 0);
     assert_eq!(crate::costs::read_all(&app.data_dir).len(), 4);
+}
+
+#[test]
+fn helpers_folder_cost_replay_reads_only_the_attempts_review_and_advisor() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Queued);
+    task.attempts = vec![attempt_with_failure(1, "failure")];
+    let result = |cost: f64| format!(r#"{{"type":"result","total_cost_usd":{cost},"result":"x"}}"#);
+    for (stage, attempt, cost) in [
+        ("review", 1, 0.25),
+        ("review", 1, 0.5),
+        ("review", 2, 10.0),
+        ("advisor", 1, 0.125),
+        ("advisor", 2, 20.0),
+    ] {
+        let dir = app
+            .store
+            .claim_helper_run_dir(&task.id, stage, Some(attempt))
+            .unwrap();
+        std::fs::write(dir.join("events.jsonl"), result(cost)).unwrap();
+    }
+    let legacy = app.store.run_dir(&task.id, 1);
+    for stage in ["review", "advisor"] {
+        std::fs::create_dir_all(legacy.join(stage)).unwrap();
+        std::fs::write(legacy.join(stage).join("events.jsonl"), result(99.0)).unwrap();
+    }
+    let prices = Settings::default().prices;
+    settle_interrupted_review(&mut task, 0, &app.store, &prices);
+    assert_eq!(task.attempts[0].review_cost_usd, Some(0.75));
+    assert!(settle_interrupted_advisor(&mut task, &app.store, &prices));
+    assert_eq!(task.attempts[0].advisor_cost_usd, Some(0.125));
+    assert_eq!(task.cost_usd, 0.875);
+    settle_interrupted_review(&mut task, 0, &app.store, &prices);
+    assert!(!settle_interrupted_advisor(&mut task, &app.store, &prices));
+    assert_eq!(task.cost_usd, 0.875);
+    let mut old = task.clone();
+    old.id = uuid::Uuid::new_v4().to_string();
+    old.cost_usd = 0.0;
+    old.attempts[0].review_cost_usd = None;
+    old.attempts[0].advisor_cost_usd = None;
+    for stage in ["review", "advisor"] {
+        let dir = app.store.run_dir(&old.id, 1).join(stage);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), result(99.0)).unwrap();
+    }
+    settle_interrupted_review(&mut old, 0, &app.store, &prices);
+    assert!(!settle_interrupted_advisor(&mut old, &app.store, &prices));
+    assert_eq!(old.cost_usd, 0.0);
 }

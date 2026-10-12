@@ -95,6 +95,55 @@ test("taskCreateParams adds a trimmed base on the title/goal fallback path too",
   );
 });
 
+for (const form of ["request", "fallback"]) {
+  for (const start of [false, true]) {
+    test(`composerCreateParams ${form} ${start ? "starts without backlog" : "parks in NEXT"}`, async () => {
+      const { composerCreateParams } = await library;
+      const text = "Add CSV export";
+      const params = composerCreateParams(
+        text,
+        start,
+        "  feature/base-demo  ",
+        "project-1",
+        form,
+      );
+      assert.deepEqual(params, {
+        ...(form === "request"
+          ? { request: text }
+          : { title: text, goal: text }),
+        start,
+        source: "ui",
+        projectId: "project-1",
+        ...(!start ? { backlog: { bucket: "next" } } : {}),
+        base: "feature/base-demo",
+      });
+      assert.equal(Object.hasOwn(params, "backlog"), !start);
+      for (const base of ["", "   "]) {
+        const blank = composerCreateParams(text, start, base, undefined, form);
+        assert.equal(Object.hasOwn(blank, "base"), false);
+        assert.equal(Object.hasOwn(blank, "backlog"), !start);
+      }
+    });
+  }
+}
+
+test("composerCreateParams truncates fallback titles to 60 characters and keeps the goal", async () => {
+  const { composerCreateParams } = await library;
+  const text = "x".repeat(61);
+  const params = composerCreateParams(text, false, "", undefined, "fallback");
+  assert.equal(params.title, `${"x".repeat(59)}…`);
+  assert.equal(params.title.length, 60);
+  assert.equal(params.goal, text);
+  assert.equal(
+    composerCreateParams("x".repeat(60), true, "", undefined, "fallback").title,
+    "x".repeat(60),
+  );
+  assert.equal(
+    composerCreateParams(text, false, "", undefined, "request").request,
+    text,
+  );
+});
+
 test("formatDuration reads in whole minutes and never prints a zero unit", async () => {
   const { formatDuration } = await library;
   assert.equal(formatDuration(0), "<1m");

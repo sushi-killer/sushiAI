@@ -59,7 +59,7 @@ pub(super) async fn run_task_loop(
             }
             task.queue.paused_until = None;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
 
@@ -68,7 +68,7 @@ pub(super) async fn run_task_loop(
         let recreated = match app.ensure_worktree(&mut task).await {
             Ok(true) => {
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 true
             }
@@ -77,7 +77,7 @@ pub(super) async fn run_task_loop(
                 task.decisions.push(format!("Worktree: {e}"));
                 task.status = TaskStatus::Failed;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 app.finish_task_loop(&task_id);
                 return;
@@ -96,7 +96,7 @@ pub(super) async fn run_task_loop(
                 task.decisions.push(format!("Worktree setup: {e}"));
                 task.status = TaskStatus::Failed;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
             app.finish_task_loop(&task_id);
@@ -154,7 +154,7 @@ pub(super) async fn run_task_loop(
                     task.status = TaskStatus::Queued;
                     task.queue.queue_reason = None;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
+                    app.save_task_logged(&task);
                     app.broadcast_task(&task);
                 }
                 app.finish_task_loop(&task_id);
@@ -214,7 +214,7 @@ pub(super) async fn run_task_loop(
             }
             attempt_budget = attempt_budget.max(counted_attempts(&task) + 1);
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
 
@@ -280,7 +280,7 @@ pub(super) async fn run_task_loop(
             a.failure = None;
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             match finish_after_review(
                 &app,
@@ -364,8 +364,7 @@ pub(super) async fn run_task_loop(
             && task.planned_by_parent
             && !task.brief_check.refreshed
         {
-            let attempt_n = task.attempts.len() as u32 + 1;
-            if refresh_after_dependencies(&app, &task_id, attempt_n, &cancel).await {
+            if refresh_after_dependencies(&app, &task_id, &cancel).await {
                 drop(permit);
                 mark_stopped_if_not_already(&app, &task_id).await;
                 app.finish_task_loop(&task_id);
@@ -382,10 +381,7 @@ pub(super) async fn run_task_loop(
             && !task.brief_check.done
             && parent_failure.is_none()
         {
-            let attempt_n = task.attempts.len() as u32 + 1;
-            if let BriefAction::Cancelled =
-                check_brief(&app, &task_id, attempt_n, false, &cancel).await
-            {
+            if let BriefAction::Cancelled = check_brief(&app, &task_id, false, &cancel).await {
                 drop(permit);
                 mark_stopped_if_not_already(&app, &task_id).await;
                 app.finish_task_loop(&task_id);
@@ -424,7 +420,7 @@ pub(super) async fn run_task_loop(
                 task.brief_check.missing_tool_asked = true;
                 task.brief_check.missing_tool = None;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 drop(permit);
                 continue 'attempts;
@@ -443,11 +439,10 @@ pub(super) async fn run_task_loop(
             if heal_grep_dashes(&mut task) {
                 app.verify_cache.lock().unwrap().remove(&task_id);
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
-            let attempt_n = task.attempts.len() as u32 + 1;
-            spawn_base_preflight(&app, &task, attempt_n, &cancel);
+            spawn_base_preflight(&app, &task, &cancel);
         }
 
         let status = task.status;
@@ -514,7 +509,7 @@ pub(super) async fn run_task_loop(
                 app.finish_task_loop(&task_id);
                 return;
             }
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
         let dependencies_before = task.depends_on.clone();
@@ -587,10 +582,10 @@ pub(super) async fn run_task_loop(
                 task.cost_usd -= counted;
             }
             // A review it died under is paid for too; the review runs again.
-            settle_interrupted_review(&mut task, idx, &run_dir, &settings.prices);
+            settle_interrupted_review(&mut task, idx, &app.store, &settings.prices);
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             // The agent still running holds the token of its Stop hook: the
             // earlier daemon left it with the run files.
@@ -642,7 +637,7 @@ pub(super) async fn run_task_loop(
                 return;
             }
             let settings = app.settings.read().unwrap().clone();
-            let attempt_n = implement_attempt_count(&task) + 1;
+            let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
             // A landing that conflicted only needs its markers resolved: that
             // runs on the cheap route, not as a full re-implementation.
             let conflict_only = last_failure_is_conflict(&task)
@@ -730,7 +725,7 @@ pub(super) async fn run_task_loop(
                 {
                     task.cost_usd += cost;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(&task);
+                    app.save_task_logged(&task);
                     app.broadcast_task(&task);
                     // The advisor's spend can be what reaches the budget.
                     let status = task.status;
@@ -877,7 +872,7 @@ pub(super) async fn run_task_loop(
             refresh_criteria_results(&mut task, idx);
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
 
             let run_dir = app.store.run_dir(&task_id, attempt_n);
@@ -937,7 +932,7 @@ pub(super) async fn run_task_loop(
             );
             // Recorded after the reload below, which would drop a line pushed now.
             let mut no_second = BestOfExtra::default();
-            let second = match second_route(&task, &settings, &route, attempt_n) {
+            let second = match second_route(&task, &settings, &route) {
                 Ok(second) => second,
                 Err(line) => {
                     no_second.decisions.push(line);
@@ -1033,13 +1028,13 @@ pub(super) async fn run_task_loop(
             Err(RunError::Cancelled) => {
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
-                settle_unfinished_cost(&mut task, idx, &run_dir, &settings.prices);
+                settle_unfinished_cost(&mut task, idx, &app.store, &settings.prices);
                 task.status = app.cancelled_status(&task.status);
                 if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(&mut task);
                 }
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 drop(permit);
                 app.finish_task_loop(&task_id);
@@ -1053,7 +1048,7 @@ pub(super) async fn run_task_loop(
                 task.decisions
                     .push(format!("Orchestrator: {msg}; no attempt was used"));
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 drop(permit);
                 continue;
@@ -1359,7 +1354,7 @@ pub(super) async fn run_task_loop(
                             let origin = origin_of_last_answer(&task);
                             let _ = drop_criterion(&settings, &mut task, n, origin);
                             task.updated_at = now_ms();
-                            let _ = app.store.save_task(&task);
+                            app.save_task_logged(&task);
                             app.broadcast_task(&task);
                         }
                         drop(permit);
@@ -1436,7 +1431,7 @@ pub(super) async fn run_task_loop(
                 };
                 permissions::apply_no_tool_answer(&app, &mut task, &capability, &answer);
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 drop(permit);
                 continue;
@@ -1595,7 +1590,7 @@ pub(super) async fn run_task_loop(
                         app.write_report(&mut task).await;
                         app.release_worktree(&mut task, "task done").await;
                         task.updated_at = now_ms();
-                        let _ = app.store.save_task(&task);
+                        app.save_task_logged(&task);
                         app.broadcast_task(&task);
                         wake_orchestrator_for_done(&app, &mut task);
                         drop(permit);
@@ -1672,7 +1667,7 @@ pub(super) async fn run_task_loop(
                         .await
                         .unwrap_or(None);
                 task.attempts[idx].evidence_base = Some(task.base_sha.clone());
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             } else if !task.visual_criteria_texts().is_empty() {
                 let source = task
@@ -1717,7 +1712,7 @@ pub(super) async fn run_task_loop(
                             task.decisions.push(format!(
                                 "Orchestrator: attempt {n} changed no UI file of its own since attempt {m} (artifacts, tests and carried-in base commits do not count); reused attempt {m}'s evidence"
                             ));
-                            let _ = app.store.save_task(&task);
+                            app.save_task_logged(&task);
                             app.broadcast_task(&task);
                         } else {
                             stale_evidence = Some((m, other.into_iter().take(5).collect()));
@@ -2011,7 +2006,7 @@ pub(super) async fn run_task_loop(
             if !task.decisions.contains(&note) {
                 task.decisions.push(note);
                 add_follow_ups(&mut task, follow);
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
         } else if !visual.is_empty() && evidence_missing {
@@ -2200,7 +2195,7 @@ pub(super) async fn run_task_loop(
                             a.ended_at = Some(now_ms());
                         }
                         t.updated_at = now_ms();
-                        let _ = app.store.save_task(&t);
+                        app.save_task_logged(&t);
                         app.broadcast_task(&t);
                     }
                     drop(permit);
@@ -2213,12 +2208,10 @@ pub(super) async fn run_task_loop(
                 // automatic re-run after a reply with no verdict, and any the
                 // owner or the policy asks for with `retry`. Same diff, no new
                 // implement attempt.
-                let mut round = 1u32;
                 let mut after_no_verdict = false;
                 let mut auto_rerun = true;
-                // Findings a judge dropped in this attempt, and its judge runs.
+                // Findings a judge dropped in this attempt.
                 let mut dropped: Vec<(String, String)> = Vec::new();
-                let mut judge_runs = 0u32;
                 // After a narrow PASS that left files no open finding names,
                 // every later round of this attempt is a full review; the
                 // escalation happens at most once.
@@ -2228,7 +2221,7 @@ pub(super) async fn run_task_loop(
                         &app,
                         &task_id,
                         attempt_n,
-                        &task,
+                        &mut task,
                         &worktree,
                         &base_sha,
                         &verify_results,
@@ -2239,7 +2232,6 @@ pub(super) async fn run_task_loop(
                         &cancel,
                         &mut review_cost,
                         &mut review_fingerprint,
-                        round,
                         after_no_verdict,
                         &dropped,
                         force_full,
@@ -2280,7 +2272,6 @@ pub(super) async fn run_task_loop(
                                         if unnamed.len() == 1 { "it" } else { "them" }
                                     ));
                                     force_full = true;
-                                    round += 1;
                                     after_no_verdict = false;
                                     continue;
                                 }
@@ -2305,13 +2296,11 @@ pub(super) async fn run_task_loop(
                                         review_route,
                                         &route,
                                         task_tier,
-                                        &mut judge_runs,
                                         &cancel,
                                     )
                                     .await;
                                     if !newly.is_empty() {
                                         dropped.extend(newly);
-                                        round += 1;
                                         after_no_verdict = false;
                                         continue;
                                     }
@@ -2319,9 +2308,8 @@ pub(super) async fn run_task_loop(
                                 match heal_repeated_unmet(&app, &mut task, idx, &r, &cancel).await {
                                     Ok(true) => {
                                         task.updated_at = now_ms();
-                                        let _ = app.store.save_task(&task);
+                                        app.save_task_logged(&task);
                                         app.broadcast_task(&task);
-                                        round += 1;
                                         continue;
                                     }
                                     Ok(false) => {}
@@ -2349,7 +2337,6 @@ pub(super) async fn run_task_loop(
                     };
                     if no_verdict && auto_rerun {
                         auto_rerun = false;
-                        round += 1;
                         after_no_verdict = true;
                         task.decisions.push(format!(
                             "Orchestrator: attempt {attempt_n} review reply had no verdict; reviewing the same attempt again"
@@ -2395,7 +2382,6 @@ pub(super) async fn run_task_loop(
                             // Review the same attempt again, not a new one.
                             task.attempts[idx].status = AttemptStatus::Running;
                             task.attempts[idx].ended_at = None;
-                            round += 1;
                             after_no_verdict = no_verdict;
                             continue;
                         }
@@ -2424,7 +2410,7 @@ pub(super) async fn run_task_loop(
         if let Some(r) = review_result.as_mut() {
             // After the first attempt only P1+ findings about the task's own
             // work cost an attempt; the rest go to the report.
-            if r.verdict == Verdict::Fail && attempt_n >= 2 {
+            if r.verdict == Verdict::Fail && implement_attempt_count(&task) >= 2 {
                 let was = r.findings.len();
                 let follow_ups = scope_review(&task, idx, &changed, r);
                 if !follow_ups.is_empty() {
@@ -2736,7 +2722,7 @@ pub(super) async fn carry_after_base_moves(
                         short_sha(&task.base_sha)
                     ));
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(task);
+                    app.save_task_logged(task);
                     app.broadcast_task(task);
                 }
                 tokio::select! {
@@ -2769,7 +2755,7 @@ pub(super) async fn carry_after_base_moves(
                 if is_option(&answer, "stop") {
                     task.status = TaskStatus::Stopped;
                     task.updated_at = now_ms();
-                    let _ = app.store.save_task(task);
+                    app.save_task_logged(task);
                     app.broadcast_task(task);
                     return BaseRetry::Stopped;
                 }
@@ -2793,7 +2779,7 @@ fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
         app.close_stopped_task(task);
     }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
 }
 
@@ -2808,7 +2794,7 @@ pub(super) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
                 app.close_stopped_task(&mut task);
             }
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
     }
@@ -2868,7 +2854,7 @@ impl App {
             let before = task.decisions.len();
             record_check_outcomes(self, &mut task, &[]);
             if task.decisions.len() != before {
-                let _ = self.store.save_task(&task);
+                self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
             self.drop_settled_output(&task);
@@ -2994,7 +2980,7 @@ pub(super) async fn finish_after_review(
         }
         if !kept.is_empty() {
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
         }
         let ordinary_detail = ordinary
@@ -3102,7 +3088,7 @@ pub(super) async fn finish_after_review(
                 }
                 *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 *permit = None;
                 return Tail::Continue;
@@ -3114,7 +3100,7 @@ pub(super) async fn finish_after_review(
             a.failure = None;
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(task);
+            app.save_task_logged(task);
             app.broadcast_task(task);
             if !ordinary.is_empty() {
                 return match fail_and_continue(
@@ -3198,7 +3184,7 @@ pub(super) async fn finish_attempt(
                 task.attempts[idx].ended_at = Some(now_ms());
                 task.status = TaskStatus::Landing;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 *permit = None;
                 app.finish_task_loop(task_id);
@@ -3213,7 +3199,7 @@ pub(super) async fn finish_attempt(
                 app.write_report(task).await;
                 app.release_worktree(task, "landed").await;
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 *permit = None;
                 app.finish_task_loop(task_id);
@@ -3253,7 +3239,7 @@ pub(super) async fn finish_attempt(
                     app.close_stopped_task(task);
                 }
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(task);
+                app.save_task_logged(task);
                 app.broadcast_task(task);
                 *permit = None;
                 app.finish_task_loop(task_id);
@@ -3314,7 +3300,7 @@ pub(super) async fn finish_attempt(
         app.release_worktree(task, "committed on its branch").await;
     }
     task.updated_at = now_ms();
-    let _ = app.store.save_task(task);
+    app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
     *permit = None;

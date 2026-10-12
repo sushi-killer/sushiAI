@@ -4,6 +4,7 @@ import type { Tone } from "../ui/tone.ts";
 import { needsOwner, questionCount, questionsLabel } from "./ownerAttention.ts";
 import type {
   Attempt,
+  BacklogBucket,
   FailureKind,
   Fingerprint,
   Message,
@@ -24,6 +25,7 @@ export type TaskCreateParams = {
   base?: string;
   start?: boolean;
   source?: string;
+  backlog?: { bucket: BacklogBucket; order?: number };
   /** The project the task belongs to: its variables and MCP servers follow. */
   projectId?: string;
 };
@@ -38,6 +40,30 @@ export function taskCreateParams(
 ): TaskCreateParams {
   const trimmed = base.trim();
   return trimmed ? { ...params, base: trimmed } : { ...params };
+}
+
+export function composerCreateParams(
+  text: string,
+  start: boolean,
+  base: string,
+  projectId: string | undefined,
+  form: "request" | "fallback",
+): TaskCreateParams {
+  return taskCreateParams(
+    {
+      ...(form === "request"
+        ? { request: text }
+        : {
+            title: text.length > 60 ? `${text.slice(0, 59)}…` : text,
+            goal: text,
+          }),
+      start,
+      source: "ui",
+      projectId,
+      ...(!start ? { backlog: { bucket: "next" as const } } : {}),
+    },
+    base,
+  );
 }
 
 export function formatDuration(ms: number): string {

@@ -69,7 +69,7 @@ export function segmentLabel(segment: TimelineSegment): string {
     : segment.stage;
 }
 
-function clock(ms: number): string {
+export function clock(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;

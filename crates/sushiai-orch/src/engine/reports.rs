@@ -381,10 +381,18 @@ impl App {
         tokio::spawn(async move {
             let tasks = tokio::task::spawn_blocking({
                 let app = app.clone();
-                move || app.store.list_tasks().unwrap_or_default()
+                move || {
+                    app.store.list_tasks().unwrap_or_else(|e| {
+                        eprintln!("orch: listing tasks for lead touch check failed: {e}");
+                        Vec::new()
+                    })
+                }
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                eprintln!("orch: starting lead touch check failed: {e}");
+                Vec::new()
+            });
             for mut task in tasks {
                 if app.shutting_down.load(Ordering::SeqCst) {
                     return;
@@ -404,7 +412,7 @@ impl App {
                     app.write_report(&mut task).await;
                 }
                 task.updated_at = now_ms();
-                let _ = app.store.save_task(&task);
+                app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
         });

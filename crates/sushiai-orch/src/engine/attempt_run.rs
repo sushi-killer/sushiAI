@@ -1113,8 +1113,10 @@ mod stall_tests {
         let cancel = CancelToken::new();
         let limit = Duration::from_millis(250);
         let mut guard = Guard::helper("planner", limit);
+        // Far below the fake's 30 s sleep, far above a loaded machine's
+        // spawn and kill latency: it proves the helper deadline, not speed.
         let result = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             codex_version(bin.to_str().unwrap(), &cancel, &mut guard),
         )
         .await

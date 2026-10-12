@@ -30,13 +30,13 @@ async function spawnReady(script) {
   return child;
 }
 
-test("deadline defaults to 60 s and takes a positive env override", () => {
-  assert.equal(deadlineMs({}), 60000);
+test("deadline defaults to 180 s and takes a positive env override", () => {
+  assert.equal(deadlineMs({}), 180000);
   assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "5" }), 5000);
-  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "abc" }), 60000);
-  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "0" }), 60000);
-  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "-3" }), 60000);
-  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "" }), 60000);
+  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "abc" }), 180000);
+  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "0" }), 180000);
+  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "-3" }), 180000);
+  assert.equal(deadlineMs({ SUSHIAI_TEST_DEADLINE_SECS: "" }), 180000);
   assert.equal(typeof DEADLINE_MS, "number");
 });
 

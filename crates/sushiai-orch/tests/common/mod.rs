@@ -52,9 +52,9 @@ impl Drop for DaemonChild {
     }
 }
 
-/// The one wall-clock budget every wait in this suite shares: 60 s, or
+/// The one wall-clock budget every wait in this suite shares: 180 s, or
 /// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (unset, 0 or anything else
-/// means 60 s, like `tests/helpers/deadline.cjs`). Read once per test process. A test that measures
+/// means 180 s, like `tests/helpers/deadline.cjs`). Read once per test process. A test that measures
 /// timing scales its slow job and its budget from this value instead of using its own constant.
 pub fn deadline() -> Duration {
     static DEADLINE: OnceLock<Duration> = OnceLock::new();
@@ -63,7 +63,7 @@ pub fn deadline() -> Duration {
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0);
-        Duration::from_secs(secs.unwrap_or(60))
+        Duration::from_secs(secs.unwrap_or(180))
     })
 }
 

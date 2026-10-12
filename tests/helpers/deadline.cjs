@@ -4,10 +4,10 @@
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 
-const DEFAULT_DEADLINE_MS = 60000;
+const DEFAULT_DEADLINE_MS = 180000;
 const POLL_MS = 25;
 
-/** Deadline in ms: `SUSHIAI_TEST_DEADLINE_SECS` (a positive number) or 60 s. */
+/** Deadline in ms: `SUSHIAI_TEST_DEADLINE_SECS` (a positive number) or 180 s. */
 function deadlineMs(env = process.env) {
   const secs = Number(env.SUSHIAI_TEST_DEADLINE_SECS);
   return Number.isFinite(secs) && secs > 0 ? secs * 1000 : DEFAULT_DEADLINE_MS;

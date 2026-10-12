@@ -814,8 +814,9 @@ pub(super) async fn run_task_loop(
                 }
                 _ => brief_text,
             };
-            // Every attempt here starts a fresh session; a conflict-only one
-            // touches only the conflicted files.
+            // The full brief carries the block unless the attempt is
+            // conflict-only (it touches only the conflicted files); a resumed
+            // retry sends a shorter resume brief instead of this one.
             let brief_text = if conflict_only {
                 brief_text
             } else {

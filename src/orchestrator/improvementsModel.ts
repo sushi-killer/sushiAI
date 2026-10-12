@@ -136,10 +136,13 @@ export function recentPrecedents(rows: Precedent[]) {
   return [...rows].sort((a, b) => b.lastAt - a.lastAt).slice(0, MAX_PRECEDENTS);
 }
 
-/** The pieces of one precedent row. */
+/** The pieces of one precedent row. The kind names the commands the
+ * precedent is about, so two rows that differ only by command read apart. */
 export function precedentRow(precedent: Precedent) {
+  const commands = precedent.commands ?? [];
+  const label = questionKindLabel(precedent.kind);
   return {
-    kind: questionKindLabel(precedent.kind),
+    kind: commands.length ? `${label} (${commands.join(", ")})` : label,
     answer: precedent.answer,
     by: answeredBy(precedent.by),
     why: precedent.why,

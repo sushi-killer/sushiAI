@@ -689,7 +689,12 @@ export function taskReason(
   tasks: Task[],
   maxAttempts?: number,
 ): string {
-  if (task.wait) return waitLabel(task.wait);
+  const asking = task.status === "waiting" && questionCount(task) > 0;
+  const queueing =
+    task.status === "queued" ||
+    task.status === "drafting" ||
+    task.status === "running";
+  if (task.wait && queueing && !asking) return waitLabel(task.wait);
   const children = childrenOf(tasks, task.id);
   if (children.length > 0 && task.status !== "waiting") {
     const landed = children.filter((c) => c.status === "done").length;

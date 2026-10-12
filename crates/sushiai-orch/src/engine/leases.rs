@@ -264,7 +264,9 @@ impl App {
                     task.status,
                     TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
                 );
-            if !ended && self.file_blocked(&task) {
+            // A task parked on a question no longer waits for a file.
+            let asking = task.status == TaskStatus::Waiting;
+            if !ended && !asking && self.file_blocked(&task) {
                 continue;
             }
             if let Err(e) = self.update_task(&task.id, |t| t.queue.wait = None) {
@@ -564,5 +566,63 @@ mod tests {
             .handle
             .abort();
         assert!(!app.file_blocked(&other));
+    }
+
+    #[tokio::test]
+    async fn advance_queue_clears_a_file_wait_once_the_task_asks_a_question() {
+        let (app, _dir) = test_app();
+        let holder = task_with_status(TaskStatus::Running);
+        app.store.save_task(&holder).unwrap();
+        app.controls.lock().unwrap().insert(
+            holder.id.clone(),
+            TaskControl {
+                cancel: CancelToken::new(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(std::future::pending()),
+            },
+        );
+        app.sync_lease(&holder.id, &["real.txt".into()]);
+        let mut other = task_with_status(TaskStatus::Running);
+        other.queue.wait = Some(Wait::File {
+            task_id: holder.id.clone(),
+            title: "Holder".into(),
+            path: "real.txt".into(),
+        });
+        app.store.save_task(&other).unwrap();
+        // Still running and still refused: the wait stays.
+        app.advance_queue(&other.repo);
+        assert!(app
+            .store
+            .load_task(&other.id)
+            .unwrap()
+            .unwrap()
+            .queue
+            .wait
+            .is_some());
+        other.status = TaskStatus::Waiting;
+        other.question = Some(Question::new(
+            "Which way?",
+            vec![],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&other).unwrap();
+        app.advance_queue(&other.repo);
+        assert!(app
+            .store
+            .load_task(&other.id)
+            .unwrap()
+            .unwrap()
+            .queue
+            .wait
+            .is_none());
+        app.controls
+            .lock()
+            .unwrap()
+            .remove(&holder.id)
+            .unwrap()
+            .handle
+            .abort();
     }
 }

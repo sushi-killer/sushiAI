@@ -240,6 +240,24 @@ test("a waiting row shows the real question count", async () => {
   assert.equal(waiting("Which one?"), "1 question for you");
 });
 
+test("an open question wins over a stale wait label", async () => {
+  const { taskReason } = await library;
+  const wait = { kind: "file", taskId: "t9", title: "Other", path: "a.txt" };
+  const running = taskReason(task({ status: "running", wait }), []);
+  assert.match(running, /a\.txt/);
+  assert.equal(
+    taskReason(
+      task({
+        status: "waiting",
+        wait,
+        question: { text: "Which?", options: [] },
+      }),
+      [],
+    ),
+    "1 question for you",
+  );
+});
+
 test("statusBadgeLabel names each status a short word for the list row's pill", async () => {
   const { statusBadgeLabel } = await library;
   assert.equal(statusBadgeLabel(task({ status: "running" })), "Running");

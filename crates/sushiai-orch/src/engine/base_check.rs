@@ -1155,7 +1155,8 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         .extend(jobs);
 }
 
-/// Baselines the checks that have none yet on the base commit (not in the
+/// Baselines the checks that have none yet on the base commit, or on the
+/// planner's tests commit when the task has one (not in the
 /// task's worktree, which may hold the implementer's changes). `false` when
 /// cancelled or the base could not be checked out; nothing is stored then.
 pub(super) async fn baseline_on_base(
@@ -1169,11 +1170,12 @@ pub(super) async fn baseline_on_base(
     }
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
+    let rev = task.work_base().to_string();
     match run_on_base(
         app,
         Some(&task.id),
         &task.repo,
-        &task.base_sha,
+        &rev,
         &commands,
         &run_dir,
         cancel,
@@ -1314,9 +1316,7 @@ pub(super) async fn apply_pending_amendment(
         app.verify_cache.lock().unwrap().remove(&task.id);
     }
     amendment.apply(task);
-    if task.variant().grounded_checks {
-        baseline_on_base(app, task, cancel).await;
-    }
+    baseline_on_base(app, task, cancel).await;
     app.save_task_logged(task);
     app.broadcast_task(task);
 }

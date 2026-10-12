@@ -71,6 +71,8 @@ fn a_final_check_that_fails_twice_on_base_is_asked_after_the_first_attempt_and_l
     let id = start(&daemon, repo.path(), &check);
 
     let task = waiting_with_attempts(&daemon, &id, 1);
+    assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
+    assert_eq!(task["attempts"][0]["failure"]["kind"], "verify", "{task}");
     let base = task["baseSha"].as_str().unwrap();
     assert_eq!(
         task["question"]["text"].as_str().unwrap(),
@@ -100,7 +102,7 @@ fn a_final_check_that_fails_twice_on_base_is_asked_after_the_first_attempt_and_l
 #[test]
 fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     let scripts = tempfile::tempdir().unwrap();
-    let daemon = spawn(scripts.path());
+    let mut daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let (first, second) = ("echo one; exit 3", "echo two; exit 4");
     let mut settings = daemon.request("settings.get", json!({}));
@@ -140,6 +142,63 @@ fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     assert!(text.contains(first) && text.contains(second), "{text}");
     let history = task["questionHistory"].as_array().map_or(0, Vec::len);
     assert_eq!(history, 0, "{task}");
+
+    let script = scripts.path().join("fake.sh");
+    daemon.restart(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let resumed = waiting_with_attempts(&daemon, &id, 1);
+    assert_eq!(resumed["question"]["commands"], json!([first, second]));
+    assert_eq!(resumed["question"]["kind"], "preexisting_failure");
+    assert_eq!(
+        resumed["questionHistory"].as_array().map_or(0, Vec::len),
+        0,
+        "{resumed}"
+    );
+    daemon.request("task.answer", json!({"id": id, "answer": "drop all"}));
+    let done = poll_until(&daemon, &id, |s| s == "done");
+    assert_eq!(done["attempts"].as_array().unwrap().len(), 2, "{done}");
+    assert!(
+        done["finalVerify"].as_array().is_none_or(Vec::is_empty),
+        "{done}"
+    );
+    let attempts = done["attempts"].as_array().unwrap();
+    assert!(attempts.last().unwrap()["failure"].is_null(), "{done}");
+    let decisions = done["decisions"].as_array().unwrap();
+    for check in [first, second] {
+        let dropped = format!("Orchestrator: dropped check {check}");
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|d| d.as_str() == Some(dropped.as_str()))
+                .count(),
+            1,
+            "{decisions:?}"
+        );
+        let recorded = format!(
+            "Owner: base check {check} on {} -> drop all",
+            &task["baseSha"].as_str().unwrap()[..7]
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|d| d.as_str() == Some(recorded.as_str()))
+                .count(),
+            1,
+            "{decisions:?}"
+        );
+    }
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|d| d.as_str() == Some("Owner: drop all"))
+            .count(),
+        1,
+        "{decisions:?}"
+    );
+    assert_eq!(
+        done["questionHistory"].as_array().unwrap().len(),
+        1,
+        "{done}"
+    );
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -315,6 +374,9 @@ fn an_owner_retry_waits_for_the_base_to_move_keeps_the_check_and_runs_a_second_a
     std::thread::sleep(std::time::Duration::from_secs(3));
     let idle = daemon.request("task.get", json!({"id": id}));
     assert_eq!(idle["attempts"].as_array().unwrap().len(), 1, "{idle}");
+    assert_eq!(idle["finalVerify"][0], check.as_str(), "{idle}");
+    assert_eq!(idle["baseSha"], base_sha.as_str(), "{idle}");
+    assert!(idle["question"].is_null(), "{idle}");
     std::fs::write(repo.path().join("OTHER.txt"), "other\n").unwrap();
     git_out(repo.path(), &["add", "OTHER.txt"]);
     git_out(repo.path(), &["commit", "-q", "-m", "move the base"]);
@@ -479,6 +541,7 @@ fn a_drop_answered_after_a_restart_sticks_for_a_single_task() {
     let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("claude-opus");
     settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
     request_on(&socket1, "settings.set", json!({"settings": settings}));

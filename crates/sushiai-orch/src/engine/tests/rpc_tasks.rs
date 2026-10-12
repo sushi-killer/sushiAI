@@ -272,10 +272,6 @@ async fn task_amend_keeps_grounded_baselines_when_saved_under_the_task_lock() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Stopped);
     task.criteria = vec!["a".into(), "b".into()];
-    task.variant = Some(Variant {
-        grounded_checks: true,
-        ..Default::default()
-    });
     app.store.save_task(&task).unwrap();
     for (command, code) in [
         ("test -f NOPE.txt", 1),

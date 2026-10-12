@@ -364,6 +364,7 @@ impl App {
             depends_on: vec![],
             parent: None,
             paths: vec![],
+            checklist: vec![],
             relay_of: None,
             eval_set: None,
             eval_name: None,

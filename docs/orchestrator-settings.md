@@ -16,6 +16,7 @@ Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
 | `review`                     | route id, `""` or `"auto"`                                                           | `"auto"`                                                              | Who reviews a passed attempt. `""` turns review off; `"auto"` excludes the implementer's route and every route with its harness+model, and prefers a priced route on another harness at or above the floor (2 for mechanical/standard, 3 for hard, never below the implementer's). Without one, it takes the strongest remaining route. It uses the implementer's own model only when no other route exists, logged `self-review: no other route`. A route with no model has unknown strength, never meets the floor, and needs `strength`. | Models & routes                                  |
 | `planner`                    | route id or `""`                                                                     | `claude-opus`                                                         | Route that drafts a plan from a one-sentence request. `""` turns drafting off.                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Models & routes                                  |
 | `briefCheckRoute`            | `"auto"`, a route id or `""`                                                         | `"auto"`                                                              | Read-only run that checks a brief for contradictions before the first attempt. `"auto"` uses the cheapest route whose CLI is installed; an unknown or unavailable id falls back the same way; `""` turns the check off.                                                                                                                                                                                                                                                                                                                     | Checks and worktrees: Cheap checks route         |
+| `planReview`                 | a route id or `""`                                                                   | `"codex"`                                                             | One read-only review of the planner's draft by another model family, once per task: missing requirement, wrong approach, wrong split, untestable criterion. A critical finding replans once. A route that is missing or whose CLI is not installed skips the review with a `Plan gate:` decision line; there is no fallback. `""` turns it off.                                                                                                                                                                                             | Advanced JSON                                    |
 | `orchestrator`               | route id or `""`                                                                     | `""` (the standard tier's route)                                      | Route of the orchestrator chat and, with `autoAnswer`, its answers to stuck questions.                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Models & routes                                  |
 | `autoAnswer`                 | boolean                                                                              | `false`                                                               | The orchestrator answers a stuck agent's question before it reaches you, and logs what it chose. When triage does not answer, the orchestrator chat is woken for the waiting task once, so it can answer or escalate.                                                                                                                                                                                                                                                                                                                       | Autonomy                                         |
 | `digestHour`                 | integer 0-23 or `null`                                                               | `null` (off)                                                          | Local hour at which the orchestrator chat is woken once a day, for each repo with recent task activity or a waiting task, to write you a digest: what finished, what waits on you, and the spend. Set it under Advanced (all settings as JSON); it has no control of its own.                                                                                                                                                                                                                                                               | Advanced — all settings as JSON                  |
@@ -164,7 +165,7 @@ A preset sets only the values it names. The values a preset can carry:
 | ----------------- | ------------------------------------------------------------------------------- |
 | `briefCheck`      | `false` turns the brief check off; `true` uses the settings' `briefCheckRoute`. |
 | `advisor`         | The advisor after a failed attempt.                                             |
-| `heldOut`         | The held-out check (`groundedChecks`).                                          |
+| `heldOut`         | The held-out check (`experiments.heldOut`, on by default).                      |
 | `planner`         | The route for the planning stage.                                               |
 | `briefCheckRoute` | A route id for the brief check; wins over `briefCheck`.                         |
 | `review`          | The review route: a route id, `"auto"` or `""`.                                 |
@@ -189,17 +190,76 @@ configured, a duplicate or built-in id, `maxAttempts` of 0, and a
 - **Shared checks.** Shared checks (the repo's CI entry and base checks) are
   owner-only. No preset and no inspector switch disables them.
 
+## How a task is planned, gated and reviewed
+
+- **Plan gate and one replan.** After the planner's draft is stored and
+  before any question or split, code checks and one read-only review by
+  another model family (`planReview`; `""` turns it off, a missing route is
+  skipped with a `Plan gate:` decision line and never replaced) produce
+  findings. Any critical finding runs the planner again once, with the
+  findings in the prompt; the request text is never edited. Findings left
+  after that reach the implementer as plan notes.
+- **Merged checklist tasks.** Subtasks that list no paths, have no check or
+  overlap another part are merged into one task with a checklist, in planner
+  order. Each item's check runs before the full verify of every attempt and a
+  failing item fails the attempt by name. If one task remains it is the parent
+  itself.
+- **`groundedChecks` is removed.** The flag is no longer read. A settings
+  file or task that still carries it loads, and the key is dropped on the next
+  save. Checks are always baselined on the base commit.
+- **Protected planner tests and the held-out check.** The planner's test
+  files are committed first, hashed and denied to the implementer; an attempt
+  that changes them has them restored. The planner's checks and one held-out
+  check run on that commit before attempt 1: a check that already passes
+  proves nothing, one that cannot run is an environment fault, one that
+  fails gates the task. The held-out check is hidden from the implementer, its
+  failure has kind `heldout`, and its command appears in no brief or detail.
+- **Two review rounds, stable finding ids.** A review runs at most twice per
+  attempt (once more only after a missing verdict or a judge's drop). Every
+  finding has a stable id (`F-...`) that follows it across attempts, so a
+  finding that returns is recognised, and one that repeats twice goes to a
+  check or to the judge. After round two the last result stands and the owner
+  gets no further retry.
+- **Overseer state files.** Every overseer wake runs on a fresh harness
+  session and never touches the owner's session id. Per repo, orchd keeps one
+  file `<data>/overseer/<hash of repo>.md` (mode 0600) with the repo's open
+  tasks, the plan of the wake's task and the last 50 decisions. It is
+  rewritten when a wake starts, put at the top of the wake prompt, and gets one
+  decision line per wake. Check output is never written to it.
+- **Metrics in the `done` entry.** When a task ends `done` or `failed`, orchd
+  stores `metrics` on it and a top-level task adds one `done` entry to the
+  overseer log. Its text is
+  `first pass: yes|no; owner touches: N; cause: none|env|plan|impl|review_loop; cost: plan $0.02, implement $0.01`
+  (only nonzero phases, in the order plan, implement, review, triage,
+  advisor, finding_judge, answer_judge, pick; `cost: $0.00` with no spend).
+  First pass means done with exactly one implement attempt and no question the
+  owner answered; a parent is first pass when every subtask is and it ran no
+  attempt of its own. Owner touches count owner-answered questions plus
+  `Amended: ` decision lines. The cause comes from the last failure: errors,
+  cost budget, a missing harness and base-check failures are `env`; a failed plan
+  stage or a plan-gate drop is `plan`; verify, held-out, loop, stall,
+  protected path, implement time budget, no deliverable, evidence, conflict and blocked are `impl`;
+  review failures, the review-round limit and repeated findings are
+  `review_loop`. The entry detail adds the repo's first-pass rate and the
+  average cost per landed task over its last 20 finished top-level tasks.
+- **Late planning.** A task created with a `request` and a backlog bucket is
+  saved `queued` and plans nothing. When `task.start` or the autopilot starts
+  it, its worktree first moves to the current head of its base branch (when no
+  attempt ran and nothing in it changed), a `Rebase: planning from` decision
+  line is recorded when the head moved, and the plan is drafted on that code.
+
 ## `experiments` flags
 
-| Flag                                                                                      | Default | What it does                                                                                         |
-| ----------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `stallTimeoutSecs`                                                                        | `0`     | Stop an attempt whose harness prints nothing for this long; 0 is off.                                |
-| `reviewEvidence`                                                                          | `false` | The reviewer gets saved screenshots and longer verify output.                                        |
-| `advisor`                                                                                 | `false` | After a failed attempt, one read-only call diagnoses it for the next attempt.                        |
-| `loopDetect`                                                                              | `true`  | Stop an attempt that repeats itself.                                                                 |
-| `land`                                                                                    | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
-| `maxCostUsd`, `maxAttemptCostUsd`                                                         | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
-| `plannerRoute`, `tierRoutes`, `batchQuestions`, `groundedChecks`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                       |
+| Flag                                                                    | Default | What it does                                                                                         |
+| ----------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `stallTimeoutSecs`                                                      | `0`     | Stop an attempt whose harness prints nothing for this long; 0 is off.                                |
+| `reviewEvidence`                                                        | `false` | The reviewer gets saved screenshots and longer verify output.                                        |
+| `heldOut`                                                               | `true`  | Run the hidden planner check. Regular behaviour checks always run.                                   |
+| `advisor`                                                               | `false` | After a failed attempt, one read-only call diagnoses it for the next attempt.                        |
+| `loopDetect`                                                            | `true`  | Stop an attempt that repeats itself.                                                                 |
+| `land`                                                                  | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
+| `maxCostUsd`, `maxAttemptCostUsd`                                       | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
+| `plannerRoute`, `tierRoutes`, `batchQuestions`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                       |
 
 Only settings reachable through the app are listed with a control. A key
 missing from the list above but present in `crates/sushiai-orch/src/model.rs` is still

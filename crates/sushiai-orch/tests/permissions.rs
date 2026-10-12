@@ -561,6 +561,7 @@ fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_a
     settings["review"] = json!("");
     settings["tiers"]["mechanical"] = json!("claude-sonnet");
     settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["planReview"] = serde_json::json!("");
     settings["chatTools"] = json!([
         {"id": "asana", "label": "Asana", "enabled": false,
          "server": {"type": "http", "url": "https://example.invalid/mcp"}},

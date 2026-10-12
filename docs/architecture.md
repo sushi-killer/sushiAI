@@ -174,6 +174,8 @@ Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImp
 stateDiagram-v2
   [*] --> drafting: task.create {repo, request}
   [*] --> queued: task.create {title, goal, criteria, verify}
+  [*] --> queued: task.create {repo, request, backlog}<br/>(no loop, no plan yet)
+  queued --> drafting: backlog start: task.start or the autopilot<br/>(a request task never planned; planned on the base's head)
   drafting --> waiting: planner question
   drafting --> queued: plan parsed
   drafting --> running: plan split into subtasks<br/>(the task becomes their parent)
@@ -198,10 +200,26 @@ stateDiagram-v2
 A task can be parked in the planning backlog (`task.backlog`, or `backlog` on
 `task.create`): a `next` or `later` bucket with an integer order. A backlog
 task is started only by `task.start` or the autopilot; recovery and the graph
-never start it (a drafting one resumes planning but stops after the plan). With
+never start it (a drafting one, left from before late planning, resumes planning
+but stops after the plan). With
 `settings.autopilot` on, the orchestrator starts the ready `next` tasks (every `dependsOn`
 done) in (order, createdAt, id) order while live loops are below `parallel`.
 Starting clears the backlog and records who started it in `decisions`.
+
+A backlog task created with a `request` is saved `queued` and spawns no loop, so
+nothing is planned while it waits. When it starts, the loop moves its worktree
+to the current head of its base branch (`git reset --hard`, only when the task
+has no attempt, `baseRef` is set, HEAD is still `baseSha` and no tracked file
+changed), sets `baseSha`, records `Rebase: planning from <base> at <sha>` when
+the sha changed, and then plans. The plan therefore reads the code as it is at
+start time, not as it was when the request was parked.
+
+When a task ends `done` or `failed`, `engine/metrics.rs` stores `metrics` on it
+once (`firstPass`, `ownerTouches`, `costByPhase` over the eight model phases,
+`failureCause` of `env | plan | impl | review_loop`, `endedAt`), and a
+top-level task adds one `done` entry to the overseer log with that line and the
+repo's first-pass rate and average cost per landed task over its last 20
+finished tasks. Starting a finished task again clears its metrics.
 
 A task graph is state the orchestrator keeps, never a split it decides: the planner
 may answer a top-level request with `subtasks` (keys, `dependsOn` between
@@ -236,7 +254,7 @@ under `"every"` the parent does not run a command that already passed on
 exactly its tree. When every child has landed, the parent runs its own
 verify and final checks on its branch; a final that fails there and on the
 base (the cache, else the in-flight job) and that the keep rule does not
-explain goes to one pre-existing question instead of an agent attempt (with `groundedChecks`, its checks were baselined before
+explain goes to one pre-existing question instead of an agent attempt (its checks were baselined before
 the first child started and its gated and held-out checks run once here). With
 `land` on it then lands on its base branch like a single task: carried onto
 the base head, squashed to one commit titled with its title, checked again
@@ -255,6 +273,33 @@ live loop is applied right before its next check. Its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.
+
+### Plan gate
+
+`engine/plan_gate.rs` runs after the planner's draft is stored and before any
+plan question or split. Code checks produce findings with a severity: a
+criterion about the agent's report or process (CRITICAL `report-only`), a
+request item no criterion proves with a runnable check (CRITICAL `coverage`),
+a shared check named in the request but dropped from verify (CRITICAL
+`shared-check`), a check that names no command (HIGH `untestable`), a verify
+command whose script, test target or file does not exist (HIGH
+`verify-missing`), a whole-repo command in `verify` (MEDIUM `verify-cost`,
+moved to `finalVerify`) and overlapping subtask paths (LOW `overlap`). One
+read-only review by another model family (`planReview`, default `codex`;
+skipped with a decision line when its route is missing, never a fallback) adds
+findings once per task, and the brief check's contradiction counts as a
+critical finding. Any critical finding replans once: the planner runs again
+with a `## Plan gate findings` block and the request is never edited. A
+report-only criterion that survives is removed. Other findings are stored in
+`planGate.findings` and reach the implementer as `## Plan notes`.
+
+Incomplete overlapping subtasks and parts with no paths or targeted check
+are merged into one task whose `checklist` holds the parts in planner order
+(stable-topological by `dependsOn`). Parts with their own paths and targeted check stay separate children.
+Complete drafts with their own goal, criteria and targeted verification
+serialize when their paths overlap and may relay on one branch, landed once. If only one task remains it is the parent itself.
+Before the full verify of every attempt, orchd runs each item's check and
+fails the attempt with the failing items by name.
 
 ### Self-healing briefs
 
@@ -297,8 +342,9 @@ flowchart LR
 ```mermaid
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
+  plangate["Plan gate<br/>code checks, one plan review by another model family,<br/>brief check; a critical finding replans once"]
   split["Plan lint: a whole-repo suite in verify (npm run ci,<br/>cargo test --workspace, ...) moves to finalVerify;<br/>verify entries that are not shell commands become review criteria"]
-  baseline["Baseline (variant.groundedChecks), before attempt 1<br/>planner's checks and held-out check run on the base;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
+  baseline["Baseline, before attempt 1<br/>planner's tests are committed first; planner's checks and held-out check run on that commit;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]
   gate["Landing gate, before finalVerify runs on the worktree<br/>waits for the preflight, applies the judge's rulings to the task"]
   tier["Tier<br/>planner's tier, else standard"]
@@ -306,6 +352,7 @@ flowchart TD
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
   timebudget["Time budget<br/>implement run past settings.implementBudgetMins -> kill,<br/>report-only resume of its session, kind time_budget"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
+  checklist["Checklist (a merged task)<br/>each item's check runs first; a failing item<br/>fails the attempt by name, before the full verify"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
   gated["Gated checks<br/>baseline-fail checks must now pass"]
   heldout["Held-out check<br/>hidden from the implementer; failure kind heldout,<br/>command never in a brief or detail"]
@@ -323,7 +370,7 @@ flowchart TD
   triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
   ownerQ(["Owner question"])
 
-  plan --> split --> baseline --> tier --> impl --> rebase --> verify
+  plan --> plangate --> split --> baseline --> tier --> impl --> rebase --> checklist --> verify
   baseline -.->|"starts, does not wait"| basecheck
   impl -.- stall
   stall -->|stalled| fail

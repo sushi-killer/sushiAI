@@ -233,17 +233,20 @@ fn a_question_dropped_by_task_stop_is_not_history() {
 
 #[test]
 fn a_policy_answer_is_recorded_as_policy() {
-    let s = setup(&[("PASS_REVIEW_FROM", "2")], |settings| {
-        settings["review"] = json!("claude-sonnet");
+    // A review that may not run again offers no `retry` (two runs per attempt),
+    // so the policy answer here is the "attempts keep failing" one.
+    let s = setup(&[], |settings| {
+        settings["review"] = json!("");
+        settings["planReview"] = json!("");
     });
-    let id = create(&s, json!({}));
+    let id = create(&s, json!({"verify": ["false"]}));
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "done", "{task}");
+    assert_eq!(task["status"], "waiting", "{task}");
     let h = history(&task);
     assert_eq!(h.len(), 1, "{task}");
     assert_eq!(h[0]["answeredBy"], "policy");
-    assert_eq!(h[0]["answer"], "retry");
-    assert_eq!(h[0]["askedBy"], "review");
+    assert_eq!(h[0]["answer"], "continue");
+    assert_eq!(h[0]["kind"], "attempts_failing");
     assert!(h[0]["askedAt"].is_i64(), "{task}");
     cleanup(s, &task);
 }
@@ -261,12 +264,12 @@ fn a_judged_impossible_claim_is_recorded_as_judge() {
         |settings| {
             settings["review"] = json!("");
             settings["briefCheckRoute"] = json!("claude-sonnet");
+            settings["planReview"] = serde_json::json!("");
         },
     );
     let id = create(
         &s,
         json!({
-            "variant": {"groundedChecks": true},
             "checks": [{"criterion": 2, "run": "grep -q ok impl2.txt"}],
         }),
     );
@@ -302,6 +305,7 @@ fn a_budget_question_before_an_implement_run_is_asked_by_implement_and_answered_
     let mut settings = request_on(&socket1, "settings.get", json!({}));
     settings["review"] = json!("");
     settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["answerPolicy"] = json!(false);
     fit_sandbox(&mut settings);
     request_on(&socket1, "settings.set", json!({"settings": settings}));

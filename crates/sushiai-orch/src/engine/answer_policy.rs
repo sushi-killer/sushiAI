@@ -445,6 +445,10 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
         ),
         _ => return None,
     };
+    // A review that may not run again offers no `retry`: nothing to answer.
+    if kind == QuestionKind::ReviewNoVerdict && !question.options.iter().any(|o| o == answer) {
+        return None;
+    }
     let answered = if kind == QuestionKind::PreexistingFailure {
         covered_by_rule(task, question, answer)
     } else {

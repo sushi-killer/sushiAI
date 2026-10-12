@@ -25,6 +25,8 @@ pub(super) struct NewTask {
     pub(super) paths: Vec<String>,
     /// The sibling subtask whose branch this one continues.
     pub(super) relay_of: Option<String>,
+    /// The ordered parts a merged task checks after every attempt.
+    pub(super) checklist: Vec<ChecklistItem>,
     pub(super) eval_set: Option<String>,
     pub(super) eval_name: Option<String>,
     pub(super) eval_check_cmd: Option<String>,
@@ -415,6 +417,7 @@ impl App {
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty())
                     .collect(),
+                checklist: vec![],
                 relay_of: None,
                 eval_set: p.eval_set.clone().filter(|s| !s.trim().is_empty()),
                 eval_name: p.eval_name.clone().filter(|s| !s.trim().is_empty()),
@@ -434,20 +437,21 @@ impl App {
             store::write_json_atomic(&path, mcp).map_err(|e| e.to_string())?;
         }
         self.broadcast_task(&task);
-        if request_text.is_some() {
+        if backlog.is_some() {
+            // Queued until `task.start` or the autopilot, with no loop and no
+            // plan: it is planned on the base as it is then.
+            self.advance_autopilot();
+        } else if request_text.is_some() {
             // Planning always runs regardless of `start`; only whether the
             // loop falls through into implementing once it's done depends
             // on it (spec step 6).
-            self.spawn_task_loop(id.clone(), p.start.unwrap_or(true) && backlog.is_none());
-        } else if backlog.is_none() && (p.start.unwrap_or(true) || in_graph) {
+            self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
+        } else if p.start.unwrap_or(true) || in_graph {
             // Same default as the request form: a `queued` task that never
             // starts until a daemon restart looks like work in progress. A
             // task in a graph starts on its own: its loop waits for what it
             // depends on.
             self.start_task_loop(id.clone());
-        }
-        if backlog.is_some() {
-            self.advance_autopilot();
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
@@ -602,7 +606,10 @@ impl App {
             final_verify: new.final_verify,
             checks: new.checks,
             held_out: new.held_out,
-            status: if new.request.is_some() {
+            planner_tests: Default::default(),
+            // A backlog task with a request is planned when it starts, on
+            // the base as it is then.
+            status: if new.request.is_some() && new.backlog.is_none() {
                 TaskStatus::Drafting
             } else {
                 TaskStatus::Queued
@@ -638,6 +645,7 @@ impl App {
             assumptions: vec![],
             question_history: vec![],
             judged_findings: vec![],
+            findings: vec![],
             archived: false,
             pr_url: None,
             overseer_woken: false,
@@ -651,6 +659,9 @@ impl App {
             source: new.source,
             eval_check: None,
             brief_check: Default::default(),
+            plan_gate: Default::default(),
+            metrics: None,
+            checklist: new.checklist,
             queue: QueueState {
                 relay_of: new.relay_of,
                 backlog: new.backlog,
@@ -1382,9 +1393,7 @@ impl App {
         }
         let dependencies_amended = amendment.depends_on.is_some();
         amendment.clone().apply(&mut task);
-        if task.variant().grounded_checks {
-            baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
-        }
+        baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
         let updated = self.update_task(&id, |fresh| {
             amendment.apply(fresh);
             if dependencies_amended

@@ -1,4 +1,4 @@
-//! Black-box integration tests (variant.groundedChecks): spawn the real `orchd`
+//! Black-box integration tests (grounded checks): spawn the real `orchd`
 //! binary with a fake harness and drive it over its NDJSON unix socket.
 
 mod common;
@@ -86,7 +86,6 @@ fn create(daemon: &Daemon, repo: &Path, extra: Value) -> Value {
         "repo": repo.to_str().unwrap(),
         "title": "Grounded",
         "goal": "Make the checks pass",
-        "variant": {"groundedChecks": true},
     });
     for (k, v) in extra.as_object().unwrap() {
         params[k] = v.clone();
@@ -139,7 +138,7 @@ emit "$REPORT""#,
             "verify": ["true"],
             "checks": [
                 // Creates a file and edits a tracked one, then fails on base.
-                {"criterion": 0, "run": "echo junk > side.txt; echo more >> README.md; grep -q ok impl.txt"},
+                {"criterion": 0, "run": "echo junk > side.txt; echo more >> READ*.md; grep -q ok impl.txt"},
                 {"criterion": 1, "run": "true"},
                 {"criterion": 2, "run": "no-such-tool-anywhere --version"},
                 {"criterion": 9, "run": "dropped: out of range"},
@@ -179,9 +178,7 @@ emit "$REPORT""#,
     assert!(attempts[0]["failure"]["detail"]
         .as_str()
         .unwrap()
-        .starts_with(
-            "echo junk > side.txt; echo more >> README.md; grep -q ok impl.txt exited 2."
-        ));
+        .starts_with("echo junk > side.txt; echo more >> READ*.md; grep -q ok impl.txt exited 2."));
     assert_eq!(attempts[1]["status"], "passed");
 
     // The baseline left the worktree as it found it.
@@ -286,7 +283,8 @@ emit "$REPORT""#,
     );
     assert!(files.iter().any(|f| f.ends_with("runs/2/brief.md")));
     for f in &files {
-        let text = String::from_utf8_lossy(&std::fs::read(f).unwrap()).to_string();
+        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        let text = String::from_utf8_lossy(&bytes).to_string();
         assert!(
             !text.contains(held),
             "{} leaks the held-out command",
@@ -408,7 +406,7 @@ emit '"```sushi-impossible\n{\"criterion\":7,\"evidence\":\"nope\"}\n```\n```sus
 }
 
 #[test]
-fn the_planner_stores_validated_checks_when_the_flag_is_on() {
+fn the_planner_stores_validated_checks() {
     let s = setup(
         r#"echo ok > x.txt; echo ok > y.txt
 emit "$REPORT""#,
@@ -428,7 +426,6 @@ emit "$REPORT""#,
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "make x and y",
-            "variant": {"groundedChecks": true},
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
@@ -460,37 +457,45 @@ emit "$REPORT""#,
 }
 
 #[test]
-fn with_the_flag_off_planner_checks_are_ignored_and_the_brief_is_unchanged() {
-    let s = setup(
-        r#"echo ok > x.txt
-emit "$REPORT""#,
-        false,
-        &[],
+fn disabling_the_hidden_check_keeps_regular_planner_checks_and_their_brief() {
+    let s = setup("echo ok > x.txt\nemit \"$REPORT\"", false, &[]);
+    let hidden = "false && echo HIDDEN_CHECK_MUST_STAY_OFF";
+    let plan = format!(
+        "```sushi-plan\n{}\n```",
+        json!({
+            "title": "Planned",
+            "goal": "make x",
+            "tier": "standard",
+            "criteria": ["x exists"],
+            "verify": ["true"],
+            "checks": [{"criterion": 0, "run": "test -f x.txt"}],
+            "heldOut": {"criterion": 0, "run": hidden},
+        })
     );
-    let plan = r#"```sushi-plan
-{"title":"Planned","goal":"make x","tier":"standard","criteria":["x exists"],"verify":["true"],
- "checks":[{"criterion":0,"run":"test -f x.txt"}],"heldOut":{"criterion":0,"run":"true"}}
-```"#;
     let event = json!({"type": "result", "result": plan}).to_string();
     std::fs::write(s.log.path().join("plan.json"), format!("{event}\n")).unwrap();
     let repo = repo_with(&[]);
     let task = s.daemon.request(
         "task.create",
-        json!({"repo": repo.path().to_str().unwrap(), "request": "make x"}),
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "make x",
+            "variant": {"heldOut": false},
+        }),
     );
-    let id = task["id"].as_str().unwrap().to_string();
-    let done = settle(&s.daemon, &id);
-    assert_eq!(done["status"], "done", "task JSON: {done}");
-    assert!(
-        done.get("checks").is_none() && done.get("heldOut").is_none(),
-        "{done}"
+    let id = task["id"].as_str().unwrap();
+    let done = settle(&s.daemon, id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["variant"]["heldOut"], false);
+    assert_eq!(
+        done["checks"],
+        json!([{"criterion": 0, "run": "test -f x.txt", "baseline": "fail"}])
     );
-    let brief = run_file(&s.daemon, &id, "brief.md");
-    assert!(
-        brief.contains("- x exists\n")
-            && !brief.contains("## Checks")
-            && !brief.contains("sushi-impossible")
-    );
+    assert!(done["heldOut"].get("baseline").is_none(), "{done}");
+    assert_eq!(implement_attempts(&done).len(), 1, "{done}");
+    let brief = run_file(&s.daemon, id, "brief.md");
+    assert!(brief.contains("## Checks") && brief.contains("test -f x.txt"));
+    assert!(!brief.contains(hidden));
     cleanup(s, &[&done]);
 }
 
@@ -513,7 +518,7 @@ case "$input" in
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;
       *PART_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"PART_B: create b.txt next to a.txt\",\"verify\":[\"test -f a.txt && test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f b.txt && echo x >> $LOG_DIR/checks.log\"}]'"$held"',\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"criteria\":[\"both files exist\"],\"verify\":[\"test -f a.txt && test -f b.txt\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f b.txt && echo x >> $LOG_DIR/checks.log\"}]'"$held"',\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"request\":\"PART_A create a.txt\",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\"},{\"key\":\"b\",\"title\":\"Part B\",\"request\":\"PART_B create b.txt\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"]}]}\n```"' ;;
     esac
     ;;
   *PART_A*) echo a > a.txt; out "$report" ;;
@@ -544,7 +549,6 @@ fn parent_run(with_held: bool) -> (Setup, Value, tempfile::TempDir) {
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "build both parts",
-            "variant": {"groundedChecks": true},
         }),
     );
     let id = parent["id"].as_str().unwrap().to_string();
@@ -605,7 +609,7 @@ fn a_failing_parent_held_out_check_fails_the_parent_without_naming_the_command()
 }
 
 #[test]
-fn task_create_validates_checks_and_the_mcp_schema_names_the_flag_once() {
+fn task_create_validates_checks_and_refuses_the_retired_flag() {
     let s = setup("emit \"$REPORT\"", false, &[]);
     let repo = repo_with(&[]);
     let task = create(
@@ -625,18 +629,25 @@ fn task_create_validates_checks_and_the_mcp_schema_names_the_flag_once() {
     );
     assert_eq!(task["checks"], json!([{"criterion": 1, "run": "true"}]));
     assert!(task.get("heldOut").is_none(), "{task}");
-    assert_eq!(task["variant"]["groundedChecks"], true);
-    let partial = s.daemon.request(
-        "task.create",
-        json!({
-            "repo": repo.path().to_str().unwrap(),
-            "title": "t",
-            "goal": "g",
-            "start": false,
-            "variant": {"groundedChecks": false},
-        }),
-    );
-    assert!(partial["variant"].get("groundedChecks").is_none());
+    for value in [true, false] {
+        let error = s.daemon.request_error(
+            "task.create",
+            json!({
+                "repo": repo.path().to_str().unwrap(),
+                "title": "t",
+                "goal": "g",
+                "start": false,
+                "variant": {"groundedChecks": value},
+            }),
+        );
+        assert!(
+            error.contains("variant flag groundedChecks was retired"),
+            "{error}"
+        );
+    }
+    assert!(!serde_json::to_string(&task["variant"])
+        .unwrap()
+        .contains("groundedChecks"));
 
     let source =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mcp.rs")).unwrap();
@@ -644,8 +655,8 @@ fn task_create_validates_checks_and_the_mcp_schema_names_the_flag_once() {
         source.matches("\"variant\": {\"type\": \"object\"").count(),
         1
     );
-    assert!(source.contains("groundedChecks (bool;"));
-    cleanup(s, &[&task, &partial]);
+    assert!(!source.contains("groundedChecks (bool;"));
+    cleanup(s, &[&task]);
 }
 
 #[test]

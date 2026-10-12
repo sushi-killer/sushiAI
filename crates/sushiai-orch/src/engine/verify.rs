@@ -1008,7 +1008,11 @@ pub(super) fn baseline_todo(task: &Task) -> Vec<(Option<usize>, usize, String)> 
             todo.push((Some(i), c.criterion, c.run.clone()));
         }
     }
-    if let Some(h) = task.held_out.as_ref().filter(|h| h.baseline.is_none()) {
+    if let Some(h) = task
+        .held_out
+        .as_ref()
+        .filter(|h| task.variant().held_out && h.baseline.is_none())
+    {
         todo.push((None, h.criterion, h.run.clone()));
     }
     todo
@@ -1061,7 +1065,7 @@ pub(super) fn record_baselines(
 /// Some check (or the held-out one) has not run on the base yet.
 pub(super) fn needs_baseline(task: &Task) -> bool {
     task.checks.iter().any(|c| c.baseline.is_none())
-        || task.held_out.as_ref().is_some_and(|h| h.baseline.is_none())
+        || (task.variant().held_out && task.held_out.as_ref().is_some_and(|h| h.baseline.is_none()))
 }
 
 /// The gated checks of `task`: visible ones that fail on the base, then the
@@ -1077,7 +1081,7 @@ pub(super) fn gated_checks(task: &Task) -> Vec<Check> {
 pub(super) fn gated_held_out(task: &Task) -> Option<Check> {
     task.held_out
         .clone()
-        .filter(|h| h.baseline == Some(Baseline::Fail))
+        .filter(|h| task.variant().held_out && h.baseline == Some(Baseline::Fail))
 }
 
 /// Runs the held-out check and returns its outcome with the command scrubbed
@@ -1437,6 +1441,36 @@ pub(super) fn verify_options(worktree: &Path) -> Vec<String> {
 #[cfg(test)]
 mod grounded_checks_tests {
     use super::*;
+
+    #[test]
+    fn disabling_held_out_keeps_regular_baselines_and_gated_checks() {
+        let mut task = task_with_status(TaskStatus::Running);
+        let check = |run: &str| Check {
+            criterion: 0,
+            run: run.into(),
+            baseline: None,
+        };
+        task.checks = vec![check("regular")];
+        task.held_out = Some(check("hidden"));
+        assert!(task.variant().held_out);
+        assert_eq!(
+            baseline_todo(&task),
+            vec![(Some(0), 0, "regular".into()), (None, 0, "hidden".into())]
+        );
+        task.variant = Some(Variant {
+            held_out: false,
+            ..Variant::default()
+        });
+        assert!(needs_baseline(&task));
+        assert_eq!(baseline_todo(&task), vec![(Some(0), 0, "regular".into())]);
+        task.checks[0].baseline = Some(Baseline::Fail);
+        assert!(!needs_baseline(&task));
+        assert_eq!(gated_checks(&task), task.checks);
+        task.held_out.as_mut().unwrap().baseline = Some(Baseline::Fail);
+        assert!(gated_held_out(&task).is_none());
+        task.variant.as_mut().unwrap().held_out = true;
+        assert_eq!(gated_held_out(&task), task.held_out);
+    }
 
     fn outcome(code: Option<i32>, tail: &str) -> VerifyOutcome {
         VerifyOutcome {

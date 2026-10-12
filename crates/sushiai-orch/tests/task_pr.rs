@@ -199,6 +199,15 @@ fn task_pr_surfaces_a_failing_gh_create_and_stores_no_url() {
     assert!(stored.get("prUrl").is_none(), "{stored}");
 }
 
+/// The log entries a PR wrote; the finished task's own `done` entry is not one.
+fn pr_entries(log: &serde_json::Value) -> Vec<&serde_json::Value> {
+    log.as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "pr")
+        .collect()
+}
+
 #[test]
 fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
     let s = setup();
@@ -211,12 +220,12 @@ fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
         serde_json::json!({"id": s.id, "title": "Owner PR", "branch": "feature/owner"}),
     );
     let log = s.daemon.request("overseer.log", serde_json::json!({}));
-    assert_eq!(log.as_array().unwrap().len(), 0, "{log}");
+    assert_eq!(pr_entries(&log).len(), 0, "{log}");
 
     s.daemon
         .request("task.pr", serde_json::json!({"id": s.id, "source": "chat"}));
     let log = s.daemon.request("overseer.log", serde_json::json!({}));
-    assert_eq!(log.as_array().unwrap().len(), 0, "{log}");
+    assert_eq!(pr_entries(&log).len(), 0, "{log}");
     s.daemon.request(
         "task.pr",
         serde_json::json!({"id": s.id, "source": "overseer"}),
@@ -224,9 +233,10 @@ fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
     let log = s
         .daemon
         .request("overseer.log", serde_json::json!({"repo": repo}));
-    assert_eq!(log[0]["kind"], "pr", "{log}");
-    assert_eq!(log[0]["text"], URL);
-    assert_eq!(log[0]["taskId"], s.id);
+    let prs = pr_entries(&log);
+    assert_eq!(prs.len(), 1, "{log}");
+    assert_eq!(prs[0]["text"], URL);
+    assert_eq!(prs[0]["taskId"], s.id);
     let other = s
         .daemon
         .request("overseer.log", serde_json::json!({"repo": "/elsewhere"}));

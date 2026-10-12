@@ -23,7 +23,7 @@ case "$input" in
     case "$input" in
       *SECOND_WORK*) out '"```sushi-plan\n{\"title\":\"Second child\",\"goal\":\"SECOND_WORK: create second.txt\",\"verify\":[\"test -f second.txt\"]}\n```"' ;;
       *CHILD_WORK*) out '"```sushi-plan\n{\"title\":\"Child\",\"goal\":\"CHILD_WORK: edit README\",\"verify\":[\"true\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Finish the children\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"],\"subtasks\":[{\"key\":\"child\",\"title\":\"Child\",\"request\":\"CHILD_WORK edit README\"},{\"key\":\"second\",\"title\":\"Second child\",\"request\":\"SECOND_WORK create second.txt\",\"dependsOn\":[\"child\"]}]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Parent\",\"goal\":\"Finish the children\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"],\"subtasks\":[{\"key\":\"child\",\"title\":\"Child\",\"request\":\"CHILD_WORK edit README\",\"paths\":[\"README.md\"],\"check\":\"grep -q child README.md\"},{\"key\":\"second\",\"title\":\"Second child\",\"request\":\"SECOND_WORK create second.txt\",\"paths\":[\"second.txt\"],\"check\":\"test -f second.txt\",\"dependsOn\":[\"child\"]}]}\n```"' ;;
     esac ;;
   *SECOND_WORK*) echo second > second.txt; out "$report" ;;
   *) echo child > README.md; out "$report" ;;

@@ -755,7 +755,7 @@ esac
 "###;
 
 #[test]
-fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_escalates() {
+fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_handled() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-repeat.sh", FAKE_REPEAT_SCRIPT);
     let daemon = Daemon::spawn(&[
@@ -789,14 +789,20 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|a| a["stage"] == "implement")
         .collect();
     // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
-    // repeat -> advisor and a tier up. Attempt 3: repeated again -> waiting.
-    assert_eq!(implements.len(), 3, "{settled}");
+    // repeat -> advisor and a tier up. Attempt 3: repeated a second time ->
+    // handled (the judge), not the owner; the budget of 6 ends the task.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert!(
         implements[0]["review"].get("repeated").is_none(),
         "{settled}"
     );
     assert_eq!(
-        implements[1]["review"]["repeated"][0], "P1: a.rs:1 - null check missing",
+        implements[1]["review"]["repeated"][0]
+            .as_str()
+            .unwrap()
+            .split(" [F-")
+            .next(),
+        Some("P1: a.rs:1 - null check missing"),
         "{settled}"
     );
     assert_eq!(implements[0]["routeId"], "claude-sonnet", "{settled}");
@@ -814,14 +820,14 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_esca
         .filter(|e| e.file_name().to_string_lossy().starts_with("review."))
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
-    assert_eq!(reviews.len(), 3, "one review per attempt");
+    assert_eq!(reviews.len(), 6, "one review per attempt");
     assert_eq!(
         reviews
             .iter()
             .filter(|b| b.contains("## Previous review") && b.contains("null check missing"))
             .count(),
-        2,
-        "attempts 2 and 3 carry the previous findings"
+        5,
+        "attempts 2 to 6 carry the previous findings"
     );
     let decisions = settled["decisions"].as_array().unwrap();
     assert!(
@@ -971,7 +977,9 @@ fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
         .iter()
         .filter(|a| a["stage"] == "implement")
         .collect();
-    assert_eq!(implements.len(), 3, "{settled}");
+    // The second repeat (attempt 3) is handled, not escalated: the judge
+    // already ruled, so the attempts run until the budget of 6 is spent.
+    assert_eq!(implements.len(), 6, "{settled}");
     assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
     let decisions = decision_lines(&settled);

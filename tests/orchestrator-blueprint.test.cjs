@@ -40,6 +40,7 @@ function payload(overrides = {}) {
         costUsd: 0.42,
       }),
       stage("checks", { ownerOnly: true, state: "running" }),
+      stage("held-out", { optional: true }),
       stage("plan-review"),
       stage("review", { routeId: "codex" }),
       stage("land", { optional: true, enabled: false }),
@@ -65,7 +66,7 @@ function settings(overrides = {}) {
     review: "codex",
     planner: "claude-sonnet",
     maxAttempts: 3,
-    experiments: { advisor: false, groundedChecks: false, land: false },
+    experiments: { advisor: false, heldOut: false, land: false },
     briefCheckRoute: "codex",
     ...overrides,
   };
@@ -109,7 +110,7 @@ test("node states, labels and flags", async () => {
     Object.values(by)
       .filter((n) => n.canToggle)
       .map((n) => n.id),
-    ["brief-check", "land", "advisor"],
+    ["brief-check", "held-out", "land", "advisor"],
   );
   assert.deepEqual(
     Object.values(by)
@@ -169,9 +170,13 @@ test("stageEdit without a preset changes only the globals", async () => {
     true,
   );
   assert.equal(
+    edit("held-out", { kind: "enabled", value: true }).experiments.heldOut,
+    true,
+  );
+  assert.equal(
     edit("held-out", { kind: "enabled", value: true }).experiments
       .groundedChecks,
-    true,
+    undefined,
   );
   assert.equal(
     edit("land", { kind: "enabled", value: true }).experiments.land,
@@ -241,6 +246,16 @@ test("stageEdit on a custom preset edits only that preset", async () => {
   });
   assert.deepEqual(tier.presets[0].values.tierRoutes, { standard: "codex" });
   assert.equal(tier.tiers.standard, "claude-sonnet");
+  const held = stageEdit(base, "/r", "mine", "held-out", {
+    kind: "enabled",
+    value: false,
+  });
+  assert.deepEqual(held.presets[0].values, {
+    advisor: false,
+    maxAttempts: 2,
+    heldOut: false,
+  });
+  assert.deepEqual(held.experiments, base.experiments);
 });
 
 test("stageEdit on a built-in appends one custom copy and points the repo at it", async () => {

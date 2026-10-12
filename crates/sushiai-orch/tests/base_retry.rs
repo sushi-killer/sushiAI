@@ -16,6 +16,8 @@ brief=$(cat)
 case "$brief" in
 "## Review"*)
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*'```sushi-plan'*)
+  cat "$PLAN_REPLY" ;;
 *)
   echo changed > CHANGED_MARKER.txt
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
@@ -95,6 +97,107 @@ fn a_retry_starts_no_attempt_until_the_base_branch_moves() {
     assert_eq!(done["attempts"].as_array().unwrap().len(), 2, "{done}");
     assert_ne!(done["baseSha"].as_str().unwrap(), old_base, "{done}");
     let worktree = done["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+}
+
+#[test]
+fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let plan_reply = scripts.path().join("plan.json");
+    let test_content = "test -f CHANGED_MARKER.txt\n";
+    let plan = json!({
+        "title": "Planned base retry",
+        "goal": "Write the marker",
+        "tier": "standard",
+        "criteria": ["The marker exists"],
+        "verify": ["true"],
+        "finalVerify": ["test -f FIXED.txt"],
+        "paths": ["CHANGED_MARKER.txt"],
+        "checks": [{"criterion": 0, "run": "sh tests/planner-check.sh"}],
+        "tests": [{"path": "tests/planner-check.sh", "content": test_content}],
+    });
+    std::fs::write(
+        &plan_reply,
+        json!({"type": "result", "result": format!("```sushi-plan\n{plan}\n```")}).to_string(),
+    )
+    .unwrap();
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("PLAN_REPLY", plan_reply.to_str().unwrap()),
+    ]);
+    prepare(&daemon, |s| {
+        s["briefCheckRoute"] = json!("");
+        s["planReview"] = json!("");
+        s["answerPolicy"] = json!(false);
+    });
+    let repo = init_git_repo();
+    let created = daemon.request(
+        "task.create",
+        json!({"repo": repo.path().to_str().unwrap(), "request": "Write the marker"}),
+    );
+    let id = created["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, |s| s == "waiting");
+    assert_eq!(
+        waiting["question"]["kind"], "preexisting_failure",
+        "{waiting}"
+    );
+    let old_tests = waiting["plannerTests"]["commit"].as_str().unwrap();
+    assert_ne!(old_tests, waiting["baseSha"].as_str().unwrap());
+    let protected = waiting["plannerTests"]["protected"].clone();
+    let worktree = Path::new(waiting["worktree"].as_str().unwrap());
+    assert_eq!(git_out(worktree, &["rev-parse", "HEAD"]), old_tests);
+
+    daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
+    wait_until("the base retry to wait for a moved branch", || {
+        let task = daemon.request("task.get", json!({"id": id}));
+        task["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("waiting for"))
+            .then_some(())
+    });
+    commit_file(repo.path(), "FIXED.txt");
+    let new_base = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    let done = wait_until("the carried retry to finish", || {
+        let task = daemon.request("task.get", json!({"id": id}));
+        let implements = task["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["stage"] == "implement")
+            .count();
+        (implements >= 2
+            && matches!(
+                task["status"].as_str(),
+                Some("done" | "waiting" | "failed" | "stopped")
+            ))
+        .then_some(task)
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["baseSha"], new_base, "{done}");
+    let tests = done["plannerTests"]["commit"].as_str().unwrap();
+    assert_ne!(tests, old_tests);
+    // A done task's worktree is removed: read the result from its branch.
+    let repo_path = repo.path();
+    let branch = done["branch"].as_str().unwrap();
+    let show = |file: &str| git_out(repo_path, &["show", &format!("{branch}:{file}")]);
+    assert_eq!(
+        git_out(repo_path, &["rev-parse", &format!("{tests}^")]),
+        new_base
+    );
+    assert_eq!(done["plannerTests"]["protected"], protected);
+    assert_eq!(show("tests/planner-check.sh"), test_content.trim_end());
+    assert_eq!(show("CHANGED_MARKER.txt"), "changed");
+    git_out(
+        repo_path,
+        &["cat-file", "-e", &format!("{branch}:FIXED.txt")],
+    );
+    let diff = git_out(repo_path, &["diff", "--name-only", tests, branch]);
+    assert_eq!(diff, "CHANGED_MARKER.txt");
+    let worktree = worktree.to_path_buf();
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);
 }

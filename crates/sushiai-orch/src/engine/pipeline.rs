@@ -309,7 +309,7 @@ impl App {
                     "plan" => (!plan_id.is_empty(), false, plan_id.as_str()),
                     "brief-check" => (!check_id.is_empty(), true, check_id.as_str()),
                     "implement" => (true, false, implement_id.as_str()),
-                    "held-out" => (variant.grounded_checks, true, ""),
+                    "held-out" => (variant.held_out, true, ""),
                     "review" => (!review_id.is_empty(), false, review_id.as_str()),
                     // Judge keeps the global route, even when a preset or
                     // task variant overrides the brief check.

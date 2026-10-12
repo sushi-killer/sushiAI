@@ -77,12 +77,12 @@ impl Run {
 }
 
 fn run(also_other: bool, full_verdict: &str) -> (Run, Value) {
+    run_script(also_other, full_verdict, FAKE_RETRY_REVIEW_SCRIPT)
+}
+
+fn run_script(also_other: bool, full_verdict: &str, body: &str) -> (Run, Value) {
     let log_dir = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(
-        log_dir.path(),
-        "fake-retry-review.sh",
-        FAKE_RETRY_REVIEW_SCRIPT,
-    );
+    let script = fake_harness_script(log_dir.path(), "fake-retry-review.sh", body);
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("LOG_DIR", log_dir.path().to_str().unwrap()),
@@ -217,5 +217,39 @@ fn a_full_review_that_fails_after_a_narrow_pass_fails_the_attempt() {
     assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
     assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
     assert!(run.brief(2, 2).is_some());
+    run.finish();
+}
+
+#[test]
+fn a_narrow_review_without_a_verdict_uses_its_last_run_for_the_full_change() {
+    let body = FAKE_RETRY_REVIEW_SCRIPT.replace(
+        "  *\"## Settled criteria\"*)\n",
+        "  *\"## Settled criteria\"*)\n    if [ \"$(wc -l < \"$LOG_DIR/reviews.log\")\" -eq 2 ]; then\n      printf '%s\\n' '{\"type\":\"result\",\"result\":\"No verdict\"}'\n      exit 0\n    fi\n",
+    );
+    let (run, settled) = run_script(true, "PASS", &body);
+    assert_eq!(settled["status"], "done", "{settled}");
+    let narrow = run.brief(2, 1).unwrap();
+    assert!(narrow.contains("## Settled criteria"), "{narrow}");
+    let full = run.brief(2, 2).unwrap();
+    assert!(full.contains("## Diff"), "{full}");
+    assert!(!full.contains("## Settled criteria"), "{full}");
+    assert!(run.brief(2, 3).is_none());
+    assert_eq!(run.reviews_run(), 3);
+    assert_eq!(implements(&settled)[1]["reviewScope"], "full");
+    run.finish();
+}
+
+#[test]
+fn a_narrow_pass_does_not_resolve_a_blocker_before_the_full_review() {
+    let body = FAKE_RETRY_REVIEW_SCRIPT.replace("P1: other.txt:1 - broken", "P1: a.txt:1 - fix it");
+    let (run, settled) = run_script(true, "FAIL", &body);
+    assert_ne!(settled["status"], "done", "{settled}");
+    let attempts = implements(&settled);
+    assert_eq!(attempts.len(), 2, "{settled}");
+    assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
+    assert_eq!(attempts[1]["failure"]["kind"], "review", "{settled}");
+    assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
+    assert!(run.brief(2, 2).is_some());
+    assert_eq!(run.reviews_run(), 3);
     run.finish();
 }

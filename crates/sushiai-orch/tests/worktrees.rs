@@ -100,6 +100,38 @@ fn new_worktree_lives_outside_the_repo_under_the_home_and_done_removes_it_but_ke
 }
 
 #[test]
+fn an_in_repo_worktree_root_override_excludes_only_that_root() {
+    let (daemon, _scripts) = spawn(PASS);
+    let repo = init_git_repo();
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["worktreeRoot"] = serde_json::json!("src/.wt");
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let task = create(&daemon, repo.path(), "Custom root", false);
+    let worktree = task["worktree"].as_str().unwrap();
+    assert_eq!(
+        canon(Path::new(worktree)),
+        canon(&repo.path().join("src/.wt/task-custom-root"))
+    );
+    let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == "/src/.wt/"));
+    assert!(!exclude.lines().any(|line| line == "/src/"));
+    assert_eq!(git_out(repo.path(), &["status", "--porcelain"]), "");
+
+    std::fs::write(repo.path().join("src/new.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        "?? src/new.rs"
+    );
+    daemon.request("task.delete", serde_json::json!({"id": task["id"]}));
+    assert!(!Path::new(worktree).exists());
+    daemon.shutdown_and_wait();
+}
+
+#[test]
 fn archiving_a_stopped_task_saves_its_edits_and_unarchive_restores_them() {
     let (daemon, _scripts) = spawn(HANG);
     let repo = init_git_repo();

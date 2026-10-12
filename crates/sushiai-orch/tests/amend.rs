@@ -444,8 +444,7 @@ fn amended_checks_are_baselined_on_the_base_and_only_failing_ones_gate() {
             "title": "Grounded amend",
             "goal": "Something",
             "criteria": ["a", "b"],
-            "variant": {"groundedChecks": true},
-            "start": false,
+                        "start": false,
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();

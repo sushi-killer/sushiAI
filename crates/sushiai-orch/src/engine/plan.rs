@@ -491,7 +491,7 @@ fn write_planner_run_files(
 
 /// Writes a parsed draft into the task and ends the plan attempt `idx` as
 /// passed; the first draft and a corrected one go through the same code.
-fn store_draft(
+pub(super) fn store_draft(
     app: &Arc<App>,
     task: &mut Task,
     idx: usize,
@@ -534,10 +534,15 @@ fn store_draft(
             .map(|v| format!("Checked by review (not a shell command): {v}")),
     );
     task.verify = verify;
-    if task.variant().grounded_checks {
-        // Stored before any split, so a splitting parent keeps them.
-        task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
-        task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+    // Stored before any split, so a splitting parent keeps them.
+    task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
+    task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+    let (tests, dropped) = keep_planned_tests(&draft.tests);
+    task.planner_tests.files = tests;
+    for line in dropped {
+        if !task.decisions.contains(&line) {
+            task.decisions.push(line);
+        }
     }
     task.final_verify = draft
         .final_verify
@@ -867,6 +872,16 @@ pub(super) async fn run_plan_stage(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
             );
+            // The single replan carries the gate's findings in its brief; the
+            // request itself is never edited.
+            let brief_text = if task.plan_gate.replanned {
+                brief::with_block_before_report(
+                    &brief_text,
+                    &plan_gate::findings_block(&task.plan_gate.findings),
+                )
+            } else {
+                brief_text
+            };
             let tools = permissions::task_tools(
                 app,
                 &app.settings.read().unwrap().clone(),
@@ -1083,6 +1098,16 @@ pub(super) async fn run_plan_stage(
             BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
             BriefAction::Proceed => {}
         }
+
+        // The plan gate: code checks and one plan review by another model
+        // family. A critical finding replans once.
+        match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
+            plan_gate::GateAction::Replan => continue,
+            plan_gate::GateAction::Cancelled => {
+                return end_plan_stage(app, task_id, Some(idx)).await;
+            }
+            plan_gate::GateAction::Proceed => {}
+        }
         if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
             task = reloaded;
         }
@@ -1182,26 +1207,34 @@ pub(super) async fn run_plan_stage(
         // The planner split the request: the task becomes a parent of one
         // child per part and never implements anything itself.
         if !draft.subtasks.is_empty() && task.parent.is_none() {
-            let split = match check_subtasks(&draft.subtasks) {
-                Ok(()) => split_into_subtasks(app, task_id, &draft.subtasks, auto_start_after_plan)
-                    .await
-                    .map_err(|e| format!("could not create the subtasks: {e}")),
-                Err(reason) => Err(format!("subtasks ignored: {reason}")),
-            };
-            match split {
+            let failed = match check_subtasks(&draft.subtasks) {
+                Err(reason) => Some(format!("subtasks ignored: {reason}")),
                 Ok(()) => {
-                    return if auto_start_after_plan {
-                        PlanOutcome::Proceed
+                    let plan = prepare_subtasks(&draft.subtasks);
+                    // One merged group and nothing else: the task itself
+                    // keeps its draft and gains the ordered checklist.
+                    if plan.merge.separate.is_empty() {
+                        merge_into_checklist(app, task_id, &plan).err()
                     } else {
-                        PlanOutcome::StoppedForReview
-                    };
-                }
-                Err(why) => {
-                    app.append_decision(task_id, format!("Planner: {why}; running as one task"));
-                    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
-                        task = reloaded;
+                        match split_into_subtasks(app, task_id, &plan, auto_start_after_plan).await
+                        {
+                            Ok(()) => {
+                                return if auto_start_after_plan {
+                                    PlanOutcome::Proceed
+                                } else {
+                                    PlanOutcome::StoppedForReview
+                                };
+                            }
+                            Err(e) => Some(format!("could not create the subtasks: {e}")),
+                        }
                     }
                 }
+            };
+            if let Some(why) = failed {
+                app.append_decision(task_id, format!("Planner: {why}; running as one task"));
+            }
+            if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                task = reloaded;
             }
         }
 
@@ -1253,108 +1286,228 @@ pub(super) async fn run_plan_stage(
     }
 }
 
-/// Turns a drafted task into a parent: one child per part, branching from
-/// the parent's branch, with `dependsOn` mapped from the parts' keys. A part
-/// the planner drafted completely (title, goal, criteria and verify) runs as
-/// drafted; an incomplete one is drafted by its own planner from its request. The parent is left `running` (its loop then
+pub(super) struct SubtaskPlan {
+    pub(super) parts: Vec<brief::PlanSubtask>,
+    pub(super) links: Vec<Option<usize>>,
+    decisions: Vec<String>,
+    pub(super) merge: plan_gate::MergePlan,
+}
+
+/// All dependency edges are present before grouping can contract the graph.
+pub(super) fn prepare_subtasks(parts: &[brief::PlanSubtask]) -> SubtaskPlan {
+    let (mut parts, mut decisions) = serialise_overlapping(parts);
+    let (links, relayed) = relay_links(&mut parts);
+    decisions.extend(relayed);
+    let merge = plan_gate::merge_parts(&parts);
+    SubtaskPlan {
+        parts,
+        links,
+        decisions,
+        merge,
+    }
+}
+
+/// The whole plan is one merged group: the task keeps its draft and gains
+/// the ordered checklist. `Err("")` tells the caller to carry on as one task.
+fn merge_into_checklist(app: &Arc<App>, task_id: &str, plan: &SubtaskPlan) -> Result<(), String> {
+    let mut task = app
+        .store
+        .load_task(task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "task not found".to_string())?;
+    task.checklist = plan_gate::checklist_of(&plan.parts, &plan.merge.merged);
+    task.decisions.extend(plan.decisions.iter().cloned());
+    task.decisions.push(format!(
+        "Plan gate: merged {} subtasks into one task with a checklist",
+        plan.merge.merged.len()
+    ));
+    task.updated_at = now_ms();
+    app.store.save_task(&task).map_err(|e| e.to_string())?;
+    app.broadcast_task(&task);
+    Ok(())
+}
+
+/// What a standalone part brings to its child: its own draft.
+#[derive(Default)]
+struct Draft<'a> {
+    goal: String,
+    criteria: Vec<String>,
+    verify: Vec<String>,
+    final_verify: Vec<String>,
+    checks: Vec<Check>,
+    held_out: Option<Check>,
+    complete: bool,
+    part: Option<&'a brief::PlanSubtask>,
+}
+
+/// One child of a split: the planner's parts that stand alone, and the one
+/// merged group (if any) with its ordered checklist.
+struct Unit {
+    /// Indexes into the parts, in group order.
+    members: Vec<usize>,
+    merged: bool,
+}
+
+/// Turns a drafted task into a parent: one child per unit, branching from
+/// the parent's branch, with `dependsOn` mapped from the parts' keys. A
+/// standalone part the planner drafted completely (title, goal, criteria and
+/// verify) runs as drafted; an incomplete one, and the merged group, is
+/// drafted by its own planner from its request. The parent is left `running` (its loop then
 /// starts the children) or `stopped` for the owner to review first.
 async fn split_into_subtasks(
     app: &Arc<App>,
     parent_id: &str,
-    parts: &[brief::PlanSubtask],
+    plan: &SubtaskPlan,
     start: bool,
 ) -> Result<(), String> {
-    let (mut parts, mut serialised) = serialise_overlapping(parts);
-    let (links, relayed) = relay_links(&mut parts);
-    serialised.extend(relayed);
-    let parts = parts.as_slice();
+    let parts = plan.parts.as_slice();
+    let merge = &plan.merge;
+    let links = &plan.links;
     let mut parent = app
         .store
         .load_task(parent_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "task not found".to_string())?;
-    let ids: HashMap<&str, String> = parts
+    // Planner order, the merged group at its first member's place.
+    let mut units: Vec<Unit> = Vec::new();
+    for i in 0..parts.len() {
+        if merge.merged.contains(&i) {
+            if merge.merged.iter().min() == Some(&i) {
+                units.push(Unit {
+                    members: merge.merged.clone(),
+                    merged: true,
+                });
+            }
+        } else {
+            units.push(Unit {
+                members: vec![i],
+                merged: false,
+            });
+        }
+    }
+    let unit_ids: Vec<String> = units
         .iter()
-        .map(|p| (p.key.trim(), uuid::Uuid::new_v4().to_string()))
+        .map(|_| uuid::Uuid::new_v4().to_string())
         .collect();
+    let id_of_key: HashMap<&str, &String> = units
+        .iter()
+        .zip(&unit_ids)
+        .flat_map(|(u, id)| u.members.iter().map(move |&m| (parts[m].key.trim(), id)))
+        .collect();
+    let part_title = |p: &brief::PlanSubtask| {
+        if p.title.trim().is_empty() {
+            truncate_chars(p.request.trim(), 60)
+        } else {
+            p.title.trim().to_string()
+        }
+    };
+    let unit_title = |u: &Unit| {
+        let first = part_title(&parts[u.members[0]]);
+        if u.members.len() > 1 {
+            format!("{first} (+{} more)", u.members.len() - 1)
+        } else {
+            first
+        }
+    };
     let parent_mcp = std::fs::read_to_string(app.store.task_dir(parent_id).join("mcp.json")).ok();
-    let titles_by_key: HashMap<&str, String> = parts
-        .iter()
-        .map(|p| {
-            let title = if p.title.trim().is_empty() {
-                truncate_chars(p.request.trim(), 60)
-            } else {
-                p.title.trim().to_string()
-            };
-            (p.key.trim(), title)
-        })
-        .collect();
     let now = now_ms();
     let review_on = !app.settings.read().unwrap().review.is_empty();
     let parent_worktree = PathBuf::from(&parent.worktree);
     let mut titles = Vec::new();
     let mut children: Vec<Task> = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        let title = titles_by_key[part.key.trim()].clone();
+    for (i, unit) in units.iter().enumerate() {
+        let title = unit_title(unit);
+        let mut depends_on: Vec<String> = Vec::new();
+        for &m in &unit.members {
+            for d in &parts[m].depends_on {
+                let id = id_of_key[d.trim()].clone();
+                if id != unit_ids[i] && !depends_on.contains(&id) {
+                    depends_on.push(id);
+                }
+            }
+        }
         let non_empty = |list: &[String]| -> Vec<String> {
             list.iter()
                 .filter(|c| !c.trim().is_empty())
                 .cloned()
                 .collect()
         };
-        let drafted_verify = non_empty(&part.verify);
-        let (verify, judged) = if review_on {
-            split_verify_commands(&parent_worktree, &drafted_verify)
+        // A merged group is drafted by its own planner; a standalone part
+        // carries the draft it came with.
+        let mut drafted = Draft::default();
+        let (request, checklist, paths) = if unit.merged {
+            let text = unit
+                .members
+                .iter()
+                .map(|&m| parts[m].request.trim())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let mut paths: Vec<String> = Vec::new();
+            for &m in &unit.members {
+                for p in &parts[m].paths {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+            (text, plan_gate::checklist_of(parts, &unit.members), paths)
         } else {
-            (drafted_verify, Vec::new())
+            let part = &parts[unit.members[0]];
+            let drafted_verify = non_empty(&part.verify);
+            let (verify, judged) = if review_on {
+                split_verify_commands(&parent_worktree, &drafted_verify)
+            } else {
+                (drafted_verify, Vec::new())
+            };
+            let mut criteria = non_empty(&part.criteria);
+            // Indices count the part's own criteria, before the review entries.
+            let own_criteria = criteria.len();
+            drafted.checks = valid_checks(part.checks.clone(), own_criteria);
+            drafted.held_out = valid_check(part.held_out.clone(), own_criteria);
+            criteria.extend(
+                judged
+                    .into_iter()
+                    .map(|v| format!("Checked by review (not a shell command): {v}")),
+            );
+            drafted.goal = part.goal.trim().to_string();
+            drafted.complete = part.is_complete() && !verify.is_empty();
+            drafted.criteria = criteria;
+            drafted.verify = verify;
+            drafted.final_verify = non_empty(&part.final_verify);
+            drafted.part = Some(part);
+            let request = if part.check.trim().is_empty() {
+                part.request.trim().to_string()
+            } else {
+                format!("{}\n\nCheck: {}", part.request.trim(), part.check_command())
+            };
+            (request, vec![], part.paths.clone())
         };
-        let mut criteria = non_empty(&part.criteria);
-        // Indices count the part's own criteria, before the review entries.
-        let own_criteria = criteria.len();
-        let grounded = parent.variant().grounded_checks;
-        let (checks, held_out) = if grounded {
-            (
-                valid_checks(part.checks.clone(), own_criteria),
-                valid_check(part.held_out.clone(), own_criteria),
-            )
-        } else {
-            (vec![], None)
-        };
-        criteria.extend(
-            judged
-                .into_iter()
-                .map(|v| format!("Checked by review (not a shell command): {v}")),
-        );
-        let goal = part.goal.trim().to_string();
-        let complete = !part.title.trim().is_empty()
-            && !goal.is_empty()
-            && !criteria.is_empty()
-            && !verify.is_empty();
+        let relay_of = links[unit.members[0]].and_then(|at| {
+            let id = id_of_key[parts[at].key.trim()];
+            (id != &unit_ids[i]).then(|| id.clone())
+        });
         let created = app
             .create_task_record(NewTask {
                 backlog: None,
-                id: ids[part.key.trim()].clone(),
+                id: unit_ids[i].clone(),
                 repo_root: PathBuf::from(&parent.repo),
                 project_id: parent.project_id.clone(),
                 title: title.clone(),
-                goal,
-                criteria,
-                verify,
-                final_verify: non_empty(&part.final_verify),
-                checks,
-                held_out,
-                request: Some(subtask_request(&parent, &part.request)),
+                goal: drafted.goal,
+                criteria: drafted.criteria,
+                verify: drafted.verify,
+                final_verify: drafted.final_verify,
+                checks: drafted.checks,
+                held_out: drafted.held_out,
+                request: Some(subtask_request(&parent, &request)),
                 branch: None,
                 base: parent.branch.clone(),
                 variant: parent.variant(),
-                depends_on: part
-                    .depends_on
-                    .iter()
-                    .map(|k| ids[k.trim()].clone())
-                    .collect(),
+                depends_on: depends_on.clone(),
                 parent: Some(parent.id.clone()),
-                paths: part.paths.clone(),
-                relay_of: links[i].map(|p| ids[parts[p].key.trim()].clone()),
+                paths,
+                checklist,
+                relay_of,
                 // Eval reports count the parent, which carries the children's
                 // cost.
                 eval_set: None,
@@ -1374,15 +1527,22 @@ async fn split_into_subtasks(
                 return Err(e);
             }
         };
-        child.planned_tier = part.tier;
-        child.visual_criteria = part.visual_criteria.clone();
-        child.brief_check.screenshot = part
-            .screenshot
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .map(str::to_string);
-        child.planned_by_parent = complete;
+        if let Some(part) = drafted.part {
+            if !unit.merged {
+                let (tests, dropped) = keep_planned_tests(&part.tests);
+                child.planner_tests.files = tests;
+                child.decisions.extend(dropped);
+            }
+            child.planned_tier = part.tier;
+            child.visual_criteria = part.visual_criteria.clone();
+            child.brief_check.screenshot = part
+                .screenshot
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            child.planned_by_parent = drafted.complete;
+        }
         if let Err(e) = app.store.save_task(&child) {
             children.push(child);
             discard_children(app, children).await;
@@ -1391,22 +1551,28 @@ async fn split_into_subtasks(
         if let Some(mcp) = &parent_mcp {
             let _ = std::fs::write(app.store.task_dir(&child.id).join("mcp.json"), mcp);
         }
-        titles.push(if part.depends_on.is_empty() {
+        titles.push(if depends_on.is_empty() {
             title
         } else {
-            let after: Vec<&str> = part
-                .depends_on
+            let after: Vec<String> = depends_on
                 .iter()
-                .map(|k| titles_by_key[k.trim()].as_str())
+                .filter_map(|id| unit_ids.iter().position(|u| u == id))
+                .map(|at| unit_title(&units[at]))
                 .collect();
             format!("{title} (after {})", after.join(", "))
         });
         children.push(child);
     }
-    parent.decisions.extend(serialised);
+    parent.decisions.extend(plan.decisions.iter().cloned());
+    if merge.merged.len() > 1 {
+        parent.decisions.push(format!(
+            "Plan gate: merged {} subtasks into one task with a checklist",
+            merge.merged.len()
+        ));
+    }
     parent.decisions.push(format!(
         "Planner: split into {} subtasks: {}",
-        parts.len(),
+        units.len(),
         titles.join("; ")
     ));
     parent.status = if start {

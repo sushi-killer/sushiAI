@@ -317,6 +317,36 @@ pub fn wip_ref(task_id: &str) -> String {
     format!("refs/orchd/wip/{task_id}")
 }
 
+/// Moves a worktree nothing has touched onto the current head of its base
+/// branch before planning: `Some(new_sha)` when it moved, `None` when the
+/// base did not move or the worktree has commits or tracked changes of its own.
+pub fn reset_untouched_to_base(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+) -> Result<Option<String>, GitError> {
+    let new_sha = run(
+        worktree,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
+    if new_sha == base_sha {
+        return Ok(None);
+    }
+    if run(worktree, &["rev-parse", "HEAD"])?.trim() != base_sha {
+        return Ok(None);
+    }
+    if !run(worktree, &["status", "--porcelain", "--untracked-files=no"])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+    Ok(Some(new_sha))
+}
+
 /// Carries the agent's uncommitted work from `base_sha` onto wherever
 /// `base_ref` points now. The work is first saved as a commit kept at
 /// [`wip_ref`], the branch moves to the new base, and the work is applied
@@ -446,6 +476,74 @@ pub fn carry_onto_moved_base(
 
 pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(run(worktree, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// Carries a recorded, single commit together with the uncommitted work,
+/// keeping `paths` in their own commit on the new base. A conflict in those
+/// paths restores the old worktree instead of committing conflict markers.
+pub fn carry_onto_moved_base_with_commit(
+    worktree: &Path,
+    base_ref: &str,
+    base_sha: &str,
+    task_id: &str,
+    commit: &str,
+    paths: &[String],
+) -> Result<(Rebase, String), GitError> {
+    let skipped = |reason: &str| {
+        Ok((
+            Rebase::Skipped {
+                reason: reason.to_string(),
+            },
+            commit.to_string(),
+        ))
+    };
+    if head_sha(worktree)? != commit
+        || run(worktree, &["rev-parse", &format!("{commit}^")])?.trim() != base_sha
+    {
+        return skipped("the task branch has commits beyond its recorded tests");
+    }
+    if resolve_commit(worktree, base_ref)? == base_sha {
+        return Ok((Rebase::Unchanged, commit.to_string()));
+    }
+    let mut changed = vec!["diff", "--quiet", commit, "--"];
+    changed.extend(paths.iter().map(String::as_str));
+    if run(worktree, &changed).is_err() {
+        return skipped("the recorded test files were changed");
+    }
+    let title = run(worktree, &["log", "-1", "--format=%s", commit])?;
+    uncommit_to(worktree, base_sha)?;
+    let carried = match carry_onto_moved_base(worktree, base_ref, base_sha, task_id) {
+        Ok(carried) => carried,
+        Err(error) => {
+            uncommit_to(worktree, commit)?;
+            return Err(error);
+        }
+    };
+    let restore = || -> Result<(), GitError> {
+        run(worktree, &["reset", "-q", "--hard", &wip_ref(task_id)])?;
+        uncommit_to(worktree, commit)
+    };
+    match &carried {
+        Rebase::Moved { .. } | Rebase::Conflicts { .. } => {
+            if let Rebase::Conflicts { files, .. } = &carried {
+                if files.iter().any(|f| paths.contains(f)) {
+                    restore()?;
+                    return skipped("the new base conflicts with the recorded test files");
+                }
+            }
+            match commit_paths(worktree, paths, title.trim(), task_id) {
+                Ok(new_commit) => Ok((carried, new_commit)),
+                Err(error) => {
+                    restore()?;
+                    Err(error)
+                }
+            }
+        }
+        Rebase::Unchanged | Rebase::Skipped { .. } => {
+            uncommit_to(worktree, commit)?;
+            Ok((carried, commit.to_string()))
+        }
+    }
 }
 
 /// Turns every commit on the worktree's branch since `base_sha` back into
@@ -1002,6 +1100,64 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
         ],
     )?;
     Ok(())
+}
+
+/// Commits exactly `paths` (already written in `cwd`) with a `Task-Id`
+/// trailer and returns HEAD. Nothing else in the index or the tree goes into
+/// the commit; when no listed path differs from HEAD there is no commit and
+/// HEAD is returned as it is. Same hook rule as [`commit`].
+pub fn commit_paths(
+    cwd: &Path,
+    paths: &[String],
+    title: &str,
+    task_id: &str,
+) -> Result<String, GitError> {
+    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    run(cwd, &add)?;
+    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
+    diff.extend(paths.iter().map(String::as_str));
+    if run(cwd, &diff).is_err() {
+        let trailer = format!("Task-Id: {task_id}");
+        let mut commit = vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            title,
+            "--trailer",
+            &trailer,
+            "--",
+        ];
+        commit.extend(paths.iter().map(String::as_str));
+        run(cwd, &commit)?;
+    }
+    head_sha(cwd)
+}
+
+/// The content of `path` at `rev` when it is a file there.
+pub fn blob_at(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Puts `paths` back as they are at `rev`, in the tree and the index.
+pub fn restore_paths(cwd: &Path, rev: &str, paths: &[String]) -> Result<(), GitError> {
+    let mut args = vec!["checkout", "-q", rev, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
 }
 
 // -- report facts -------------------------------------------------------------
@@ -1790,6 +1946,59 @@ mod tests {
     }
 
     #[test]
+    fn carrying_a_recorded_commit_restores_work_when_its_paths_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let base_ref = branch_of(&repo, "HEAD").unwrap();
+        let wt = tmp.path().join("task");
+        let created = create_worktree(&repo, "task/tests", &wt, "HEAD").unwrap();
+        let paths = vec!["README.md".to_string()];
+        std::fs::write(wt.join("README.md"), "planner test\n").unwrap();
+        let tests = commit_paths(&wt, &paths, "test: planner", "t1").unwrap();
+        std::fs::write(wt.join("implementation.txt"), "implementation\n").unwrap();
+        std::fs::write(repo.join("README.md"), "fixed base test\n").unwrap();
+        commit_paths(&repo, &paths, "test: base fix", "base").unwrap();
+        let new_base = head_sha(&repo).unwrap();
+
+        let (result, retained) = carry_onto_moved_base_with_commit(
+            &wt,
+            &base_ref,
+            &created.base_sha,
+            "t1",
+            &tests,
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Rebase::Skipped {
+                reason: "the new base conflicts with the recorded test files".to_string(),
+            }
+        );
+        assert_eq!(retained, tests);
+        assert_eq!(head_sha(&wt).unwrap(), tests);
+        assert_eq!(head_sha(&repo).unwrap(), new_base);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "planner test\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("implementation.txt")).unwrap(),
+            "implementation\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "fixed base test\n"
+        );
+        assert_eq!(diff_name_only(&wt, &tests).unwrap(), Vec::<String>::new());
+        assert!(run(&wt, &["status", "--porcelain"])
+            .unwrap()
+            .contains("?? implementation.txt"));
+    }
+
+    #[test]
     fn carry_onto_moved_base_skips_what_would_lose_work() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
@@ -2026,18 +2235,37 @@ mod tests {
 
     #[test]
     fn bootstrap_without_a_worktreeinclude_copies_the_default_files_and_links_nothing() {
-        let (_tmp, repo, wt) = repo_with_worktree(".env\nnode_modules/\n");
-        std::fs::write(repo.join(".env"), "SECRET=1\n").unwrap();
-        std::fs::create_dir_all(repo.join("hub/node_modules/vite")).unwrap();
-        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
-        std::fs::create_dir_all(wt.join("hub")).unwrap();
+        let (_tmp, repo, wt) =
+            repo_with_worktree(".env\n.env.local\n.claude/settings.local.json\nnode_modules/\n");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        let defaults = [
+            (".env", "SECRET=1\n"),
+            (".env.local", "LOCAL=1\n"),
+            (".claude/settings.local.json", "{\"local\":true}\n"),
+        ];
+        for (path, contents) in defaults {
+            std::fs::write(repo.join(path), contents).unwrap();
+        }
+        let dependencies = [
+            "node_modules/pkg/index.js",
+            "hub/node_modules/vite/index.js",
+            "hub/web/node_modules/react/index.js",
+        ];
+        for path in dependencies {
+            let source = repo.join(path);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(source, "main checkout dependency\n").unwrap();
+        }
+        std::fs::create_dir_all(wt.join("hub/web")).unwrap();
 
         bootstrap_worktree(&repo, &wt).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(wt.join(".env")).unwrap(),
-            "SECRET=1\n"
-        );
+        let exclude = run(&wt, &["rev-parse", "--git-path", "info/exclude"]).unwrap();
+        let exclude = std::fs::read_to_string(wt.join(exclude.trim())).unwrap();
+        for (path, contents) in defaults {
+            assert_eq!(std::fs::read_to_string(wt.join(path)).unwrap(), contents);
+            assert!(exclude.lines().any(|line| line == format!("/{path}")));
+        }
         // Nothing named node_modules is linked or created anywhere.
         let mut stack = vec![wt.clone()];
         while let Some(dir) = stack.pop() {
@@ -2048,8 +2276,18 @@ mod tests {
                 }
             }
         }
-        let changed = changed_files(&wt, "HEAD").unwrap();
-        assert!(!changed.iter().any(|f| f == ".env"));
+        // Dependencies installed into the worktree stay local and ignored.
+        for path in dependencies {
+            let installed = wt.join(path);
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            std::fs::write(installed, "worktree dependency\n").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(repo.join(path)).unwrap(),
+                "main checkout dependency\n"
+            );
+        }
+        std::fs::write(wt.join("kept.txt"), "edited\n").unwrap();
+        assert_eq!(changed_files(&wt, "HEAD").unwrap(), vec!["kept.txt"]);
     }
 
     #[cfg(unix)]

@@ -57,6 +57,7 @@ fn run(check_result: &str, route: Option<&str>, create: serde_json::Value) -> Ru
     settings["review"] = serde_json::json!("");
     settings["tiers"]["mechanical"] = serde_json::json!("claude-sonnet");
     settings["briefCheckRoute"] = serde_json::json!(route.unwrap_or("claude-sonnet"));
+    settings["planReview"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let mut params = create;
@@ -106,7 +107,7 @@ fn count(calls: &[String], kind: &str) -> usize {
 }
 
 #[test]
-fn a_contradicting_planner_draft_is_redrafted_once_and_never_twice() {
+fn a_contradicting_planner_draft_is_replanned_once_and_never_twice() {
     let r = run(CONTRADICTION, None, planned());
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
     assert_eq!(count(&r.calls, "plan"), 2, "calls: {:?}", r.calls);

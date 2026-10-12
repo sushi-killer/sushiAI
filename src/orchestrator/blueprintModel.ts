@@ -159,7 +159,7 @@ function globalsWith(
       if (change.kind === "enabled")
         return {
           ...settings,
-          experiments: { ...experiments, groundedChecks: change.value },
+          experiments: { ...experiments, heldOut: change.value },
         };
       break;
     case "land":

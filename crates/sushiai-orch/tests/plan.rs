@@ -211,6 +211,7 @@ fn a_task_waiting_on_its_plan_question_does_not_hold_a_parallel_slot() {
     let mut settings = request_on(&socket1, "settings.get", serde_json::json!({}));
     settings["parallel"] = serde_json::json!(1);
     settings["briefCheckRoute"] = serde_json::json!("");
+    settings["planReview"] = serde_json::json!("");
     settings["review"] = serde_json::json!("");
     settings["answerPolicy"] = serde_json::json!(false);
     fit_sandbox(&mut settings);
@@ -599,7 +600,7 @@ case "$input" in
   *sushi-plan*)
     case "$input" in
       *CHILD_REQ_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"]}\n```"' ;;
-      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\",{\"text\":\"a screenshot of a.txt\",\"visual\":true}],\"verify\":[\"test -f a.txt\"],\"finalVerify\":[\"true\"],\"paths\":[\"a.txt\"],\"tier\":\"standard\",\"request\":\"CHILD_REQ_A create a.txt\"},__PART_B__]}\n```"' ;;
+      *) out '"```sushi-plan\n{\"title\":\"Both parts\",\"goal\":\"Create a.txt, then b.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\",{\"text\":\"a screenshot of a.txt\",\"visual\":true}],\"verify\":[\"test -f a.txt\"],\"finalVerify\":[\"true\"],\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\",\"tier\":\"standard\",\"request\":\"CHILD_REQ_A create a.txt\"},__PART_B__]}\n```"' ;;
     esac
     ;;
   *MAKE_B*) echo b > b.txt; out "$report" ;;
@@ -608,9 +609,8 @@ case "$input" in
 esac
 "#;
 
-const COMPLETE_PART_B: &str = r#"{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
-const INCOMPLETE_PART_B: &str =
-    r#"{\"key\":\"b\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
+const COMPLETE_PART_B: &str = r#"{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
+const INCOMPLETE_PART_B: &str = r#"{\"key\":\"b\",\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B create b.txt\"}"#;
 
 fn run_split(
     part_b: &str,
@@ -730,7 +730,7 @@ out() {
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
   *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
-  *sushi-plan*) out '"```sushi-plan\n{\"title\":\"One part\",\"goal\":\"Create a.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"true\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f a.txt\"},{\"criterion\":9,\"run\":\"test -f nowhere.txt\"}],\"heldOut\":{\"criterion\":0,\"run\":\"test -s a.txt\"},\"screenshot\":\"  mkdir -p artifacts && echo png > artifacts/a.png  \",\"paths\":[\"a.txt\"],\"request\":\"CHILD_REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B\"}]}\n```"' ;;
+  *sushi-plan*) out '"```sushi-plan\n{\"title\":\"One part\",\"goal\":\"Create a.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"true\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f a.txt\"},{\"criterion\":9,\"run\":\"test -f nowhere.txt\"}],\"heldOut\":{\"criterion\":0,\"run\":\"test -s a.txt\"},\"screenshot\":\"  mkdir -p artifacts && echo png > artifacts/a.png  \",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\",\"request\":\"CHILD_REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B\"}]}\n```"' ;;
   *MAKE_A*) echo a > a.txt; out "$report" ;;
   *MAKE_B*) echo b > b.txt; out "$report" ;;
   *) out "$report" ;;
@@ -752,7 +752,6 @@ fn a_parent_drafted_part_keeps_its_drafted_checks_and_held_out() {
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "build the part",
-            "variant": {"groundedChecks": true},
             "start": true,
         }),
     );

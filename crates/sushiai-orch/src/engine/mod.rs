@@ -54,17 +54,21 @@ mod hooks;
 mod land;
 mod leases;
 mod lines;
+mod metrics;
 mod past_work;
 mod permissions;
 mod pipeline;
 mod plan;
+mod plan_gate;
 mod pr;
+mod protected;
 mod questions;
 mod rate_limit;
 mod recovery;
 mod repo_notes;
 mod reports;
 mod review;
+mod review_findings;
 mod routing;
 mod rpc_misc;
 mod rpc_tasks;
@@ -97,10 +101,12 @@ use land::*;
 use leases::*;
 use lines::*;
 use plan::*;
+use protected::*;
 use questions::*;
 use rate_limit::*;
 use reports::*;
 use review::*;
+use review_findings::*;
 use routing::*;
 use rpc_tasks::*;
 use slots::{ResizableSlots, SlotPermit};
@@ -141,7 +147,7 @@ fn validate_task_id(store: &Store, id: &str) -> Result<(), String> {
 
 /// FNV-1a 64-bit -- fast, dependency-free, plenty for a cache key (not a
 /// security boundary).
-fn simple_hash(s: &str) -> String {
+pub(crate) fn simple_hash(s: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         hash ^= b as u64;

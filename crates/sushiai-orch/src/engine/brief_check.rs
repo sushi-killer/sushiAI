@@ -337,10 +337,10 @@ pub(super) async fn check_brief(
             truncate_chars(&why, 200)
         )),
         Verdict::Conflict(conflict) => {
-            if can_redraft && !task.brief_check.redrafted {
+            if can_redraft && !task.plan_gate.replanned {
                 task.decisions
                     .push(format!("Brief check: {conflict} (drafting again)"));
-                task.brief_check.redrafted = true;
+                task.plan_gate.replanned = true;
                 task.status = TaskStatus::Drafting;
                 action = BriefAction::Redraft(conflict);
             } else {

@@ -82,7 +82,7 @@ fn describe_lists_stages_with_routes_from_settings() {
         s["tiers"]["standard"] = json!("claude-sonnet");
         s["maxAttempts"] = json!(3);
         s["experiments"]["advisor"] = json!(true);
-        s["experiments"]["groundedChecks"] = json!(true);
+        s["experiments"]["heldOut"] = json!(true);
     });
     let d = daemon.request("pipeline.describe", json!({}));
     assert_eq!(
@@ -131,7 +131,7 @@ fn preset_matches_settings_path() {
         s["maxAttempts"] = json!(2);
         s["planner"] = json!("claude-opus");
         s["experiments"]["advisor"] = json!(true);
-        s["experiments"]["groundedChecks"] = json!(true);
+        s["experiments"]["heldOut"] = json!(true);
     });
     let expected = via_settings.request("pipeline.describe", json!({"repo": repo_path}));
 
@@ -173,7 +173,9 @@ fn task_create_applies_repo_preset() {
     assert_eq!(v["briefCheckRoute"], "");
     assert_eq!(v["maxAttempts"], 6);
     assert_eq!(v["advisor"], true);
-    assert_eq!(v["groundedChecks"], true);
+    assert!(v.get("groundedChecks").is_none());
+    let described = daemon.request("pipeline.describe", json!({"taskId": got["id"]}));
+    assert_eq!(stage(&described, "held-out")["enabled"], true);
 
     // An explicit preset wins over the repo's, and a variant over both.
     let fast = create(
@@ -184,6 +186,7 @@ fn task_create_applies_repo_preset() {
     let v = &fast["variant"];
     assert_eq!(v["maxAttempts"], 5);
     assert_eq!(v["advisor"], false);
+    assert_eq!(v["heldOut"], false);
     assert_eq!(v["briefCheckRoute"], "");
     assert!(v.get("reviewRoute").is_none());
 }
@@ -270,6 +273,38 @@ fn shared_checks_are_not_optional() {
 }
 
 #[test]
+fn held_out_defaults_on_and_its_switch_leaves_regular_checks_enabled() {
+    let daemon = spawn();
+    let repo = init_git_repo();
+    let default = create(&daemon, repo.path(), json!({}));
+    let described = daemon.request("pipeline.describe", json!({"taskId": default["id"]}));
+    assert_eq!(stage(&described, "held-out")["enabled"], true);
+    assert_eq!(stage(&described, "held-out")["optional"], true);
+
+    for enabled in [false, true] {
+        let task = create(
+            &daemon,
+            repo.path(),
+            json!({
+                "variant": {"heldOut": enabled},
+                "criteria": ["the marker exists"],
+                "checks": [{"criterion": 0, "run": "test -f marker.txt"}],
+                "heldOut": {"criterion": 0, "run": "test -s marker.txt"},
+            }),
+        );
+        assert_eq!(task["checks"][0]["run"], "test -f marker.txt");
+        assert_eq!(task["heldOut"]["run"], "test -s marker.txt");
+        assert!(task["variant"].get("groundedChecks").is_none());
+        let described = daemon.request("pipeline.describe", json!({"taskId": task["id"]}));
+        assert_eq!(stage(&described, "held-out")["enabled"], enabled);
+        for id in ["checks", "base-checks"] {
+            assert_eq!(stage(&described, id)["enabled"], true);
+            assert_eq!(stage(&described, id)["optional"], false);
+        }
+    }
+}
+
+#[test]
 fn settings_set_rejects_bad_presets() {
     let daemon = spawn();
     let err = set_error(&daemon, |s| {
@@ -331,7 +366,9 @@ fn task_preset_is_refused_after_an_implement_attempt() {
     assert_eq!(ok["variant"]["maxAttempts"], 4);
     assert_eq!(ok["variant"]["advisor"], true);
     let got = daemon.request("task.get", json!({"id": id}));
-    assert_eq!(got["variant"]["groundedChecks"], true);
+    assert!(got["variant"].get("groundedChecks").is_none());
+    let described = daemon.request("pipeline.describe", json!({"taskId": id}));
+    assert_eq!(stage(&described, "held-out")["enabled"], true);
     let err = daemon.request_error("task.preset", json!({"id": id, "preset": "ghost"}));
     assert!(err.contains("unknown preset"), "{err}");
 

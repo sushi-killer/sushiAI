@@ -87,13 +87,13 @@ const VARIANT_KEYS: Exclude<
   | "maxCostUsd"
   | "maxAttemptCostUsd"
   | "batchQuestions"
-  | "groundedChecks"
   | "bestOf"
   | "bestOfRoute"
   | "land"
   | "reviewRoute"
   | "briefCheckRoute"
   | "maxAttempts"
+  | "heldOut"
 >[] = ["stallTimeoutSecs", "reviewEvidence"];
 
 function variantFlagText(value: boolean | string | number): string {
@@ -117,6 +117,9 @@ export function variantLabel(task: Task, experiments: Variant): string {
   const diffs = VARIANT_KEYS.filter(
     (key) => variant[key] !== experiments[key],
   ).map((key) => `${key} ${variantFlagText(variant[key])}`);
+  if ((variant.heldOut ?? true) !== (experiments.heldOut ?? true)) {
+    diffs.push(`heldOut ${variantFlagText(variant.heldOut ?? true)}`);
+  }
   if (variant.plannerRoute !== experiments.plannerRoute) {
     diffs.push(`plannerRoute ${variant.plannerRoute ?? "settings"}`);
   }
@@ -138,9 +141,6 @@ export function variantLabel(task: Task, experiments: Variant): string {
     (variant.batchQuestions ?? false) !== (experiments.batchQuestions ?? false)
   ) {
     diffs.push(`batchQuestions ${variant.batchQuestions ? "on" : "off"}`);
-  }
-  if (!!variant.groundedChecks !== !!experiments.groundedChecks) {
-    diffs.push(`groundedChecks ${variantFlagText(!!variant.groundedChecks)}`);
   }
   const bestOf = variant.bestOf ?? 0;
   if (bestOf >= 2 !== (experiments.bestOf ?? 0) >= 2) {

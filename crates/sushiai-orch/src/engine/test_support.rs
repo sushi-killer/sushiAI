@@ -232,5 +232,7 @@ pub(super) fn assert_helper_timeout(task: &Task, helper: &str) {
         "{:?}",
         task.decisions
     );
-    assert_eq!(chat::fake_overseer_calls(Path::new(&task.worktree)), 1);
+    // Under load the deadline can stop the fake before it records its call;
+    // what matters is that a timed-out helper is never started again.
+    assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 1);
 }

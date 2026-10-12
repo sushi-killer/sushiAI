@@ -38,8 +38,11 @@ fn a_final_check_killed_by_a_shutdown_is_rerun_not_failed() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts_dir.path(), "fake-claude.sh", PASS_SCRIPT);
     let marker = scripts_dir.path().join("final-started");
+    // The daemon also runs every check on the base commit in the background,
+    // in a scratch checkout under `base-runs`. Only the task's own run may
+    // touch the marker, or the test would stop the daemon at the wrong moment.
     let final_check = format!(
-        "if [ ! -f {m} ]; then touch {m}; sleep 60; fi",
+        "case \"$PWD\" in */base-runs/*) exit 0 ;; esac; if [ ! -f {m} ]; then touch {m}; sleep 60; fi",
         m = marker.display()
     );
     let env = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];

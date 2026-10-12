@@ -502,6 +502,8 @@ export type Task = {
   baseSha: string;
   /** Branch the task started from; its work is carried onto it when it moves. */
   baseRef?: string;
+  /** Commits left on the task branch instead of landing on the base branch. */
+  unlanded?: { commits: number; base: string };
   /** Where the work started (chat, ui, mcp, cli, planner, eval, handoff). */
   source?: string;
   /** The commit a `variant.land` task put on its base branch. */

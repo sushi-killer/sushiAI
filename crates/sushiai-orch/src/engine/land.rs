@@ -7,6 +7,76 @@ const AFTER_LAND_TIMEOUT: Duration = Duration::from_secs(600);
 /// it before the attempt fails.
 const MAX_RECARRIES: u32 = 3;
 
+pub(super) struct LandingRedirect {
+    pub(super) branch: String,
+    pub(super) done_tasks: Vec<Task>,
+    pub(super) decisions: Vec<String>,
+}
+
+pub(super) fn resolve_landing_branch(
+    branch: &str,
+    tasks: &[Task],
+) -> Result<LandingRedirect, String> {
+    let mut branch = branch.to_string();
+    let mut seen = std::collections::HashSet::new();
+    let mut done_tasks = Vec::new();
+    let mut decisions = Vec::new();
+    loop {
+        if !seen.insert(branch.clone()) {
+            return Err(format!("Land: refused, a cycle was found while following done task branches from {branch}; the work stays on its own branch"));
+        }
+        let Some(done) = tasks
+            .iter()
+            .find(|t| t.status == TaskStatus::Done && t.branch == branch)
+        else {
+            break;
+        };
+        let Some(base) = done.base_ref.clone() else {
+            return Err(format!("Land: refused, done task {} has no base branch to redirect to; the work stays on its own branch", done.title));
+        };
+        decisions.push(format!(
+            "Land: redirected from done task {} ({})'s branch {branch} to {base}",
+            done.title, done.id
+        ));
+        done_tasks.push(done.clone());
+        branch = base;
+    }
+    Ok(LandingRedirect {
+        branch,
+        done_tasks,
+        decisions,
+    })
+}
+
+async fn mark_redirected_landed(
+    app: &Arc<App>,
+    task: &Task,
+    branch: &str,
+    sha: &str,
+    redirects: &[Task],
+) {
+    for redirected in redirects.iter().filter(|done| done.landed_sha.is_none()) {
+        let Ok(Some(mut done)) = app.store.load_task(&redirected.id) else {
+            continue;
+        };
+        done.base_ref = Some(branch.to_string());
+        done.landed_sha = Some(sha.to_string());
+        done.landed_at = Some(now_ms());
+        done.unlanded = None;
+        done.decisions.push(format!(
+            "Land: task {} ({}) landed this work at {}",
+            task.title,
+            task.id,
+            short_sha(sha)
+        ));
+        super::reports::refresh_diff_stat(&mut done).await;
+        app.write_report(&mut done).await;
+        done.updated_at = now_ms();
+        let _ = app.store.save_task(&done);
+        app.broadcast_task(&done);
+    }
+}
+
 /// Lands a finished top-level task with `variant.land` on its base branch,
 /// one task per (repo, branch) at a time: its work is carried onto the
 /// branch's current head, squashed to one commit, checked again on exactly
@@ -26,13 +96,23 @@ pub(super) async fn land_on_base(
         let s = app.settings.read().unwrap();
         (s.may_land_on_default(&task.repo), s.after_land.clone())
     };
-    let Some(branch) = task.base_ref.clone() else {
+    let Some(original_branch) = task.base_ref.clone() else {
         task.decisions.push(
             "Land: refused, the task was not started from a branch; the work stays on its own branch"
                 .to_string(),
         );
         return Landing::NoParent;
     };
+    let all = app.repo_tasks(&task.repo);
+    let redirect = match resolve_landing_branch(&original_branch, &all) {
+        Ok(redirect) => redirect,
+        Err(reason) => {
+            task.decisions.push(reason);
+            return Landing::NoParent;
+        }
+    };
+    let branch = redirect.branch.clone();
+    task.decisions.extend(redirect.decisions.clone());
     let repo = PathBuf::from(&task.repo);
     if !land_on_default {
         let r = repo.clone();
@@ -47,6 +127,29 @@ pub(super) async fn land_on_base(
             ));
             return Landing::NoParent;
         }
+    }
+
+    if !redirect.done_tasks.is_empty() {
+        if redirect
+            .done_tasks
+            .iter()
+            .any(|done| done.landed_sha.is_none())
+        {
+            let (r, start, target) = (repo.clone(), task.base_sha.clone(), branch.clone());
+            match tokio::task::spawn_blocking(move || git::merge_base_of(&r, &start, &target))
+                .await
+                .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+            {
+                Ok(base) => task.base_sha = base,
+                Err(e) => {
+                    task.decisions.push(format!(
+                        "Land: refused, could not find the merge base for redirected branch {branch}: {e}; the work stays on its own branch"
+                    ));
+                    return Landing::NoParent;
+                }
+            }
+        }
+        task.base_ref = Some(branch.clone());
     }
 
     let lock = app.landing_lock(&format!("base\0{}\0{branch}", task.repo));
@@ -84,6 +187,10 @@ pub(super) async fn land_on_base(
                     tokio::task::spawn_blocking(move || git::resolve_commit(&r, &b).ok())
                         .await
                         .unwrap_or(None);
+                task.unlanded = None;
+                if let Some(sha) = task.landed_sha.as_deref() {
+                    mark_redirected_landed(app, task, &branch, sha, &redirect.done_tasks).await;
+                }
                 record_landing(task).await;
                 return Landing::Landed;
             }
@@ -114,8 +221,10 @@ pub(super) async fn land_on_base(
         match moved {
             Ok((sha, git::BranchMove::Done { checkout })) => {
                 task.landed_sha = Some(sha.clone());
+                task.unlanded = None;
                 task.decisions
                     .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+                mark_redirected_landed(app, task, &branch, &sha, &redirect.done_tasks).await;
                 record_landing(task).await;
                 run_after_land(task, &checkout, &after_land).await;
                 return Landing::Landed;

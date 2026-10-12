@@ -137,6 +137,56 @@ printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,
     (daemon, scripts)
 }
 
+#[test]
+fn a_done_task_report_lists_patch_aware_unlanded_commits() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts.path(),
+        "fake-claude.sh",
+        r#"#!/bin/sh
+input="$(cat)"
+name=$(printf '%s' "$input" | grep -o 'FILE_[a-z]*' | head -1 | sed 's/FILE_//')
+echo "$name" > "$name.txt"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+"#,
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_off(&daemon);
+    let repo = init_git_repo();
+    git_out(repo.path(), &["checkout", "-q", "-b", "work"]);
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Add report",
+            "goal": "FILE_report: create the file",
+            "verify": ["test -f report.txt"],
+            "base": "work",
+            "land": false,
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", json!({"id": id}));
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["unlanded"]["commits"], 1, "{done}");
+    assert_eq!(done["unlanded"]["base"], "work", "{done}");
+    let expected = format!(
+        "- Not landed: 1 commit(s) on `{}` are not on `work`",
+        done["branch"].as_str().unwrap()
+    );
+    assert!(
+        done["report"].as_str().unwrap().contains(&expected),
+        "{done}"
+    );
+    let report = daemon.request("task.report", json!({"id": id}));
+    let text = report["report"].as_str().unwrap();
+    assert!(text.contains(&expected), "{text}");
+    daemon.shutdown_and_wait();
+}
+
 fn land_one(daemon: &Daemon, repo: &Path) -> serde_json::Value {
     let task = daemon.request(
         "task.create",

@@ -22,6 +22,7 @@ import {
   formatTaskTier,
   statusBadgeLabel,
   statusTone,
+  unlandedLabel,
   variantLabel,
 } from "./helpers";
 import type { Tone } from "../ui/tone";
@@ -619,6 +620,7 @@ export function TaskDetail({
   ].filter((row) => formatCost(row.cost) !== "$0.00");
   const hasDetails =
     (selected.request && selected.request !== selected.title) ||
+    !!selected.unlanded ||
     children.length > 0 ||
     (selected.assumptions ?? []).length > 0 ||
     selected.decisions.length > 0 ||
@@ -986,6 +988,12 @@ export function TaskDetail({
                   {selected.baseRef && (
                     <span className="td-branch" title={selected.baseRef}>
                       {" · "}from {selected.baseRef}
+                    </span>
+                  )}
+                  {selected.unlanded && (
+                    <span className="td-branch">
+                      {" · "}
+                      {unlandedLabel(selected)}
                     </span>
                   )}
                   {selected.variant?.land && (

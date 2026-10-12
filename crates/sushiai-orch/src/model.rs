@@ -1696,6 +1696,13 @@ pub struct Deliverable {
     pub placed: Option<String>,
 }
 
+/// Patch-equivalent commits on a done task's branch that have not landed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unlanded {
+    pub commits: u32,
+    pub base: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -1747,6 +1754,9 @@ pub struct Task {
     /// When the task landed (ms since epoch), set beside `landed_sha`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_at: Option<i64>,
+    /// Work on a done top-level task's branch that is absent from its base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlanded: Option<Unlanded>,
     /// The task's branch against its base (the landing commit against its
     /// parent once landed); refreshed after each implement attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2781,6 +2791,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -3043,6 +3054,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -3113,6 +3125,7 @@ mod tests {
             visual_criteria: flagged.iter().map(|c| c.to_string()).collect(),
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -3209,6 +3222,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,

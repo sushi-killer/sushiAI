@@ -242,6 +242,12 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         )),
         None => out.push_str(&format!("- {status}, on branch `{}`\n", top.branch)),
     }
+    if let Some(unlanded) = &top.unlanded {
+        out.push_str(&format!(
+            "- Not landed: {} commit(s) on `{}` are not on `{}`\n",
+            unlanded.commits, top.branch, unlanded.base
+        ));
+    }
     match &top.lead_touch {
         Some(t) => out.push_str(&format!(
             "- Lead touch: {} (by {}){}\n",
@@ -404,5 +410,29 @@ mod tests {
     fn minutes_reads_seconds_then_minutes() {
         assert_eq!(minutes(12_000), "12s");
         assert_eq!(minutes(600_000), "10 min");
+    }
+
+    #[test]
+    fn unlanded_work_is_reported_and_absent_when_not_set() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
+        task.branch = "task/feature".into();
+        task.base_ref = Some("work".into());
+        task.unlanded = Some(crate::model::Unlanded {
+            commits: 2,
+            base: "work".into(),
+        });
+        let report = build(&task, &[&task], &[], &Facts::default());
+        assert!(report.contains("- Not landed: 2 commit(s) on `task/feature` are not on `work`"));
+        let serialized = serde_json::to_value(&task).unwrap();
+        assert_eq!(serialized["unlanded"]["commits"], 2);
+        assert_eq!(serialized["unlanded"]["base"], "work");
+
+        task.unlanded = None;
+        let report = build(&task, &[&task], &[], &Facts::default());
+        assert!(!report.contains("Not landed:"));
+        assert!(serde_json::to_value(&task)
+            .unwrap()
+            .get("unlanded")
+            .is_none());
     }
 }

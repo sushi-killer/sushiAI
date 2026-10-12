@@ -6,7 +6,9 @@
 //
 // <seed.json> is a JSON array of task objects, or {tasks, proposals, notes, settings} (see
 // SKILL.md for the shape); only `title` is required on a task, everything
-// else defaults. The tasks are written as task.json files into the throwaway
+// else defaults. A task may include `git: {base, commits}` to create an
+// isolated repository with that base branch and patch-unique task commits.
+// The tasks are written as task.json files into the throwaway
 // daemon home's orchestrator dir, with the module's enabled flag, before the
 // app starts; the app's sushiai daemon then loads them. Each proposal is completed
 // (id, repo, createdAt) and written to <dataDir>/evolution/proposals/<id>.json,
@@ -23,6 +25,7 @@
 import { _electron as electron } from "playwright";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
 const root = process.cwd();
@@ -33,6 +36,59 @@ function escapeRegExp(text) {
 }
 
 const FIXTURE_STATUSES = new Set(["done", "failed", "stopped", "waiting"]);
+
+async function createGitFixture(profile, tasks, ids) {
+  const gitTasks = tasks.filter((seed) => seed.git);
+  if (!gitTasks.length) return null;
+  const repo = `${profile}/git-repo`;
+  await fs.mkdir(repo, { recursive: true });
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  const base = gitTasks[0].git.base;
+  if (gitTasks.some((seed) => seed.git.base !== base))
+    throw new Error("all git fixtures in a run must use the same base branch");
+  git("init", "-q", "-b", base);
+  git("config", "user.name", "Evidence User");
+  git("config", "user.email", "evidence@example.test");
+  await fs.writeFile(`${repo}/README.md`, "unlanded evidence\n");
+  git("add", "README.md");
+  git(
+    "-c",
+    "user.name=Evidence User",
+    "-c",
+    "user.email=evidence@example.test",
+    "commit",
+    "-qm",
+    "base",
+  );
+  for (const seed of gitTasks) {
+    const id = (seed.key && ids.get(seed.key)) || randomUUID();
+    const branch = seed.branch ?? `task/${id}`;
+    const commits = seed.git.commits;
+    if (!Number.isInteger(commits) || commits < 1)
+      throw new Error(
+        `seed task "${seed.title}": git.commits must be a positive integer`,
+      );
+    git("switch", "-c", branch);
+    for (let index = 1; index <= commits; index++) {
+      const file = `unlanded-${id}-${index}.txt`;
+      await fs.writeFile(`${repo}/${file}`, `commit ${index}\n`);
+      git("add", file);
+      git(
+        "-c",
+        "user.name=Evidence User",
+        "-c",
+        "user.email=evidence@example.test",
+        "commit",
+        "-qm",
+        `task commit ${index}`,
+      );
+    }
+    git("switch", base);
+    seed.branch = branch;
+  }
+  return repo;
+}
 
 /** A seed object completed to the task.json shape the orchestrator's store loads.
  * `ids` maps each seed's `key` to its generated id, so `parent`,
@@ -70,6 +126,7 @@ function taskJson(seed, repo, now, id, ids) {
     followUpOf,
     evidence: _evidence,
     pausedInHours,
+    git: _git,
     ...rest
   } = seed;
   return {
@@ -134,10 +191,12 @@ if (!seedPath || !title) {
     const ids = new Map(
       tasks.filter((seed) => seed.key).map((seed) => [seed.key, randomUUID()]),
     );
+    const gitRepo = await createGitFixture(profile, tasks, ids);
+    const taskRepo = gitRepo ?? root;
     for (const [index, seed] of tasks.entries()) {
       const id = (seed.key && ids.get(seed.key)) || randomUUID();
       // Seed order is creation order, which is how subtasks are listed.
-      const task = taskJson(seed, root, now + index, id, ids);
+      const task = taskJson(seed, taskRepo, now + index, id, ids);
       const dir = `${dataDir}/tasks/${task.id}`;
       await fs.mkdir(dir, { recursive: true });
       // `evidence: {"<attempt n>": ["<image path>", ...]}` copies images into
@@ -184,6 +243,37 @@ if (!seedPath || !title) {
       );
     }
     report.seededTitles = tasks.map((t) => t.title);
+
+    if (gitRepo) {
+      const panel = {
+        id: "evidence-agent",
+        kind: "agent",
+        title: "Evidence Agent",
+        agent: "codex",
+        started: false,
+      };
+      await fs.writeFile(
+        `${profile}/workspace-state.json`,
+        JSON.stringify({
+          workspaces: [
+            {
+              id: "git-evidence",
+              name: "Git Evidence",
+              cwd: gitRepo,
+              panels: [panel],
+              layout: { type: "leaf", id: panel.id },
+            },
+          ],
+          activeId: "git-evidence",
+          selected: panel.id,
+          mode: "Code",
+          sidebar: true,
+          workspaceGrouping: "grouped",
+          routines: [],
+          fontScale: 1,
+        }),
+      );
+    }
 
     // The daemon hosts the orchestrator module only when it is enabled.
     await fs.mkdir(`${daemonHome}/modules`, { recursive: true, mode: 0o700 });
@@ -317,6 +407,22 @@ if (!seedPath || !title) {
     }
     await row.first().click();
     await page.locator(".td").waitFor();
+    const details = page.locator(".td-details-toggle");
+    const unlanded = tasks.find((seed) => seed.title === title)?.unlanded;
+    if (unlanded) {
+      await details.waitFor({ timeout: 10000 });
+      if ((await details.getAttribute("aria-expanded")) === "false")
+        await details.click();
+      await page
+        .locator(".td-details-body")
+        .getByText(
+          `${unlanded.commits} commit${unlanded.commits === 1 ? "" : "s"} not on ${unlanded.base}`,
+        )
+        .waitFor({ timeout: 10000 });
+    } else if (await details.count()) {
+      if ((await details.getAttribute("aria-expanded")) === "false")
+        await details.click();
+    }
 
     await page.screenshot({ path: shot("orchestrator-window") });
     await page.locator(".td").screenshot({ path: shot("orchestrator-detail") });

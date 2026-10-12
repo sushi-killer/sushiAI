@@ -986,3 +986,16 @@ test("the composer chip and the header name the route the same way", async () =>
     "gone",
   );
 });
+
+test("unlandedLabel describes commits left on the task branch", async () => {
+  const { unlandedLabel } = await library;
+  assert.equal(
+    unlandedLabel(task({ unlanded: { commits: 2, base: "work" } })),
+    "2 commits not on work",
+  );
+  assert.equal(
+    unlandedLabel(task({ unlanded: { commits: 1, base: "work" } })),
+    "1 commit not on work",
+  );
+  assert.equal(unlandedLabel(task()), "");
+});

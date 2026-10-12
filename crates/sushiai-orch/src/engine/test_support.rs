@@ -23,7 +23,7 @@ pub(super) fn test_app() -> (Arc<App>, tempfile::TempDir) {
     (app, dir)
 }
 
-pub(super) fn task_with_status(status: TaskStatus) -> Task {
+pub(crate) fn task_with_status(status: TaskStatus) -> Task {
     Task {
         id: uuid::Uuid::new_v4().to_string(),
         title: "Do thing".into(),
@@ -43,6 +43,7 @@ pub(super) fn task_with_status(status: TaskStatus) -> Task {
         visual_criteria: vec![],
         landed_sha: None,
         landed_at: None,
+        unlanded: None,
         diff_stat: None,
         report: None,
         report_at: None,

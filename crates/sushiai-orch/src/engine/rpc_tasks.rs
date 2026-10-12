@@ -623,6 +623,7 @@ impl App {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,
@@ -770,11 +771,28 @@ impl App {
             return Err("task is busy".to_string());
         }
         let Some(branch) = task.base_ref.clone() else {
+            self.update_task(&p.id, |task| {
+                task.decisions.push(
+                    "Land: refused, the task was not started from a branch; the work stays on its own branch"
+                        .to_string(),
+                );
+            })?;
             return Err(
                 "the task was not started from a branch, so there is nothing to land on"
                     .to_string(),
             );
         };
+        let all = self.repo_tasks(&task.repo);
+        let redirect = match super::land::resolve_landing_branch(&branch, &all) {
+            Ok(redirect) => redirect,
+            Err(reason) => {
+                self.update_task(&p.id, |task| {
+                    task.decisions.push(reason.clone());
+                })?;
+                return Err(reason);
+            }
+        };
+        let branch = redirect.branch.clone();
         let (land_on_default, repo) = (
             self.settings
                 .read()
@@ -787,10 +805,17 @@ impl App {
                 .await
                 .map_err(|e| e.to_string())?;
             if default.as_deref() == Some(branch.as_str()) {
-                return Err(crate::model::land_on_default_refusal(&branch, &task.repo));
+                let reason = crate::model::land_on_default_refusal(&branch, &task.repo);
+                self.update_task(&p.id, |task| {
+                    task.decisions.extend(redirect.decisions);
+                    task.decisions.push(format!(
+                        "Land: refused, {reason} The work stays on {}",
+                        task.branch
+                    ));
+                })?;
+                return Err(reason);
             }
         }
-        let all = self.repo_tasks(&task.repo);
         if task.attempts.is_empty() && !is_parent(&task, &all) {
             return Err("the task has no finished attempt to land".to_string());
         }
@@ -799,6 +824,7 @@ impl App {
             variant.land = true;
             task.variant = Some(variant);
             task.status = TaskStatus::Landing;
+            task.unlanded = None;
             task.decisions
                 .push(format!("Land: requested, landing on {branch}"));
         })?;

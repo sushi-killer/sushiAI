@@ -78,7 +78,7 @@ mod subtask_checks;
 mod sync;
 mod task_loop;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod time_budget;
 pub mod verify;
 mod wait_sla;

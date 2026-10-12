@@ -57,7 +57,12 @@ stopped or waiting. Optional `pausedInHours` (a number) becomes
 `pausedUntil = now + pausedInHours * 3600000` and is omitted from the stored task,
 so a usage-limit pause stays relative to each run rather than a fixed date.
 `evidence: {"<attempt n>": [image paths]}` copies screenshots into that attempt's evidence dir. Give a seed a `key` to let others name it in `parent`,
-`dependsOn` (a task graph), `followUps` or `followUpOf`. The tasks are written into the throwaway daemon home (with the module's
+`dependsOn` (a task graph), `followUps` or `followUpOf`. A seed may include
+`git: {base, commits}` to create a temporary Git repo, its base branch, and
+that many patch-unique commits on the task branch; all seeded tasks then use
+that repo, and the fixture becomes the saved workspace cwd. The driver expands
+Details and waits for an unlanded label when the selected seed includes one.
+The tasks are written into the throwaway daemon home (with the module's
 enabled flag) before the app starts its sushiai daemon there - no harness run, no API key. It opens the
 panel, picks the task by title, saves
 `artifacts/orchestrator-{window,detail,home}.png` (`home` is the Home view before a task is picked; `detail` crops the task view `.td`), plus `artifacts/orchestrator-proposals.png` (a crop of the first proposal card on the Improvements view, only when proposals were seeded; `report.screenshots.proposals`), plus `artifacts/orchestrator-improvements.png` (the whole Improvements view, when proposals or notes were seeded) and `artifacts/orchestrator-repo-notes.png` (a crop of the notes list on that view, only when notes were seeded; `report.screenshots.notes`), prints a JSON report, and

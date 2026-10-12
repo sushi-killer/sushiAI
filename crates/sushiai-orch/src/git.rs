@@ -204,6 +204,17 @@ pub fn resolve_commit(repo_root: &Path, rev: &str) -> Result<String, GitError> {
     .map(|s| s.trim().to_string())
 }
 
+/// The best common ancestor of two revisions.
+pub fn merge_base_of(repo_root: &Path, a: &str, b: &str) -> Result<String, GitError> {
+    run(repo_root, &["merge-base", a, b]).map(|s| s.trim().to_string())
+}
+
+/// Patch-equivalent commits on `branch` that are not on `base`.
+pub fn cherry_count(repo_root: &Path, base: &str, branch: &str) -> Result<u32, GitError> {
+    let output = run(repo_root, &["cherry", base, branch])?;
+    Ok(output.lines().filter(|line| line.starts_with('+')).count() as u32)
+}
+
 pub struct CreatedWorktree {
     pub path: PathBuf,
     pub base_sha: String,
@@ -1567,6 +1578,37 @@ mod tests {
 
     use super::*;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn cherry_count_ignores_patch_equivalent_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        std::fs::write(repo.join("change.txt"), "same patch\n").unwrap();
+        git(&["add", "change.txt"]);
+        git(&["commit", "-q", "-m", "task change"]);
+        git(&["checkout", "-q", "-b", "landed", &base]);
+        std::fs::write(repo.join("change.txt"), "same patch\n").unwrap();
+        git(&["add", "change.txt"]);
+        git(&["commit", "-q", "-m", "landed change"]);
+        let landed = git(&["rev-parse", "HEAD"]);
+
+        assert_eq!(merge_base_of(&repo, "task", "landed").unwrap(), base);
+        assert_eq!(cherry_count(&repo, &base, "task").unwrap(), 1);
+        assert_eq!(cherry_count(&repo, &landed, "task").unwrap(), 0);
+    }
 
     #[test]
     fn worktree_tree_covers_untracked_files_but_not_ignored_and_leaves_the_index_alone() {

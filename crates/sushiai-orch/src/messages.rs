@@ -338,6 +338,7 @@ mod tests {
             visual_criteria: vec![],
             landed_sha: None,
             landed_at: None,
+            unlanded: None,
             diff_stat: None,
             report: None,
             report_at: None,

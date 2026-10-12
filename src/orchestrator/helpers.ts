@@ -78,6 +78,13 @@ export function formatCost(costUsd: number | undefined): string {
   return `$${(costUsd || 0).toFixed(2)}`;
 }
 
+/** Describes commits that finished on the task branch without landing. */
+export function unlandedLabel(task: Task): string {
+  const unlanded = task.unlanded;
+  if (!unlanded) return "";
+  return `${unlanded.commits} commit${unlanded.commits === 1 ? "" : "s"} not on ${unlanded.base}`;
+}
+
 /** `Variant`'s own field order - `variantLabel` walks it in this order so a
  * task with several differing flags always reads the same way. */
 const VARIANT_KEYS: Exclude<

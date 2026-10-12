@@ -311,6 +311,17 @@ pub(super) async fn follow_run(
         .get("argv")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let resume = match attempt.harness {
+        Harness::Claude => argv
+            .windows(2)
+            .find(|w| w[0] == "--resume")
+            .map(|w| w[1].as_str()),
+        Harness::Codex => argv
+            .get(2)
+            .filter(|_| argv.get(1).is_some_and(|a| a == "resume"))
+            .map(String::as_str),
+    };
+    price_resumed_attempt(app, &task.id, n, attempt.harness, resume, &mut outcome);
     let codex_version = meta
         .get("codexVersion")
         .and_then(|v| v.as_str())
@@ -327,7 +338,7 @@ pub(super) async fn follow_run(
             &task.id,
             n,
             &CostTag::task("implement", &attempt.route_id),
-            (attempt.harness, model.as_deref(), false),
+            (attempt.harness, model.as_deref(), resume.is_some()),
             &outcome,
             attempt.started_at,
         );

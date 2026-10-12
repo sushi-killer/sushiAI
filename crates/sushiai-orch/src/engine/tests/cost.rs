@@ -1,4 +1,78 @@
 #[test]
+fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Running);
+    for (n, session, cost) in [(1, "other", 8.0), (2, "resumed", 0.1), (3, "resumed", 0.2)] {
+        let mut a = attempt_with_failure(n, "verify");
+        a.session_id = Some(session.into());
+        a.cost_usd = Some(cost);
+        a.review_cost_usd = Some(9.0);
+        task.attempts.push(a);
+    }
+    app.store.save_task(&task).unwrap();
+    let mut outcome = harness::RunOutcome {
+        cost_usd: Some(0.7),
+        ..Default::default()
+    };
+    price_resumed_attempt(
+        &app,
+        &task.id,
+        4,
+        Harness::Claude,
+        Some("resumed"),
+        &mut outcome,
+    );
+    assert!((outcome.cost_usd.unwrap() - 0.4).abs() < 1e-9);
+    assert!(!outcome.cost_estimated);
+    let mut streamed = harness::RunOutcome {
+        cost_usd: Some(20.0),
+        ..Default::default()
+    };
+    harness::feed_stream_line(
+        Harness::Claude,
+        r#"{"type":"assistant","message":{"id":"own","model":"claude-sonnet-5-5","usage":{"input_tokens":1000,"output_tokens":100}}}"#,
+        &mut streamed,
+    );
+    let expected = streamed
+        .streamed_cost(&app.settings.read().unwrap().prices)
+        .unwrap();
+    price_resumed_attempt(
+        &app,
+        &task.id,
+        4,
+        Harness::Claude,
+        Some("resumed"),
+        &mut streamed,
+    );
+    assert_eq!(streamed.cost_usd, Some(expected));
+    assert!(streamed.cost_estimated);
+}
+
+#[test]
+fn an_interrupted_resumed_attempt_settles_only_its_own_session_spend() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("run.json"),
+        r#"{"argv":["-p","--resume","sess-1"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("events.jsonl"),
+        r#"{"type":"result","total_cost_usd":0.7}"#,
+    )
+    .unwrap();
+    let mut task = task_with_status(TaskStatus::Running);
+    let mut previous = attempt_with_failure(1, "verify");
+    previous.session_id = Some("sess-1".into());
+    previous.cost_usd = Some(0.3);
+    task.cost_usd = 0.3;
+    task.attempts = vec![previous, attempt_with_failure(2, "verify")];
+    settle_unfinished_cost(&mut task, 1, dir.path(), &Settings::default().prices);
+    assert!((task.cost_usd - 0.7).abs() < 1e-9);
+    assert!((task.attempts[1].cost_usd.unwrap() - 0.4).abs() < 1e-9);
+}
+
+#[test]
 fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
     let tmp = tempfile::tempdir().unwrap();
     let plan = tmp.path().join("plan");

@@ -17,6 +17,37 @@ async fn cancel_token_wakes_a_waiter_registered_after_cancel() {
         .expect("cancelled() must resolve immediately once already cancelled");
 }
 
+#[tokio::test]
+async fn cancel_token_children_follow_the_parent_without_cancelling_siblings() {
+    let parent = CancelToken::new();
+    let child = parent.child();
+    let sibling = parent.child();
+    let descendant = child.child();
+    let waiting = descendant.clone();
+    let waiter = tokio::spawn(async move { waiting.cancelled().await });
+    tokio::task::yield_now().await;
+    child.cancel();
+    tokio::time::timeout(Duration::from_millis(200), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(descendant.is_cancelled());
+    assert!(!parent.is_cancelled());
+    assert!(!sibling.is_cancelled());
+    let waiting = sibling.child();
+    let waiter = tokio::spawn(async move { waiting.cancelled().await });
+    tokio::task::yield_now().await;
+    parent.cancel();
+    tokio::time::timeout(Duration::from_millis(200), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(sibling.is_cancelled());
+    tokio::time::timeout(Duration::from_millis(200), parent.child().cancelled())
+        .await
+        .unwrap();
+}
+
 #[test]
 fn validate_task_id_rejects_path_traversal_and_non_uuid() {
     let dir = tempfile::tempdir().unwrap();

@@ -21,7 +21,9 @@ case "$brief" in
 *)
   if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
-  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+  json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}'
+  case " $* " in *" --resume "*) json=$(printf '%s' "$json" | sed 's/total_cost_usd":0.01/total_cost_usd":0.02/') ;; esac
+  printf '%s\n' "$json" ;;
 esac
 "###;
 

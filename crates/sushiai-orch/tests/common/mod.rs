@@ -572,9 +572,14 @@ pub fn poll_until(
 pub const FAKE_RETRY_SCRIPT: &str = r#"#!/bin/sh
 cat > /dev/null
 printf '%s\n' "$*" >> "$ARGS_LOG"
+case " $* " in
+  *" --resume "*)
+    if [ "$REJECT_RESUME" = 1 ]; then echo 'session not found' >&2; exit 1; fi ;;
+esac
 if [ -f FIRST ]; then echo x > SECOND; else echo x > FIRST; fi
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
 json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"tried the quick fix\",\"decisions\":[],\"question\":\"\"}\n```"}'
+case " $* " in *" --resume "*) json=$(printf '%s' "$json" | sed 's/total_cost_usd":0.01/total_cost_usd":0.02/') ;; esac
 printf '%s\n' "$json"
 "#;
 

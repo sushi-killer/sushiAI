@@ -52,9 +52,25 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, run_dir: &Path
             cached: 0,
         };
         for path in uncounted_event_files(run_dir, attempt) {
-            let Some(outcome) = replay_run_cost(&path, prices) else {
+            let Some(mut outcome) = replay_run_cost(&path, prices) else {
                 continue;
             };
+            if attempt.stage == Stage::Implement {
+                let argv: Vec<String> = std::fs::read_to_string(run_dir.join("run.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|meta| serde_json::from_value(meta["argv"].clone()).ok())
+                    .unwrap_or_default();
+                if let Some(resume) = argv.windows(2).find(|w| w[0] == "--resume") {
+                    price_claude_resume(
+                        &task.attempts,
+                        attempt.n,
+                        &resume[1],
+                        prices,
+                        &mut outcome,
+                    );
+                }
+            }
             let cost = outcome.cost_usd.unwrap_or(0.0);
             *total.get_or_insert(0.0) += cost;
             estimated |= outcome.cost_estimated;

@@ -155,6 +155,7 @@ struct CancelToken(Arc<CancelInner>);
 struct CancelInner {
     flag: AtomicBool,
     notify: Notify,
+    parent: Option<CancelToken>,
 }
 
 impl CancelToken {
@@ -162,6 +163,15 @@ impl CancelToken {
         CancelToken(Arc::new(CancelInner {
             flag: AtomicBool::new(false),
             notify: Notify::new(),
+            parent: None,
+        }))
+    }
+
+    fn child(&self) -> Self {
+        CancelToken(Arc::new(CancelInner {
+            flag: AtomicBool::new(false),
+            notify: Notify::new(),
+            parent: Some(self.clone()),
         }))
     }
 
@@ -171,18 +181,43 @@ impl CancelToken {
     }
 
     fn is_cancelled(&self) -> bool {
-        self.0.flag.load(Ordering::SeqCst)
+        let mut token = Some(self);
+        while let Some(current) = token {
+            if current.0.flag.load(Ordering::SeqCst) {
+                return true;
+            }
+            token = current.0.parent.as_ref();
+        }
+        false
     }
 
     async fn cancelled(&self) {
         // Register interest *before* checking the flag, so a cancel() that
         // lands in between can't be missed (the documented tokio::Notify
         // pattern for exactly this race).
-        let notified = self.0.notify.notified();
+        let mut tokens = vec![self];
+        while let Some(parent) = tokens.last().and_then(|t| t.0.parent.as_ref()) {
+            tokens.push(parent);
+        }
+        let mut notified: Vec<_> = tokens
+            .iter()
+            .map(|t| Box::pin(t.0.notify.notified()))
+            .collect();
+        for wait in &mut notified {
+            wait.as_mut().enable();
+        }
         if self.is_cancelled() {
             return;
         }
-        notified.await;
+        std::future::poll_fn(|cx| {
+            for wait in &mut notified {
+                if std::future::Future::poll(wait.as_mut(), cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await;
     }
 }
 

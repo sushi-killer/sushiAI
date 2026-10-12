@@ -859,6 +859,27 @@ mod tests {
             prompt_hash(&argv, None),
             prompt_hash(&codex_argv(&codex), None)
         );
+        codex.review = false;
+        for network in [false, true] {
+            codex.network_allowed = network;
+            let argv = codex_argv(&codex);
+            assert_eq!(
+                &argv[..5],
+                [
+                    "exec",
+                    "resume",
+                    "sess-2",
+                    "--json",
+                    "--skip-git-repo-check"
+                ]
+            );
+            assert!(!argv.iter().any(|a| a == "-C" || a == "--sandbox"));
+            assert!(argv
+                .windows(2)
+                .any(|w| w == ["-c", "sandbox_mode=\"workspace-write\""]));
+            assert!(argv.windows(2).any(|w| w[0] == "-c"
+                && w[1] == format!("sandbox_workspace_write.network_access={network}")));
+        }
     }
 
     #[test]

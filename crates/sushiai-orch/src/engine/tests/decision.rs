@@ -1,4 +1,108 @@
 #[test]
+fn resume_eligibility_requires_a_failed_check_session_on_the_same_route() {
+    let mut task = task_with_status(TaskStatus::Running);
+    let route = Route {
+        id: "claude-sonnet".into(),
+        label: "Claude".into(),
+        harness: Harness::Claude,
+        model: Some("sonnet".into()),
+        effort: None,
+        profile_id: None,
+        account_id: None,
+        strength: None,
+    };
+    let mut previous = attempt_with_failure(1, "verify");
+    previous.session_id = Some("sess-1".into());
+    task.attempts.push(previous);
+    assert!(resume_attempt(&task, &route, false, false).is_some());
+    assert!(resume_attempt(&task, &route, true, false).is_none());
+    assert!(resume_attempt(&task, &route, false, true).is_none());
+    let mut changed = route.clone();
+    changed.id = "other".into();
+    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    changed = route.clone();
+    changed.harness = Harness::Codex;
+    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    changed = route.clone();
+    changed.model = Some("opus".into());
+    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    task.attempts[0].session_id = None;
+    assert!(resume_attempt(&task, &route, false, false).is_none());
+    task.attempts[0].session_id = Some("sess-1".into());
+    for kind in [
+        FailureKind::Loop,
+        FailureKind::Conflict,
+        FailureKind::Review,
+    ] {
+        task.attempts[0].failure.as_mut().unwrap().kind = kind;
+        assert!(
+            resume_attempt(&task, &route, false, false).is_none(),
+            "{kind:?}"
+        );
+    }
+    task.attempts[0].review = Some(ReviewResult {
+        verdict: Verdict::Fail,
+        findings: vec!["[P1] wrong".into()],
+        repeated: vec!["[P1] wrong".into()],
+        severities: vec![],
+        criteria: vec![],
+    });
+    assert!(last_review_repeated(&task));
+    assert!(resume_attempt(&task, &route, false, false).is_none());
+}
+
+#[test]
+fn a_resume_brief_keeps_failure_output_messages_and_new_owner_answers() {
+    let mut task = task_with_status(TaskStatus::Running);
+    let mut previous = attempt_with_failure(1, "verify");
+    previous.started_at = 100;
+    previous.failure.as_mut().unwrap().detail =
+        "Final check check.sh exited 9.\nfailure tail".into();
+    previous.verify = vec![VerifyOutcome {
+        command: "check.sh".into(),
+        code: Some(9),
+        tail: "failure tail".into(),
+        ms: 1,
+    }];
+    for (answer, at, by) in [
+        ("old answer", 99, AnsweredBy::Owner),
+        ("new answer", 101, AnsweredBy::Owner),
+        ("policy answer", 102, AnsweredBy::Policy),
+    ] {
+        task.question_history.push(AnsweredQuestion {
+            question: "Which fix?".into(),
+            options: vec![],
+            kind: QuestionKind::AttemptsFailing,
+            asked_by: Some(AskedBy::Verify),
+            asked_at: Some(100),
+            answer: answer.into(),
+            answered_at: at,
+            answered_by: by,
+        });
+    }
+    let brief = brief::build_resume_brief(
+        &task,
+        &previous,
+        "\n## Messages\n\nA peer's update",
+        Some("Fix check.sh"),
+    );
+    for text in [
+        "check.sh exited 9.",
+        "failure tail",
+        "A peer's update",
+        "new answer",
+        "## Advisor",
+        "Fix check.sh",
+        "## Report format",
+    ] {
+        assert!(brief.contains(text), "{text}: {brief}");
+    }
+    assert!(!brief.contains("## Task"));
+    assert!(!brief.contains("old answer") && !brief.contains("policy answer"));
+    assert_eq!(brief.matches("failure tail").count(), 1, "{brief}");
+}
+
+#[test]
 fn failure_signature_prefers_an_error_looking_line_over_the_first_line() {
     let detail =
         "Compiling...\nWarning: unused variable\nError: assertion failed at line 42\nmore noise";

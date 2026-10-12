@@ -238,6 +238,7 @@ pub(super) async fn run_task_loop(
                 &worktree,
                 &run_dir,
                 &settings,
+                None,
                 &mut attempt_budget,
                 &pending_answer,
                 &cancel,
@@ -737,10 +738,8 @@ pub(super) async fn run_task_loop(
             };
             // The messages sent to this task since its last attempt are
             // delivered here, with the attempt about to start.
-            let brief_text = brief::with_block_before_report(
-                &brief_text,
-                &messages::brief_block_for_task(&app, &task_id),
-            );
+            let messages = messages::brief_block_for_task(&app, &task_id);
+            let brief_text = brief::with_block_before_report(&brief_text, &messages);
             let advice = task
                 .attempts
                 .iter()
@@ -764,6 +763,27 @@ pub(super) async fn run_task_loop(
                 &brief_text,
                 &permissions::tools_block(&tools, false),
             );
+            let mut no_second = BestOfExtra::default();
+            let second = match second_route(&task, &settings, &route, attempt_n) {
+                Ok(second) => second,
+                Err(line) => {
+                    no_second.decisions.push(line);
+                    None
+                }
+            };
+            let full_brief = brief_text;
+            let previous = resume_attempt(&task, &route, conflict_only, second.is_some());
+            let resume = previous.and_then(|a| a.session_id.clone());
+            let brief_text = match previous {
+                Some(a) => brief::build_resume_brief(&task, a, &messages, advice.as_deref()),
+                None => full_brief.clone(),
+            };
+            if let Some(session) = &resume {
+                task.decisions.push(format!(
+                    "Orchestrator: attempt {attempt_n} resumes session {session} on route {} after a failed check",
+                    route.id
+                ));
+            }
 
             let reason = if conflict_only {
                 format!("conflict only -> route {}", route.id)
@@ -835,7 +855,7 @@ pub(super) async fn run_task_loop(
 
             let network_allowed = settings.codex_network;
             let codex_mcp = tools.codex_servers(&messages_server);
-            let req = harness::RunRequest {
+            let mut req = harness::RunRequest {
                 harness: route.harness,
                 worktree: &worktree,
                 model: route.model.as_deref(),
@@ -849,7 +869,7 @@ pub(super) async fn run_task_loop(
                 codex_mcp: &codex_mcp,
                 images: &[],
                 repo_settings: true,
-                resume: None,
+                resume: resume.as_deref(),
             };
 
             let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
@@ -874,16 +894,7 @@ pub(super) async fn run_task_loop(
                     task.attempts[idx].started_at,
                 ),
             );
-            // Recorded after the reload below, which would drop a line pushed now.
-            let mut no_second = BestOfExtra::default();
-            let second = match second_route(&task, &settings, &route, attempt_n) {
-                Ok(second) => second,
-                Err(line) => {
-                    no_second.decisions.push(line);
-                    None
-                }
-            };
-            let (run_result, best_of) = match second {
+            let (mut run_result, mut best_of) = match second {
                 Some(b_route) => {
                     run_best_of(
                         &app,
@@ -905,6 +916,51 @@ pub(super) async fn run_task_loop(
                 }
                 None => (a_run.await, no_second),
             };
+            let rejected = match &run_result {
+                Ok(outcome) => outcome.error.is_some() && outcome.session_id.is_none(),
+                Err(RunError::Io(_) | RunError::NotFound(_)) => true,
+                Err(RunError::Cancelled) => false,
+            };
+            if req.resume.is_some() && rejected && !cancel.is_cancelled() {
+                best_of.decisions.push(format!(
+                    "Orchestrator: attempt {attempt_n} resume rejected without a session init; falling back to a fresh run in the same attempt"
+                ));
+                req.resume = None;
+                let _ = std::fs::rename(&events_path, run_dir.join("resume-rejected.events.jsonl"));
+                let _ = std::fs::write(run_dir.join("brief.md"), &full_brief);
+                // Subscription credentials are consumed when the CLI starts.
+                if let Some(account) = route
+                    .account_id
+                    .as_ref()
+                    .and_then(|id| app.secrets.read().unwrap().accounts.get(id).cloned())
+                {
+                    if account.kind == "subscription" {
+                        let _ =
+                            store::write_secret_file(&run_dir.join("oauth-token"), &account.value);
+                    }
+                }
+                run_result = run_harness(
+                    &app,
+                    &task_id,
+                    attempt_n,
+                    RunTrack::Resumable,
+                    &worktree,
+                    &req,
+                    CostTag::task("implement", &route.id),
+                    &full_brief,
+                    &events_path,
+                    &cancel,
+                    Guard::for_variant(
+                        &task.variant(),
+                        registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
+                    )
+                    .with_time_budget(
+                        settings.implement_budget_mins,
+                        task.attempts[idx].started_at,
+                    ),
+                )
+                .await;
+            }
             (
                 settings, attempt_n, idx, route, worktree, base_sha, run_dir, key_path, registered,
                 run_result, best_of,
@@ -1995,6 +2051,7 @@ pub(super) async fn run_task_loop(
                         &worktree,
                         &run_dir,
                         &settings,
+                        None,
                         &mut attempt_budget,
                         &pending_answer,
                         &cancel,
@@ -2085,6 +2142,7 @@ pub(super) async fn run_task_loop(
             return;
         }
         let mut review_result: Option<ReviewResult> = None;
+        let mut final_task = None;
         let review_id = task.variant().review_route_id(&settings).to_string();
         if !review_id.is_empty() {
             let selected = select_review_route_with(&settings, &review_id, &route, task.tier)
@@ -2132,7 +2190,20 @@ pub(super) async fn run_task_loop(
                     app.finish_task_loop(&task_id);
                     return;
                 }
+                // The preflight can drop or rewrite a final command even
+                // when fast verification passed. Settle it before cloning
+                // the commands or a stale failure could discard the review.
+                if !settle_base_preflight(&app, &mut task, &cancel).await {
+                    interrupt_attempt(&app, &mut task, idx);
+                    drop(permit);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
                 let mut review_cost = 0.0;
+                let finals =
+                    BackgroundFinal::start(&app, &task, &worktree, &run_dir, &settings, &cancel);
+                let review_cancel = finals.review_cancel.clone();
+                final_task = Some(finals);
                 let mut review_fingerprint = None;
                 // Every review run of this attempt: the first, the one
                 // automatic re-run after a reply with no verdict, and any the
@@ -2149,6 +2220,9 @@ pub(super) async fn run_task_loop(
                 // escalation happens at most once.
                 let mut force_full = false;
                 loop {
+                    if review_cancel.is_cancelled() && !cancel.is_cancelled() {
+                        break;
+                    }
                     let reviewed = run_review(
                         &app,
                         &task_id,
@@ -2161,7 +2235,7 @@ pub(super) async fn run_task_loop(
                         &agent_decisions,
                         review_route,
                         &deny_read,
-                        &cancel,
+                        &review_cancel,
                         &mut review_cost,
                         &mut review_fingerprint,
                         round,
@@ -2181,6 +2255,9 @@ pub(super) async fn run_task_loop(
                     task.attempts[idx].review_cost_usd =
                         Some(task.attempts[idx].review_cost_usd.unwrap_or(0.0) + review_cost);
                     review_cost = 0.0;
+                    if review_cancel.is_cancelled() && !cancel.is_cancelled() {
+                        break;
+                    }
                     let (why, no_verdict) = match reviewed {
                         Ok((r, recorded_as_pass, saw)) => {
                             task.attempts[idx].review_tree = saw.tree.clone();
@@ -2241,6 +2318,9 @@ pub(super) async fn run_task_loop(
                                         continue;
                                     }
                                 }
+                                if review_cancel.is_cancelled() && !cancel.is_cancelled() {
+                                    break;
+                                }
                                 match heal_repeated_unmet(&app, &mut task, idx, &r, &cancel).await {
                                     Ok(true) => {
                                         task.updated_at = now_ms();
@@ -2262,9 +2342,13 @@ pub(super) async fn run_task_loop(
                             break;
                         }
                         Err(ReviewFailure::Cancelled) => {
-                            // A cancelled review is never a PASS: the attempt
-                            // (and the task) is simply stopped.
+                            if !cancel.is_cancelled() {
+                                break;
+                            }
                             interrupt_attempt(&app, &mut task, idx);
+                            if let Some(finals) = final_task.take() {
+                                let _ = finals.finish().await;
+                            }
                             drop(permit);
                             app.finish_task_loop(&task_id);
                             return;
@@ -2280,6 +2364,9 @@ pub(super) async fn run_task_loop(
                             "Orchestrator: attempt {attempt_n} review reply had no verdict; reviewing the same attempt again"
                         ));
                         continue;
+                    }
+                    if review_cancel.is_cancelled() && !cancel.is_cancelled() {
+                        break;
                     }
                     // No verdict is never a PASS: the owner decides whether
                     // to commit this attempt unreviewed.
@@ -2346,6 +2433,14 @@ pub(super) async fn run_task_loop(
                 }
             }
         }
+        let mut final_failed = final_task
+            .as_ref()
+            .is_some_and(|f| f.review_cancel.is_cancelled())
+            && !cancel.is_cancelled();
+        if final_failed {
+            review_result = None;
+        }
+        let mut review_follow_ups = Vec::new();
         if let Some(r) = review_result.as_mut() {
             // After the first attempt only P1+ findings about the task's own
             // work cost an attempt; the rest go to the report.
@@ -2363,11 +2458,52 @@ pub(super) async fn run_task_loop(
                             follow_ups.len()
                         )
                     });
-                    add_follow_ups(&mut task, follow_ups);
+                    review_follow_ups.extend(follow_ups);
                 }
             } else if r.verdict == Verdict::Pass {
-                add_follow_ups(&mut task, r.findings.clone());
+                review_follow_ups.extend(r.findings.clone());
             }
+        }
+        let finished = match final_task.take() {
+            Some(finals)
+                if !final_failed
+                    && !finals.review_cancel.is_cancelled()
+                    && review_result
+                        .as_ref()
+                        .is_some_and(|r| r.verdict == Verdict::Fail) =>
+            {
+                // Only the scoped, judged and healed verdict can stop the checks.
+                finals.cancel.cancel();
+                let _ = finals.finish().await;
+                task.decisions.push(format!(
+                    "Orchestrator: attempt {attempt_n} review failed; cancelled the final checks"
+                ));
+                None
+            }
+            Some(finals) => finals.finish().await,
+            None => None,
+        };
+        if cancel.is_cancelled() {
+            interrupt_attempt(&app, &mut task, idx);
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
+        final_failed |= finished.as_ref().is_some_and(|f| {
+            f.results
+                .iter()
+                .any(|r| r.code.is_some_and(|code| code != 0))
+        });
+        if final_failed {
+            task.decisions.push(format!(
+                "Orchestrator: attempt {attempt_n} review discarded because a final check failed"
+            ));
+            review_result = None;
+            task.attempts[idx].review_tree = None;
+            task.attempts[idx].review_base = None;
+            task.attempts[idx].review_scope = None;
+        } else {
+            add_follow_ups(&mut task, review_follow_ups);
         }
         task.attempts[idx].review = review_result.clone();
         refresh_criteria_results(&mut task, idx);
@@ -2407,6 +2543,7 @@ pub(super) async fn run_task_loop(
                             &worktree,
                             &run_dir,
                             &settings,
+                            None,
                             &mut attempt_budget,
                             &pending_answer,
                             &cancel,
@@ -2433,6 +2570,7 @@ pub(super) async fn run_task_loop(
             &worktree,
             &run_dir,
             &settings,
+            finished,
             &mut attempt_budget,
             &pending_answer,
             &cancel,
@@ -2446,6 +2584,29 @@ pub(super) async fn run_task_loop(
             Tail::Return => return,
         }
     }
+}
+
+pub(super) fn resume_attempt<'a>(
+    task: &'a Task,
+    route: &Route,
+    conflict_only: bool,
+    best_of: bool,
+) -> Option<&'a Attempt> {
+    if conflict_only || best_of || last_review_repeated(task) {
+        return None;
+    }
+    task.attempts
+        .iter()
+        .rfind(|a| a.stage == Stage::Implement)
+        .filter(|a| {
+            a.failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::Verify)
+                && a.session_id.as_ref().is_some_and(|id| !id.is_empty())
+                && a.route_id == route.id
+                && a.harness == route.harness
+                && a.model == route.model.as_deref().unwrap_or_default()
+        })
 }
 
 /// The files the task changed since the last full review that no open finding
@@ -2741,10 +2902,122 @@ pub(super) fn record_gate_passes(app: &App, tree: &str, base_sha: &str, results:
     }
 }
 
-/// A passed review (or an accepted attempt): the task's final checks run on
-/// the worktree, then `finish_attempt` commits or lands it. A failing final
-/// check is a `Verify` failure -- or, when it already failed on the base, a
-/// question to the owner.
+pub(super) struct FinalChecks {
+    results: Vec<VerifyOutcome>,
+    skipped: Vec<String>,
+    tree: Option<String>,
+}
+
+struct BackgroundFinal {
+    cancel: CancelToken,
+    review_cancel: CancelToken,
+    handle: Option<tokio::task::JoinHandle<FinalChecks>>,
+}
+
+impl BackgroundFinal {
+    fn start(
+        app: &Arc<App>,
+        task: &Task,
+        worktree: &Path,
+        run_dir: &Path,
+        settings: &Settings,
+        parent: &CancelToken,
+    ) -> Self {
+        let cancel = parent.child();
+        let review_cancel = parent.child();
+        let (commands, deferred) = split_deferred(app, settings, task);
+        let app = app.clone();
+        let repo = task.repo.clone();
+        let base = task.base_sha.clone();
+        let worktree = worktree.to_path_buf();
+        let run_dir = run_dir.to_path_buf();
+        let sandbox = settings.sandbox;
+        let final_cancel = cancel.clone();
+        let failed = review_cancel.clone();
+        let handle = tokio::spawn(async move {
+            let mut finished = run_final_checks(
+                &app,
+                &repo,
+                &worktree,
+                &run_dir,
+                &base,
+                &commands,
+                sandbox,
+                &final_cancel,
+                Some(&failed),
+            )
+            .await;
+            finished
+                .skipped
+                .extend(deferred.iter().map(|c| deferred_line(c)));
+            finished
+        });
+        Self {
+            cancel,
+            review_cancel,
+            handle: Some(handle),
+        }
+    }
+
+    async fn finish(mut self) -> Option<FinalChecks> {
+        self.handle.take().unwrap().await.ok()
+    }
+}
+
+impl Drop for BackgroundFinal {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_final_checks(
+    app: &Arc<App>,
+    repo: &str,
+    worktree: &Path,
+    run_dir: &Path,
+    base: &str,
+    commands: &[String],
+    sandbox: SandboxMode,
+    cancel: &CancelToken,
+    cancel_review: Option<&CancelToken>,
+) -> FinalChecks {
+    let (commands, skipped) = scope_to_diff(app, repo, worktree, base, commands).await;
+    let wt = worktree.to_path_buf();
+    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let mut results = Vec::new();
+    for command in &commands {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let checked = run_verify_commands(
+            worktree,
+            &run_dir.join("final"),
+            std::slice::from_ref(command),
+            sandbox,
+            base,
+            cancel,
+        )
+        .await;
+        if checked.iter().any(|r| r.code.is_some_and(|code| code != 0)) {
+            if let Some(review) = cancel_review {
+                review.cancel();
+            }
+        }
+        results.extend(checked);
+    }
+    FinalChecks {
+        results,
+        skipped,
+        tree,
+    }
+}
+
+/// Settles retained final results, or runs the checks for an accepted attempt.
+/// A failing final is a Verify failure or a pre-existing-check question.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finish_after_review(
     app: &Arc<App>,
@@ -2755,13 +3028,13 @@ pub(super) async fn finish_after_review(
     worktree: &Path,
     run_dir: &Path,
     settings: &Settings,
+    finished: Option<FinalChecks>,
     attempt_budget: &mut u32,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Tail {
-    // The gate: the base preflight is settled before finalVerify runs on
-    // the worktree, so a ruling of the judge never comes after a landing.
+    // Settle the base preflight before interpreting final results or landing.
     if !settle_base_preflight(app, task, cancel).await {
         interrupt_attempt(app, task, idx);
         *permit = None;
@@ -2775,27 +3048,28 @@ pub(super) async fn finish_after_review(
     if !to_run.is_empty() {
         // Not through the verify cache: it keys on the diff alone and
         // would hand back the fast checks' results.
-        let (final_commands, skipped) =
-            scope_to_diff(app, &task.repo, worktree, &task.base_sha, &to_run).await;
-        record_skips(task, skipped);
-        // The tree the finals run on, taken before they run: a parent whose
-        // final tree is the same one does not run a passed command again.
-        let tree = {
-            let wt = worktree.to_path_buf();
-            tokio::task::spawn_blocking(move || git::worktree_tree(&wt))
+        let FinalChecks {
+            results: mut final_results,
+            skipped,
+            tree,
+        } = match finished {
+            Some(finished) => finished,
+            None => {
+                run_final_checks(
+                    app,
+                    &task.repo,
+                    worktree,
+                    run_dir,
+                    &task.base_sha,
+                    &to_run,
+                    settings.sandbox,
+                    cancel,
+                    None,
+                )
                 .await
-                .ok()
-                .and_then(|r| r.ok())
+            }
         };
-        let mut final_results = run_verify_commands(
-            worktree,
-            &run_dir.join("final"),
-            &final_commands,
-            settings.sandbox,
-            &task.base_sha,
-            cancel,
-        )
-        .await;
+        record_skips(task, skipped);
         if cancel.is_cancelled() {
             interrupt_attempt(app, task, idx);
             *permit = None;
@@ -3185,4 +3459,72 @@ pub(super) async fn finish_attempt(
     *permit = None;
     app.finish_task_loop(task_id);
     Tail::Return
+}
+
+#[cfg(test)]
+mod final_check_tests {
+    use super::*;
+
+    fn fixture(
+        commands: Vec<String>,
+    ) -> (
+        Arc<App>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Task,
+        Settings,
+    ) {
+        let (app, home) = test_app();
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.path().to_string_lossy().into_owned();
+        task.worktree = task.repo.clone();
+        task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        task.final_verify = commands;
+        let mut settings = app.settings.read().unwrap().clone();
+        settings.sandbox = SandboxMode::Host;
+        (app, home, repo, task, settings)
+    }
+
+    #[tokio::test]
+    async fn background_final_failure_cancels_review_without_stopping_the_task() {
+        let (app, _home, repo, task, settings) = fixture(vec!["echo failed; exit 7".into()]);
+        let parent = CancelToken::new();
+        let finals =
+            BackgroundFinal::start(&app, &task, repo.path(), repo.path(), &settings, &parent);
+        tokio::time::timeout(Duration::from_secs(5), finals.review_cancel.cancelled())
+            .await
+            .unwrap();
+        assert!(!parent.is_cancelled());
+        assert!(!finals.cancel.is_cancelled());
+        let result = finals.finish().await.unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].code, Some(7));
+        assert!(result.results[0].tail.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn background_final_cancellation_stops_the_command_before_its_done_marker() {
+        let (app, _home, repo, task, settings) =
+            fixture(vec!["touch STARTED; sleep 30; touch DONE".into()]);
+        let parent = CancelToken::new();
+        let finals =
+            BackgroundFinal::start(&app, &task, repo.path(), repo.path(), &settings, &parent);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !repo.path().join("STARTED").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        finals.cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(10), finals.finish())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.results[0].code, None);
+        assert!(!repo.path().join("DONE").exists());
+        assert!(!parent.is_cancelled());
+    }
 }

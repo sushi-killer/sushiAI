@@ -1457,6 +1457,8 @@ pub struct Question {
     /// Empty for every other question.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_signature: Option<String>,
 }
 
 /// How long a question stays held for the overseer.
@@ -1491,6 +1493,7 @@ impl Question {
             held_for_overseer: false,
             held_at: None,
             commands: Vec::new(),
+            failure_signature: None,
         }
     }
 }
@@ -1535,6 +1538,8 @@ pub struct AnsweredQuestion {
     pub answer: String,
     pub answered_at: i64,
     pub answered_by: AnsweredBy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_signature: Option<String>,
 }
 
 /// Why orchd asks a question, set where it is asked.
@@ -1864,6 +1869,17 @@ pub struct Task {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct QueueState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub park: Option<ParkRecord>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_explicitly: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub restart_children: bool,
+    /// A base carry needs one conflict-only attempt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub carry_conflicts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carry_conflict_attempt: Option<u32>,
     /// Why the task sits `queued`: it waits for another task's lease
     /// ("waits for <task> on <path>"). Cleared when it starts.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1900,6 +1916,29 @@ pub struct QueueState {
     /// (ms); the next reminder is one interval later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_reminded_at: Option<i64>,
+}
+
+/// An explicit pause, independent of file-lease waiting or the backlog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParkRecord {
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    pub by: AnswerSource,
+}
+
+/// RPC provenance; an omitted source is the owner in the app.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnswerSource {
+    #[default]
+    Owner,
+    Lead,
+    Chat,
+    Mcp,
+    Overseer,
+    Policy,
 }
 
 /// Which planning bucket a backlog task is in; the autopilot only starts
@@ -2632,6 +2671,7 @@ mod tests {
             answer: "a".into(),
             answered_at: 5,
             answered_by: AnsweredBy::Orchestrator,
+            failure_signature: None,
         });
         task.question = Some(q);
         let v = serde_json::to_value(&task).unwrap();

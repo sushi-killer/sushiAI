@@ -288,7 +288,13 @@ fn stopping_a_task_mid_review_keeps_the_review_s_estimated_cost_in_helpers_folde
             .then_some(())
     });
     daemon.request("task.stop", serde_json::json!({"id": task_id}));
-    let stopped = poll_until(&daemon, &task_id, |s| s == "stopped");
+    let stopped = wait_until("the stopped review's cost to settle", || {
+        let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
+        (task["status"] == "stopped"
+            && task["attempts"][0]["status"] == "interrupted"
+            && task["attempts"][0]["reviewCostUsd"].is_number())
+        .then_some(task)
+    });
     let review = stopped["attempts"][0]["reviewCostUsd"].as_f64().unwrap();
     assert!((review - PRICED_MESSAGE_COST).abs() < 1e-9, "{stopped}");
     let total = stopped["costUsd"].as_f64().unwrap();

@@ -474,6 +474,81 @@ pub fn carry_onto_moved_base(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum BaseMerge {
+    Unchanged,
+    Merged { head: String },
+    Conflicts { files: Vec<String> },
+}
+
+/// Paths introduced by the incoming side since the branches diverged.
+pub fn incoming_paths(worktree: &Path, base_ref: &str) -> Result<Vec<String>, GitError> {
+    Ok(run(
+        worktree,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &format!("HEAD...{base_ref}"),
+        ],
+    )?
+    .split('\0')
+    .filter(|p| !p.is_empty())
+    .map(str::to_string)
+    .collect())
+}
+
+/// Merges a base into a clean graph branch. A conflict is always aborted;
+/// conflict markers belong only in a part's carry, never in the parent.
+pub fn merge_base(worktree: &Path, base_ref: &str) -> Result<BaseMerge, GitError> {
+    let base = resolve_commit(worktree, base_ref)?;
+    if run(worktree, &["merge-base", "--is-ancestor", &base, "HEAD"]).is_ok() {
+        return Ok(BaseMerge::Unchanged);
+    }
+    if !run(worktree, &["status", "--porcelain"])?.trim().is_empty() {
+        return Err(GitError("the graph branch has uncommitted changes".into()));
+    }
+    let merged = run(
+        worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "merge",
+            "--no-edit",
+            "--no-verify",
+            &base,
+        ],
+    );
+    if let Err(error) = merged {
+        let files: Vec<String> = run(worktree, &["diff", "--name-only", "--diff-filter=U", "-z"])?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if run(worktree, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok() {
+            run(
+                worktree,
+                &["-c", "core.hooksPath=/dev/null", "merge", "--abort"],
+            )?;
+        }
+        return if files.is_empty() {
+            Err(error)
+        } else {
+            Ok(BaseMerge::Conflicts { files })
+        };
+    }
+    Ok(BaseMerge::Merged {
+        head: head_sha(worktree)?,
+    })
+}
+
 pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(run(worktree, &["rev-parse", "HEAD"])?.trim().to_string())
 }

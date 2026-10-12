@@ -118,10 +118,7 @@ pub(super) async fn pause_for_rate_limit(
         task.queue.paused_until = None;
     }
     if !resumed {
-        task.status = app.cancelled_status(&task.status);
-        if task.status == TaskStatus::Stopped {
-            app.close_stopped_task(task);
-        }
+        app.apply_cancellation(task);
     }
     task.updated_at = now_ms();
     app.save_task_logged(task);

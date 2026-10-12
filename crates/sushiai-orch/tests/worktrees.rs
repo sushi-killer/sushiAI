@@ -63,6 +63,21 @@ fn stop_hanging(daemon: &Daemon, id: &str, worktree: &Path) {
     poll_until(daemon, id, |s| s == "stopped");
 }
 
+fn archive_stopped(daemon: &Daemon, id: &str) -> serde_json::Value {
+    wait_until("the stopped loop to exit before archiving", || {
+        let response = raw_request_with_params(
+            &daemon.socket,
+            "task.archive",
+            serde_json::json!({"id": id}),
+        );
+        if response["error"]["message"] == "cannot archive a task with a live loop" {
+            return None;
+        }
+        assert!(response.get("error").is_none(), "{response}");
+        Some(response["result"].clone())
+    })
+}
+
 #[test]
 fn new_worktree_lives_outside_the_repo_under_the_home_and_done_removes_it_but_keeps_the_commit() {
     let (daemon, _scripts) = spawn(PASS);
@@ -144,7 +159,7 @@ fn archiving_a_stopped_task_saves_its_edits_and_unarchive_restores_them() {
     let branch = task["branch"].as_str().unwrap().to_string();
     let head_before = git_out(repo.path(), &["rev-parse", &branch]);
 
-    let archived = daemon.request("task.archive", serde_json::json!({"id": id}));
+    let archived = archive_stopped(&daemon, &id);
     assert_eq!(archived["worktreeRemoved"], true, "{archived}");
     assert!(!wt.exists());
     assert_eq!(git_out(repo.path(), &["rev-parse", &branch]), head_before);
@@ -268,9 +283,7 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     let stopped_wt = stopped["worktree"].as_str().unwrap().to_string();
     stop_hanging(&daemon, &stopped_id, Path::new(&stopped_wt));
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
-    // Archive while the record still says stopped but the loop is gone; gc
-    // is what removes it, so archive through the record instead.
-    daemon.request("task.archive", serde_json::json!({"id": stopped_id}));
+    archive_stopped(&daemon, &stopped_id);
     assert!(!Path::new(&stopped_wt).exists());
     git(&[
         "worktree",

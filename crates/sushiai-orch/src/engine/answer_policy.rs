@@ -590,6 +590,7 @@ pub(super) fn record_answered_question(
         answer: answer.to_string(),
         answered_at: now_ms(),
         answered_by,
+        failure_signature: question.failure_signature.clone(),
     });
 }
 
@@ -602,6 +603,9 @@ pub(super) async fn try_policy_answer(
     task: &mut Task,
     cancel: &CancelToken,
 ) -> Option<String> {
+    if cancel.is_cancelled() {
+        return None;
+    }
     let question = task.question.clone()?;
     if !policy_open(app, task, question.kind) {
         return None;

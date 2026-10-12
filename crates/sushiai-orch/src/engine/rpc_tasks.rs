@@ -696,7 +696,12 @@ impl App {
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
-        let already_running = self.controls.lock().unwrap().contains_key(&p.id);
+        let already_running = self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&p.id)
+            .is_some_and(|c| !c.cancel.is_cancelled());
         if !already_running {
             let task = self
                 .store
@@ -713,7 +718,9 @@ impl App {
                     | TaskStatus::Failed
                     | TaskStatus::Drafting
                     | TaskStatus::Landing
-            ) {
+            ) || (is_parent(&task, &self.repo_tasks(&task.repo))
+                && matches!(task.status, TaskStatus::Running | TaskStatus::Waiting))
+            {
                 // A manual `task.start` on a still-drafting task (e.g. one
                 // left there by a daemon that died mid-plan) means proceed
                 // straight to implementing once planning finishes.
@@ -817,90 +824,42 @@ impl App {
             /// Why the task is stopped; optional.
             #[serde(default)]
             reason: Option<String>,
+            #[serde(default)]
+            source: AnswerSource,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
-        let live = match self.controls.lock().unwrap().get(&p.id) {
-            Some(ctrl) => {
-                ctrl.cancel.cancel();
-                true
-            }
-            None => false,
-        };
         let mut task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        // A task in a graph can sit idle with no loop to cancel: a parent
-        // while its children work, a task waiting for its dependencies.
-        let stop_line = stop_line(p.reason.as_deref());
-        let active = !matches!(
-            task.status,
-            TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
-        );
-        if active && live {
-            // The loop saves the closed question in its own cancellation path.
-            self.close_stopped_task(&mut task);
-        }
-        let all = self.repo_tasks(&task.repo);
-        let parent = is_parent(&task, &all);
-        if parent {
-            self.stop_children(&task.id, &task.repo);
-        }
-        if !live && task.status == TaskStatus::Landing {
-            let decisions_before = task.decisions.len();
-            task.status = TaskStatus::Stopped;
-            self.close_stopped_task(&mut task);
-            task.updated_at = now_ms();
-            self.release_worktree(&mut task, "stopped while waiting to land")
-                .await;
-            task = self.update_task(&p.id, |fresh| {
-                fresh.status = TaskStatus::Stopped;
-                fresh.question = task.question.clone();
-                fresh.worktree_removed = task.worktree_removed;
-                fresh.deliverables = task.deliverables.clone();
-                fresh
-                    .decisions
-                    .extend_from_slice(&task.decisions[decisions_before..]);
-            })?;
-            // Its lease lapses: whoever waited for it can go.
-            self.advance_graph(&task.repo);
-        }
-        if !live
-            && (parent
-                || !task.depends_on.is_empty()
-                || task.queue.queue_reason.is_some()
-                || task.status == TaskStatus::Waiting)
-            && matches!(
-                task.status,
-                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting
-            )
+        if !matches!(task.status, TaskStatus::Done | TaskStatus::Failed)
+            && (task.status != TaskStatus::Stopped || !task.queue.stopped_explicitly)
         {
-            task = self.update_task(&p.id, |task| {
-                self.close_stopped_task(task);
-                task.queue.queue_reason = None;
-                task.status = TaskStatus::Stopped;
-            })?;
-            self.advance_graph(&task.repo);
+            let waiting_to_land = task.status == TaskStatus::Landing;
+            let line = p.source.control_line(
+                "stop",
+                p.reason
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|r| truncate_chars(r, 300))
+                    .as_deref(),
+            );
+            self.close_stopped_task(&mut task);
+            self.interrupt_task(&mut task, None, true, line)?;
+            self.stop_children(&task.id, &task.repo);
+            if waiting_to_land && !self.controls.lock().unwrap().contains_key(&p.id) {
+                self.release_worktree(&mut task, "stopped while waiting to land")
+                    .await;
+                self.store.save_task(&task).map_err(|e| e.to_string())?;
+            }
+        } else if task.status == TaskStatus::Stopped && task.question.take().is_some() {
+            self.store.save_task(&task).map_err(|e| e.to_string())?;
+            self.broadcast_task(&task);
         }
-        if active && live {
-            // The loop saves its own copy as it winds down: the line goes in after.
-            let app = self.arc();
-            let id = p.id.clone();
-            tokio::spawn(async move {
-                for _ in 0..300 {
-                    if !app.controls.lock().unwrap().contains_key(&id) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                app.append_decision(&id, stop_line);
-            });
-        } else if active {
-            self.append_decision(&p.id, stop_line);
-        }
-        let task = self.store.load_task(&p.id).ok().flatten().unwrap_or(task);
+        self.advance_queue(&task.repo);
+        self.advance_graph(&task.repo);
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
@@ -956,7 +915,8 @@ impl App {
         struct P {
             id: String,
             answer: String,
-            /// Declared by an agent or set by the MCP bridge; the app sends none.
+            /// The bridge sets chat/mcp/overseer; raw RPC may set lead.
+            /// Omitted means the owner in the app.
             #[serde(default)]
             source: Option<String>,
             /// With source `policy` (the waiting SLA): why this answer was given.
@@ -978,7 +938,7 @@ impl App {
             (Some("policy"), None) => return Err("a policy answer needs its evidence".to_string()),
             _ => None,
         };
-        let task = self
+        let mut task = self
             .store
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
@@ -1055,22 +1015,27 @@ impl App {
         }
 
         if p.answer.trim().eq_ignore_ascii_case("stop") {
-            if let Some(ctrl) = self.controls.lock().unwrap().get(&p.id) {
-                ctrl.cancel.cancel();
-            }
             self.agent_answers.lock().unwrap().remove(&p.id);
-            let task = self.update_task(&p.id, |task| {
-                let question = task.question.take();
-                record_answer_for(
-                    task,
-                    question.as_ref(),
-                    "stop",
-                    caller,
-                    default_evidence.as_deref(),
-                );
-                task.status = TaskStatus::Stopped;
-                self.close_stopped_task(task);
-            })?;
+            let question = task.question.take();
+            record_answer_for(
+                &mut task,
+                question.as_ref(),
+                "stop",
+                caller,
+                default_evidence.as_deref(),
+            );
+            let line = match caller {
+                AnsweredBy::Owner => "Owner: stop (UI)".to_string(),
+                AnsweredBy::Lead => "Lead: stop (RPC)".to_string(),
+                _ => task.decisions.last().cloned().unwrap_or_default(),
+            };
+            if matches!(caller, AnsweredBy::Owner | AnsweredBy::Lead) {
+                if let Some(last) = task.decisions.last_mut() {
+                    *last = line.clone();
+                }
+            }
+            self.close_stopped_task(&mut task);
+            self.interrupt_task(&mut task, None, true, line)?;
             self.stop_children(&task.id, &task.repo);
             self.advance_graph(&task.repo);
             return serde_json::to_value(&task).map_err(|e| e.to_string());
@@ -2103,12 +2068,7 @@ mod answer_caller_tests {
 
     #[tokio::test]
     async fn a_lead_answer_records_a_lead_line_and_history_without_owner_lines() {
-        recorded_caller(
-            Some("lead"),
-            "lead",
-            "Lead: Allow it? -> use B (answered by a lead session)",
-        )
-        .await;
+        recorded_caller(Some("lead"), "lead", "Lead: use B").await;
     }
 
     #[tokio::test]
@@ -2132,7 +2092,7 @@ mod answer_caller_tests {
         recorded_caller(
             Some("chat"),
             "orchestrator",
-            "Orchestrator: Allow it? -> use B (answered by the orchestrator agent)",
+            "Orchestrator: Allow it? -> use B (answered by the orchestrator chat)",
         )
         .await;
     }
@@ -2149,12 +2109,7 @@ mod answer_caller_tests {
 
     #[tokio::test]
     async fn a_tasks_mcp_answer_is_recorded_as_a_lead() {
-        recorded_caller(
-            Some("mcp"),
-            "lead",
-            "Lead: Allow it? -> use B (answered by a lead session)",
-        )
-        .await;
+        recorded_caller(Some("mcp"), "lead", "Lead: use B").await;
     }
 
     #[tokio::test]
@@ -2185,7 +2140,7 @@ mod answer_caller_tests {
         let task = app.store.load_task(&id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Stopped);
         assert!(task.question.is_none());
-        assert_eq!(task.decisions, ["Lead: stop"]);
+        assert_eq!(task.decisions, ["Lead: stop (RPC)"]);
         assert_eq!(task.question_history[0].answered_by, AnsweredBy::Lead);
     }
 
@@ -2406,7 +2361,7 @@ mod answer_caller_tests {
         assert!(parent
             .decisions
             .iter()
-            .any(|d| d.starts_with("Lead:") && d.contains(" -> drop the dependency")));
+            .any(|d| d == "Lead: drop the dependency"));
         assert!(parent.decisions.iter().all(|d| !d.starts_with("Owner:")));
         assert!(child
             .decisions
@@ -2416,23 +2371,18 @@ mod answer_caller_tests {
     }
 }
 
-/// The decision line a stop leaves, so a stopped task says why.
-fn stop_line(reason: Option<&str>) -> String {
-    match reason.map(str::trim).filter(|r| !r.is_empty()) {
-        Some(reason) => format!("Owner: stop (UI): {}", truncate_chars(reason, 300)),
-        None => "Owner: stop (UI)".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod stop_reason_tests {
     use super::*;
 
     #[test]
     fn a_stop_line_names_its_source_and_reason() {
-        assert_eq!(stop_line(None), "Owner: stop (UI)");
         assert_eq!(
-            stop_line(Some(" wrong repo ")),
+            AnswerSource::Owner.control_line("stop", None),
+            "Owner: stop (UI)"
+        );
+        assert_eq!(
+            AnswerSource::Owner.control_line("stop", Some(" wrong repo ")),
             "Owner: stop (UI): wrong repo"
         );
     }

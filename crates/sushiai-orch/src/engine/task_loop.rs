@@ -37,6 +37,10 @@ pub(super) async fn run_task_loop(
                 return;
             }
         };
+        if task.queue.park.is_some() {
+            app.finish_task_loop(&task_id);
+            return;
+        }
         if !budget_loaded {
             budget_loaded = true;
             if let Some(n) = task.variant().max_attempts {
@@ -149,6 +153,8 @@ pub(super) async fn run_task_loop(
                 .is_some_and(|p| {
                     !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
                         || p.queue.backlog.is_some()
+                        || app.is_suspended(p)
+                        || matches!(p.status, TaskStatus::Stopped | TaskStatus::Failed)
                         // A parent parked on a question (its base check) starts
                         // no subtask until it is answered.
                         || (p.status == TaskStatus::Waiting
@@ -508,32 +514,24 @@ pub(super) async fn run_task_loop(
                 start_relay_link(&app, &mut task, &prev_id).await;
             }
         }
-        if completed_implement_attempts(&task) == 0
+        if task.parent.is_some() {
+            let _ = app.sync_graph_base(&task.id, false).await;
+            app.carry_part_onto_parent(&mut task).await;
+        } else if completed_implement_attempts(&task) == 0
             && parent_failure.is_none()
-            && (task.parent.is_some() || !task.depends_on.is_empty() || task.queue.waited_on_lease)
+            && (!task.depends_on.is_empty() || task.queue.waited_on_lease)
             && task.queue.relay_of.is_none()
         {
-            if let Some(base_ref) = task.base_ref.clone() {
-                let (wt, from, tid, r) = (
-                    PathBuf::from(&task.worktree),
-                    task.base_sha.clone(),
-                    task_id.clone(),
-                    base_ref.clone(),
-                );
-                let synced = tokio::task::spawn_blocking(move || {
-                    git::carry_onto_moved_base(&wt, &r, &from, &tid)
-                })
-                .await;
-                if let Ok(Ok(git::Rebase::Moved { new_sha, .. })) = synced {
-                    task.decisions.push(format!(
-                        "Rebase: started from {base_ref} at {}",
-                        short_sha(&new_sha)
-                    ));
-                    task.base_sha = new_sha;
-                }
-            }
+            let wt = PathBuf::from(&task.worktree);
+            carry_onto_newest_base(&mut task, &wt).await;
         }
         task.queue.waited_on_lease = false;
+        if cancel.is_cancelled() {
+            mark_stopped_if_not_already(&app, &task_id).await;
+            drop(permit);
+            app.finish_task_loop(&task_id);
+            return;
+        }
 
         if completed_implement_attempts(&task) == 0 && needs_prepare(&task) {
             let wt = PathBuf::from(&task.worktree);
@@ -674,7 +672,9 @@ pub(super) async fn run_task_loop(
             let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
             // A landing that conflicted only needs its markers resolved: that
             // runs on the cheap route, not as a full re-implementation.
-            let conflict_only = last_failure_is_conflict(&task)
+            let carry_conflicts = task.queue.carry_conflicts.clone();
+            let conflict_only = !carry_conflicts.is_empty()
+                || last_failure_is_conflict(&task)
                 || (parent_conflict_only && completed_implement_attempts(&task) == 0);
             let (route_id, overridden) = task.variant().implement_route_id(
                 &settings,
@@ -795,7 +795,10 @@ pub(super) async fn run_task_loop(
             }
             let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
             let brief_text = if conflict_only {
-                brief::with_block_before_report(&brief_text, &brief::conflict_only_block())
+                brief::with_block_before_report(
+                    &brief_text,
+                    &brief::conflict_only_block(&carry_conflicts),
+                )
             } else {
                 brief_text
             };
@@ -898,6 +901,10 @@ pub(super) async fn run_task_loop(
                 criteria_results: vec![],
                 diff_stat: None,
             };
+            if !carry_conflicts.is_empty() {
+                task.queue.carry_conflict_attempt = Some(attempt_n);
+                task.queue.carry_conflicts.clear();
+            }
             task.attempts.push(attempt);
             let idx = task.attempts.len() - 1;
             refresh_criteria_results(&mut task, idx);
@@ -963,7 +970,11 @@ pub(super) async fn run_task_loop(
             );
             // Recorded after the reload below, which would drop a line pushed now.
             let mut no_second = BestOfExtra::default();
-            let second = match second_route(&task, &settings, &route) {
+            let second = match if conflict_only {
+                Ok(None)
+            } else {
+                second_route(&task, &settings, &route)
+            } {
                 Ok(second) => second,
                 Err(line) => {
                     no_second.decisions.push(line);
@@ -1060,7 +1071,7 @@ pub(super) async fn run_task_loop(
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
                 settle_unfinished_cost(&mut task, idx, &app.store, &settings.prices);
-                task.status = app.cancelled_status(&task.status);
+                app.apply_cancellation(&mut task);
                 if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(&mut task);
                 }
@@ -1500,6 +1511,10 @@ pub(super) async fn run_task_loop(
                 QuestionKind::AgentQuestion,
                 AskedBy::Implement,
             ));
+            task.question.as_mut().unwrap().failure_signature = task.attempts[idx]
+                .failure
+                .as_ref()
+                .map(|f| f.signature.clone());
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
             match wait_for_answer_with_triage(
@@ -1672,6 +1687,7 @@ pub(super) async fn run_task_loop(
                             .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
                     }
                     task.base_sha = new_sha.clone();
+                    task.queue.carry_conflicts = files.clone();
                     let detail = conflict_detail(&base_ref, &new_sha, &files, &task_id);
                     match fail_and_continue(
                         &app,
@@ -2825,6 +2841,7 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> 
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
             let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
+            task.queue.carry_conflicts = files;
             task.base_sha = new_sha;
             BaseCarry::Conflict(detail)
         }
@@ -2933,10 +2950,7 @@ fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
     }
     task.attempts[idx].status = AttemptStatus::Interrupted;
     task.attempts[idx].ended_at = Some(now_ms());
-    task.status = app.cancelled_status(&task.status);
-    if task.status == TaskStatus::Stopped {
-        app.close_stopped_task(task);
-    }
+    app.apply_cancellation(task);
     task.updated_at = now_ms();
     app.save_task_logged(task);
     app.broadcast_task(task);
@@ -2944,18 +2958,13 @@ fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx: usize) {
 
 pub(super) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
     if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        if !matches!(
-            task.status,
-            TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed
-        ) {
-            task.status = app.cancelled_status(&task.status);
-            if task.status == TaskStatus::Stopped {
-                app.close_stopped_task(&mut task);
-            }
+        if !matches!(task.status, TaskStatus::Done | TaskStatus::Failed) {
+            app.apply_cancellation(&mut task);
             task.updated_at = now_ms();
             app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
+        app.advance_queue(&task.repo);
     }
 }
 
@@ -3007,7 +3016,26 @@ impl App {
     }
 
     fn finish_task_loop(&self, task_id: &str) {
-        self.controls.lock().unwrap().remove(task_id);
+        let restart = {
+            let mut cancellations = self.cancellations.lock().unwrap();
+            self.controls.lock().unwrap().remove(task_id);
+            let end = cancellations.remove(task_id);
+            if let Some(end) = &end {
+                if let Ok(Some(mut task)) = self.store.load_task(task_id) {
+                    end.apply(&mut task);
+                    for attempt in &mut task.attempts {
+                        if attempt.status == AttemptStatus::Running {
+                            attempt.status = AttemptStatus::Interrupted;
+                            attempt.ended_at = Some(now_ms());
+                        }
+                    }
+                    task.updated_at = now_ms();
+                    let _ = self.store.save_task(&task);
+                    self.broadcast_task(&task);
+                }
+            }
+            end.is_some_and(|c| c.restart)
+        };
         self.record_task_metrics(task_id);
         self.final_base_jobs.lock().unwrap().remove(task_id);
         if let Ok(Some(mut task)) = self.store.load_task(task_id) {
@@ -3017,7 +3045,13 @@ impl App {
                 self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
+        }
+        if restart {
+            self.spawn_task_loop(task_id.to_string(), true);
+        }
+        if let Ok(Some(task)) = self.store.load_task(task_id) {
             self.drop_settled_output(&task);
+            self.advance_queue(&task.repo);
             self.advance_graph(&task.repo);
         }
         self.record_evolution_signals(task_id);
@@ -3430,10 +3464,7 @@ pub(super) async fn finish_attempt(
             Landing::Cancelled => {
                 task.attempts[idx].status = AttemptStatus::Interrupted;
                 task.attempts[idx].ended_at = Some(now_ms());
-                task.status = app.cancelled_status(&task.status);
-                if task.status == TaskStatus::Stopped {
-                    app.close_stopped_task(task);
-                }
+                app.apply_cancellation(task);
                 task.updated_at = now_ms();
                 app.save_task_logged(task);
                 app.broadcast_task(task);

@@ -70,18 +70,29 @@ pub(super) fn relative_to_worktree(worktree: &Path, file: &str) -> Option<String
 }
 
 impl App {
-    /// Drops the claims of tasks whose loop ended: the task landed, stopped
-    /// or failed. A task waiting to land keeps its claim without a loop.
+    /// Terminal, parked and cancelled tasks release immediately. A task
+    /// waiting to land keeps its claim without a loop.
     fn prune_leases(&self, leases: &mut HashMap<String, Lease>) {
-        let controls = self.controls.lock().unwrap();
-        leases.retain(|id, _| match controls.get(id) {
-            Some(ctrl) => !ctrl.cancel.is_cancelled(),
-            None => self
-                .store
-                .load_task(id)
-                .ok()
-                .flatten()
-                .is_some_and(|t| t.status == TaskStatus::Landing && !t.archived),
+        let controls: HashMap<String, bool> = self
+            .controls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, ctrl)| (id.clone(), !ctrl.cancel.is_cancelled()))
+            .collect();
+        leases.retain(|id, _| {
+            self.store.load_task(id).ok().flatten().is_some_and(|t| {
+                !t.archived
+                    && !self.is_suspended(&t)
+                    && !matches!(
+                        t.status,
+                        TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
+                    )
+                    && controls
+                        .get(id)
+                        .copied()
+                        .unwrap_or(t.status == TaskStatus::Landing)
+            })
         });
     }
 
@@ -191,6 +202,15 @@ impl App {
         None
     }
 
+    pub(super) fn leased_paths(&self, ids: &[String]) -> Vec<String> {
+        let mut leases = self.leases.lock().unwrap();
+        self.prune_leases(&mut leases);
+        ids.iter()
+            .filter_map(|id| leases.get(id))
+            .flat_map(Lease::held)
+            .collect()
+    }
+
     /// Starts the tasks that waited for a lease and are free now. Called
     /// whenever a loop ends or a task stops, the moments a lease can lapse.
     pub(super) fn advance_queue(&self, repo: &str) {
@@ -202,6 +222,7 @@ impl App {
                 || task.status != TaskStatus::Queued
                 || task.queue.queue_reason.is_none()
                 || task.queue.backlog.is_some()
+                || self.is_suspended(&task)
                 || self.controls.lock().unwrap().contains_key(&task.id)
                 || self.lease_blocker(&task).is_some()
             {
@@ -301,5 +322,83 @@ pub(super) fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool) -> b
             app.broadcast_task(task);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn graph_control_stopped_holder_is_pruned_with_its_control_still_registered() {
+        let (app, _dir) = test_app();
+        let mut holder = task_with_status(TaskStatus::Running);
+        holder.paths = vec!["shared.txt".into()];
+        app.store.save_task(&holder).unwrap();
+        let control = TaskControl {
+            cancel: CancelToken::new(),
+            pending_answer: Arc::new(StdMutex::new(None)),
+            pending_amend: Arc::new(StdMutex::new(None)),
+            handle: tokio::spawn(std::future::pending()),
+        };
+        app.controls
+            .lock()
+            .unwrap()
+            .insert(holder.id.clone(), control);
+        assert!(app.acquire_lease(&holder, false).is_none());
+        let mut waiter = holder.clone();
+        waiter.id = "waiter".into();
+        assert!(app.lease_blocker(&waiter).is_some());
+        app.handle_task_stop(json!({"id": holder.id, "source": "lead"}))
+            .await
+            .unwrap();
+        assert!(app.controls.lock().unwrap().contains_key(&holder.id));
+        assert!(app.lease_blocker(&waiter).is_none());
+        // A save of the winding loop's old copy cannot reclaim the paths.
+        app.store.save_task(&holder).unwrap();
+        assert!(app.lease_blocker(&waiter).is_none());
+        app.apply_cancellation(&mut holder);
+        app.store.save_task(&holder).unwrap();
+        app.controls
+            .lock()
+            .unwrap()
+            .remove(&holder.id)
+            .unwrap()
+            .handle
+            .abort();
+    }
+
+    #[tokio::test]
+    async fn graph_control_waiting_live_holder_keeps_its_lease() {
+        let (app, _dir) = test_app();
+        let mut holder = task_with_status(TaskStatus::Waiting);
+        holder.paths = vec!["shared.txt".into()];
+        holder.question = Some(Question::new(
+            "Which way?",
+            vec![],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&holder).unwrap();
+        app.controls.lock().unwrap().insert(
+            holder.id.clone(),
+            TaskControl {
+                cancel: CancelToken::new(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(std::future::pending()),
+            },
+        );
+        assert!(app.acquire_lease(&holder, false).is_none());
+        let mut waiter = holder.clone();
+        waiter.id = "waiter".into();
+        assert!(app.lease_blocker(&waiter).is_some());
+        app.controls
+            .lock()
+            .unwrap()
+            .remove(&holder.id)
+            .unwrap()
+            .handle
+            .abort();
     }
 }

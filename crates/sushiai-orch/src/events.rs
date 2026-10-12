@@ -138,6 +138,7 @@ mod tests {
             answer: "yes".into(),
             answered_at: 9,
             answered_by: AnsweredBy::Owner,
+            failure_signature: None,
         });
         task.question = Some(q);
         let v = serde_json::to_value(Event::Task {

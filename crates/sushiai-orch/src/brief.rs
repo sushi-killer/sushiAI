@@ -516,7 +516,10 @@ pub fn time_budget_report_prompt() -> String {
 
 /// Tells the implementer that the work was finished and checked, and only a
 /// landing conflict is left: resolve the markers, nothing else.
-pub fn conflict_only_block() -> String {
+pub fn conflict_only_block(files: &[String]) -> String {
+    if !files.is_empty() {
+        return format!("## Conflict-only attempt\n\nCarrying this task onto the graph's newest base left conflicts in: {}. This is the single attempt to resolve these conflicts. Resolve only those files so both changes survive, remove every conflict marker, and run a targeted check. Do not redo or extend the task. The orchestrator did not auto-resolve these conflicts.\n\n", files.join(", "));
+    }
     "## Conflict-only attempt\n\nThe work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run only a targeted test for the files you touched (one test file or one test name, not the listed verification commands or a whole-repo suite: the orchestrator runs those after you finish and gives any failure back to you), then finish.\n\n".to_string()
 }
 

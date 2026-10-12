@@ -45,7 +45,7 @@ impl App {
         });
         tasks.sort_by_key(|t| resumable_attempt(self, t).is_none());
         for mut t in tasks {
-            if t.archived {
+            if t.archived || t.queue.park.is_some() || t.queue.stopped_explicitly {
                 continue;
             }
             if t.status == TaskStatus::Stopped {
@@ -188,6 +188,14 @@ impl App {
     /// whose process group lives is resumed: the task's loop follows it and
     /// carries on with review and verify like after any other pass.
     pub(super) fn run_fate(&self, task: &Task, idx: usize) -> RunFate {
+        if task.queue.park.is_some()
+            || matches!(
+                task.status,
+                TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
+            )
+        {
+            return RunFate::Interrupted;
+        }
         let attempt = &task.attempts[idx];
         let events = self.store.run_dir(&task.id, attempt.n).join("events.jsonl");
         let files = RunFiles::of(&events);

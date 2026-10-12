@@ -185,7 +185,17 @@ stateDiagram-v2
   waiting --> queued: answer
   running --> queued: failed attempt, budget left
   running --> done: gates passed, committed<br/>(a subtask: landed on its parent's branch;<br/>a parent: every child landed, its checks passed,<br/>landed on its base branch with land on)
+  running --> parked: task.park / same failure after 3 retries
+  queued --> parked: task.park
+  waiting --> parked: task.park
+  parked --> queued: task.start / until task done
+  parked --> stopped: task.stop
+  waiting --> stopped: task.stop
   running --> stopped: task.stop
+  note right of parked
+    Stored as queued with park and queueReason.
+    No question, slot, or file lease.
+  end note
   waiting --> stopped: answer "stop"
   stopped --> queued: task.start
   queued --> running: backlog start: task.start or the autopilot<br/>(queued/stopped, never implemented)
@@ -300,6 +310,51 @@ Complete drafts with their own goal, criteria and targeted verification
 serialize when their paths overlap and may relay on one branch, landed once. If only one task remains it is the parent itself.
 Before the full verify of every attempt, orchd runs each item's check and
 fails the attempt with the failing items by name.
+
+`orch.task.park {id, reason, until?, source?}` stores a park record
+(`reason`, `until`, `by`) and leaves the task `queued` with its reason in
+`queueReason`. A live loop is cancelled and its attempt is interrupted, never
+failed. The question is cleared. Parked tasks are pending to parents and
+dependents, so they raise no `dependency_ended` question. The graph, lease
+queue, recovery and autopilot never start them. `task.start` resumes one;
+the graph also resumes it when its `until` task is done. `task.stop` ends a
+parked task as stopped. `Park:` decisions name the reason and source.
+
+`task.stop` records an explicit stop and clears the question even when the
+loop is still waiting or there is no loop. Policy and agent answers never
+retry an explicitly stopped dependency: only starting that part, explicitly
+restarting its parent, or the owner's dependency answer may restart it. The
+parent still asks its normal dependency question. A daemon shutdown preserves
+a waiting question. File leases are pruned by stored status as well as live
+loop registration: stopped, failed, done and parked tasks hold no lease,
+even while their loops wind down. Stop and park paths advance the queue at
+once; a waiting question with a live loop retains its lease.
+
+`engine/sync.rs` resolves `orch.task.sync {id}` from any graph part to its
+top-level task and merges that task's `baseRef` into the parent branch under
+its landing lock. A parent merge conflict is aborted, recorded as `Sync:`,
+and returned as a `conflicts` file list. Each live part carries its work onto
+the parent's new head at its next attempt boundary (`Rebase:`). Automatic
+sync runs at these boundaries only when incoming base commits touch no path
+the graph holds: the parent's and parts' declared paths plus their lease
+files. Explicit `task.sync` merges regardless of overlap. A part carry that
+conflicts gets one attempt on the conflict-only route, with the conflicting
+files in its brief; orchd never auto-resolves them. A failed conflict attempt
+parks for a fix and an explicit start.
+
+Answer history keeps `answeredBy` and an optional `failureSignature`. An
+omitted RPC source means the owner in the UI (`Owner: <answer>` and
+`Owner: stop (UI)`). A raw RPC lead sends `source: "lead"` on `task.answer`,
+`task.stop` or `task.park`, which records `Lead:` lines and `answeredBy: lead`.
+The bridge still forces `chat`, `mcp` or `overseer`. Chat and overseer
+answers use `Orchestrator:` lines naming the orchestrator chat or overseer;
+MCP task answers are attributed to the lead.
+Policy answers keep their assumption records. The `Orchestrator: Attempts
+keep failing` prefix remains the continue counter's key. Before asking that
+question again, orchd counts retry answers from every source for the same
+failure signature (anything except stop or accept). After three such retries,
+the next same failure parks without a question, with a reason that asks for
+the cause to be fixed before starting it again. This cap is fixed at 3.
 
 ### Self-healing briefs
 

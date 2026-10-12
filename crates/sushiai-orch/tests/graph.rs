@@ -164,7 +164,17 @@ fn a_plan_with_two_dependent_subtasks_lands_both_on_the_parent_in_order() {
             &["cat-file", "-e", &format!("{branch}:{file}")],
         );
     }
-    assert!(b["decisions"].to_string().contains("started from"), "{b}");
+    assert!(
+        b["decisions"]
+            .to_string()
+            .contains("Rebase: carried the work onto"),
+        "{b}"
+    );
+    assert_eq!(
+        b["baseSha"],
+        git_out(repo.path(), &["rev-parse", &format!("{branch}^")]),
+        "{b}"
+    );
     let total = a["costUsd"].as_f64().unwrap() + b["costUsd"].as_f64().unwrap();
     assert!(
         parent["costUsd"].as_f64().unwrap() >= total - 1e-9,

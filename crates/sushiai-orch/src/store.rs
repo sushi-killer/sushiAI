@@ -228,10 +228,18 @@ impl Store {
                     }
                 }
             }
-            // Resume interrupted work unless the owner already stopped the task
-            // before its attempt had time to wind down.
+            // Interrupted work resumes unless a saved stop or park says otherwise.
             if interrupted {
-                if task.status != TaskStatus::Stopped {
+                if task.queue.stopped_explicitly {
+                    task.status = TaskStatus::Stopped;
+                    task.question = None;
+                } else if task.queue.park.is_some() {
+                    task.status = TaskStatus::Queued;
+                    task.question = None;
+                } else if !matches!(
+                    task.status,
+                    TaskStatus::Stopped | TaskStatus::Failed | TaskStatus::Done
+                ) {
                     task.status = TaskStatus::Queued;
                 }
                 task.updated_at = crate::model::now_ms();

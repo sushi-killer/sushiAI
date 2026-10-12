@@ -251,25 +251,30 @@ impl App {
             }
             return;
         }
-        if task.metrics.is_some() {
-            return;
-        }
-        let all = self.repo_tasks(&task.repo);
-        let records = costs::read_all(&self.data_dir);
-        let metrics = compute(&task, &all, &records, now_ms());
+        let mut all = self.repo_tasks(&task.repo);
+        let metrics = task.metrics.clone().unwrap_or_else(|| {
+            let records = costs::read_all(&self.data_dir);
+            compute(&task, &all, &records, now_ms())
+        });
         task.metrics = Some(metrics.clone());
+        if task.parent.is_none() {
+            if let Some(current) = all.iter_mut().find(|current| current.id == task.id) {
+                current.metrics = Some(metrics.clone());
+            }
+            let line = entry_text(&metrics);
+            let detail = format!("{line}\n{}", repo_line(&all));
+            let entry = overseer::Entry::new("done", &task.repo, Some(&task.id), &line)
+                .with_detail(&detail);
+            if matches!(overseer::append_task_once(&self.data_dir, &entry), Ok(true)) {
+                let _ = self.events_tx.send(Event::Overseer {
+                    entry: Box::new(entry),
+                });
+            }
+        }
         if self.store.save_task(&task).is_err() {
             return;
         }
         self.broadcast_task(&task);
-        if task.parent.is_some() {
-            return;
-        }
-        let line = entry_text(&metrics);
-        let detail = format!("{line}\n{}", repo_line(&self.repo_tasks(&task.repo)));
-        self.record_overseer(
-            overseer::Entry::new("done", &task.repo, Some(&task.id), &line).with_detail(&detail),
-        );
     }
 }
 
@@ -359,6 +364,7 @@ mod tests {
             answer: "stop".into(),
             answered_at: 20,
             answered_by: AnsweredBy::Owner,
+            failure_signature: None,
         });
         assert_eq!(cause(&t), Some(FailureCause::Env));
         t.question_history[0].answered_at = 5;
@@ -421,6 +427,7 @@ mod tests {
             answer: "a".into(),
             answered_at: 1,
             answered_by: AnsweredBy::Owner,
+            failure_signature: None,
         });
         assert!(!first_pass(&t, &[]));
         assert_eq!(owner_touches(&t, &[]), 2);

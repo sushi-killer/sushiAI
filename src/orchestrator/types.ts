@@ -277,7 +277,7 @@ export type AnsweredQuestion = {
   askedAt?: number;
   answer: string;
   answeredAt: number;
-  answeredBy: "owner" | "policy" | "judge" | "orchestrator";
+  answeredBy: "owner" | "lead" | "policy" | "judge" | "orchestrator";
 };
 
 export type BacklogBucket = "next" | "later";

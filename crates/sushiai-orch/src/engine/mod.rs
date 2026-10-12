@@ -55,6 +55,7 @@ mod land;
 mod leases;
 mod lines;
 mod metrics;
+mod park;
 mod past_work;
 mod permissions;
 mod pipeline;
@@ -74,6 +75,7 @@ mod rpc_misc;
 mod rpc_tasks;
 mod slots;
 mod subtask_checks;
+mod sync;
 mod task_loop;
 #[cfg(test)]
 mod test_support;
@@ -348,10 +350,10 @@ pub struct App {
     hook_tokens: RwLock<HashMap<String, Arc<HookContext>>>,
     /// Keyed by task id: the held tool call a `task.answer` resolves.
     permission_waits: StdMutex<HashMap<String, oneshot::Sender<Reply>>>,
-    /// Callers who just answered a task's parked question
-    /// (`task.answer` with a source): the loop reads and clears it when the
-    /// answer arrives, so such an answer is never recorded as the owner's.
+    /// Callers who just answered a task's parked question; the loop consumes
+    /// the provenance after recording the answer.
     agent_answers: StdMutex<HashMap<String, AnsweredBy>>,
+    cancellations: StdMutex<HashMap<String, park::Cancellation>>,
     /// Keyed by repo: overseer wakes skipped while its chat was busy; each
     /// fires when that repo's turn ends.
     deferred_wakes: StdMutex<HashMap<String, Vec<chat::DeferredWake>>>,
@@ -584,6 +586,7 @@ impl App {
             hook_tokens: RwLock::new(HashMap::new()),
             permission_waits: StdMutex::new(HashMap::new()),
             agent_answers: StdMutex::new(Default::default()),
+            cancellations: StdMutex::new(Default::default()),
             deferred_wakes: StdMutex::new(HashMap::new()),
             leases: StdMutex::new(HashMap::new()),
             child_admission: StdMutex::new(()),
@@ -842,6 +845,8 @@ impl App {
             "task.land" => self.handle_task_land(params).await,
             "task.pr" => self.handle_task_pr(params).await,
             "task.stop" => self.handle_task_stop(params).await,
+            "task.park" => self.handle_task_park(params).await,
+            "task.sync" => self.handle_task_sync(params).await,
             "task.answer" => self.handle_task_answer(params).await,
             "task.report" => self.handle_task_report(params).await,
             "task.leadTouch" => self.handle_task_lead_touch(params).await,

@@ -339,18 +339,14 @@ pub(super) async fn ask_plan_question(
         }
         None => {
             if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-                let next = app.cancelled_status(&task.status);
-                let changed =
-                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
-                if next == TaskStatus::Stopped {
+                app.apply_cancellation(&mut task);
+                if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(&mut task);
                 }
-                if changed {
-                    task.status = next;
-                    task.updated_at = now_ms();
-                    app.save_task_logged(&task);
-                    app.broadcast_task(&task);
-                }
+                task.updated_at = now_ms();
+                app.save_task_logged(&task);
+                app.broadcast_task(&task);
+                app.advance_queue(&task.repo);
             }
         }
     }

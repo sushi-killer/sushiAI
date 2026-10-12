@@ -311,6 +311,20 @@ pub(super) fn advance_after_failure(
     {
         consecutive = consecutive.min(2);
     }
+    if task.queue.carry_conflict_attempt == Some(last.n) {
+        let reason =
+            "the base carry conflict attempt failed; fix the conflicts, then start it".to_string();
+        task.queue.park = Some(ParkRecord {
+            reason: reason.clone(),
+            until: None,
+            by: AnswerSource::Policy,
+        });
+        task.queue.queue_reason = Some(reason.clone());
+        task.decisions.push(format!("Park: {reason} (by policy)"));
+        task.question = None;
+        task.status = TaskStatus::Queued;
+        return false;
+    }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]
             .failure
@@ -354,6 +368,31 @@ pub(super) fn advance_after_failure(
             true
         }
         FailureDecision::Waiting { question } => {
+            let retries = task
+                .question_history
+                .iter()
+                .filter(|q| {
+                    q.failure_signature.as_deref() == Some(signature.as_str())
+                        && !is_option(&q.answer, "stop")
+                        && !is_accept_option(&q.answer)
+                })
+                .count();
+            if retries >= 3 {
+                let reason = format!(
+                    "{} failed again after 3 retries; fix the cause, then start it",
+                    signature_phrase(&signature)
+                );
+                task.queue.park = Some(ParkRecord {
+                    reason: reason.clone(),
+                    until: None,
+                    by: AnswerSource::Policy,
+                });
+                task.queue.queue_reason = Some(reason.clone());
+                task.decisions.push(format!("Park: {reason} (by policy)"));
+                task.question = None;
+                task.status = TaskStatus::Queued;
+                return false;
+            }
             let mut options: Vec<String> = vec!["continue".into(), "change approach".into()];
             if accept_offered(&task.attempts[task.attempts.len() - 1], protected_paths) {
                 options.push(brief::ACCEPT_LAST_ATTEMPT.into());
@@ -365,6 +404,7 @@ pub(super) fn advance_after_failure(
                 QuestionKind::AttemptsFailing,
                 AskedBy::Implement,
             ));
+            task.question.as_mut().unwrap().failure_signature = Some(signature);
             task.status = TaskStatus::Waiting;
             false
         }

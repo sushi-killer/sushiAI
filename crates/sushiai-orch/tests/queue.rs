@@ -174,9 +174,10 @@ fn a_task_with_overlapping_paths_waits_for_the_first_and_starts_on_top_of_its_la
     // conflict attempt.
     assert_eq!(implement_attempts(&b_done).len(), 1, "{b_done}");
     assert!(
-        decisions(&b_done).contains("Rebase: started from work"),
+        decisions(&b_done).contains("Rebase: carried the work onto work"),
         "{b_done}"
     );
+    assert_eq!(b_done["baseSha"], a_done["landedSha"], "{b_done}");
     assert_eq!(
         std::fs::read_to_string(root.join("shared.txt")).unwrap(),
         "a\nb\n"

@@ -186,6 +186,25 @@ pub fn append(data_dir: &Path, entry: &Entry) -> std::io::Result<()> {
     let _guard = APPEND.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = read_lines(data_dir);
     entries.push(entry.clone());
+    write_entries(data_dir, &entries)
+}
+
+/// Appends a task's terminal entry once, even if loop finalization is retried.
+pub fn append_task_once(data_dir: &Path, entry: &Entry) -> std::io::Result<bool> {
+    let _guard = APPEND.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = read_lines(data_dir);
+    if entries
+        .iter()
+        .any(|existing| existing.kind == entry.kind && existing.task_id == entry.task_id)
+    {
+        return Ok(false);
+    }
+    entries.push(entry.clone());
+    write_entries(data_dir, &entries)?;
+    Ok(true)
+}
+
+fn write_entries(data_dir: &Path, entries: &[Entry]) -> std::io::Result<()> {
     let skip = entries.len().saturating_sub(MAX_LINES);
     let mut out = String::new();
     for e in &entries[skip..] {

@@ -617,7 +617,8 @@ pub(super) async fn run_parent(
     // `advance_graph` only relaunches a queued or running parent, so a
     // stopped or failed one here is the owner's own restart: its unfinished
     // children restart with it.
-    let restarted = matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed);
+    let restarted = task.queue.restart_children;
+    task.queue.restart_children = false;
     for child in all
         .iter()
         .filter(|t| t.parent.as_deref() == Some(task_id) && !t.archived)
@@ -628,7 +629,7 @@ pub(super) async fn run_parent(
         match child.status {
             // A part whose dependencies have not landed is not started (so
             // not planned) yet; the graph comes back to it when they do.
-            TaskStatus::Drafting | TaskStatus::Queued => {
+            TaskStatus::Drafting | TaskStatus::Queued if child.queue.park.is_none() => {
                 if matches!(waits_state(child, &all), Waits::Ready | Waits::Nothing) {
                     app.spawn_child_loop(&all, child);
                 }
@@ -637,11 +638,18 @@ pub(super) async fn run_parent(
                 // Queued before its loop runs, so this parent never reads
                 // it as ended.
                 let mut child = child.clone();
+                let mut cancellations = app.cancellations.lock().unwrap();
+                if let Some(end) = cancellations.get_mut(&child.id) {
+                    end.restart = true;
+                }
+                child.queue.stopped_explicitly = false;
+                child.queue.park = None;
                 child.question = None;
                 child.status = TaskStatus::Queued;
                 child.updated_at = now_ms();
                 app.save_task_logged(&child);
                 app.broadcast_task(&child);
+                drop(cancellations);
                 app.spawn_child_loop(&all, &child);
             }
             _ => {}
@@ -1321,7 +1329,26 @@ impl App {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        let all = self.repo_tasks(repo);
+        let mut all = self.repo_tasks(repo);
+        for task in &mut all {
+            let ready = task
+                .queue
+                .park
+                .as_ref()
+                .and_then(|p| p.until.as_ref())
+                .and_then(|id| self.store.load_task(id).ok().flatten())
+                .is_some_and(|target| target.status == TaskStatus::Done);
+            if ready && !task.archived && !self.controls.lock().unwrap().contains_key(&task.id) {
+                task.queue.park = None;
+                task.queue.queue_reason = None;
+                task.decisions
+                    .push("Park: the until task is done, resuming".into());
+                task.updated_at = now_ms();
+                let _ = self.store.save_task(task);
+                self.broadcast_task(task);
+                self.spawn_task_loop(task.id.clone(), true);
+            }
+        }
         for task in all.iter().filter(|t| !t.archived) {
             let parent = is_parent(task, &all);
             let asking = task.status == TaskStatus::Waiting
@@ -1334,6 +1361,7 @@ impl App {
                 || asking;
             if !idle
                 || task.queue.backlog.is_some()
+                || self.is_suspended(task)
                 || self.controls.lock().unwrap().contains_key(&task.id)
             {
                 continue;
@@ -1351,6 +1379,8 @@ impl App {
             {
                 if !matches!(own_waits_state(p, &all), Waits::Ready | Waits::Nothing)
                     || p.queue.backlog.is_some()
+                    || self.is_suspended(p)
+                    || matches!(p.status, TaskStatus::Stopped | TaskStatus::Failed)
                     || (p.status == TaskStatus::Waiting && implement_attempt_count(task) == 0)
                 {
                     continue;
@@ -1459,7 +1489,10 @@ impl App {
         // The answer policy retries an ended dependency once before the owner
         // is asked.
         if let Some(question) = task.question.clone() {
-            if policy_open(self, &task, question.kind)
+            if !all
+                .iter()
+                .any(|t| ended.contains(&t.id) && t.queue.stopped_explicitly)
+                && policy_open(self, &task, question.kind)
                 && !task
                     .assumptions
                     .iter()
@@ -1495,23 +1528,14 @@ impl App {
             {
                 continue;
             }
-            let live = match self.controls.lock().unwrap().get(&child.id) {
-                Some(ctrl) => {
-                    ctrl.cancel.cancel();
-                    true
-                }
-                None => false,
-            };
             self.close_stopped_task(&mut child);
-            if live {
-                continue;
-            }
-            if let Err(e) = self.update_task(&child.id, |child| {
-                self.close_stopped_task(child);
-                child.status = TaskStatus::Stopped;
-            }) {
-                eprintln!("orch: updating task {} failed: {e}", child.id);
-            }
+            let _ = self.interrupt_task(
+                &mut child,
+                None,
+                true,
+                "Orchestrator: stopped with its parent".into(),
+            );
+            self.stop_children(&child.id, repo);
         }
     }
 
@@ -1533,22 +1557,34 @@ impl App {
             .filter(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Stopped))
             .cloned()
             .collect();
+        let by_owner = caller == Some(AnsweredBy::Owner);
         let choice = answer.trim().to_ascii_lowercase();
         if !choice.starts_with("retry") && !choice.starts_with("drop") {
             return Err("answer retry the dependency, drop the dependency, or stop".to_string());
         }
         if choice.starts_with("retry") {
+            if !by_owner && ended.iter().any(|t| t.queue.stopped_explicitly) {
+                return Err("an explicitly stopped dependency needs the owner's restart".into());
+            }
             for dep in ended.iter().filter(|t| !t.archived) {
-                if self.controls.lock().unwrap().contains_key(&dep.id) {
-                    continue;
+                let mut cancellations = self.cancellations.lock().unwrap();
+                if let Some(end) = cancellations.get_mut(&dep.id) {
+                    end.restart = true;
+                    end.restart_children = is_parent(dep, &all);
                 }
                 // Queued before its loop runs, so nothing reads it as
                 // ended again while it retries.
-                let dep = self.update_task(&dep.id, |dep| {
-                    dep.question = None;
-                    dep.status = TaskStatus::Queued;
-                })?;
-                self.spawn_task_loop(dep.id, true);
+                let mut dep = dep.clone();
+                dep.queue.restart_children = is_parent(&dep, &all);
+                dep.queue.stopped_explicitly = false;
+                dep.queue.park = None;
+                dep.question = None;
+                dep.status = TaskStatus::Queued;
+                dep.updated_at = now_ms();
+                self.save_task_logged(&dep);
+                self.broadcast_task(&dep);
+                drop(cancellations);
+                self.spawn_task_loop(dep.id.clone(), true);
             }
         } else if choice.starts_with("drop") {
             for child in ended

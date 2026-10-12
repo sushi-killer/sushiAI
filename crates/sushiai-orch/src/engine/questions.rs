@@ -39,6 +39,13 @@ pub(super) async fn wait_for_exhausted_answer(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
+    if task.queue.park.is_some() {
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        app.advance_queue(&task.repo);
+        return None;
+    }
     let asked = task.question.clone();
     if let Some(text) = try_policy_answer(app, task, cancel).await {
         return Some(Answered {
@@ -198,6 +205,14 @@ async fn park_for_answer(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
+    if cancel.is_cancelled() {
+        app.apply_cancellation(task);
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(task);
+        app.broadcast_task(task);
+        app.advance_queue(&task.repo);
+        return None;
+    }
     // A task waiting for its owner holds no slot: parallel limits running
     // agents, not open questions.
     permit.take();
@@ -242,18 +257,14 @@ async fn park_for_answer(
         None => {
             if let Ok(Some(saved)) = app.store.load_task(task_id) {
                 *task = saved;
-                let next = app.cancelled_status(&task.status);
-                let changed =
-                    task.status != next || (next == TaskStatus::Stopped && task.question.is_some());
-                if next == TaskStatus::Stopped {
+                app.apply_cancellation(task);
+                if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(task);
                 }
-                if changed {
-                    task.status = next;
-                    task.updated_at = now_ms();
-                    app.save_task_logged(task);
-                    app.broadcast_task(task);
-                }
+                task.updated_at = now_ms();
+                app.save_task_logged(task);
+                app.broadcast_task(task);
+                app.advance_queue(&task.repo);
             }
         }
     }
@@ -274,13 +285,26 @@ pub(super) fn answer_line_question(q: &Question) -> &str {
 /// Counts chat, overseer and lead extensions of the attempt budget,
 /// including legacy orchestrator lines.
 pub(super) fn non_owner_continues(task: &Task) -> usize {
-    task.decisions
+    let orchestrator = task
+        .decisions
         .iter()
-        .filter(|d| {
-            d.starts_with(EXHAUSTED_ANSWER_PREFIX)
-                || d.starts_with("Lead: Attempts keep failing -> ")
+        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
+        .count();
+    let legacy_lead = task
+        .decisions
+        .iter()
+        .filter(|d| d.starts_with("Lead: Attempts keep failing -> "))
+        .count();
+    let lead = task
+        .question_history
+        .iter()
+        .filter(|q| {
+            q.kind == QuestionKind::AttemptsFailing
+                && q.answered_by == AnsweredBy::Lead
+                && !is_option(&q.answer, "stop")
         })
-        .count()
+        .count();
+    orchestrator + lead.max(legacy_lead)
 }
 
 /// Records a parked question's answer and its caller.
@@ -296,11 +320,10 @@ pub(super) fn record_answer(
     let text = question.map(answer_line_question).unwrap_or_default();
     let line = match caller {
         AnsweredBy::Owner => format!("Owner: {answer}"),
-        AnsweredBy::Lead if answer.trim().eq_ignore_ascii_case("stop") => "Lead: stop".into(),
-        AnsweredBy::Lead => format!("Lead: {text} -> {answer} (answered by a lead session)"),
+        AnsweredBy::Lead => format!("Lead: {answer}"),
         AnsweredBy::Overseer => orchestrator_answer_line(text, answer, "answered by the overseer"),
         AnsweredBy::Orchestrator => {
-            orchestrator_answer_line(text, answer, "answered by the orchestrator agent")
+            orchestrator_answer_line(text, answer, "answered by the orchestrator chat")
         }
         AnsweredBy::Policy => policy_answer_line(text, answer, "policy", ""),
         AnsweredBy::Judge => policy_answer_line(text, answer, "judge", ""),
@@ -519,7 +542,14 @@ async fn run_triage(
         && task
             .decisions
             .last()
-            .map(|d| is_orchestrator_answer_decision(d))
+            .map(|d| {
+                is_orchestrator_answer_decision(d)
+                    || task.question_history.last().is_some_and(|q| {
+                        q.answered_by == AnsweredBy::Lead
+                            && !is_option(&q.answer, "stop")
+                            && *d == format!("Lead: {}", q.answer)
+                    })
+            })
             .unwrap_or(false)
     {
         return None;
@@ -752,6 +782,7 @@ async fn wait_for_triaged_answer(
                     held_for_overseer: false,
                     held_at: None,
                     commands: question.commands.clone(),
+                    failure_signature: question.failure_signature.clone(),
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));
@@ -915,11 +946,20 @@ mod tests {
         ));
         app.store.save_task(&task).unwrap();
         let cancel = CancelToken::new();
-        cancel.cancel();
         let pending = Arc::new(StdMutex::new(None));
         let id = task.id.clone();
-        park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
-        chat::wait_idle(&app, task.repo.as_str()).await;
+        let parked = {
+            let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
+            tokio::spawn(async move {
+                park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+            })
+        };
+        while pending.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cancel.cancel();
+        parked.await.unwrap();
+        chat::wait_idle(&app, repo.to_str().unwrap()).await;
         chat::fake_overseer_calls(&repo)
     }
 
@@ -1158,9 +1198,7 @@ mod answer_caller_tests {
             assert_eq!(task.question_history.len(), 1);
             assert_eq!(task.question_history[0].answered_by, expected);
             if expected == AnsweredBy::Lead {
-                assert!(task
-                    .decisions
-                    .contains(&"Lead: Which way? -> B (answered by a lead session)".to_string()));
+                assert!(task.decisions.contains(&"Lead: B".to_string()));
             }
             if expected != AnsweredBy::Owner {
                 assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
@@ -1209,10 +1247,8 @@ mod answer_caller_tests {
         assert_eq!(waiter.await.unwrap().as_deref(), Some("B"));
         let task = app.store.load_task(&id).unwrap().unwrap();
         assert_eq!(task.question_history[0].answered_by, AnsweredBy::Lead);
-        assert!(task
-            .decisions
-            .contains(&"Lead: Which plan? -> B (answered by a lead session)".to_string()));
-        assert!(subtask_request(&task, "Build it").contains("Lead: Which plan? -> B"));
+        assert!(task.decisions.contains(&"Lead: B".to_string()));
+        assert!(subtask_request(&task, "Build it").contains("Lead: B"));
         assert_eq!(app.take_agent_answer(&id), Some(AnsweredBy::Lead));
         app.shutdown();
     }

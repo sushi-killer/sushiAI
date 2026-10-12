@@ -102,6 +102,8 @@ pub(super) async fn run_task_loop(
             return;
         }
 
+        apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+
         // The task graph: a parent never implements, and a task whose
         // dependencies are not all done waits `queued` with no loop until
         // `advance_graph` starts it again. Drafting runs meanwhile.
@@ -253,7 +255,7 @@ pub(super) async fn run_task_loop(
         }
 
         if needs_planning(&task) {
-            match run_plan_stage(
+            let planned = run_plan_stage(
                 &app,
                 &task_id,
                 &pending_answer,
@@ -261,8 +263,11 @@ pub(super) async fn run_task_loop(
                 &mut permit,
                 auto_start_after_plan,
             )
-            .await
-            {
+            .await;
+            if let Ok(Some(mut planned_task)) = app.store.load_task(&task_id) {
+                apply_pending_amendment(&app, &mut planned_task, &pending_amend, &cancel).await;
+            }
+            match planned {
                 PlanOutcome::Proceed => {
                     drop(permit);
                     continue;
@@ -456,7 +461,11 @@ pub(super) async fn run_task_loop(
             let _ = app.store.save_task(&task);
             app.broadcast_task(&task);
         }
+        let dependencies_before = task.depends_on.clone();
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
+        if task.depends_on != dependencies_before && completed_implement_attempts(&task) == 0 {
+            continue 'attempts;
+        }
 
         // A final check that already fails on the base is looked up after
         // the attempt, from the cache or the job started here: the first

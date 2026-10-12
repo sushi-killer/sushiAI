@@ -204,7 +204,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
         (
             "task_amend",
             "task.amend",
-            "Replace a running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks or heldOut (each field you pass replaces the task's; at least one is required). A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+            "Replace a drafting, running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks, heldOut or dependsOn (each field you pass replaces the task's; at least one is required). dependsOn replaces the full list of task ids only before the first implement attempt; an empty list makes the task ready. A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. With variant.groundedChecks, amended checks and heldOut are re-run on the base commit and only those failing there gate.",
             json!({
                 "type": "object",
                 "properties": {
@@ -215,6 +215,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                     "screenshot": {"type": "string", "description": "Replaces the repo command that captures the screenshot evidence; an empty string removes it."},
                     "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
                     "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
+                    "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "The full new list of task ids; only before the first implement attempt; an empty list makes the task ready."},
                 },
                 "required": ["id"],
             }),
@@ -704,6 +705,28 @@ mod tests {
     fn ping_returns_an_empty_object() {
         let result = dispatch(&orchestrator(), "ping", &json!({})).unwrap();
         assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn task_amend_schema_offers_full_dependency_replacement_before_implementing() {
+        let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
+        let amend = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "task_amend")
+            .unwrap();
+        let dependencies = &amend["inputSchema"]["properties"]["dependsOn"];
+        assert_eq!(dependencies["type"], "array");
+        assert_eq!(dependencies["items"]["type"], "string");
+        assert!(dependencies["description"]
+            .as_str()
+            .unwrap()
+            .contains("full new list"));
+        let description = amend["description"].as_str().unwrap();
+        assert!(description.contains("dependsOn"));
+        assert!(description.contains("first implement attempt"));
+        assert!(description.contains("empty list"));
     }
 
     #[test]

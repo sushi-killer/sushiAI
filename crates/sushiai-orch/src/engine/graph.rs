@@ -479,6 +479,7 @@ pub(super) async fn run_parent(
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return ParentEnd::Finished;
     };
+    apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
     // The parent's own checks run after the children landed: fix a grep that
     // cannot run now (the children's loops fix theirs).
     if heal_grep_dashes(&mut task) {
@@ -537,9 +538,18 @@ pub(super) async fn run_parent(
             matches!(t.status, TaskStatus::Drafting | TaskStatus::Queued)
                 && implement_attempt_count(t) == 0
         });
+    let dependencies_before = task.depends_on.clone();
     if none_started
         && !parent_base_preflight(app, &mut task, pending_answer, pending_amend, cancel).await
     {
+        return ParentEnd::Finished;
+    }
+    apply_pending_amendment(app, &mut task, pending_amend, cancel).await;
+    if task.depends_on != dependencies_before {
+        task.status = TaskStatus::Queued;
+        task.updated_at = now_ms();
+        let _ = app.store.save_task(&task);
+        app.broadcast_task(&task);
         return ParentEnd::Finished;
     }
     // `advance_graph` only relaunches a queued or running parent, so a

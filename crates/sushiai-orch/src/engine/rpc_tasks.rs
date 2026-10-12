@@ -343,7 +343,8 @@ impl App {
         // Checked before anything is created: a rejected graph leaves no
         // worktree, branch or record behind.
         let (depends_on, parent) =
-            self.check_graph_params(&repo, &p.depends_on, p.parent.as_deref())?;
+            self.check_graph_params(&repo, &p.depends_on, p.parent.as_deref(), None)?;
+        let depends_on: Vec<String> = depends_on.into_iter().map(|t| t.id).collect();
         let base = p.base.clone().filter(|b| !b.trim().is_empty());
         let base = match (&parent, base) {
             (Some(parent), Some(base)) if base != parent.branch => {
@@ -432,17 +433,18 @@ impl App {
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
 
-    /// `task.create`'s `dependsOn`/`parent`: every id a task of this repo,
+    /// `task.create`/`task.amend`'s graph: every id a task of this repo,
     /// the parent a top-level task that has not implemented anything itself
     /// and is not done, and no dependency cycle once the new task is added
     /// (a parent waits for its children, so a child depending on its own
-    /// parent is one). Returns the deduplicated dependencies and the parent.
+    /// parent is one). Returns the deduplicated dependency records and parent.
     fn check_graph_params(
         &self,
         repo: &str,
         depends_on: &[String],
         parent: Option<&str>,
-    ) -> Result<(Vec<String>, Option<Task>), String> {
+        existing: Option<&Task>,
+    ) -> Result<(Vec<Task>, Option<Task>), String> {
         let load = |id: &str, what: &str| -> Result<Task, String> {
             validate_task_id(&self.store, id).map_err(|_| format!("unknown {what} {id}"))?;
             let task = self
@@ -455,11 +457,14 @@ impl App {
             }
             Ok(task)
         };
-        let mut deps: Vec<String> = Vec::new();
+        let mut deps: Vec<Task> = Vec::new();
         for id in depends_on {
-            load(id, "dependency")?;
-            if !deps.contains(id) {
-                deps.push(id.clone());
+            let dependency = load(id, "dependency")?;
+            if existing.is_some_and(|t| dependency.parent.as_deref() == Some(t.id.as_str())) {
+                return Err("a task cannot depend on its own child".to_string());
+            }
+            if !deps.iter().any(|t| t.id == *id) {
+                deps.push(dependency);
             }
         }
         let parent = match parent.filter(|p| !p.trim().is_empty()) {
@@ -499,10 +504,37 @@ impl App {
             }
         };
         let new_id = "(new task)".to_string();
-        let mut edges = wait_edges(&self.repo_tasks(repo));
-        edges.insert(new_id.clone(), deps.clone());
-        if let Some(parent) = &parent {
-            edges.entry(parent.id.clone()).or_default().push(new_id);
+        let mut all = self.repo_tasks(repo);
+        {
+            let controls = self.controls.lock().unwrap();
+            for task in &mut all {
+                if let Some(ctrl) = controls.get(&task.id).filter(|c| !c.cancel.is_cancelled()) {
+                    if let Some(deps) = ctrl
+                        .pending_amend
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|a| a.depends_on.as_ref())
+                    {
+                        task.depends_on = deps.clone();
+                    }
+                }
+            }
+        }
+        let mut edges = wait_edges(&all);
+        let mut waits: Vec<String> = deps.iter().map(|t| t.id.clone()).collect();
+        if let Some(task) = existing {
+            waits.extend(
+                all.iter()
+                    .filter(|t| t.parent.as_deref() == Some(task.id.as_str()))
+                    .map(|t| t.id.clone()),
+            );
+            edges.insert(task.id.clone(), waits);
+        } else {
+            edges.insert(new_id.clone(), waits);
+            if let Some(parent) = &parent {
+                edges.entry(parent.id.clone()).or_default().push(new_id);
+            }
         }
         if has_cycle(&edges) {
             return Err("dependsOn would make a dependency cycle".to_string());
@@ -1154,7 +1186,7 @@ impl App {
         serde_json::to_value(&latest).map_err(|e| e.to_string())
     }
 
-    /// Owner amendment of criteria/verify/finalVerify/checks/heldOut. A task
+    /// Owner amendment of a task's brief, checks or dependencies. A task
     /// with a live loop (running, or parked on a question) gets it through
     /// `pending_amend`, because the loop saves its own copy of the task and
     /// would overwrite a write made here; any other task is saved directly.
@@ -1210,7 +1242,7 @@ impl App {
                 (Some(texts), visual)
             }
         };
-        let amendment = Amendment {
+        let mut amendment = Amendment {
             criteria,
             visual_criteria,
             verify: field(&params, "verify", "an array of strings")?,
@@ -1218,10 +1250,12 @@ impl App {
             screenshot: field(&params, "screenshot", "a string")?,
             checks: field(&params, "checks", "an array of {criterion, run} objects")?,
             held_out,
+            depends_on: field(&params, "dependsOn", "an array of strings")?,
+            dependency_titles: Vec::new(),
         };
         if amendment.is_empty() {
             return Err(
-                "task.amend needs at least one of criteria, verify, finalVerify, screenshot, checks, heldOut"
+                "task.amend needs at least one of criteria, verify, finalVerify, screenshot, checks, heldOut, dependsOn"
                     .to_string(),
             );
         }
@@ -1254,13 +1288,32 @@ impl App {
         }
         if !matches!(
             task.status,
-            TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Queued | TaskStatus::Stopped
+            TaskStatus::Drafting
+                | TaskStatus::Running
+                | TaskStatus::Waiting
+                | TaskStatus::Queued
+                | TaskStatus::Stopped
         ) {
             return Err(format!(
-                "task is {:?}: only running, waiting, queued or stopped tasks can be amended",
+                "task is {:?}: only drafting, running, waiting, queued or stopped tasks can be amended",
                 task.status
             )
             .to_lowercase());
+        }
+        if let Some(deps) = &amendment.depends_on {
+            if implement_attempt_count(&task) > 0 {
+                return Err("task has already run an implement attempt".to_string());
+            }
+            if self.repo_tasks(&task.repo).iter().any(|child| {
+                child.parent.as_deref() == Some(task.id.as_str())
+                    && !child.archived
+                    && implement_attempt_count(child) > 0
+            }) {
+                return Err("a child has already run an implement attempt".to_string());
+            }
+            let (deps, _) = self.check_graph_params(&task.repo, deps, None, Some(&task))?;
+            amendment.dependency_titles = deps.iter().map(|t| t.title.clone()).collect();
+            amendment.depends_on = Some(deps.into_iter().map(|t| t.id).collect());
         }
         let criteria_len = amendment
             .criteria
@@ -1309,12 +1362,29 @@ impl App {
                 return Ok(json!({"id": id, "amended": fields, "pending": true}));
             }
         }
+        let dependencies_amended = amendment.depends_on.is_some();
         amendment.apply(&mut task);
+        if dependencies_amended
+            && task.status == TaskStatus::Waiting
+            && task
+                .question
+                .as_ref()
+                .is_some_and(|q| q.text.starts_with(DEPENDENCY_QUESTION))
+        {
+            task.question = None;
+            task.status = TaskStatus::Queued;
+        }
         if task.variant().grounded_checks {
             baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
         }
         self.store.save_task(&task).map_err(|e| e.to_string())?;
         self.broadcast_task(&task);
+        if dependencies_amended {
+            if task.status == TaskStatus::Queued && task.queue.backlog.is_none() {
+                self.start_task_loop(id.clone());
+            }
+            self.advance_graph(&task.repo);
+        }
         Ok(json!({"id": id, "amended": fields, "pending": false}))
     }
 

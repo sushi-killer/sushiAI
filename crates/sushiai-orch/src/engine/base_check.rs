@@ -1005,6 +1005,8 @@ pub(super) struct Amendment {
     pub screenshot: Option<String>,
     pub checks: Option<Vec<Check>>,
     pub held_out: Option<Option<Check>>,
+    pub depends_on: Option<Vec<String>>,
+    pub dependency_titles: Vec<String>,
 }
 
 impl Amendment {
@@ -1033,6 +1035,9 @@ impl Amendment {
         if self.held_out.is_some() {
             names.push("heldOut");
         }
+        if self.depends_on.is_some() {
+            names.push("dependsOn");
+        }
         names
     }
 
@@ -1047,10 +1052,13 @@ impl Amendment {
         self.screenshot = later.screenshot.or(self.screenshot.take());
         self.checks = later.checks.or(self.checks.take());
         self.held_out = later.held_out.or(self.held_out.take());
+        if later.depends_on.is_some() {
+            self.depends_on = later.depends_on;
+            self.dependency_titles = later.dependency_titles;
+        }
     }
 
-    /// Replaces the fields on `task` and adds the decision line: field
-    /// names only, so it can never carry a command or a held-out check.
+    /// Replaces the fields and records their names, plus dependency titles.
     pub fn apply(self, task: &mut Task) {
         let line = format!("Amended: {}", self.fields().join(", "));
         if let Some(v) = self.criteria {
@@ -1075,6 +1083,20 @@ impl Amendment {
             task.held_out = valid_check(h, len);
         }
         task.decisions.push(line);
+        if let Some(deps) = self.depends_on {
+            task.depends_on = deps;
+            let waits = if self.dependency_titles.is_empty() {
+                "nothing".to_string()
+            } else {
+                self.dependency_titles
+                    .iter()
+                    .map(|title| format!("\"{title}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            task.decisions
+                .push(format!("Dependencies: waits for {waits}"));
+        }
         task.updated_at = now_ms();
     }
 }

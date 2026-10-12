@@ -121,3 +121,42 @@ impl Drop for SlotPermit {
         }
     }
 }
+
+pub(super) enum Slot {
+    Got(SlotPermit),
+    Cancelled,
+    Closed,
+}
+
+/// A global slot for the loop of `task`. While none is free the task shows
+/// the `slot` wait (running and limit), and `cancel` ends the wait.
+pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> Slot {
+    if let Ok(permit) = app.slots.clone().try_acquire_owned() {
+        return Slot::Got(permit);
+    }
+    let (running, limit) = app.slots.usage();
+    let wait = Wait::Slot {
+        running: running as u32,
+        limit: limit as u32,
+    };
+    task.queue.wait = Some(wait.clone());
+    if let Err(e) = app.update_task(&task.id, |t| t.queue.wait = Some(wait)) {
+        eprintln!("orch: updating task {} failed: {e}", task.id);
+    }
+    let got = tokio::select! {
+        _ = cancel.cancelled() => Slot::Cancelled,
+        permit = app.slots.clone().acquire_owned() => match permit {
+            Ok(p) => Slot::Got(p),
+            Err(_) => Slot::Closed,
+        },
+    };
+    task.queue.wait = None;
+    if let Err(e) = app.update_task(&task.id, |t| {
+        if matches!(t.queue.wait, Some(Wait::Slot { .. })) {
+            t.queue.wait = None;
+        }
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", task.id);
+    }
+    got
+}

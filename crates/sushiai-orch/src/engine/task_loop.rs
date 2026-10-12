@@ -160,9 +160,12 @@ pub(super) async fn run_task_loop(
                 || (!task.depends_on.is_empty()
                     && !matches!(waits_state(&task, &all), Waits::Ready | Waits::Nothing))
             {
-                if task.status != TaskStatus::Queued || task.queue.queue_reason.is_some() {
+                let wait = Wait::Dependency {
+                    titles: unmet_titles(&task, &all),
+                };
+                if task.status != TaskStatus::Queued || task.queue.wait.as_ref() != Some(&wait) {
                     task.status = TaskStatus::Queued;
-                    task.queue.queue_reason = None;
+                    task.queue.wait = Some(wait);
                     task.updated_at = now_ms();
                     app.save_task_logged(&task);
                     app.broadcast_task(&task);
@@ -170,17 +173,29 @@ pub(super) async fn run_task_loop(
                 app.finish_task_loop(&task_id);
                 return;
             }
-            // Paths another live task on this base holds: wait `queued`, no
-            // slot taken, until that task lands, stops or fails.
+            // Files another live task on this base has really changed: wait
+            // `queued`, no slot taken, until that task lands, stops or fails.
             if !needs_planning(&task) {
                 let force = task.status == TaskStatus::Landing
                     || completed_implement_attempts(&task) > 0
+                    || resumable_attempt(&app, &task).is_some()
                     || parent_failure.is_some();
-                if !pass_lease_gate(&app, &mut task, force) {
+                if !pass_lease_gate(&app, &mut task, force).await {
                     app.finish_task_loop(&task_id);
                     return;
                 }
             }
+        }
+
+        // The gates are passed: a wait on dependencies or a subtask slot is over.
+        if matches!(
+            task.queue.wait,
+            Some(Wait::Dependency { .. } | Wait::SubtaskSlot { .. })
+        ) {
+            task.queue.wait = None;
+            task.updated_at = now_ms();
+            app.save_task_logged(&task);
+            app.broadcast_task(&task);
         }
 
         // An answered retry survives a daemon restart without another
@@ -230,17 +245,16 @@ pub(super) async fn run_task_loop(
 
         // Concurrency limit: stays `queued` while waiting for a slot, and
         // `task.stop` (via `cancel`) works here too.
-        let mut permit = tokio::select! {
-            _ = cancel.cancelled() => {
+        let mut permit = match take_slot(&app, &mut task, &cancel).await {
+            Slot::Got(p) => Some(p),
+            Slot::Cancelled => {
                 mark_stopped_if_not_already(&app, &task_id).await;
                 app.finish_task_loop(&task_id);
                 return;
             }
-            permit = app.slots.clone().acquire_owned() => {
-                match permit {
-                    Ok(p) => Some(p),
-                    Err(_) => { app.finish_task_loop(&task_id); return; }
-                }
+            Slot::Closed => {
+                app.finish_task_loop(&task_id);
+                return;
             }
         };
 
@@ -413,11 +427,13 @@ pub(super) async fn run_task_loop(
         }
 
         // Explicit criteria are checked once, before the first attempt; a
-        // planned brief was already checked in the plan stage.
+        // planned brief was already checked in the plan stage. The base
+        // checks start beside the brief check, not after it.
         if completed_implement_attempts(&task) == 0
             && !task.brief_check.done
             && parent_failure.is_none()
         {
+            start_base_checks(&app, &mut task, &cancel);
             if let BriefAction::Cancelled = check_brief(&app, &task_id, false, &cancel).await {
                 drop(permit);
                 mark_stopped_if_not_already(&app, &task_id).await;
@@ -473,13 +489,7 @@ pub(super) async fn run_task_loop(
             && !task.brief_check.feasibility_done
             && parent_failure.is_none()
         {
-            if heal_grep_dashes(&mut task) {
-                app.verify_cache.lock().unwrap().remove(&task_id);
-                task.updated_at = now_ms();
-                app.save_task_logged(&task);
-                app.broadcast_task(&task);
-            }
-            spawn_base_preflight(&app, &task, &cancel);
+            start_base_checks(&app, &mut task, &cancel);
         }
 
         let status = task.status;
@@ -513,13 +523,12 @@ pub(super) async fn run_task_loop(
             app.carry_part_onto_parent(&mut task).await;
         } else if completed_implement_attempts(&task) == 0
             && parent_failure.is_none()
-            && (!task.depends_on.is_empty() || task.queue.waited_on_lease)
+            && !task.depends_on.is_empty()
             && task.queue.relay_of.is_none()
         {
             let wt = PathBuf::from(&task.worktree);
             carry_onto_newest_base(&mut task, &wt).await;
         }
-        task.queue.waited_on_lease = false;
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(&app, &task_id).await;
             drop(permit);
@@ -571,6 +580,8 @@ pub(super) async fn run_task_loop(
         // A run that outlived the daemon is followed, not started again: its
         // outcome goes through review and verify like any other pass.
         let resumed = resumable_attempt(&app, &task);
+        // The lease follows the worktree diff while the attempt runs.
+        let _lease_watch = watch_lease(&app, &task);
         let (
             settings,
             attempt_n,
@@ -3460,6 +3471,20 @@ pub(super) async fn finish_attempt(
                         return Tail::Return;
                     }
                 }
+            }
+            // The loop follows the finished run again: its verify and review
+            // judge the carried tree, with no new implement attempt.
+            Landing::Rereview => {
+                let a = &mut task.attempts[idx];
+                a.status = AttemptStatus::Running;
+                a.ended_at = None;
+                a.failure = None;
+                task.status = TaskStatus::Running;
+                task.updated_at = now_ms();
+                app.save_task_logged(task);
+                app.broadcast_task(task);
+                *permit = None;
+                return Tail::Continue;
             }
             Landing::Cancelled => {
                 task.attempts[idx].status = AttemptStatus::Interrupted;

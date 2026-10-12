@@ -109,7 +109,7 @@ async fn a_stopped_task_without_a_loop_is_stopped_and_its_question_closed() {
     app.store.save_task(&task).unwrap();
     assert!(!app.controls.lock().unwrap().contains_key(&task.id));
     assert!(task.parent.is_none() && task.depends_on.is_empty());
-    assert!(task.queue.queue_reason.is_none());
+    assert!(task.queue.wait.is_none());
 
     let out = app.handle_task_stop(json!({"id": task.id})).await.unwrap();
     assert_eq!(out["status"], "stopped");
@@ -140,7 +140,7 @@ async fn a_stopped_task_by_answer_releases_its_leases() {
         task.paths = vec!["src/declared.rs".into()];
         app.store.save_task(&task).unwrap();
         let result = start_stop_question_wait(&app, task.clone()).await;
-        assert!(app.acquire_lease(&task, false).is_none());
+        assert!(app.acquire_lease(&task, &task.paths, false).is_none());
         assert!(app.lease_file(&task.id, "src/edited.rs").is_none());
         let (tx, rx) = oneshot::channel();
         app.permission_waits
@@ -241,7 +241,7 @@ async fn a_stopped_task_holds_no_lease_and_another_task_can_lease_the_file() {
     task.paths = vec!["src/declared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
-    assert!(app.acquire_lease(&task, false).is_none());
+    assert!(app.acquire_lease(&task, &task.paths, false).is_none());
     assert!(app.lease_file(&task.id, "src/edited.rs").is_none());
     let mut next = task_with_status(TaskStatus::Running);
     next.base_ref = task.base_ref.clone();
@@ -260,7 +260,7 @@ async fn a_stopped_task_holds_no_lease_and_another_task_can_lease_the_file() {
         assert!(app.lease_file(&next.id, file).is_none());
     }
     assert!(app.lease_file(&task.id, "src/late-edit.rs").is_none());
-    assert!(app.acquire_lease(&task, true).is_none());
+    assert!(app.acquire_lease(&task, &task.paths, true).is_none());
     assert!(!app.leases.lock().unwrap().contains_key(&task.id));
     assert!(app.lease_file(&next.id, "src/late-edit.rs").is_none());
 
@@ -380,7 +380,7 @@ async fn a_stopped_task_with_a_cancelled_control_is_pruned_even_while_landing() 
     task.paths = vec!["src/shared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
-    assert!(app.acquire_lease(&task, false).is_none());
+    assert!(app.acquire_lease(&task, &task.paths, false).is_none());
     let next = task_with_status(TaskStatus::Running);
     app.store.save_task(&next).unwrap();
     hold_stop_control(&app, &next);
@@ -473,7 +473,7 @@ async fn a_stopped_task_cleanup_does_not_stop_a_live_loop_when_its_run_ends() {
     task.paths = vec!["src/declared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
-    assert!(app.acquire_lease(&task, false).is_none());
+    assert!(app.acquire_lease(&task, &task.paths, false).is_none());
     assert!(app.lease_file(&task.id, "src/edited.rs").is_none());
     let ctx = HookContext::new(&task, 1, Path::new(&task.worktree), &task.base_sha);
     let run_ctx = ctx.clone();

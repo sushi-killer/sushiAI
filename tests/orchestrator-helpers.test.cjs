@@ -819,7 +819,7 @@ test("taskReason and taskMetaLine give a rail row its second and third lines", a
   assert.equal(taskMetaLine(running, 4, NOON), "6m · $0.22");
   const queued = task({
     status: "queued",
-    queueReason: "queued behind default-landing",
+    park: { reason: "queued behind default-landing", by: "lead" },
   });
   assert.equal(
     taskReason(queued, [queued], 4),
@@ -904,7 +904,7 @@ test("stageTrack marks every stage before the current one done and the rest pend
   );
 });
 
-test("planDrafts lists unstarted tasks, never lease-queued or already implementing ones", async () => {
+test("planDrafts lists unstarted tasks, never waiting or already implementing ones", async () => {
   const { planDrafts } = await library;
   const tasks = [
     task({ id: "draft", status: "queued" }),
@@ -913,7 +913,11 @@ test("planDrafts lists unstarted tasks, never lease-queued or already implementi
       status: "stopped",
       attempts: [attempt({ stage: "plan", status: "passed" })],
     }),
-    task({ id: "lease", status: "queued", queueReason: "waits for a lease" }),
+    task({
+      id: "lease",
+      status: "queued",
+      wait: { kind: "file", taskId: "a", title: "A", path: "src/x" },
+    }),
     task({
       id: "retry",
       status: "queued",
@@ -998,4 +1002,50 @@ test("unlandedLabel describes commits left on the task branch", async () => {
     "1 commit not on work",
   );
   assert.equal(unlandedLabel(task()), "");
+});
+
+test("waitLabel maps each wait kind and taskReason and subtaskState show it", async () => {
+  const { waitLabel, taskReason, subtaskState } = await library;
+  const waits = [
+    [
+      { kind: "slot", running: 2, limit: 2 },
+      "waits for a slot · 2 of 2 running",
+    ],
+    [
+      { kind: "subtaskSlot", running: 1, limit: 1 },
+      "waits for a subtask slot · 1 of 1 running",
+    ],
+    [
+      { kind: "dependency", titles: ["Part A", "Part B"] },
+      "after Part A, Part B",
+    ],
+    [
+      { kind: "file", taskId: "a", title: "Add a", path: "src/x.rs" },
+      'waits for "Add a" on src/x.rs',
+    ],
+  ];
+  for (const [wait, label] of waits) {
+    assert.equal(waitLabel(wait), label);
+    // The label replaces queued, drafting and the subtask words.
+    for (const status of ["queued", "drafting", "running"]) {
+      const waiting = task({ status, wait });
+      assert.equal(taskReason(waiting, [waiting], 4), label);
+      assert.equal(subtaskState(waiting, [waiting], 4).label, label);
+    }
+  }
+  // A queued task that depends on an open task said "waits"; the wait label wins.
+  const dep = task({ id: "dep", status: "running" });
+  const waiter = task({
+    status: "queued",
+    dependsOn: ["dep"],
+    wait: { kind: "dependency", titles: ["Dep"] },
+  });
+  assert.deepEqual(subtaskState(waiter, [dep, waiter], 4), {
+    tone: "neutral",
+    label: "after Dep",
+  });
+  // Without a wait the old words stay.
+  const plain = task({ status: "queued" });
+  assert.equal(taskReason(plain, [plain], 4), "queued");
+  assert.equal(subtaskState(plain, [plain], 4).label, "queued");
 });

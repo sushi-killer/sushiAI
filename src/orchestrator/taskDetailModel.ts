@@ -7,6 +7,7 @@ import {
   latestImplementAttempt,
   reviewOf,
   totalDurationMs,
+  waitLabel,
 } from "./helpers.ts";
 import { elapsedLabel, plural } from "../lib/text.ts";
 import type {
@@ -240,7 +241,9 @@ function rowDetail(
     case "wait":
       return task.question
         ? "waiting for your answer"
-        : task.queueReason || "waiting for you";
+        : task.wait
+          ? waitLabel(task.wait)
+          : task.park?.reason || "waiting for you";
     case "verify": {
       const failed = own.filter((segment) => segment.failureKind).length;
       return failed > 0 ? `${runs} · ${failed} failed` : runs;

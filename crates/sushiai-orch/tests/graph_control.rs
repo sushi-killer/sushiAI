@@ -320,7 +320,7 @@ fn sync_aborts_a_conflict_on_the_parent_and_returns_the_files() {
 }
 
 #[test]
-fn park_asks_no_dependent_and_releases_leases() {
+fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
     let gates = tempfile::tempdir().unwrap();
     for name in ["part", "waiter", "dependent"] {
         configure(gates.path(), name, "complete", &format!("{name}.txt"), true);
@@ -334,11 +334,10 @@ fn park_asks_no_dependent_and_releases_leases() {
         "repo": repo.path(), "title": "waiter", "goal": "CASE_waiter: change a file", "verify": ["true"],
         "paths": ["shared.txt"], "base": part_task["baseRef"], "start": true,
     }))["id"].as_str().unwrap().to_string();
-    wait_until("a waiter behind the lease", || {
-        get(&daemon, &waiter)["queueReason"]
-            .is_string()
-            .then_some(())
-    });
+    // The part only planned `shared.txt`: it holds no lease on it, so the
+    // waiter runs at once.
+    started(gates.path(), "waiter", 1);
+    assert!(get(&daemon, &waiter)["wait"].is_null());
     let dependent = create(
         &daemon,
         repo.path(),
@@ -353,7 +352,7 @@ fn park_asks_no_dependent_and_releases_leases() {
         json!({"id": part, "reason": "waits for a flaky check fix", "source": "lead"}),
     );
     assert_eq!(parked["status"], "queued");
-    assert_eq!(parked["queueReason"], "waits for a flaky check fix");
+    assert_eq!(parked["park"]["reason"], "waits for a flaky check fix");
     assert_eq!(parked["park"]["by"], "lead");
     assert!(parked["question"].is_null());
     started(gates.path(), "waiter", 1);
@@ -418,44 +417,58 @@ fn park_until_resumes_when_that_task_lands() {
     assert!(get(&daemon, &manual)["park"].is_null());
 }
 
+/// The token of the run's hook wiring, read from its `settings.json`.
+fn hook_token(daemon: &Daemon, task_id: &str) -> String {
+    let settings: Value =
+        serde_json::from_str(&run_file(daemon, task_id, "settings.json")).unwrap();
+    settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .split("SUSHIAI_ORCH_TOKEN='")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .unwrap()
+        .to_string()
+}
+
+fn edit_denied(daemon: &Daemon, token: &str, file: &str) -> bool {
+    let out = daemon.request(
+        "hook.edit",
+        json!({
+            "token": token,
+            "payload": {"tool_name": "Edit", "tool_input": {"file_path": file}},
+        }),
+    );
+    out["hookSpecificOutput"]["permissionDecision"] == "deny"
+}
+
 #[test]
 fn stopped_holder_never_blocks_a_waiter() {
     let gates = tempfile::tempdir().unwrap();
-    for name in ["holder", "waiter"] {
-        configure(gates.path(), name, "complete", &format!("{name}.txt"), true);
-    }
+    configure(gates.path(), "holder", "complete", "shared.txt", true);
+    configure(gates.path(), "waiter", "complete", "waiter.txt", true);
     let (daemon, _scripts) = daemon(gates.path());
     let repo = repo();
-    let holder = create(
-        &daemon,
-        repo.path(),
-        "holder",
-        &["shared.txt"],
-        None,
-        &[],
-        "true",
-    );
+    let holder = create(&daemon, repo.path(), "holder", &[], None, &[], "true");
     start(&daemon, &holder);
+    // The holder has really changed `shared.txt` by the time it holds.
     started(gates.path(), "holder", 1);
-    let waiter = create(
-        &daemon,
-        repo.path(),
-        "waiter",
-        &["shared.txt"],
-        None,
-        &[],
-        "true",
-    );
+    let waiter = create(&daemon, repo.path(), "waiter", &[], None, &[], "true");
     start(&daemon, &waiter);
-    wait_until("the queued waiter", || {
-        get(&daemon, &waiter)["queueReason"]
-            .is_string()
-            .then_some(())
-    });
+    started(gates.path(), "waiter", 1);
+    let token = hook_token(&daemon, &waiter);
+    let file = format!(
+        "{}/shared.txt",
+        get(&daemon, &waiter)["worktree"].as_str().unwrap()
+    );
+    assert!(edit_denied(&daemon, &token, &file));
+    assert_eq!(get(&daemon, &waiter)["wait"]["kind"], "file");
     let stopped = daemon.request("task.stop", json!({"id": holder, "source": "lead"}));
     assert_eq!(stopped["status"], "stopped", "{stopped}");
-    started(gates.path(), "waiter", 1);
-    assert!(get(&daemon, &waiter)["queueReason"].is_null());
+    wait_until("the file wait to clear", || {
+        get(&daemon, &waiter)["wait"].is_null().then_some(())
+    });
+    assert!(!edit_denied(&daemon, &token, &file));
     assert!(decision_contains(
         &get(&daemon, &holder),
         "Lead: stop (RPC)"
@@ -603,7 +616,7 @@ fn third_retry_on_the_same_failure_parks_the_task() {
     assert_eq!(parked["status"], "queued");
     assert!(parked["question"].is_null());
     assert!(
-        parked["queueReason"]
+        parked["park"]["reason"]
             .as_str()
             .unwrap()
             .contains("failed again after 3 retries"),

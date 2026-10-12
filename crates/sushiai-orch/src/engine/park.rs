@@ -17,7 +17,6 @@ impl Cancellation {
             self.park.clone()
         };
         task.queue.stopped_explicitly = self.explicit && !self.restart;
-        task.queue.queue_reason = task.queue.park.as_ref().map(|p| p.reason.clone());
         task.status = if self.restart || task.queue.park.is_some() {
             TaskStatus::Queued
         } else {
@@ -92,7 +91,6 @@ impl App {
         let live = self.controls.lock().unwrap().contains_key(&task.id);
         task.question = None;
         task.queue.park = park.clone();
-        task.queue.queue_reason = park.as_ref().map(|p| p.reason.clone());
         task.queue.stopped_explicitly = explicit;
         task.status = if park.is_some() {
             TaskStatus::Queued

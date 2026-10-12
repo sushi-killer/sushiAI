@@ -145,7 +145,6 @@ impl App {
                 end.restart_children = task.queue.restart_children;
             }
             if resumed {
-                task.queue.queue_reason = None;
                 task.decisions.push("Owner: resumed a parked task".into());
             }
             if task.queue.backlog.take().is_some() {

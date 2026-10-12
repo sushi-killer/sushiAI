@@ -2422,7 +2422,9 @@ mod stop_reason_tests {
     async fn stopping_an_idle_queued_task_records_who_and_why() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Queued);
-        task.queue.queue_reason = Some("waits for another".into());
+        task.queue.wait = Some(Wait::Dependency {
+            titles: vec!["another".into()],
+        });
         app.store.save_task(&task).unwrap();
         let out = app
             .handle_task_stop(json!({"id": task.id, "reason": "not needed"}))

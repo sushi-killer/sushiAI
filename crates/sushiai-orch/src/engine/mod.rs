@@ -114,7 +114,7 @@ use review::*;
 use review_findings::*;
 use routing::*;
 use rpc_tasks::*;
-use slots::{ResizableSlots, SlotPermit};
+use slots::{take_slot, ResizableSlots, Slot, SlotPermit};
 use task_loop::*;
 #[cfg(test)]
 use test_support::*;

@@ -107,9 +107,12 @@ impl App {
                 chat::wake_overseer(
                     self,
                     &task.repo,
-                    crate::prompts::get("overseer_reminder")
-                        .replace("{id}", &task.id)
-                        .replace("{title}", &task.title),
+                    self.with_precedents(
+                        crate::prompts::get("overseer_reminder")
+                            .replace("{id}", &task.id)
+                            .replace("{title}", &task.title),
+                        &[&task],
+                    ),
                     false,
                     "reminder",
                     Some(&task.id),
@@ -141,11 +144,16 @@ impl App {
             .collect();
         repos.sort();
         repos.dedup();
+        let tasks = self.store.list_tasks().unwrap_or_default();
         for repo in repos {
+            let waiting: Vec<&Task> = tasks
+                .iter()
+                .filter(|t| t.repo == repo && t.status == TaskStatus::Waiting && !t.archived)
+                .collect();
             chat::wake_overseer(
                 self,
                 &repo,
-                crate::prompts::get("overseer_restart"),
+                self.with_precedents(crate::prompts::get("overseer_restart"), &waiting),
                 false,
                 "restart",
                 None,
@@ -792,7 +800,7 @@ mod tests {
         // A second answer, by the owner, is not a policy one.
         app.agent_answers.lock().unwrap().remove(&id);
         let mut task = task;
-        record_answer_for(&mut task, None, "x", AnsweredBy::Owner, None);
+        record_answer_for(&mut task, None, "x", AnsweredBy::Owner, None, None);
         assert!(task.assumptions.len() == 1);
     }
 

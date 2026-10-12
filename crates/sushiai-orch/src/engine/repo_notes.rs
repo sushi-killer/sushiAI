@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// Repo notes are the owner's standing guidance: the overseer never writes one.
+fn refuse_overseer(source: Option<&str>) -> Result<(), String> {
+    if source == Some("overseer") {
+        return Err(
+            "repo notes are the owner's: the overseer cannot add or remove one".to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl App {
     /// The repo root of a path, resolved the way `task.create` does.
     pub(super) async fn resolve_repo(&self, repo: &str) -> Result<String, String> {
@@ -73,8 +83,11 @@ impl App {
         struct P {
             repo: String,
             text: String,
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        refuse_overseer(p.source.as_deref())?;
         let note = self
             .add_repo_note(&p.repo, &p.text, "owner".to_string())
             .await?;
@@ -90,8 +103,11 @@ impl App {
         struct P {
             repo: String,
             id: String,
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
+        refuse_overseer(p.source.as_deref())?;
         let root = self.resolve_repo(&p.repo).await?;
         let _guard = self.notes_lock.lock().await;
         let mut all = self.store.load_repo_notes().map_err(|e| e.to_string())?;

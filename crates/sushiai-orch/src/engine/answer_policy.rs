@@ -87,7 +87,7 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
 
 /// Kinds only the owner may allow: never the policy, the chat agent or an
 /// MCP client (see [`is_refusal`] for what those may still answer).
-pub(super) fn owner_only(kind: QuestionKind) -> bool {
+pub(crate) fn owner_only(kind: QuestionKind) -> bool {
     matches!(
         kind,
         QuestionKind::Budget
@@ -591,6 +591,7 @@ pub(super) fn record_answered_question(
         answered_at: now_ms(),
         answered_by,
         failure_signature: question.failure_signature.clone(),
+        commands: question.commands.clone(),
     });
 }
 

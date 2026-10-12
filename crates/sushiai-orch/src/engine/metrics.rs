@@ -365,6 +365,7 @@ mod tests {
             answered_at: 20,
             answered_by: AnsweredBy::Owner,
             failure_signature: None,
+            commands: Vec::new(),
         });
         assert_eq!(cause(&t), Some(FailureCause::Env));
         t.question_history[0].answered_at = 5;
@@ -428,6 +429,7 @@ mod tests {
             answered_at: 1,
             answered_by: AnsweredBy::Owner,
             failure_signature: None,
+            commands: Vec::new(),
         });
         assert!(!first_pass(&t, &[]));
         assert_eq!(owner_touches(&t, &[]), 2);

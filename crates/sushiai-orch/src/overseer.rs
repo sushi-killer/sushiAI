@@ -109,7 +109,7 @@ pub fn question_title(kind: QuestionKind, text: &str) -> String {
 /// The question without the command output it quotes: a base-check question
 /// reads `<command>, <command> fail on base <sha>`, the commands read from
 /// the question and the short sha from the text.
-fn question_prose(question: &Question) -> String {
+pub(crate) fn question_prose(question: &Question) -> String {
     const ON_BASE: &str = " on base ";
     if question.kind == QuestionKind::PreexistingFailure {
         if let Some(at) = question.text.find(ON_BASE) {

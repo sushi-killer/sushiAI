@@ -302,6 +302,7 @@ pub(super) async fn ask_plan_question(
     };
     *pending_answer.lock().unwrap() = None;
     let evidence = reply.as_ref().and_then(|r| r.default_evidence.clone());
+    let like = reply.as_ref().and_then(|r| r.like.clone());
     let result = reply.map(|r| r.text);
 
     match &result {
@@ -323,6 +324,7 @@ pub(super) async fn ask_plan_question(
                         answer,
                         caller,
                         evidence.as_deref(),
+                        like.as_deref(),
                     );
                 } else {
                     task.decisions

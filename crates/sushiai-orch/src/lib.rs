@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod model;
 pub mod overseer;
 pub mod overseer_state;
+pub mod precedents;
 #[path = "../../process.rs"]
 pub mod process;
 pub mod procs;

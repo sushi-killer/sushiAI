@@ -1585,6 +1585,9 @@ pub struct AnsweredQuestion {
     pub answered_by: AnsweredBy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_signature: Option<String>,
+    /// The check commands a base-check question was about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// Why orchd asks a question, set where it is asked.
@@ -2727,6 +2730,7 @@ mod tests {
             answered_at: 5,
             answered_by: AnsweredBy::Orchestrator,
             failure_signature: None,
+            commands: Vec::new(),
         });
         task.question = Some(q);
         let v = serde_json::to_value(&task).unwrap();

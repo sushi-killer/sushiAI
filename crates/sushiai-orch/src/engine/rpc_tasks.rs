@@ -982,6 +982,7 @@ impl App {
             return Err("task is not waiting for an answer".to_string());
         }
         let like = checked_like(p.like.as_deref(), p.source.as_deref(), &task, &p.answer)?;
+        self.verify_like(like.as_deref(), &task, &p.answer)?;
         if caller != AnsweredBy::Owner {
             if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
                 if !is_refusal(q, &p.answer) {
@@ -1031,6 +1032,24 @@ impl App {
                     .all(|command| non_owner_base_retry(&task, command, Some(&task.base_sha)))
                 {
                     return Err("these checks already got a non-owner retry on this base: the owner decides now".to_string());
+                }
+            }
+            // The overseer never decides what a hard limit keeps for the owner,
+            // with or without a `like`. An owner-only kind and a shared-check drop
+            // are handled above (a refusal stays open to the first, an agent may
+            // drop a task-specific check). The lead and the chat orchestrator are
+            // not bound here: they relay what the owner said in a conversation.
+            if caller == AnsweredBy::Overseer {
+                if let Some(limit) = task
+                    .question
+                    .as_ref()
+                    .filter(|q| !owner_only(q.kind))
+                    .and_then(|q| hard_limit(q, &p.answer))
+                    .filter(|limit| *limit != HardLimit::SharedCheckDrop)
+                {
+                    return Err(format!(
+                        "this question is under a hard limit ({limit:?}): the owner decides, not the overseer"
+                    ));
                 }
             }
             self.agent_answers

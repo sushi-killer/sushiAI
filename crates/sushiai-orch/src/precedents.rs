@@ -106,6 +106,10 @@ struct File {
     /// When the file began; older answers are not back-filled.
     #[serde(default)]
     since: i64,
+    /// Answers at or before this time were recorded already, or belong to a
+    /// task dropped from `tasks`: a resave of such a task adds nothing.
+    #[serde(default)]
+    floor: i64,
     /// Per task, the newest `answeredAt` recorded, so a resave adds nothing.
     #[serde(default)]
     tasks: BTreeMap<String, i64>,
@@ -405,6 +409,14 @@ fn propose(memory: &mut RepoMemory, key: &str, answer: &str) {
     }
 }
 
+/// Forgets which answers this process synced, as a restart does.
+#[cfg(test)]
+pub fn forget_synced() {
+    if let Some(done) = DONE.get() {
+        done.lock().unwrap().clear();
+    }
+}
+
 /// Records the answers `task` gained since its last sync. Cheap when there is
 /// nothing new. Never fails a save: an IO error is logged.
 pub fn sync(data_dir: &Path, task: &Task) {
@@ -429,6 +441,7 @@ pub fn sync(data_dir: &Path, task: &Task) {
     }
     let seen = file.tasks.get(&task.id).copied().unwrap_or(0);
     let mut changed = fresh_file;
+    let seen = seen.max(file.floor);
     for entry in task.question_history.iter().filter(|e| {
         e.answered_at > seen && e.answered_at >= file.since && !engine::owner_only(e.kind)
     }) {
@@ -448,7 +461,9 @@ pub fn sync(data_dir: &Path, task: &Task) {
                 .min_by_key(|(_, at)| **at)
                 .map(|(id, _)| id.clone());
             if let Some(id) = oldest {
-                file.tasks.remove(&id);
+                if let Some(at) = file.tasks.remove(&id) {
+                    file.floor = file.floor.max(at);
+                }
             }
         }
         changed = true;
@@ -529,19 +544,27 @@ fn owner_records<'a>(memory: &'a RepoMemory, key: &str) -> Vec<&'a Precedent> {
     found
 }
 
-/// The one answer the owner's newest precedents for `key` agree on, with the
-/// time of the latest. None without an owner precedent, or when the newest
-/// [`AGREE_WINDOW`] records differ.
+/// The one answer the owner's newest [`AGREE_WINDOW`] answers for `key` agree
+/// on, with the time of the latest. Records fold equal answers into a count, so
+/// the window is read newest record first (by `last_at`), each record
+/// standing for its `count` answers. None without two owner answers, or when
+/// the window holds two different answers.
 pub fn owner_answer(data_dir: &Path, repo: &str, key: &str) -> Option<(String, i64)> {
     let _guard = LOCK.lock().unwrap();
     let file = load(data_dir);
     let found = owner_records(file.repos.get(repo)?, key);
     let newest = found.first()?;
-    found
-        .iter()
-        .take(AGREE_WINDOW)
-        .all(|p| p.answer == newest.answer)
-        .then(|| (newest.answer.clone(), newest.last_at))
+    let mut window = 0usize;
+    for p in &found {
+        if p.answer != newest.answer && window < AGREE_WINDOW {
+            return None;
+        }
+        window += (p.count.max(1) as usize).min(AGREE_WINDOW.saturating_sub(window));
+        if window >= AGREE_WINDOW {
+            break;
+        }
+    }
+    (window >= 2).then(|| (newest.answer.clone(), newest.last_at))
 }
 
 /// Up to [`MAX_PROMPT`] owner precedents of `repo` for `key`, newest first.

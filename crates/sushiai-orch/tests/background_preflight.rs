@@ -206,6 +206,149 @@ fn whole_repo_suites_in_a_planned_verify_move_to_final_verify() {
     let _ = std::fs::remove_dir_all(worktree);
 }
 
+/// Like `FAKE`, but the brief check holds on `$GATES/hold_brief` and the
+/// planner answers with the draft in `$GATES/plan_reply.json`.
+const GATED: &str = r###"#!/bin/sh
+brief=$(cat)
+emit() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
+}
+case "$brief" in
+"## Review"*)
+  emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
+*"You check a coding task brief"*)
+  touch "$GATES/brief_started"
+  while [ -e "$GATES/hold_brief" ]; do sleep 0.1; done
+  emit '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+*sushi-plan*)
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
+  cat "$GATES/plan_reply.json" ;;
+*"You judge"*)
+  emit '"{\"verdict\": \"feasible\", \"reason\": \"ok\"}"' ;;
+*)
+  echo implement-start >> "$ORDER_LOG"
+  echo changed > CHANGED_MARKER.txt
+  emit '"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"' ;;
+esac
+"###;
+
+/// A verify command and a final check that leave a marker only when they run
+/// in a base checkout (`base-runs`), where the background jobs run them.
+fn base_markers(gates: &Path) -> (String, String) {
+    let marker = |name: &str| {
+        format!(
+            "case \"$PWD\" in */base-runs/*) touch {}/{name};; esac",
+            gates.display()
+        )
+    };
+    (marker("base_verify"), marker("base_final"))
+}
+
+fn gated_daemon(scripts: &Path, gates: &Path) -> Daemon {
+    let script = fake_harness_script(scripts, "gated.sh", GATED);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("ORDER_LOG", scripts.join("order.log").to_str().unwrap()),
+        ("GATES", gates.to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["review"] = json!("claude-opus");
+    settings["answerPolicy"] = json!(false);
+    daemon.request("settings.set", json!({"settings": settings}));
+    daemon
+}
+
+/// Waits for both base markers while the brief check is held, then lets the
+/// brief check go and the task finish.
+fn base_jobs_run_beside_the_brief_check(daemon: &Daemon, gates: &Path, scripts: &Path, id: &str) {
+    wait_until("the brief check to start", || {
+        gates.join("brief_started").exists().then_some(())
+    });
+    wait_until("the base runs to start beside the brief check", || {
+        (gates.join("base_verify").exists() && gates.join("base_final").exists()).then_some(())
+    });
+    // Still held: the brief check has not returned and no attempt began.
+    assert!(gates.join("hold_brief").exists());
+    assert!(log_lines(&scripts.join("order.log")).is_empty());
+    std::fs::remove_file(gates.join("hold_brief")).unwrap();
+    let done = poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "waiting"));
+    assert_eq!(done["status"], "done", "{done}");
+}
+
+#[test]
+fn the_base_jobs_start_before_the_brief_check_of_a_task_with_explicit_criteria_returns() {
+    let scripts = tempfile::tempdir().unwrap();
+    let gates = tempfile::tempdir().unwrap();
+    let daemon = gated_daemon(scripts.path(), gates.path());
+    std::fs::write(gates.path().join("hold_brief"), "").unwrap();
+    let repo = init_git_repo();
+    let (verify, final_check) = base_markers(gates.path());
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Explicit criteria",
+            "goal": "Write the marker",
+            "criteria": ["The marker file exists"],
+            "verify": [verify],
+            "finalVerify": [final_check],
+            "start": true,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    base_jobs_run_beside_the_brief_check(&daemon, gates.path(), scripts.path(), &id);
+    let worktree = daemon.request("task.get", json!({"id": id}))["worktree"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[test]
+fn the_base_jobs_start_with_the_stored_draft_before_its_brief_check_returns() {
+    let scripts = tempfile::tempdir().unwrap();
+    let gates = tempfile::tempdir().unwrap();
+    let daemon = gated_daemon(scripts.path(), gates.path());
+    std::fs::write(gates.path().join("hold_brief"), "").unwrap();
+    let (verify, final_check) = base_markers(gates.path());
+    let plan = json!({
+        "title": "Planned",
+        "goal": "Write the marker",
+        "tier": "standard",
+        "criteria": ["The marker file exists"],
+        "verify": [verify],
+        "finalVerify": [final_check],
+        "questions": [],
+    });
+    let reply = json!({
+        "type": "result",
+        "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "result": format!("```sushi-plan\n{plan}\n```"),
+    });
+    std::fs::write(gates.path().join("plan_reply.json"), reply.to_string()).unwrap();
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "write the marker",
+            "start": true,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    base_jobs_run_beside_the_brief_check(&daemon, gates.path(), scripts.path(), &id);
+    let worktree = daemon.request("task.get", json!({"id": id}))["worktree"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    daemon.shutdown_and_wait();
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
 const PLANNER: &str = r#"#!/bin/sh
 cat > /dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'

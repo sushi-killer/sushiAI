@@ -319,7 +319,6 @@ pub(super) fn advance_after_failure(
             until: None,
             by: AnswerSource::Policy,
         });
-        task.queue.queue_reason = Some(reason.clone());
         task.decisions.push(format!("Park: {reason} (by policy)"));
         task.question = None;
         task.status = TaskStatus::Queued;
@@ -387,7 +386,6 @@ pub(super) fn advance_after_failure(
                     until: None,
                     by: AnswerSource::Policy,
                 });
-                task.queue.queue_reason = Some(reason.clone());
                 task.decisions.push(format!("Park: {reason} (by policy)"));
                 task.question = None;
                 task.status = TaskStatus::Queued;

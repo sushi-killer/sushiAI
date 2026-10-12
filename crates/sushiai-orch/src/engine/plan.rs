@@ -515,8 +515,8 @@ pub(super) fn store_draft(
     } else {
         split_verify_commands(worktree, &kept)
     };
-    // What the planner says the task edits: the queue holds it back while
-    // another live task on the same base holds any of these paths.
+    // What the planner says the task edits: a hint that orders sibling
+    // subtasks. It never holds a lease; only files really changed do.
     if task.paths.is_empty() {
         task.paths = draft
             .paths
@@ -1067,6 +1067,11 @@ pub(super) async fn run_plan_stage(
         };
 
         store_draft(app, &mut task, idx, &draft, &settings, &worktree);
+        // The base checks of the draft run beside the brief check. A split
+        // parent never implements, so its parts check their own commands.
+        if draft.subtasks.is_empty() {
+            start_base_checks(app, &mut task, cancel);
+        }
 
         // Do the draft's own requirements contradict each other? One
         // redraft, once per task; the check runs again on the new draft.
@@ -1108,6 +1113,13 @@ pub(super) async fn run_plan_stage(
             }
             BriefAction::Cancelled => return end_plan_stage(app, task_id, Some(idx)).await,
             BriefAction::Proceed => {}
+        }
+        // A redraft or a rewrite of the brief check starts the jobs again for
+        // the commands it changed.
+        if draft.subtasks.is_empty() {
+            if let Ok(Some(mut rewritten)) = app.store.load_task(task_id) {
+                start_base_checks(app, &mut rewritten, cancel);
+            }
         }
 
         // The plan gate: code checks and one plan review by another model

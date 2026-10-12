@@ -488,6 +488,13 @@ export type Deliverable = {
   placed?: string;
 };
 
+/** Why a task is not running (`wait` on the task JSON). */
+export type Wait =
+  | { kind: "slot"; running: number; limit: number }
+  | { kind: "subtaskSlot"; running: number; limit: number }
+  | { kind: "dependency"; titles: string[] }
+  | { kind: "file"; taskId: string; title: string; path: string };
+
 export type Task = {
   id: string;
   /** Set by the app on a task of a remote host ("ssh:<id>"); absent locally. */
@@ -536,12 +543,12 @@ export type Task = {
   /** Repo-relative files or directories the planner said this subtask edits;
    * overlapping siblings run one after another. */
   paths?: string[];
-  /** Why the task sits queued: it waits for another task's lease, e.g.
-   * `waits for "Add a" on src/x`. Gone once it starts. */
-  queueReason?: string;
-  /** The task waited for a lease; its worktree is carried onto the base head
-   * before its first attempt. */
-  waitedOnLease?: boolean;
+  /** What the task waits for right now: a global slot, a subtask slot, the
+   * tasks it depends on, or a file another task has really changed. Gone
+   * once the wait is over. */
+  wait?: Wait;
+  /** An explicit pause: the task stays queued until it is started again. */
+  park?: { reason: string; until?: string; by?: string };
   relayOf?: string;
   relayBase?: string;
   /** The ordered parts of a merged task: each item's check runs after every

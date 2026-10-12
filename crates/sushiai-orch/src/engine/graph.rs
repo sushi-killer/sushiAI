@@ -100,6 +100,32 @@ fn state_of(waits: Vec<&Task>) -> Waits {
     }
 }
 
+/// Titles of what a queued task waits for, for its `dependency` wait: what
+/// it depends on that is not done, else what its parent waits for.
+pub(super) fn unmet_titles(task: &Task, all: &[Task]) -> Vec<String> {
+    let unmet = |of: &Task| -> Vec<String> {
+        waits_for(of, all)
+            .iter()
+            .filter(|t| t.status != TaskStatus::Done)
+            .map(|t| t.title.clone())
+            .collect()
+    };
+    let mut titles = unmet(task);
+    if titles.is_empty() {
+        if let Some(parent) = task
+            .parent
+            .as_deref()
+            .and_then(|pid| all.iter().find(|t| t.id == pid))
+        {
+            titles = unmet(parent);
+            if titles.is_empty() {
+                titles.push(parent.title.clone());
+            }
+        }
+    }
+    titles
+}
+
 /// Asked when something a task waits for ended `failed`/`stopped`; its
 /// answer is handled by `answer_dependency_question`, not the attempt loop.
 pub(super) const DEPENDENCY_QUESTION: &str = "A task this one waits for ended";
@@ -475,6 +501,8 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
                 mark_stopped_if_not_already(app, &task_id).await;
                 return ParentEnd::Finished;
             }
+            // A parent has no review to run again.
+            Landing::Rereview => {}
             // Refused: done on its own branch, as with land off.
             Landing::NoParent => {}
         }
@@ -632,6 +660,8 @@ pub(super) async fn run_parent(
             TaskStatus::Drafting | TaskStatus::Queued if child.queue.park.is_none() => {
                 if matches!(waits_state(child, &all), Waits::Ready | Waits::Nothing) {
                     app.spawn_child_loop(&all, child);
+                } else {
+                    app.note_dependency_wait(child, &all);
                 }
             }
             TaskStatus::Stopped | TaskStatus::Failed if restarted => {
@@ -969,6 +999,34 @@ pub(super) enum Landing {
     /// The base branch's checkout has uncommitted changes: the task waits
     /// `landing` and is retried.
     Waiting,
+    /// The carry changed a file the review saw: the attempt's verify and
+    /// review run again on the carried tree, with no new implement attempt.
+    Rereview,
+}
+
+/// Start of the decision line of a landing that sent the attempt back to
+/// verify and the review.
+const REREVIEW_LINE: &str = "Land: the carry";
+/// How often one task goes back to verify and the review after a landing
+/// carry before the carried tree lands on the checks alone.
+const MAX_REREVIEWS: u32 = 3;
+
+/// The files the review saw that the carry onto `new_base` rewrote: files
+/// the task changed, in the reviewed tree or the carried one, that differ
+/// between the two. Empty without a review.
+async fn carry_changed_reviewed(worktree: &Path, attempt: &Attempt, new_base: &str) -> Vec<String> {
+    let (Some(tree), Some(old_base)) = (attempt.review_tree.clone(), attempt.review_base.clone())
+    else {
+        return Vec::new();
+    };
+    let (wt, new_base) = (worktree.to_path_buf(), new_base.to_string());
+    tokio::task::spawn_blocking(move || {
+        let now = git::worktree_tree(&wt)?;
+        git::own_changes_between(&wt, &tree, &old_base, &now, &new_base)
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+    .unwrap_or_default()
 }
 
 /// Lands a finished child on its parent's branch, one child per parent at a
@@ -1191,6 +1249,23 @@ pub(super) async fn carry_and_check(
                     .push(format!("Land: {branch} already contains this work"));
                 return Ok(true);
             }
+            // A carry that rewrote a file the review saw leaves that review
+            // judging another tree: verify and the review run again.
+            if let Some(idx) = idx {
+                let files = carry_changed_reviewed(worktree, &task.attempts[idx], &new_sha).await;
+                let reruns = task
+                    .decisions
+                    .iter()
+                    .filter(|d| d.starts_with(REREVIEW_LINE))
+                    .count() as u32;
+                if !files.is_empty() && reruns < MAX_REREVIEWS {
+                    task.decisions.push(format!(
+                        "{REREVIEW_LINE} onto {branch} changed {} which the review saw; verify and the review run again on the carried tree",
+                        files.join(", ")
+                    ));
+                    return Err(Landing::Rereview);
+                }
+            }
             let (verify_commands, skipped) =
                 scope_task_checks(app, task, worktree, &new_sha, &task.verify).await;
             record_check_decisions(task, skipped);
@@ -1349,7 +1424,6 @@ impl App {
                 .is_some_and(|target| target.status == TaskStatus::Done);
             if ready && !task.archived && !self.controls.lock().unwrap().contains_key(&task.id) {
                 task.queue.park = None;
-                task.queue.queue_reason = None;
                 task.decisions
                     .push("Park: the until task is done, resuming".into());
                 task.updated_at = now_ms();
@@ -1375,8 +1449,8 @@ impl App {
             {
                 continue;
             }
-            // Waiting for a lease: `advance_queue` starts it when it is free.
-            if task.queue.queue_reason.is_some() && self.lease_blocker(task).is_some() {
+            // Waiting for a file: `advance_queue` starts it when it is free.
+            if self.file_blocked(task) {
                 continue;
             }
             // A subtask never starts while its parent still waits for the
@@ -1443,11 +1517,24 @@ impl App {
                 Waits::Ended(ended) if !asking => {
                     self.ask_dependency_question(task, &all, &ended);
                 }
+                Waits::Pending if !parent && !asking => self.note_dependency_wait(task, &all),
                 _ => {}
             }
         }
         self.advance_queue(repo);
         self.advance_autopilot();
+    }
+
+    /// A task with no loop that waits for other tasks shows which ones.
+    fn note_dependency_wait(&self, task: &Task, all: &[Task]) {
+        let wait = Wait::Dependency {
+            titles: unmet_titles(task, all),
+        };
+        if task.queue.wait.as_ref() != Some(&wait) {
+            if let Err(e) = self.update_task(&task.id, |t| t.queue.wait = Some(wait)) {
+                eprintln!("orch: updating task {} failed: {e}", task.id);
+            }
+        }
     }
 
     /// Starts `child`'s loop unless its parent already has `childParallel`
@@ -1465,6 +1552,15 @@ impl App {
                 .count()
         };
         if running >= cap {
+            let wait = Wait::SubtaskSlot {
+                running: running as u32,
+                limit: cap as u32,
+            };
+            if child.queue.wait.as_ref() != Some(&wait) {
+                if let Err(e) = self.update_task(&child.id, |t| t.queue.wait = Some(wait)) {
+                    eprintln!("orch: updating task {} failed: {e}", child.id);
+                }
+            }
             return false;
         }
         self.spawn_task_loop(child.id.clone(), true);

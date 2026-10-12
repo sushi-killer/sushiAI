@@ -2050,14 +2050,10 @@ pub struct QueueState {
     pub carry_conflicts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carry_conflict_attempt: Option<u32>,
-    /// Why the task sits `queued`: it waits for another task's lease
-    /// ("waits for <task> on <path>"). Cleared when it starts.
+    /// What the task waits for right now, if anything: a global slot, a
+    /// subtask slot, dependencies, or a file another task has changed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue_reason: Option<String>,
-    /// The task waited for a lease: its worktree is carried onto the base
-    /// head before its first attempt.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub waited_on_lease: bool,
+    pub wait: Option<Wait>,
     /// The sibling subtask whose branch this one continues (a relay): it
     /// starts from that subtask's commit instead of the parent's head.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2086,6 +2082,28 @@ pub struct QueueState {
     /// (ms); the next reminder is one interval later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_reminded_at: Option<i64>,
+}
+
+/// Why a task is not running, as the panel shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Wait {
+    /// All global `parallel` slots are taken.
+    Slot { running: u32, limit: u32 },
+    /// The parent already runs `childParallel` subtasks.
+    SubtaskSlot { running: u32, limit: u32 },
+    /// Titles of the tasks it depends on that are not done.
+    Dependency { titles: Vec<String> },
+    /// Another live task has really changed a file this task tried to edit.
+    File {
+        task_id: String,
+        title: String,
+        path: String,
+    },
 }
 
 /// An explicit pause, independent of file-lease waiting or the backlog.

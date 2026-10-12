@@ -24,6 +24,7 @@ import {
   statusTone,
   unlandedLabel,
   variantLabel,
+  waitLabel,
 } from "./helpers";
 import type { Tone } from "../ui/tone";
 import type { Attempt, Settings, Task } from "./types";
@@ -593,6 +594,12 @@ export function TaskDetail({
     ? tasks.find((t) => t.id === selected.parent)
     : undefined;
   const waitsFor = dependencyTitles(selected, tasks);
+  // A dependency wait repeats what `after ...` already says.
+  const waitNote =
+    selected.wait &&
+    !(selected.wait.kind === "dependency" && waitsFor.length > 0)
+      ? waitLabel(selected.wait)
+      : "";
   const done = selected.status === "done";
   const mark = selected.leadTouch;
   const statusTag: { tone: Tone; label: string } | null = done
@@ -878,7 +885,7 @@ export function TaskDetail({
             Your repo may expect a branch name like feature/&lt;slug&gt;.
           </p>
         )}
-        {(parentTask || waitsFor.length > 0 || selected.queueReason) && (
+        {(parentTask || waitsFor.length > 0 || waitNote) && (
           <p className="td-facts">
             {parentTask && (
               <button className="td-link" onClick={() => onOpen(parentTask.id)}>
@@ -887,8 +894,8 @@ export function TaskDetail({
             )}
             {parentTask && waitsFor.length > 0 && " · "}
             {waitsFor.length > 0 && `after ${waitsFor.join(", ")}`}
-            {selected.queueReason &&
-              `${parentTask || waitsFor.length > 0 ? " · " : ""}${selected.queueReason}`}
+            {waitNote &&
+              `${parentTask || waitsFor.length > 0 ? " · " : ""}${waitNote}`}
           </p>
         )}
         {done ? (
@@ -1038,11 +1045,15 @@ export function TaskDetail({
                               after {after.join(", ")}
                             </span>
                           )}
-                          {child.queueReason && (
-                            <span className="td-faint">
-                              {child.queueReason}
-                            </span>
-                          )}
+                          {child.wait &&
+                            !(
+                              child.wait.kind === "dependency" &&
+                              after.length > 0
+                            ) && (
+                              <span className="td-faint">
+                                {waitLabel(child.wait)}
+                              </span>
+                            )}
                           <span className="td-faint">
                             {statusBadgeLabel(child)}
                           </span>

@@ -358,6 +358,10 @@ pub(super) struct BasePreflight {
 pub(super) struct PreflightJob {
     result: tokio::sync::watch::Receiver<Option<Arc<BasePreflight>>>,
     applied: std::sync::atomic::AtomicBool,
+    /// The commands the job runs on the base; a job for other commands is
+    /// replaced, not reused.
+    commands: Vec<String>,
+    cancel: CancelToken,
 }
 
 impl PreflightJob {
@@ -378,33 +382,50 @@ impl PreflightJob {
     }
 }
 
+/// The commands the base preflight runs for `task`: every `verify` and
+/// `checks` command, once each (`finalVerify` has its own base jobs).
+fn preflight_commands(task: &Task) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for c in task.verify.iter().chain(task.checks.iter().map(|c| &c.run)) {
+        if !c.trim().is_empty() && !commands.contains(c) {
+            commands.push(c.clone());
+        }
+    }
+    commands
+}
+
 /// Starts the base preflight of `task` in the background, holding no slot:
 /// every `verify` and `checks` command runs on the base once (`run_on_base`)
 /// and each failure goes to the feasibility judge. The result only goes into
-/// the app's map; nothing is saved here. A no-op while a job of this task is
-/// running or finished. `loop_cancel` stops the job.
+/// the app's map; nothing is saved here. A no-op while a job of this task
+/// for the same commands is running or finished; a job for other commands
+/// (the draft or the brief check rewrote them) is cancelled and started
+/// again. `loop_cancel` stops the job.
 pub(super) fn spawn_base_preflight(app: &Arc<App>, task: &Task, loop_cancel: &CancelToken) {
+    let commands = preflight_commands(task);
     let mut jobs = app.base_preflights.lock().unwrap();
-    if jobs
-        .get(&task.id)
-        .is_some_and(|j| j.running() || j.finished())
-    {
-        return;
+    if let Some(job) = jobs.get(&task.id) {
+        if job.commands == commands && (job.running() || job.finished()) {
+            return;
+        }
+        job.cancel.cancel();
     }
     let (tx, rx) = tokio::sync::watch::channel(None);
+    // The loop's cancel reaches the job through the job's own token, which
+    // the base runs watch, so their scratch checkout is cleaned up.
+    let cancel = CancelToken::new();
     jobs.insert(
         task.id.clone(),
         Arc::new(PreflightJob {
             result: rx,
             applied: std::sync::atomic::AtomicBool::new(false),
+            commands,
+            cancel: cancel.clone(),
         }),
     );
     drop(jobs);
     let (app, task, loop_cancel) = (app.clone(), task.clone(), loop_cancel.clone());
     tokio::spawn(async move {
-        // The loop's cancel reaches the job through the job's own token,
-        // which the base runs watch, so their scratch checkout is cleaned up.
-        let cancel = CancelToken::new();
         let watcher = {
             let job_cancel = cancel.clone();
             tokio::spawn(async move {
@@ -418,6 +439,24 @@ pub(super) fn spawn_base_preflight(app: &Arc<App>, task: &Task, loop_cancel: &Ca
             let _ = tx.send(Some(Arc::new(result)));
         }
     });
+}
+
+/// Starts the base jobs of `task` that its brief check does not need to
+/// wait for: the preflight of its `verify` and `checks` and the base runs of
+/// its `finalVerify`. Called as soon as the commands exist and again after a
+/// rewrite; a job for commands that did not change is not started twice.
+pub(super) fn start_base_checks(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) {
+    if task.brief_check.feasibility_done {
+        return;
+    }
+    if heal_grep_dashes(task) {
+        app.verify_cache.lock().unwrap().remove(&task.id);
+        task.updated_at = now_ms();
+        app.save_task_logged(task);
+        app.broadcast_task(task);
+    }
+    spawn_base_preflight(app, task, cancel);
+    start_final_base_jobs(app, task);
 }
 
 /// The job body. `None`: cancelled.
@@ -434,12 +473,7 @@ async fn run_base_preflight(
     // `finalVerify` is not judged here: its base runs are the background
     // jobs of `start_final_base_jobs` and the finals gate after review. A
     // command that is in `verify` as well is still judged.
-    let mut commands: Vec<String> = Vec::new();
-    for c in task.verify.iter().chain(task.checks.iter().map(|c| &c.run)) {
-        if !c.trim().is_empty() && !commands.contains(c) {
-            commands.push(c.clone());
-        }
-    }
+    let commands = preflight_commands(task);
     let run_dir = match app
         .store
         .claim_helper_run_dir(&task.id, "feasibility-base", None)
@@ -1121,6 +1155,28 @@ pub(super) async fn heal_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_rewritten_verify_starts_the_preflight_again_for_the_new_commands() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.verify = vec!["echo one".into()];
+        let cancel = CancelToken::new();
+        let job = |app: &Arc<App>| app.base_preflights.lock().unwrap()[&task.id].clone();
+        spawn_base_preflight(&app, &task, &cancel);
+        let first = job(&app);
+        // The same commands again: the job is not started twice.
+        spawn_base_preflight(&app, &task, &cancel);
+        assert!(Arc::ptr_eq(&first, &job(&app)));
+        // A rewrite replaces the job and stops the old one.
+        task.verify = vec!["echo two".into()];
+        spawn_base_preflight(&app, &task, &cancel);
+        let second = job(&app);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.commands, vec!["echo two".to_string()]);
+        assert!(first.cancel.is_cancelled());
+        assert!(!second.cancel.is_cancelled());
+    }
 
     #[test]
     fn grep_patterns_starting_with_a_dash_get_a_double_dash() {

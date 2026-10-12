@@ -179,7 +179,7 @@ stateDiagram-v2
   drafting --> waiting: planner question
   drafting --> queued: plan parsed
   drafting --> running: plan split into subtasks<br/>(the task becomes their parent)
-  queued --> running: parallel slot free,<br/>every dependsOn task done
+  queued --> running: parallel slot free (wait slot),<br/>childParallel slot free (wait subtaskSlot),<br/>every dependsOn task done (wait dependency)
   queued --> waiting: a dependsOn task or child<br/>ended failed/stopped
   running --> waiting: blocked / protected path /<br/>review gave no verdict /<br/>attempts exhausted
   waiting --> queued: answer
@@ -193,7 +193,7 @@ stateDiagram-v2
   waiting --> stopped: task.stop
   running --> stopped: task.stop
   note right of parked
-    Stored as queued with park and queueReason.
+    Stored as queued with a park record.
     No question, slot, or file lease.
   end note
   waiting --> stopped: answer "stop"
@@ -312,8 +312,8 @@ Before the full verify of every attempt, orchd runs each item's check and
 fails the attempt with the failing items by name.
 
 `orch.task.park {id, reason, until?, source?}` stores a park record
-(`reason`, `until`, `by`) and leaves the task `queued` with its reason in
-`queueReason`. A live loop is cancelled and its attempt is interrupted, never
+(`reason`, `until`, `by`) and leaves the task `queued`; the panel shows
+`park.reason`. A live loop is cancelled and its attempt is interrupted, never
 failed. The question is cleared. Parked tasks are pending to parents and
 dependents, so they raise no `dependency_ended` question. The graph, lease
 queue, recovery and autopilot never start them. `task.start` resumes one;
@@ -329,6 +329,36 @@ a waiting question. File leases are pruned by stored status as well as live
 loop registration: stopped, failed, done and parked tasks hold no lease,
 even while their loops wind down. Stop and park paths advance the queue at
 once; a waiting question with a live loop retains its lease.
+
+A lease holds only the files a task has really changed, never its planned
+`paths`. orchd reads them from the worktree diff (`git::changed_files`) every
+few seconds while an attempt runs and when `hook.edit` is asked, so a file a
+shell command wrote counts like an Edit tool edit. `hook.edit` refuses an edit
+of a file another live task on the same repo and base has changed; the task
+stays running and carries a `file` wait until that task lands or ends. The
+lease gate before a loop starts compares the same real changes, so a fresh task
+is never parked by a plan. Planned paths only order sibling subtasks at the
+split (`serialise_overlapping`, `relay_links`). Two top-level tasks whose plans
+overlap but whose edits do not run and land together. Landing carries the
+work onto the newest base head; when that carry conflicts, the task gets one
+more implement attempt on the newest base whose brief names the conflicting
+files. When a clean carry rewrites a file the review saw, verify and the review
+run again on the carried tree (no new implement attempt) before the task lands;
+the shared final checks always run on the tree that lands.
+
+A waiting task carries `wait`: `slot` (the global `parallel` slots are taken,
+with running and limit), `subtaskSlot` (the parent already runs `childParallel`
+parts), `dependency` (titles of what it waits for) or `file` (task, title and
+path of the holder of a file it was refused). `waitLabel` in
+`src/orchestrator/helpers.ts` is the one place that turns a wait into text;
+the rail row, the subtask line and the task detail show it instead of the
+status word while it is set.
+
+The base preflight (`spawn_base_preflight`) and the final base jobs
+(`start_final_base_jobs`) start as soon as a draft is stored, or before the
+brief check of a task created with explicit criteria, so they run beside the
+brief check. A redraft or a brief-check rewrite that changes the commands
+starts them again for the new commands; no check that gates landing is skipped.
 
 `engine/sync.rs` resolves `orch.task.sync {id}` from any graph part to its
 top-level task and merges that task's `baseRef` into the parent branch under

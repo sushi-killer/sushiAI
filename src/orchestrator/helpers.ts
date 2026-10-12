@@ -14,6 +14,7 @@ import type {
   Task,
   Tier,
   Variant,
+  Wait,
 } from "./types";
 
 export type TaskCreateParams = {
@@ -638,7 +639,8 @@ export function planDrafts(tasks: Task[]): Task[] {
     (t) =>
       !t.archived &&
       (t.status === "queued" || t.status === "stopped") &&
-      !t.queueReason &&
+      !t.wait &&
+      !t.park &&
       !t.attempts.some((a) => a.stage === "implement"),
   );
 }
@@ -667,12 +669,27 @@ const FAILURE_WORDS: Partial<Record<FailureKind, string>> = {
   error: "error",
 };
 
+/** What a waiting task shows instead of its status word. */
+export function waitLabel(wait: Wait): string {
+  switch (wait.kind) {
+    case "slot":
+      return `waits for a slot · ${wait.running} of ${wait.limit} running`;
+    case "subtaskSlot":
+      return `waits for a subtask slot · ${wait.running} of ${wait.limit} running`;
+    case "dependency":
+      return `after ${wait.titles.join(", ")}`;
+    case "file":
+      return `waits for "${wait.title}" on ${wait.path}`;
+  }
+}
+
 /** A rail row's second line: why it sits where it does, in its tone. */
 export function taskReason(
   task: Task,
   tasks: Task[],
   maxAttempts?: number,
 ): string {
+  if (task.wait) return waitLabel(task.wait);
   const children = childrenOf(tasks, task.id);
   if (children.length > 0 && task.status !== "waiting") {
     const landed = children.filter((c) => c.status === "done").length;
@@ -686,7 +703,7 @@ export function taskReason(
     case "drafting":
       return "drafting the brief";
     case "queued":
-      return task.queueReason ? task.queueReason : "queued";
+      return task.park ? task.park.reason : "queued";
     case "running": {
       const stage = latestAttempt(task)?.stage;
       return `${stage === "plan" ? "brief" : (stage ?? "implement")} · attempt ${attemptOf(task, maxAttempts)}`;
@@ -730,8 +747,18 @@ export function taskMetaLine(
   return parts.join(" · ");
 }
 
-/** A subtask line under its parent in the rail: dot tone and a short state. */
+/** A subtask line under its parent in the rail: dot tone and a short state;
+ * the wait label replaces the status word while the task waits. */
 export function subtaskState(
+  task: Task,
+  tasks: Task[],
+  maxAttempts?: number,
+): { tone: Tone; label: string } {
+  const state = subtaskStatus(task, tasks, maxAttempts);
+  return task.wait ? { ...state, label: waitLabel(task.wait) } : state;
+}
+
+function subtaskStatus(
   task: Task,
   tasks: Task[],
   maxAttempts?: number,
@@ -762,7 +789,7 @@ export function subtaskState(
       });
       return {
         tone: "neutral",
-        label: waits || task.queueReason ? "waits" : "queued",
+        label: waits || task.park ? "waits" : "queued",
       };
     }
   }

@@ -31,19 +31,9 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// An unidentified process is left alone. The executable path or the name it was started
-/// under (its argv[0], like the old process-list check) must say `orchd`; on Linux
-/// `/proc/<pid>/exe` alone did not identify a freshly started copy.
+/// An unidentified process is left alone.
 fn looks_like_orchd(pid: i32) -> bool {
-    let named = |s: &str| {
-        Path::new(s)
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().contains("orchd"))
-    };
-    crate::process::executable(pid).is_some_and(|exe| named(&exe.to_string_lossy()))
-        || crate::process::argv(pid)
-            .and_then(|argv| argv.into_iter().next())
-            .is_some_and(|argv0| named(&argv0))
+    crate::process::executable(pid).is_some_and(|exe| exe.to_string_lossy().contains("orchd"))
 }
 
 fn terminate(pid: i32) {
@@ -87,7 +77,18 @@ mod tests {
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                other => return other.unwrap(),
+                other => {
+                    let child = other.unwrap();
+                    // The spawn can return before the fork has exec'd into `orchd`; until
+                    // then the pid still shows this test binary.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while !looks_like_orchd(child.id() as i32)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    return child;
+                }
             }
         }
         panic!("fake orchd stayed busy");
@@ -102,21 +103,10 @@ mod tests {
         for name in FILES {
             std::fs::write(data.join(name), child.id().to_string()).unwrap();
         }
-        let pid = child.id() as i32;
-        let seen = format!(
-            "alive {}, looks like orchd {}, exe {:?}, argv {:?}",
-            alive(pid),
-            looks_like_orchd(pid),
-            crate::process::executable(pid),
-            crate::process::argv(pid)
-        );
         stop(&data);
         // `stop` waits for the process to exit; `wait` reaps it and shows it did not survive.
         let status = child.wait().unwrap();
-        assert!(
-            !status.success(),
-            "the process was signalled: {status:?}; {seen}"
-        );
+        assert!(!status.success(), "the process was signalled: {status:?}");
         for name in FILES {
             assert!(!data.join(name).exists(), "{name} remains");
         }

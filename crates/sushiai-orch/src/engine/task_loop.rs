@@ -4010,6 +4010,8 @@ mod follow_origin_tests {
                 repo.to_str().unwrap(),
             ],
         );
+        git_in(&repo, &["config", "user.email", "test@example.com"]);
+        git_in(&repo, &["config", "user.name", "Test"]);
         // The owner merges a fix on the remote; the local main never sees it.
         std::fs::write(seed.join("fix.txt"), "fixed\n").unwrap();
         git_in(&seed, &["add", "."]);

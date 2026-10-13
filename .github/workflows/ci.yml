@@ -5,9 +5,14 @@ on:
     branches: [main, codex/**]
   pull_request:
 
+# A new push to a pull request cancels its run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # Fast feedback: build, unit tests and the repository conventions.
-  deterministic:
+  # `npm run ci` is `ci:web` and `test:daemon`; the two halves run side by side.
+  web:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -21,7 +26,31 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
-      - run: npm run ci
+      - run: npm run ci:web
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # nextest runs every test binary in parallel instead of one by one.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: npm run test:daemon
+
+  # The required check: green only when both halves of `npm run ci` are.
+  deterministic:
+    needs: [web, rust]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.web.result }}" = success && test "${{ needs.rust.result }}" = success
 
   # Hosts run the engines floor, not .nvmrc: on Node 22 an awaited promise
   # held only by an unref'd timer stopped the suite there and nowhere else.

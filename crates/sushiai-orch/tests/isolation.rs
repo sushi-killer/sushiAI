@@ -243,12 +243,22 @@ fn a_stored_project_mismatch_fails_without_starting_the_harness() {
 }
 
 fn assert_no_secret(dir: &Path, secret: &str) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
+    // The daemon may remove a temporary file or folder while this walks the
+    // tree; what is gone holds no secret.
+    let entries = match fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        entries => entries.unwrap(),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
         if path.is_dir() {
             assert_no_secret(&path, secret);
         } else {
-            let bytes = fs::read(&path).unwrap();
+            let bytes = match fs::read(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                read => read.unwrap(),
+            };
             assert!(
                 !bytes
                     .windows(secret.len())

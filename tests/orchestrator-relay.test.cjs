@@ -117,13 +117,10 @@ test("host all lists every saved host, labelled, and names the ones it could not
   relay("local", "r1", "all", "task.list");
   const answer = await replyTo("r1");
   const { results, unreachable } = answer.params.result;
-  assert.deepEqual(
-    results.map((task) => [task.id, task.host]).sort(),
-    [
-      ["a", "local"],
-      ["b", "ssh:lab"],
-    ],
-  );
+  assert.deepEqual(results.map((task) => [task.id, task.host]).sort(), [
+    ["a", "local"],
+    ["b", "ssh:lab"],
+  ]);
   assert.deepEqual(
     unreachable.map((item) => item.host),
     ["ssh:down"],

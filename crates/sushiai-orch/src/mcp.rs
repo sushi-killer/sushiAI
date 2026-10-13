@@ -35,7 +35,7 @@ pub const READ_ONLY_TOOLS: [&str; 5] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 24] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
     "task_list",
     "task_get",
     "task_create",
@@ -60,7 +60,46 @@ pub const ORCHESTRATOR_TOOLS: [&str; 24] = [
     "repo_notes_add",
     "repo_notes_remove",
     "costs_summary",
+    "hosts_list",
 ];
+
+/// The tools an orchestrator bridge may point at another saved host with `host`; the call
+/// then goes to the daemon's `relay.call`, which the desktop app answers.
+const HOST_TOOLS: [&str; 13] = [
+    "task_list",
+    "task_get",
+    "task_create",
+    "task_backlog",
+    "task_start",
+    "task_report",
+    "task_pr",
+    "task_lead_touch",
+    "task_answer",
+    "task_amend",
+    "task_archive",
+    "task_unarchive",
+    "inbox_read",
+];
+
+/// The tools whose `host` may be `all`: every saved host at once.
+const ALL_HOSTS_TOOLS: [&str; 2] = ["task_list", "inbox_read"];
+
+/// The relay method on the daemon (`orch.relay.call`).
+const RELAY: &str = "relay.call";
+
+fn host_schema(tool: &str) -> Value {
+    let all = if ALL_HOSTS_TOOLS.contains(&tool) {
+        ", or \"all\" for every saved host (results labelled with their host, unreachable hosts listed)"
+    } else {
+        ""
+    };
+    json!({
+        "type": "string",
+        "description": format!(
+            "Run this on another saved host: \"local\" (This Mac) or \"ssh:<id>\" from hosts_list{all}. Omit for this machine's own orchestrator."
+        ),
+    })
+}
 
 fn from_schema() -> Value {
     json!({
@@ -377,6 +416,12 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 },
             }),
         ),
+        (
+            "hosts_list",
+            "hosts.list",
+            "List the hosts whose orchestrator you can reach with a tool's `host` argument: This Mac (\"local\") and every saved ssh host (\"ssh:<id>\"), each with its name and state (ready, connecting, idle, error). Needs the sushiai desktop app running.",
+            json!({"type": "object", "properties": {}}),
+        ),
     ]
 }
 
@@ -412,9 +457,11 @@ fn tools_list_result(bridge: &Bridge) -> Value {
         .into_iter()
         .filter(|(name, ..)| bridge.offers(name))
         .map(|(name, _, description, mut input_schema)| {
-            if bridge.task.is_some() {
-                if let Some(props) = input_schema["properties"].as_object_mut() {
+            if let Some(props) = input_schema["properties"].as_object_mut() {
+                if bridge.task.is_some() {
                     props.remove("from");
+                } else if HOST_TOOLS.contains(&name) {
+                    props.insert("host".to_string(), host_schema(name));
                 }
             }
             json!({"name": name, "description": description, "inputSchema": input_schema})
@@ -514,13 +561,25 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
     let Some(method) = orch_method_for(bridge, &p.name) else {
         return tool_error(format!("unknown tool: {}", p.name));
     };
-    let args = if p.arguments.is_null() {
+    let mut args = if p.arguments.is_null() {
         json!({})
     } else {
         p.arguments
     };
+    let host = match take_host(bridge, &p.name, &mut args) {
+        Ok(host) => host,
+        Err(message) => return tool_error(message),
+    };
+    if method == "hosts.list" {
+        return match (bridge.call)(RELAY, json!({"method": method, "params": {}})) {
+            Ok(result) => tool_ok(result),
+            Err(message) => tool_error(message),
+        };
+    }
+    // The project servers of a task on another host are resolved by the app for that host.
     let task_mcp = std::env::var("ORCHD_TASK_MCP")
         .ok()
+        .filter(|_| host.is_none())
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
     let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
@@ -533,10 +592,52 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
     );
     let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
-    match (bridge.call)(method, args) {
+    let reply = match host {
+        Some(host) => (bridge.call)(
+            RELAY,
+            json!({"host": host, "method": method, "params": args}),
+        ),
+        None => (bridge.call)(method, args),
+    };
+    match reply {
         Ok(result) => tool_ok(result),
         Err(message) => tool_error(message),
     }
+}
+
+/// Takes the optional `host` out of a tool's arguments: `local`, `ssh:<id>`, or `all` where
+/// the tool lists. A task bridge never names a host, and a tool that cannot run elsewhere
+/// refuses one rather than quietly running here.
+fn take_host(bridge: &Bridge, tool: &str, args: &mut Value) -> Result<Option<String>, String> {
+    let Some(value) = args.as_object_mut().and_then(|obj| obj.remove("host")) else {
+        return Ok(None);
+    };
+    if bridge.task.is_some() {
+        return Err(format!("{tool} takes no host on a task's bridge"));
+    }
+    if value.is_null() {
+        return Ok(None);
+    }
+    if !HOST_TOOLS.contains(&tool) {
+        return Err(format!("{tool} takes no host"));
+    }
+    let Some(host) = value.as_str().filter(|h| !h.is_empty()) else {
+        return Err("host must be \"local\", \"ssh:<id>\" or \"all\"".to_string());
+    };
+    let valid = host == "local"
+        || host.strip_prefix("ssh:").is_some_and(|id| !id.is_empty())
+        || (host == "all" && ALL_HOSTS_TOOLS.contains(&tool));
+    if !valid {
+        let all = if ALL_HOSTS_TOOLS.contains(&tool) {
+            ", \"ssh:<id>\" or \"all\""
+        } else {
+            " or \"ssh:<id>\""
+        };
+        return Err(format!(
+            "host must be \"local\"{all} (see hosts_list), not {host:?}"
+        ));
+    }
+    Ok(Some(host.to_string()))
 }
 
 /// A task the agent creates gets the MCP servers the app resolved for its
@@ -816,6 +917,7 @@ mod tests {
                 "repo_notes_add",
                 "repo_notes_remove",
                 "costs_summary",
+                "hosts_list",
             ]
         );
         assert_eq!(names, ORCHESTRATOR_TOOLS);

@@ -65,6 +65,20 @@ For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` 
 - Tasks message you through `ask_orchestrator`; reply with `orchestrator_reply`, read
   `inbox_read`. `peer_send {to, text}` reaches a task on its next attempt.
 
+## Other hosts
+
+- Without `host`, every tool works on this machine's orchestrator. `hosts_list` names the hosts
+  the owner saved in the sushiAI app (`local` for This Mac, `ssh:<id>` per ssh host) with their
+  state; it never shows an address, port or key file.
+- `task_list`, `task_get`, `task_create`, `task_backlog`, `task_start`, `task_report`,
+  `task_pr`, `task_lead_touch`, `task_answer`, `task_amend`, `task_archive`, `task_unarchive`
+  and `inbox_read` take `host` to act on that host. A task id belongs to its host, so keep
+  passing the same `host` for it. Every returned task and message carries its `host`.
+- `task_list` and `inbox_read` also take `host: "all"`: every host's results plus an
+  `unreachable` list of hosts that could not answer.
+- These calls go through the sushiAI desktop app's existing host connections, so the app must
+  be running. Settings, secrets, deleting tasks and chats never cross hosts.
+
 ## Teach it a repository
 
 - `repo_notes_add {repo, text}` records a repo-specific rule every future task and plan sees

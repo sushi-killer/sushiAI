@@ -52,7 +52,11 @@ fn a_reply_with_an_error_fails_the_caller_with_that_text() {
     let err = agent
         .response("orch.relay.call", sent)
         .expect_err("refused");
-    assert!(err.message.contains("Lab is not connected"), "{}", err.message);
+    assert!(
+        err.message.contains("Lab is not connected"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]

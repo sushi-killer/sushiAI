@@ -63,7 +63,15 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
         })
         .collect();
     drop(base_runs);
+    let may_land_on_default = app.settings.read().unwrap().may_land_on_default(&task.repo);
     let base_moves = task.base_ref.as_ref().is_some_and(|base_ref| {
+        // Nothing lands on a default branch that landing may not move, so a
+        // wait for it to move would never end.
+        if !may_land_on_default
+            && git::default_branch(Path::new(&task.repo)).as_deref() == Some(base_ref.as_str())
+        {
+            return false;
+        }
         app.store
             .list_tasks()
             .unwrap_or_default()
@@ -1225,5 +1233,50 @@ mod timeout_tests {
         assert_eq!(task.criteria, criteria);
         assert!(task.assumptions.is_empty());
         assert_helper_timeout(&task, "answer judge");
+    }
+}
+
+#[cfg(test)]
+mod base_moves_tests {
+    use super::*;
+    use crate::engine::test_support::{git_in, init_git_repo, task_with_status, test_app};
+
+    #[test]
+    fn a_default_branch_landing_may_not_move_is_never_waited_for() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        git_in(&repo, &["branch", "-M", "main"]);
+        let on_main = |status| {
+            let mut task = task_with_status(status);
+            task.repo = repo.display().to_string();
+            task.worktree = task.repo.clone();
+            task.base_ref = Some("main".into());
+            task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+            task
+        };
+        let task = on_main(TaskStatus::Waiting);
+        let mut other = on_main(TaskStatus::Running);
+        other.id = "other".into();
+        app.store.save_task(&task).unwrap();
+        app.store.save_task(&other).unwrap();
+        let question = Question::new(
+            "make verify already fails on base",
+            vec![base_check::PRE_EXISTING_RETRY.into(), "stop".into()],
+            QuestionKind::PreexistingFailure,
+            AskedBy::Verify,
+        );
+
+        let (_, base_moves) = policy_base_context(&app, &task, &question);
+        assert!(!base_moves, "nothing may land on main, so it never moves");
+
+        app.settings
+            .write()
+            .unwrap()
+            .land_on_default_repos
+            .insert(task.repo.clone(), true);
+        let (_, base_moves) = policy_base_context(&app, &task, &question);
+        assert!(base_moves, "another live task may land on main");
     }
 }

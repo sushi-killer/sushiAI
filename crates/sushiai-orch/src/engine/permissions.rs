@@ -472,6 +472,37 @@ fn edit_target(ctx: &HookContext, input: Option<&serde_json::Value>) -> Option<S
     relative_to_worktree(&ctx.worktree, file).map(|rel| normalized(&rel))
 }
 
+fn escapes_worktree(ctx: &HookContext, input: Option<&serde_json::Value>) -> bool {
+    let file = ["file_path", "notebook_path", "path"]
+        .iter()
+        .find_map(|k| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()))
+        .unwrap_or_default();
+    // Only an absolute path: a relative one may start with `~` or resolve
+    // against another directory.
+    if !Path::new(file).is_absolute() {
+        return true;
+    }
+    let Some(rel) = relative_to_worktree(&ctx.worktree, file) else {
+        return true;
+    };
+    // No `..` and no symlink on the way: a link may point out of the
+    // worktree, also to a file that does not exist yet.
+    let mut at = ctx.worktree.clone();
+    for part in rel.split('/') {
+        if part == ".." {
+            return true;
+        }
+        at.push(part);
+        if at
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// `mcp__server__tool` of a connected tool, read or write; other servers are
 /// judged by the tool's name alone.
 fn mcp_kind(app: &App, tool_name: &str) -> Kind {
@@ -507,7 +538,15 @@ fn gate_for(app: &App, ctx: &HookContext, tool: &str, input: Option<&serde_json:
             return Gate::Pass;
         };
         if !is_protected(&rel) {
-            return Gate::Pass;
+            // Headless Claude Code on Linux refused edits of files in the
+            // task's own worktree; an explicit allow keeps that from parking
+            // the task on an owner question. A path that climbs out is not
+            // the worktree's and stays with Claude's own rules.
+            return if escapes_worktree(ctx, input) {
+                Gate::Pass
+            } else {
+                Gate::Allow
+            };
         }
         let subject = Subject::Path(rel.clone());
         let ran = ctx.run_grants.lock().unwrap().contains(&subject.rule());

@@ -24,6 +24,24 @@ jobs:
       - run: npm ci
       - run: npm run ci
 
+  # Hosts run the engines floor, not .nvmrc: on Node 22 an awaited promise
+  # held only by an unref'd timer stopped the suite there and nowhere else.
+  node-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run build
+      - run: cargo build -p sushiai
+      - run: npm test
+
   # The tests import .ts directly and rely on Node's type stripping, so the
   # floor in package.json engines is worth proving rather than assuming.
   conventions:

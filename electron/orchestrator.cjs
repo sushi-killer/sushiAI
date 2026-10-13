@@ -310,7 +310,6 @@ function settledState(manager, host, timeoutMs, timeoutMessage) {
       off();
       reject(new Error(timeoutMessage));
     }, timeoutMs);
-    timer.unref?.();
     off = manager.on("state", (state) => {
       if (state.host === host && state.state !== "connecting") done(state);
     });

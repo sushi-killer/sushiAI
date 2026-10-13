@@ -35,6 +35,7 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 
 ## Promoted
 
+- 2026-10-13 Node 22 host: unref'd awaited timer failed `npm run ci` on main → `node-floor` CI job.
 - 2026-10-12 A 2 s background `git status` took index.lock and broke the task commit → read-only git polls pass `--no-optional-locks`.
 - 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-11 Electron 44 has no postinstall; a fresh `npm ci` raced parallel tests into EEXIST → `install-electron` in our postinstall.

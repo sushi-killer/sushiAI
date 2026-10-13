@@ -209,26 +209,23 @@ fn write_files(worktree: &Path, task: &Task) -> Result<Vec<String>, String> {
 /// How long the repo's format command may run over the planner's files.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Runs the repo's declared format command over the written planner files and
-/// stores what it left in `task.planner_tests.files`, so the commit, the
-/// hashes and the task agree. One decision line, or none without a command.
-async fn format_planner_tests(
-    app: &Arc<App>,
-    task: &mut Task,
+/// Runs the repo's format command (read at `rev`) over `paths` in `worktree`.
+/// `Ok(false)`: the repo declares none.
+async fn run_repo_format(
+    app: &App,
+    task: &Task,
+    rev: &str,
     worktree: &Path,
     paths: &[String],
     cancel: &CancelToken,
-) -> Option<String> {
-    let command =
-        match crate::worktree_env::format_command_at(Path::new(&task.repo), &task.base_sha) {
-            Ok(Some(command)) => command,
-            Ok(None) => return None,
-            Err(e) => return Some(format_failed(&e)),
-        };
+) -> Result<bool, String> {
+    let Some(command) = crate::worktree_env::format_command_at(Path::new(&task.repo), rev)? else {
+        return Ok(false);
+    };
     let run_dir = app.store.task_dir(&task.id).join("runs/format");
     let _ = std::fs::create_dir_all(&run_dir);
     let sandbox = app.task_sandbox(&task.repo, worktree, &run_dir);
-    let ran = crate::worktree_env::run_format(
+    crate::worktree_env::run_format(
         &command,
         paths,
         Path::new(&task.repo),
@@ -238,8 +235,23 @@ async fn format_planner_tests(
         |script| verify::build_verify_command(worktree, script, sandbox.as_ref(), ""),
         cancel.cancelled(),
     )
-    .await;
-    if let Err(e) = ran {
+    .await
+    .map(|()| true)
+}
+
+/// Runs the repo's declared format command (read at `rev`) over the written
+/// planner files and stores what it left in `task.planner_tests.files`, so the
+/// commit, the hashes and the task agree. One decision line, or none without a
+/// command.
+async fn format_planner_tests(
+    app: &App,
+    task: &mut Task,
+    worktree: &Path,
+    paths: &[String],
+    rev: &str,
+    cancel: &CancelToken,
+) -> Option<String> {
+    if let Err(e) = run_repo_format(app, task, rev, worktree, paths, cancel).await {
         for t in &task.planner_tests.files {
             let _ = std::fs::write(worktree.join(&t.path), &t.content);
         }
@@ -261,6 +273,123 @@ async fn format_planner_tests(
     })
 }
 
+/// Work a crash left set aside while the planner tests were formatted comes
+/// back before anything else touches the tree.
+pub(super) async fn recover_format_aside(task: &mut Task, worktree: &Path) {
+    let (wt, id) = (worktree.to_path_buf(), task.id.clone());
+    match tokio::task::spawn_blocking(move || git::recover_format_aside(&wt, &id))
+        .await
+        .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+    {
+        Ok(true) => task.decisions.push(
+            "Orchestrator: put back the work that an interrupted format run had set aside"
+                .to_string(),
+        ),
+        Ok(false) => {}
+        Err(e) => task.decisions.push(format!(
+            "Orchestrator: could not put back the work set aside for formatting ({e})"
+        )),
+    }
+}
+
+/// After a carry onto a new base the planner commit is a new commit, and the
+/// base may have a new formatter or toolchain. The agent's uncommitted work is
+/// set aside first, so the format command sees only the new base and the
+/// planner commit; it then runs over the planner files and the result is
+/// folded into that commit, the stored commit and hashes are refreshed and
+/// the work comes back. Nothing changes when the repo has no format command,
+/// the files are already clean or the run is cancelled.
+pub(super) async fn reformat_carried_tests(
+    app: &App,
+    task: &mut Task,
+    worktree: &Path,
+    cancel: &CancelToken,
+) {
+    let Some(commit) = task.planner_tests.commit.clone() else {
+        return;
+    };
+    if task.planner_tests.files.is_empty() || cancel.is_cancelled() {
+        return;
+    }
+    if !matches!(
+        crate::worktree_env::format_command_at(Path::new(&task.repo), &commit),
+        Ok(Some(_))
+    ) {
+        return;
+    }
+    let (wt, id, head) = (worktree.to_path_buf(), task.id.clone(), commit.clone());
+    let aside = tokio::task::spawn_blocking(move || {
+        if git::head_sha(&wt)? != head {
+            return Ok(None);
+        }
+        git::set_work_aside(&wt, &id).map(Some)
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+    let aside = match aside {
+        Ok(Some(aside)) => aside,
+        Ok(None) => return,
+        Err(e) => {
+            task.decisions.push(format!(
+                "Orchestrator: could not set the work aside to format the planner tests ({e})"
+            ));
+            return;
+        }
+    };
+    let paths: Vec<String> = task
+        .planner_tests
+        .files
+        .iter()
+        .map(|t| t.path.clone())
+        .collect();
+    let line = format_planner_tests(app, task, worktree, &paths, &commit, cancel).await;
+    let (wt, p, skip) = (worktree.to_path_buf(), paths, cancel.is_cancelled());
+    let amended = tokio::task::spawn_blocking(move || {
+        if skip {
+            git::discard_paths(&wt, &p)?;
+            Ok(None)
+        } else {
+            git::amend_paths(&wt, &p)
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+    let (wt, id) = (worktree.to_path_buf(), task.id.clone());
+    let back = match aside {
+        Some(aside) => tokio::task::spawn_blocking(move || git::bring_work_back(&wt, &id, &aside))
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string()))),
+        None => Ok(()),
+    };
+    if let Err(e) = back {
+        task.decisions.push(format!(
+            "Orchestrator: could not put the work back after formatting the planner tests ({e}); it is kept at {}",
+            git::format_aside_ref(&task.id)
+        ));
+    }
+    match amended {
+        Ok(Some(new_commit)) => {
+            let (wt, snapshot, rev) = (worktree.to_path_buf(), task.clone(), new_commit.clone());
+            task.planner_tests.protected =
+                tokio::task::spawn_blocking(move || protected_hashes(&wt, &rev, &snapshot))
+                    .await
+                    .ok();
+            task.planner_tests.commit = Some(new_commit.clone());
+            task.decisions.push(format!(
+                "Orchestrator: formatted the planner tests again after the carry, now at {}",
+                short_sha(&new_commit)
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => task.decisions.push(format!(
+            "Orchestrator: could not fold the formatted planner tests into their commit ({e})"
+        )),
+    }
+    if let Some(line) = line.filter(|l| l.contains("failed") && !cancel.is_cancelled()) {
+        task.decisions.push(line);
+    }
+}
+
 fn format_failed(reason: &str) -> String {
     let first = reason.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let short: String = first.chars().take(120).collect();
@@ -271,7 +400,7 @@ fn format_failed(reason: &str) -> String {
 /// command and commits just those paths; the new HEAD and the decision lines.
 /// Running it again on the result changes nothing.
 async fn write_format_commit(
-    app: &Arc<App>,
+    app: &App,
     task: &mut Task,
     worktree: &Path,
     cancel: &CancelToken,
@@ -280,7 +409,8 @@ async fn write_format_commit(
     let paths = tokio::task::spawn_blocking(move || write_files(&wt, &snapshot))
         .await
         .unwrap_or_else(|e| Err(e.to_string()))?;
-    let mut lines: Vec<String> = format_planner_tests(app, task, worktree, &paths, cancel)
+    let rev = task.base_sha.clone();
+    let mut lines: Vec<String> = format_planner_tests(app, task, worktree, &paths, &rev, cancel)
         .await
         .into_iter()
         .collect();
@@ -683,5 +813,223 @@ mod tests {
             planner_tests_title("Settings: copy between hosts"),
             "test: planner tests for Settings: copy between hosts"
         );
+    }
+    /// A format command that rewrites `(a, b)` to `(a, b,)` (not a whitespace
+    /// change) once the file `fmt-on` exists in the worktree.
+    fn gated_format_json(rule: &str) -> String {
+        let script = format!(
+            "[ -e implementation.txt ] && echo seen >> ../saw.log; [ -e fmt-on ] || exit 0; [ -e touched.txt ] && echo fmt >> touched.txt; for f; do sed '{rule}' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"
+        );
+        serde_json::json!({ "format": script }).to_string()
+    }
+
+    struct Carry {
+        app: Arc<App>,
+        task: Task,
+        wt: std::path::PathBuf,
+        repo: std::path::PathBuf,
+        base_ref: String,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn prepared_for_carry(setup_json: &str, content: &str) -> Carry {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join(".sushiai/setup.json"), setup_json).unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "setup"]);
+        std::fs::write(repo.join("touched.txt"), "orig\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "tracked"]);
+        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
+        let wt = dir.path().join("task");
+        let created = git::create_worktree(&repo, "task/carry", &wt, "HEAD").unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.base_ref = Some(base_ref.clone());
+        task.planner_tests.files = vec![test("tests/planner.txt", content)];
+        let id = task.id.clone();
+        assert!(prepare_tests(&app, &id, &mut task, &wt, &CancelToken::new()).await);
+        Carry {
+            app,
+            task,
+            wt,
+            repo,
+            base_ref,
+            _dir: dir,
+        }
+    }
+
+    async fn land_on_moved_base(c: &mut Carry) {
+        c.task.verify = vec!["false".to_string()];
+        let run_dir = c._dir.path().join("runs");
+        let _ = carry_and_check(
+            &c.app,
+            &mut c.task,
+            None,
+            &c.wt,
+            &run_dir,
+            &c.base_ref,
+            "Another task",
+            &[],
+            &CancelToken::new(),
+        )
+        .await;
+    }
+
+    fn assert_planner_commit_holds(c: &Carry, content: &str, parent: &str) {
+        let commit = c.task.planner_tests.commit.clone().unwrap();
+        assert_eq!(
+            git::blob_at(&c.wt, &commit, "tests/planner.txt").unwrap(),
+            content.as_bytes()
+        );
+        assert_eq!(c.task.planner_tests.files[0].content, content);
+        assert_eq!(
+            c.task.planner_tests.protected.clone().unwrap()["tests/planner.txt"],
+            sha256_hex(content.as_bytes())
+        );
+        assert_eq!(git_in(&c.wt, &["rev-parse", &format!("{commit}^")]), parent);
+        assert_eq!(git::head_sha(&c.wt).unwrap(), commit);
+    }
+
+    #[tokio::test]
+    async fn the_planner_commit_made_again_by_a_carry_is_formatted() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        assert_eq!(c.task.planner_tests.files[0].content, "call(a, b)\n");
+        std::fs::write(c.wt.join("implementation.txt"), "work\n").unwrap();
+        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
+        let new_base =
+            git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base")
+                .unwrap();
+        land_on_moved_base(&mut c).await;
+        assert_planner_commit_holds(&c, "call(a, b,)\n", &new_base);
+        assert_eq!(
+            std::fs::read_to_string(c.wt.join("implementation.txt")).unwrap(),
+            "work\n",
+            "the agent's work comes back"
+        );
+        assert!(
+            !c._dir.path().join("saw.log").exists(),
+            "the format command saw only the planner commit, not the agent's work"
+        );
+        assert!(
+            git::changed_files(&c.wt, c.task.planner_tests.commit.as_deref().unwrap())
+                .unwrap()
+                .contains(&"implementation.txt".to_string())
+        );
+        assert!(c
+            .task
+            .decisions
+            .iter()
+            .any(|d| d.contains("formatted the planner tests again")));
+    }
+
+    #[tokio::test]
+    async fn a_formatter_changed_on_the_new_base_reformats_the_protected_tests() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        std::fs::write(c.wt.join("fmt-on"), "").unwrap();
+        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
+        let _ = git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base");
+        land_on_moved_base(&mut c).await;
+        let newer = gated_format_json("s/(a, b,)/(a, b, c,)/");
+        std::fs::write(c.repo.join(".sushiai/setup.json"), newer).unwrap();
+        let new_base = git::commit_paths(
+            &c.repo,
+            &[".sushiai/setup.json".to_string()],
+            "chore: newer formatter",
+            "base",
+        )
+        .unwrap();
+        land_on_moved_base(&mut c).await;
+        assert_planner_commit_holds(&c, "call(a, b, c,)\n", &new_base);
+    }
+
+    #[tokio::test]
+    async fn a_carry_leaves_clean_planner_tests_and_their_commit_alone() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        std::fs::write(c.repo.join("OTHER.txt"), "x\n").unwrap();
+        let new_base =
+            git::commit_paths(&c.repo, &["OTHER.txt".to_string()], "chore: other", "base").unwrap();
+        land_on_moved_base(&mut c).await;
+        assert_planner_commit_holds(&c, "call(a, b)\n", &new_base);
+        assert!(!c.task.decisions.iter().any(|d| d.contains("again")));
+    }
+
+    #[tokio::test]
+    async fn an_attempts_edit_of_a_protected_test_is_not_folded_into_the_planner_commit() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        let planned = c.task.planner_tests.commit.clone().unwrap();
+        std::fs::write(c.wt.join("tests/planner.txt"), "call(x, y)\n").unwrap();
+        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
+        let _ = git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base");
+        land_on_moved_base(&mut c).await;
+        let commit = c.task.planner_tests.commit.clone().unwrap();
+        assert_eq!(commit, planned, "the carry is skipped, the commit stays");
+        assert_eq!(
+            git::blob_at(&c.wt, &commit, "tests/planner.txt").unwrap(),
+            b"call(a, b)\n"
+        );
+        assert!(!c.task.decisions.iter().any(|d| d.contains("again")));
+    }
+
+    #[tokio::test]
+    async fn a_formatter_editing_other_tracked_files_does_not_cost_the_agent_its_work() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        std::fs::write(c.wt.join("touched.txt"), "agent\n").unwrap();
+        std::fs::write(c.wt.join("new.txt"), "new\n").unwrap();
+        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
+        let new_base =
+            git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base")
+                .unwrap();
+        land_on_moved_base(&mut c).await;
+        assert_planner_commit_holds(&c, "call(a, b,)\n", &new_base);
+        let read = |f: &str| std::fs::read_to_string(c.wt.join(f)).unwrap();
+        assert_eq!(read("touched.txt"), "agent\n");
+        assert_eq!(read("new.txt"), "new\n");
+        assert!(git::format_aside_commit(&c.wt, &c.task.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn work_left_aside_by_a_crash_is_put_back_and_never_overwritten() {
+        let json = gated_format_json("s/(a, b)/(a, b,)/");
+        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
+        std::fs::write(c.wt.join("touched.txt"), "agent\n").unwrap();
+        let aside = git::set_work_aside(&c.wt, &c.task.id).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(c.wt.join("touched.txt")).unwrap(),
+            "orig\n"
+        );
+        // A second set-aside while the first is pending is refused.
+        std::fs::write(c.wt.join("touched.txt"), "other\n").unwrap();
+        assert!(git::set_work_aside(&c.wt, &c.task.id).is_err());
+        assert_eq!(
+            git::format_aside_commit(&c.wt, &c.task.id).as_deref(),
+            Some(aside.as_str())
+        );
+        // The next loop start puts the work back.
+        std::fs::write(c.wt.join("touched.txt"), "orig\n").unwrap();
+        recover_format_aside(&mut c.task, &c.wt).await;
+        assert_eq!(
+            std::fs::read_to_string(c.wt.join("touched.txt")).unwrap(),
+            "agent\n"
+        );
+        assert!(git::format_aside_commit(&c.wt, &c.task.id).is_none());
+        assert!(c
+            .task
+            .decisions
+            .iter()
+            .any(|d| d.contains("interrupted format run")));
+        // Nothing left: a second recovery is a no-op.
+        recover_format_aside(&mut c.task, &c.wt).await;
     }
 }

@@ -519,16 +519,18 @@ pub(super) async fn run_task_loop(
                 start_relay_link(&app, &mut task, &prev_id).await;
             }
         }
+        let wt = PathBuf::from(&task.worktree);
+        recover_format_aside(&mut task, &wt).await;
         if task.parent.is_some() {
             let _ = app.sync_graph_base(&task.id, false).await;
-            app.carry_part_onto_parent(&mut task).await;
+            app.carry_part_onto_parent(&mut task, &cancel).await;
         } else if completed_implement_attempts(&task) == 0
             && parent_failure.is_none()
             && !task.depends_on.is_empty()
             && task.queue.relay_of.is_none()
         {
             let wt = PathBuf::from(&task.worktree);
-            carry_onto_newest_base(&mut task, &wt).await;
+            carry_onto_newest_base(&app, &mut task, &wt, &cancel).await;
         }
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(&app, &task_id).await;
@@ -1714,6 +1716,12 @@ pub(super) async fn run_task_loop(
                 task.planner_tests = tests;
                 carried
             });
+            if matches!(
+                carried,
+                Ok(git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. })
+            ) {
+                reformat_carried_tests(&app, &mut task, &worktree, &cancel).await;
+            }
             match carried {
                 Ok(git::Rebase::Unchanged) => {}
                 Ok(git::Rebase::Moved { new_sha, rewritten }) => {
@@ -2961,7 +2969,12 @@ pub(super) enum BaseCarry {
 
 /// Carries committed and uncommitted task work (and its trusted planner test
 /// commit) onto the current base head.
-pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> BaseCarry {
+pub(super) async fn carry_onto_newest_base(
+    app: &App,
+    task: &mut Task,
+    worktree: &Path,
+    cancel: &CancelToken,
+) -> BaseCarry {
     let Some(base_ref) = task.base_ref.clone() else {
         let reason = "Rebase: cannot carry the work without a base branch".to_string();
         task.decisions.push(reason.clone());
@@ -3006,6 +3019,7 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> 
         Ok((git::Rebase::Unchanged, _, _)) => BaseCarry::Ready,
         Ok((git::Rebase::Moved { new_sha, rewritten }, already_contained, tests)) => {
             task.planner_tests = tests;
+            reformat_carried_tests(app, task, worktree, cancel).await;
             task.decisions.push(if already_contained {
                 format!(
                     "Rebase: the task branch already contains {base_ref} at {}; moved base_sha to that head",
@@ -3035,6 +3049,7 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> 
             tests,
         )) => {
             task.planner_tests = tests;
+            reformat_carried_tests(app, task, worktree, cancel).await;
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
             let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
@@ -3138,7 +3153,7 @@ pub(super) async fn carry_after_base_moves(
         if cancel.is_cancelled() {
             return BaseRetry::Stopped;
         }
-        match carry_onto_newest_base(task, worktree).await {
+        match carry_onto_newest_base(app, task, worktree, cancel).await {
             BaseCarry::Ready => return BaseRetry::Ready,
             BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
             BaseCarry::Failed(reason) => {

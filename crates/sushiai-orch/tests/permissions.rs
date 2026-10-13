@@ -443,6 +443,35 @@ fn a_write_tool_call_is_held_for_one_owner_question_and_the_answer_goes_on_in_th
 }
 
 #[test]
+fn an_edit_in_the_own_worktree_is_allowed_and_one_that_climbs_out_is_not() {
+    let env = spawn();
+    env.gate("hold", "");
+    let id = env.create(&[]);
+    env.start(&id);
+    env.wait_run(1);
+    let token = env.token(1);
+    let worktree = env.get(&id)["worktree"].as_str().unwrap().to_string();
+
+    for file in [
+        format!("{worktree}/crates/x/tests/new.rs"),
+        "src/lib.rs".to_string(),
+    ] {
+        let result = env.hook(&token, "Edit", json!({"file_path": file}));
+        assert_eq!(verdict(&result).0, "allow", "{file}: {result}");
+    }
+    for file in [
+        format!("{worktree}/../outside.rs"),
+        "../outside.rs".to_string(),
+    ] {
+        let result = env.hook(&token, "Edit", json!({"file_path": file}));
+        assert_eq!(verdict(&result).0, "", "{file}: {result}");
+    }
+    env.ungate("hold");
+    env.until(&id, "done");
+    env.daemon.shutdown_and_wait();
+}
+
+#[test]
 fn an_allowed_write_under_claude_goes_through_staging_and_lands_before_verify() {
     let env = spawn();
     env.gate("hold", "");

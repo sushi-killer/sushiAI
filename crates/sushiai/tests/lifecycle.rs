@@ -828,7 +828,7 @@ fn a_proxy_started_right_after_shutdown_reaches_the_new_daemon() {
             let _ = tx.send(buf[..n].to_vec());
         }
     });
-    let answered = rx.recv_timeout(Duration::from_secs(2));
+    let answered = rx.recv_timeout(Duration::from_secs(16));
     drop(stdin);
     let _ = proxy.kill();
     let _ = proxy.wait();

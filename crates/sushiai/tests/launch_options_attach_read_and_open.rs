@@ -600,7 +600,8 @@ fn open_checks_target_and_path() {
         );
     }
     open("preview/files", "/ok.md").expect("a valid request passes");
-    client.call("session.list", Value::Null);
+    // Events reach a client through their own task, so a round trip does not order them.
+    client.wait_note("session.open");
     let opened = client
         .notes
         .iter()

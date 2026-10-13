@@ -424,10 +424,8 @@ impl SessionStatus {
                     self.set(Status::Blocked, Some(BlockedKind::Input), now);
                 }
             }
-            Some("idle_prompt") => {
-                if self.status == Status::Working {
-                    self.set(Status::Idle, None, now);
-                }
+            Some("idle_prompt") if self.status == Status::Working => {
+                self.set(Status::Idle, None, now);
             }
             _ => {}
         }

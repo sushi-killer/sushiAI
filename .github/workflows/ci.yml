@@ -16,10 +16,9 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      # Pinned so a new stable clippy lint cannot turn CI red on its own.
-      - uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: clippy, rustfmt
+      # rust-toolchain.toml pins the version, so a new stable clippy lint
+      # cannot turn CI red on its own and every host builds with the same one.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npm run ci
@@ -35,7 +34,7 @@ jobs:
         with:
           node-version: "22.18"
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npm run build

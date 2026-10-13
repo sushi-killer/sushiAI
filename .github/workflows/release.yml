@@ -47,9 +47,9 @@ jobs:
           cache: npm
       # package:dmg builds the daemon for This Mac and the host binaries for
       # Linux and macOS (build:host), so all four targets must be installed.
-      - uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin
+      - run: |
+          rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin
       # The version build-host-binaries.mjs pins (PINNED_ZIG).
       - uses: mlugg/setup-zig@v2
         with:

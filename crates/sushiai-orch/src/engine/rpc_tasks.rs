@@ -392,7 +392,7 @@ impl App {
             None if p.eval_set.is_some() => "eval".to_string(),
             None => "cli".to_string(),
         };
-        let in_graph = parent.is_some() || !depends_on.is_empty();
+        let is_subtask = parent.is_some();
         let backlog = match &p.backlog {
             Some(b) => Some(self.backlog_slot(&repo, None, b.bucket, b.order)?),
             None => None,
@@ -451,11 +451,13 @@ impl App {
             // loop falls through into implementing once it's done depends
             // on it (spec step 6).
             self.spawn_task_loop(id.clone(), p.start.unwrap_or(true));
-        } else if p.start.unwrap_or(true) || in_graph {
+        } else if p.start.unwrap_or(true) || is_subtask {
             // Same default as the request form: a `queued` task that never
             // starts until a daemon restart looks like work in progress. A
-            // task in a graph starts on its own: its loop waits for what it
-            // depends on.
+            // subtask starts on its own: its loop waits for what it depends
+            // on. A top-level task with `start: false` gets no loop even when
+            // it depends on others: the owner may still add subtasks to it,
+            // and `advance_graph` starts it once its dependencies are done.
             self.start_task_loop(id.clone());
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())

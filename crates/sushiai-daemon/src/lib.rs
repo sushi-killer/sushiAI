@@ -342,7 +342,8 @@ fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
         tokio::spawn(async move {
             let id = info.id.clone();
             let outcome = reattach(&registry, info).await;
-            if let Err(mut info) = outcome {
+            if let Err(info) = outcome {
+                let mut info = *info;
                 if probed {
                     // A socket nobody answers on is a leftover, not a session.
                     registry.forget_announced(&id);
@@ -371,7 +372,7 @@ fn reattach_all(registry: &Arc<Registry>, pending: Vec<Pending>) {
 async fn reattach(
     registry: &Arc<Registry>,
     info: SessionInfo,
-) -> std::result::Result<(), SessionInfo> {
+) -> std::result::Result<(), Box<SessionInfo>> {
     let sock = registry.home.sessions().join(format!("{}.sock", info.id));
     let attached = async {
         let mut conn = holder::HolderConn::connect(&sock).await?;
@@ -387,7 +388,7 @@ async fn reattach(
         }
         Err(e) => {
             tracing::warn!("session {} lost its holder: {e}", info.id);
-            Err(info)
+            Err(Box::new(info))
         }
     }
 }

@@ -320,7 +320,7 @@ pub(crate) fn prune_backups(path: &Path) {
             Some((ts, e.path()))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (_, old) in found.into_iter().skip(KEEP_BACKUPS) {
         let _ = fs::remove_file(old);
     }

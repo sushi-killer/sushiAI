@@ -392,10 +392,8 @@ pub(super) fn shared_check_drop_refusal(
             return None;
         }
         question.commands.clone()
-    } else if let Some(n) = impossible_drop_target(question, answer) {
-        criterion_commands(task, n)
     } else {
-        return None;
+        criterion_commands(task, impossible_drop_target(question, answer)?)
     };
     removal_refusal(settings, task, &commands, Origin::Other)
 }

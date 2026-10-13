@@ -1,8 +1,8 @@
 ## Orchestrator
 
 - A base check that fails on a default branch that landing may not move (`landOnDefault` off for the repo) no longer waits for that branch to move. Before, the task waited forever, because only the owner's merge moves that branch.
-- A task run's file edits inside its own worktree are allowed by orchd's edit hook. Before, headless Claude Code on a Linux host could refuse them, and each refusal became an owner-only permission question that parked the task.
-- A Claude run that ends on `Failed to authenticate` or an overloaded API is paused with the rate-limit backoff and does not count as a failed attempt.
+- A task run's edits of absolute paths inside its own worktree, with no symlink on the way, are allowed by orchd's edit hook. Before, headless Claude Code on a Linux host could refuse them, and each refusal became an owner-only permission question that parked the task.
+- A Claude run that ends on `403 Request not allowed` or an overloaded API is paused with the rate-limit backoff and does not count as a failed attempt.
 - When auto-answer is turned on, the overseer is woken once for each question that parked while it was off.
 
 ## App

@@ -454,18 +454,27 @@ fn an_edit_in_the_own_worktree_is_allowed_and_one_that_climbs_out_is_not() {
 
     for file in [
         format!("{worktree}/crates/x/tests/new.rs"),
-        "src/lib.rs".to_string(),
+        format!("{worktree}/src/lib.rs"),
     ] {
         let result = env.hook(&token, "Edit", json!({"file_path": file}));
         assert_eq!(verdict(&result).0, "allow", "{file}: {result}");
     }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(env.repo.path(), Path::new(&worktree).join("out-link")).unwrap();
-    for file in [
+    let mut outside = vec![
         format!("{worktree}/../outside.rs"),
         "../outside.rs".to_string(),
-        format!("{worktree}/out-link/escaped.rs"),
-    ] {
+        "~/.zshrc".to_string(),
+        "src/lib.rs".to_string(),
+    ];
+    #[cfg(unix)]
+    {
+        let wt = Path::new(&worktree);
+        std::os::unix::fs::symlink(env.repo.path(), wt.join("out-link")).unwrap();
+        std::os::unix::fs::symlink(env.repo.path().join("not-yet.txt"), wt.join("dangling"))
+            .unwrap();
+        outside.push(format!("{worktree}/out-link/escaped.rs"));
+        outside.push(format!("{worktree}/dangling"));
+    }
+    for file in outside {
         let result = env.hook(&token, "Edit", json!({"file_path": file}));
         assert_eq!(verdict(&result).0, "", "{file}: {result}");
     }

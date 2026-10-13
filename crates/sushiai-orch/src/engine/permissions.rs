@@ -477,22 +477,30 @@ fn escapes_worktree(ctx: &HookContext, input: Option<&serde_json::Value>) -> boo
         .iter()
         .find_map(|k| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()))
         .unwrap_or_default();
+    // Only an absolute path: a relative one may start with `~` or resolve
+    // against another directory.
+    if !Path::new(file).is_absolute() {
+        return true;
+    }
     let Some(rel) = relative_to_worktree(&ctx.worktree, file) else {
         return true;
     };
-    if rel.split('/').any(|part| part == "..") {
-        return true;
+    // No `..` and no symlink on the way: a link may point out of the
+    // worktree, also to a file that does not exist yet.
+    let mut at = ctx.worktree.clone();
+    for part in rel.split('/') {
+        if part == ".." {
+            return true;
+        }
+        at.push(part);
+        if at
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return true;
+        }
     }
-    // A symlink inside the worktree may point out of it: the nearest existing
-    // ancestor must resolve inside the real worktree.
-    let Ok(root) = ctx.worktree.canonicalize() else {
-        return true;
-    };
-    let target = ctx.worktree.join(&rel);
-    let existing = target.ancestors().find(|p| p.exists());
-    !existing
-        .and_then(|p| p.canonicalize().ok())
-        .is_some_and(|p| p.starts_with(&root))
+    false
 }
 
 /// `mcp__server__tool` of a connected tool, read or write; other servers are

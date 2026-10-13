@@ -743,6 +743,42 @@ impl App {
     pub(crate) fn save_task_logged(&self, task: &Task) {
         let lock = self.task_lock(&task.id);
         let _guard = lock.lock().unwrap();
+        let kept;
+        let mut task = task;
+        if let Ok(Some(stored)) = self.store.load_task(&task.id) {
+            // A loop saves its own in-memory copy; one that was cancelled a
+            // moment ago must not put a stop or a park back to running.
+            let suspended = stored.queue.stopped_explicitly || stored.queue.park.is_some();
+            let live = matches!(
+                task.status,
+                TaskStatus::Running
+                    | TaskStatus::Drafting
+                    | TaskStatus::Waiting
+                    | TaskStatus::Landing
+            );
+            if suspended
+                && live
+                && matches!(stored.status, TaskStatus::Stopped | TaskStatus::Queued)
+            {
+                let mut copy = task.clone();
+                copy.status = stored.status;
+                copy.question = None;
+                copy.queue.park = stored.queue.park;
+                copy.queue.stopped_explicitly = stored.queue.stopped_explicitly;
+                for line in stored.decisions {
+                    if !copy.decisions.contains(&line) {
+                        copy.decisions.push(line);
+                    }
+                }
+                for answer in stored.question_history {
+                    if !copy.question_history.contains(&answer) {
+                        copy.question_history.push(answer);
+                    }
+                }
+                kept = copy;
+                task = &kept;
+            }
+        }
         if let Err(e) = self.store.save_task(task) {
             eprintln!("orch: saving task {} failed: {e}", task.id);
         }

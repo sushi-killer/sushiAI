@@ -52,7 +52,7 @@ pub(super) async fn run_task_loop(
         if task.metrics.is_some() && !matches!(task.status, TaskStatus::Done | TaskStatus::Failed) {
             task.metrics = None;
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
 
@@ -356,7 +356,7 @@ pub(super) async fn run_task_loop(
                 task.status = TaskStatus::Drafting;
             }
             task.updated_at = now_ms();
-            let _ = app.store.save_task(&task);
+            app.save_task_logged(&task);
             app.broadcast_task(&task);
             let planned = run_plan_stage(
                 &app,

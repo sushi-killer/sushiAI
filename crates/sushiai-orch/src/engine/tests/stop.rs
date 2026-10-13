@@ -575,3 +575,107 @@ async fn a_stopped_task_closes_a_held_tool_question_but_shutdown_keeps_it() {
         assert!(!app.permission_waits.lock().unwrap().contains_key(&task.id));
     }
 }
+
+#[tokio::test]
+async fn a_cancelled_loop_saving_its_old_copy_does_not_undo_a_stop() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Running);
+    app.store.save_task(&task).unwrap();
+    let stale = task.clone();
+    app.handle_task_stop(json!({"id": task.id})).await.unwrap();
+
+    app.save_task_logged(&stale);
+    task = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Stopped);
+    assert!(task.queue.stopped_explicitly);
+    app.handle_task_archive(json!({"id": task.id}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_stale_save_after_a_stop_keeps_the_stop_lines_and_the_closed_question() {
+    let (app, _dir) = test_app();
+    let task = stop_waiting_task();
+    app.store.save_task(&task).unwrap();
+    let stale = task.clone();
+    app.handle_task_stop(json!({"id": task.id})).await.unwrap();
+
+    app.save_task_logged(&stale);
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Stopped);
+    assert!(saved.question.is_none());
+    assert_eq!(
+        stop_close_lines(&saved),
+        ["Stop: closed the open question \"Which implementation should I use?\""]
+    );
+    assert!(saved.decisions.iter().any(|l| l.contains("stop")));
+}
+
+#[tokio::test]
+async fn a_start_after_a_stop_is_not_frozen_by_the_stale_save_guard() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Running);
+    app.store.save_task(&task).unwrap();
+    app.handle_task_stop(json!({"id": task.id})).await.unwrap();
+    app.update_task(&task.id, |t| {
+        t.status = TaskStatus::Queued;
+        t.queue.stopped_explicitly = false;
+    })
+    .unwrap();
+
+    let mut running = task.clone();
+    running.status = TaskStatus::Running;
+    app.save_task_logged(&running);
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Running);
+}
+
+#[tokio::test]
+async fn a_stale_save_over_a_parked_task_keeps_it_queued_with_its_park() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Running);
+    app.store.save_task(&task).unwrap();
+    app.handle_task_park(json!({"id": task.id, "reason": "later"}))
+        .await
+        .unwrap();
+    let parked = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(parked.status, TaskStatus::Queued);
+    assert!(parked.queue.park.is_some());
+
+    let mut stale = task.clone();
+    stale.status = TaskStatus::Waiting;
+    stale.question = stop_waiting_task().question;
+    app.save_task_logged(&stale);
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Queued);
+    assert!(saved.question.is_none());
+    assert_eq!(saved.queue.park, parked.queue.park);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stale_saves_never_leave_a_live_loop_task_running_after_a_stop() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Running);
+    app.store.save_task(&task).unwrap();
+    let cancel = hold_stop_control(&app, &task);
+    let savers: Vec<_> = (0..4)
+        .map(|_| {
+            let app = app.clone();
+            let stale = task.clone();
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    app.save_task_logged(&stale);
+                }
+            })
+        })
+        .collect();
+    app.handle_task_stop(json!({"id": task.id})).await.unwrap();
+    assert!(cancel.is_cancelled());
+    for saver in savers {
+        saver.join().unwrap();
+    }
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Stopped);
+    assert!(saved.queue.stopped_explicitly);
+}

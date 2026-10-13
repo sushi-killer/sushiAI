@@ -164,6 +164,37 @@ mod tests {
             .is_empty());
     }
 
+    #[tokio::test]
+    async fn a_run_after_a_restart_waits_for_the_app_values_instead_of_failing() {
+        let (app, dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = dir.path().to_string_lossy().into_owned();
+        task.project_id = Some("mine".into());
+        app.store.save_task(&task).unwrap();
+        // A fresh daemon: nothing sent yet, so the project check would fail.
+        assert!(run_secrets(&app, &task.id).is_err());
+
+        let sender = app.clone();
+        let repo = task.repo.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sender
+                .handle_secrets_set(json!({
+                    "projects": {"mine": {"KEY": "invented-value"}},
+                    "projectRepos": {repo: "mine"}
+                }))
+                .await
+                .unwrap();
+        });
+        let started = std::time::Instant::now();
+        attempt_run::wait_for_app_secrets(&app, &task.id, &CancelToken::new()).await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            run_secrets(&app, &task.id).unwrap().env.get("KEY").unwrap(),
+            "invented-value"
+        );
+    }
+
     #[test]
     fn old_run_mcp_redaction_is_private_and_runs_once() {
         let dir = tempfile::tempdir().unwrap();

@@ -520,10 +520,16 @@ impl App {
                     return Err("the parent task is already landing".to_string());
                 }
                 // A parent with parts already runs no implement attempt of its
-                // own, so a live loop may take one more part.
+                // own, so a live loop may take one more part. A loop still
+                // short of its dependencies is about to park without
+                // implementing, so it may take its first part too.
+                let all = self.repo_tasks(repo);
+                let held_by_dependencies = !parent.depends_on.is_empty()
+                    && !matches!(waits_state(&parent, &all), Waits::Ready | Waits::Nothing);
                 if parent.status != TaskStatus::Drafting
                     && self.controls.lock().unwrap().contains_key(&parent.id)
-                    && !is_parent(&parent, &self.repo_tasks(repo))
+                    && !is_parent(&parent, &all)
+                    && !held_by_dependencies
                 {
                     return Err(
                         "the parent task is already running; create it with start: false, add its subtasks, then start it"

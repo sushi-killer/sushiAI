@@ -4,7 +4,10 @@
 // one over `ssh host sushiai proxy`), and the module's `orch.event`
 // notifications arrive per host through the same connection. This file owns
 // the renderer allowlist, per-host event tagging and notices, the secrets the
-// desktop pushes whenever a host becomes ready, and the host list. It starts,
+// desktop pushes whenever a host becomes ready, the host list, and the relay
+// that lets an agent session on any host reach another saved host's
+// orchestrator (`orch.relay` from a daemon, answered with `orch.relay.reply`
+// on that daemon's connection). It starts,
 // stops and installs nothing itself: the daemon manager connects hosts and the
 // host installer provisions them.
 const fs = require("node:fs");
@@ -101,6 +104,32 @@ const ALLOWED_METHODS = new Set([
   "precedents.rule.dismiss",
 ]);
 
+// What an agent session reaches on another host through the MCP bridge's
+// `host` argument (`orch.relay`): its tasks and the orchestrator's inbox. Never
+// settings, secrets, deleting, chats or hooks; `hosts.list` is answered here.
+const RELAY_METHODS = new Set([
+  "task.list",
+  "task.get",
+  "task.create",
+  "task.start",
+  "task.backlog",
+  "task.report",
+  "task.pr",
+  "task.leadTouch",
+  "task.answer",
+  "task.amend",
+  "task.archive",
+  "task.unarchive",
+  "message.inbox",
+  "peer.list",
+]);
+const RELAY_NOTE = "orch.relay";
+const RELAY_REPLY = "orch.relay.reply";
+const HOSTS_LIST = "hosts.list";
+// `host: "all"` reads every saved host at once; only for these.
+const ALL_HOSTS = "all";
+const FAN_OUT_METHODS = new Set(["task.list", "message.inbox"]);
+
 // Results that are one task or a list of them: a remote host's are tagged
 // with the host so the renderer knows where a task lives.
 const TASK_RESULT_METHODS = new Set([
@@ -126,6 +155,17 @@ function tagTasks(result, host) {
   if (Array.isArray(result))
     return result.map((task) => (isTask(task) ? { ...task, host } : task));
   return isTask(result) ? { ...result, host } : result;
+}
+
+/** A relayed result labelled with the host it came from: every task, and
+ * every message of an inbox. */
+function labelResult(method, result, host) {
+  if (method !== "message.inbox") return tagTasks(result, host);
+  return Array.isArray(result)
+    ? result.map((message) =>
+        message && typeof message === "object" ? { ...message, host } : message,
+      )
+    : result;
 }
 
 /** A relayed event from a remote host, its task (if any) tagged. */
@@ -466,12 +506,14 @@ class OrchestratorService {
 
   /** Waits for a connecting host to be ready. A remote host that is down is
    * reconnected (at most every RETRY_AFTER_MS): the first request on a saved
-   * host is what connects it. Then checks the `orch` capability. */
-  async ready() {
+   * host is what connects it. Then checks the `orch` capability. With `reach`
+   * false nothing is reconnected or enabled: the host is usable now or not. */
+  async ready({ reach = true } = {}) {
     const manager = this.#manager();
     let state = this.#state();
     if (!state) throw new Error("The orchestrator host is not connected.");
     if (
+      reach &&
       this.remote &&
       state.state !== "ready" &&
       state.state !== "connecting" &&
@@ -484,7 +526,7 @@ class OrchestratorService {
     if (state?.state !== "ready") throw notReady(state, this.name);
     // A ready daemon without the module: the owner turned the Orchestrator on
     // after this host's daemon started, so the host is enabled now.
-    if (!hasOrch(state) && this.moduleSwitch) {
+    if (!hasOrch(state) && this.moduleSwitch && reach) {
       try {
         await this.moduleSwitch.enable(this.host);
       } catch (error) {
@@ -631,7 +673,26 @@ class OrchestratorService {
   async call(method, params = {}) {
     if (!ALLOWED_METHODS.has(method))
       throw new Error("Invalid orchestrator request");
-    await this.ready();
+    const result = await this.#run(method, params);
+    return this.remote && TASK_RESULT_METHODS.has(method)
+      ? tagTasks(result, this.host)
+      : result;
+  }
+
+  /** A request an agent session relayed here (`orch.relay`): only
+   * RELAY_METHODS, and its tasks and messages carry this host, local too. */
+  async relay(method, params = {}, { reach = true } = {}) {
+    if (!RELAY_METHODS.has(method))
+      throw new Error(`${method} is not available through the relay`);
+    return labelResult(
+      method,
+      await this.#run(method, params, { reach }),
+      this.host,
+    );
+  }
+
+  async #run(method, params, { reach = true } = {}) {
+    await this.ready({ reach });
     const sendParams =
       // A task the owner or the orchestrator agent creates gets the
       // project's own MCP servers, resolved here where the config lives.
@@ -650,9 +711,7 @@ class OrchestratorService {
     // Awaited (not fire-and-forget) so a caller who follows this with another
     // settings-dependent call never races the push.
     if (method === "settings.set") await this.refreshSecrets();
-    return this.remote && TASK_RESULT_METHODS.has(method)
-      ? tagTasks(result, this.host)
-      : result;
+    return result;
   }
 
   /** A liveness check with no side effects: the host is ready and has the
@@ -887,6 +946,11 @@ class OrchestratorHosts {
     if (!manager) return;
     const offEvent = manager.on("event", (event) => {
       if (!this.on) return;
+      // Any host may ask, also one the orchestrator has no service for yet.
+      if (event.method === RELAY_NOTE) {
+        void this.#answerRelay(manager, event);
+        return;
+      }
       const service = this.#serviceOfManagerHost(event.host);
       if (!service) return;
       if (event.method === `${ORCH_PREFIX}event`)
@@ -909,6 +973,84 @@ class OrchestratorHosts {
     this.unsubscribe = () => {
       offEvent();
       offState();
+    };
+  }
+
+  /** Answers one `orch.relay` on the connection of the daemon that sent it. */
+  async #answerRelay(manager, event) {
+    const { id, host, method, params } = event.params ?? {};
+    if (typeof id !== "string" || !id) return;
+    let reply;
+    try {
+      reply = { id, result: (await this.relay(method, params, host)) ?? null };
+    } catch (error) {
+      reply = { id, error: error?.message || String(error) };
+    }
+    try {
+      await manager.request(event.host, RELAY_REPLY, reply);
+    } catch (error) {
+      // The asker gave up, or another app answered first.
+      this.log(`orchestrator relay ${id}: ${error.message}`);
+    }
+  }
+
+  /** One relayed request: `host` is "local", "ssh:<id>" of a saved profile,
+   * or "all" (task.list, message.inbox) for This Mac plus every saved host.
+   * `hosts.list` names the hosts and their state, nothing about how they are
+   * reached. */
+  async relay(method, params, host) {
+    this.#assertOn();
+    if (method === HOSTS_LIST)
+      return this.list().map(({ id, name, state }) => ({ id, name, state }));
+    if (!RELAY_METHODS.has(method))
+      throw new Error(`${method} is not available through the relay`);
+    const sent =
+      params && typeof params === "object" && !Array.isArray(params)
+        ? params
+        : {};
+    if (host === ALL_HOSTS) {
+      if (!FAN_OUT_METHODS.has(method))
+        throw new Error(`host "all" is only for task.list and message.inbox`);
+      return this.#fanOut(method, sent);
+    }
+    if (
+      typeof host !== "string" ||
+      (host !== LOCAL_HOST && !/^ssh:.+/.test(host))
+    )
+      throw new Error(`Unknown orchestrator host ${JSON.stringify(host)}`);
+    try {
+      return await this.#serviceFor(host).relay(method, sent);
+    } catch (error) {
+      if (error?.code || host === LOCAL_HOST || this.services.has(host))
+        throw error;
+      throw new Error(`No saved host ${host}: ${error.message}`);
+    }
+  }
+
+  /** `host: "all"`: every host's labelled items, and the hosts that could not
+   * answer. Only hosts usable now are read: none is connected, enabled or
+   * started listening for here. */
+  async #fanOut(method, params) {
+    const hosts = this.list();
+    const answers = await Promise.all(
+      hosts.map(async ({ id, name }) => {
+        try {
+          const service =
+            id === LOCAL_HOST
+              ? this.local
+              : (this.services.get(id) ?? this.createService(id));
+          const items = await service.relay(method, params, { reach: false });
+          return { items: Array.isArray(items) ? items : [] };
+        } catch (error) {
+          return { unreachable: { host: id, name, error: error.message } };
+        }
+      }),
+    );
+    return {
+      results: answers.flatMap((answer) => answer.items ?? []),
+      unreachable: answers.flatMap((answer) =>
+        answer.unreachable ? [answer.unreachable] : [],
+      ),
     };
   }
 

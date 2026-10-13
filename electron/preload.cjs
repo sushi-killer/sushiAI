@@ -210,6 +210,7 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   moduleInvoke: invoke("module:invoke"),
   projectHostReady: invoke("projects:host:ready"),
   projectHostOverrides: invoke("projects:host:overrides"),
+  projectOrchSet: invoke("projects:orch:set"),
   projectHostCheck: invoke("projects:host:check"),
   projectHostPrepare: invoke("projects:host:prepare"),
   projectHostGitKey: invoke("projects:host:git-key"),

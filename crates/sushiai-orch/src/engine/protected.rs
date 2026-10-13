@@ -169,6 +169,20 @@ pub(super) fn needs_prepare(task: &Task) -> bool {
         || (t.protected.is_none() && (!t.files.is_empty() || !task.checks.is_empty()))
 }
 
+/// The planner-tests commit title: `test: planner tests for <subject>`, the
+/// task title without its own conventional-commit type.
+pub(super) fn planner_tests_title(title: &str) -> String {
+    let subject = title
+        .split_once(": ")
+        .filter(|(kind, _)| {
+            let kind = kind.trim_end_matches('!');
+            let kind = kind.split_once('(').map_or(kind, |(k, _)| k);
+            !kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase())
+        })
+        .map_or(title, |(_, rest)| rest);
+    format!("test: planner tests for {}", subject.trim())
+}
+
 /// Writes the planner's files into `worktree`; their repo-relative paths.
 fn write_files(worktree: &Path, task: &Task) -> Result<Vec<String>, String> {
     let root = worktree.canonicalize().map_err(|e| e.to_string())?;
@@ -272,8 +286,7 @@ async fn write_format_commit(
         .collect();
     let (wt, title, id) = (worktree.to_path_buf(), task.title.clone(), task.id.clone());
     let sha = tokio::task::spawn_blocking(move || {
-        git::commit_paths(&wt, &paths, &format!("test: {title} (planner tests)"), &id)
-            .map_err(|e| e.to_string())
+        git::commit_paths(&wt, &paths, &planner_tests_title(&title), &id).map_err(|e| e.to_string())
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()))?;
@@ -654,5 +667,21 @@ mod tests {
             b"a  \n"
         );
         assert!(!task.decisions.iter().any(|d| d.contains("format")));
+    }
+
+    #[test]
+    fn the_planner_tests_commit_names_the_task_subject_once() {
+        assert_eq!(
+            planner_tests_title("fix: stats cover every host"),
+            "test: planner tests for stats cover every host"
+        );
+        assert_eq!(
+            planner_tests_title("feat(orch)!: copy settings"),
+            "test: planner tests for copy settings"
+        );
+        assert_eq!(
+            planner_tests_title("Settings: copy between hosts"),
+            "test: planner tests for Settings: copy between hosts"
+        );
     }
 }

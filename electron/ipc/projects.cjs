@@ -352,6 +352,9 @@ function registerProjectIpc({
     handle("projects:host:overrides", (id, host, overrides) =>
       projects.setHostOverrides(id, host, overrides),
     );
+    handle("projects:orch:set", (id, scope, patch) =>
+      projects.setOrchSettings(id, scope, patch),
+    );
     handle("projects:host:check", async (id, host, cwd) => {
       if (typeof host !== "string" || !host.startsWith("ssh:"))
         throw new Error("Invalid project host.");

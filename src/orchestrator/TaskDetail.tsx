@@ -43,7 +43,7 @@ import {
 } from "./taskDetailModel";
 import { Chip, Criterion, Tag } from "../ui";
 import { Blueprint } from "./Blueprint";
-import { canPickTaskPreset } from "./blueprintModel";
+import { canPickTaskPreset, presetToWrite } from "./blueprintModel";
 import { usePipeline } from "./usePipeline";
 import "./task-detail.css";
 
@@ -521,6 +521,8 @@ function TaskBlueprint({
   const orchestratorClient = useOrchestratorClient();
   const { pipeline, error } = usePipeline({ taskId: task.id }, task.updatedAt);
   const pickable = canPickTaskPreset(task);
+  const inFlight = task.status === "running" || task.status === "drafting";
+  const presetId = pipeline?.presetId ?? "";
   return (
     <Blueprint
       pipeline={pipeline}
@@ -543,14 +545,16 @@ function TaskBlueprint({
             label: p.label,
           })),
         ],
-        value: pipeline?.presetId ?? "",
-        disabled: !pickable || busy || !pipeline,
-        note: pickable
-          ? undefined
-          : "Fixed: the task already has an implement attempt.",
+        value: presetId,
+        disabled: !pickable || inFlight || busy || !pipeline,
+        note: !pickable
+          ? "Fixed: the task already has an implement attempt."
+          : inFlight
+            ? "Locked while the task is running: stop it to change its preset."
+            : undefined,
         onChange: (id) => {
-          if (id && pickable)
-            act(() => orchestratorClient.taskPreset(task.id, id));
+          const next = presetToWrite(task, presetId, id);
+          if (next) act(() => orchestratorClient.taskPreset(task.id, next));
         },
       }}
     />

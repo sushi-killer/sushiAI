@@ -10,7 +10,9 @@ import {
   Workflow,
 } from "lucide-react";
 import { Character } from "../mascot/Character";
-import { useOrchestratorClient } from "./hostContext";
+import { clientFor, useOrchestratorClient } from "./hostContext";
+import { loadProjectSpend, loadProjectTasks } from "./projectScope";
+import { useProjectScope } from "./useProjectScope";
 import {
   errorText,
   formatCost,
@@ -251,6 +253,9 @@ export function HomeView({
   const orchestratorClient = useOrchestratorClient();
   const [today, setToday] = useState<number | null>(null);
   const [week, setWeek] = useState<SpendSummary | null>(null);
+  // The project's tasks on every host, for the week line.
+  const [projectTasks, setProjectTasks] = useState<Task[] | null>(null);
+  const { sources } = useProjectScope(cwd);
   const [noteFor, setNoteFor] = useState<string | null>(null);
   const refresh = tasks.map((t) => `${t.id}:${t.updatedAt}`).join();
   useEffect(() => {
@@ -259,14 +264,17 @@ export function HomeView({
       .costsSummary({ repo: cwd, sinceDays: 1, groupBy: ["stage"] })
       .then((summary) => !cancelled && setToday(summary.totals.costUsd))
       .catch(() => !cancelled && setToday(null));
-    orchestratorClient
-      .costsSummary({ repo: cwd, sinceDays: 7, groupBy: ["stage"] })
-      .then((summary) => !cancelled && setWeek(summary))
+    loadProjectSpend(clientFor, sources, { sinceDays: 7, groupBy: ["stage"] })
+      .then((result) => !cancelled && setWeek(result.summary))
       .catch(() => !cancelled && setWeek(null));
+    // Archived tasks too, so the week matches the Analytics view.
+    loadProjectTasks(clientFor, sources, true)
+      .then((result) => !cancelled && setProjectTasks(result.tasks))
+      .catch(() => !cancelled && setProjectTasks(null));
     return () => {
       cancelled = true;
     };
-  }, [cwd, refresh, orchestratorClient]);
+  }, [cwd, refresh, orchestratorClient, sources]);
 
   const live = tasks.filter((t) => !t.archived);
   const autonomy = (
@@ -277,7 +285,7 @@ export function HomeView({
   const groups = railGroups(live);
   const analytics = (
     <AnalyticsLine
-      tasks={live}
+      tasks={projectTasks ?? live}
       spend={week}
       onOpenAnalytics={onOpenAnalytics}
     />

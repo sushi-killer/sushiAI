@@ -1122,7 +1122,12 @@ pub(super) async fn land_on_parent(
                 .collect();
             let (wt, id, title) = (worktree.to_path_buf(), task.id.clone(), task.title.clone());
             let committed = tokio::task::spawn_blocking(move || {
-                git::commit_paths(&wt, &paths, &format!("test: {title} (planner tests)"), &id)
+                git::commit_paths(
+                    &wt,
+                    &paths,
+                    &super::protected::planner_tests_title(&title),
+                    &id,
+                )
             })
             .await;
             match committed {

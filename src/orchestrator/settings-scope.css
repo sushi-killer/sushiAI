@@ -1,0 +1,154 @@
+/* Settings -> Orchestration: the Host/Project scope, the project and host
+ * pickers, "Copy settings to..." and the inherited/overridden markers. */
+.os-scope-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm) var(--gap-md);
+  margin-bottom: var(--gap-md);
+}
+
+.os-scope {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-app);
+}
+.os-scope-option {
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.os-scope-option.selected {
+  background: var(--bg-hover);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.os-scope-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm) var(--gap-md);
+}
+/* Beats the dialog's generic `.modal label` / `.modal select` rules. */
+.os-scope-top .os-scope-field,
+.os-scope-bar .os-scope-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--gap-sm);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.os-scope-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.os-scope-top .os-scope-select select,
+.os-scope-bar .os-scope-select select {
+  width: auto;
+  height: 29px;
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12.5px;
+  appearance: none;
+}
+.os-scope-select svg {
+  position: absolute;
+  right: 9px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.os-scope-note,
+.os-scope-empty {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.os-scope-ok {
+  margin: 6px 0 0;
+  color: var(--tone-ok);
+  font-size: var(--text-sm);
+}
+
+.os-copy {
+  display: flex;
+  flex-basis: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.os-copy-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 560px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-app);
+  font-size: 12.5px;
+}
+.os-copy-confirm p {
+  margin: 0;
+}
+.os-copy-kept {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.os-copy-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.os-copy-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.os-copy-actions .os-ghost {
+  color: var(--text);
+}
+.os-copy-actions .os-ghost:hover {
+  background: var(--bg-hover);
+}
+.os-copy-actions .os-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.os-copy-actions button:disabled {
+  opacity: 0.6;
+}
+
+/* Where a value shown in project scope comes from. */
+.orchestrator-settings .os-origin {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  text-transform: none;
+  white-space: nowrap;
+}
+.orchestrator-settings .os-origin.inherited {
+  background: var(--tone-neutral-bg);
+  color: var(--tone-neutral);
+}
+.orchestrator-settings .os-origin.overridden {
+  background: var(--tone-warning-bg);
+  color: var(--tone-warning);
+}
+.orchestrator-settings .os-scope-marker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}

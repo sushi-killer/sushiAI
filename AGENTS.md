@@ -251,7 +251,7 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
 
 - Before finishing, run `./node_modules/.bin/prettier --write` on the files
   you touched; `prettier --check` in CI fails otherwise. the Rust workspace is
-  tested by `npm run test:daemon` (`cargo test --workspace`; one package:
+  tested by `npm run test:daemon` (cargo-nextest when installed, else `cargo test --workspace`; one package:
   `cargo test -p sushiai-orch <filter>`). `src/App.tsx` is capped at 600 lines
   (`tests/app-boundary.test.cjs`) - move logic out instead of growing it.
 - Screenshots of the built app come from the `ui-evidence` scripts:

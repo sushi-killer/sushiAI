@@ -280,6 +280,7 @@ async fn run_script(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    let running = crate::procs::running_in(worktree);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start the {label}: {e}"))?;
@@ -320,8 +321,13 @@ async fn run_script(
     };
     drop((stdout, stderr));
     crate::procs::kill_group(pgid, &mut child).await;
-    if !matches!(ended, Ended::Done(_)) {
-        let dir = worktree.to_path_buf();
+    let dir = worktree.to_path_buf();
+    if matches!(ended, Ended::Done(_)) {
+        if running.alone() {
+            let _ =
+                tokio::task::spawn_blocking(move || crate::procs::stop_orphans_under(&dir)).await;
+        }
+    } else {
         let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
     }
     let (status, stdout, stderr) = match ended {

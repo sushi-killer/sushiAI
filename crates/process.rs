@@ -89,6 +89,26 @@ pub fn info(pid: i32) -> Option<Info> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn parent_pid(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut bsd = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: libproc initializes the struct; it is read only on a complete result.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            bsd.as_mut_ptr().cast(),
+            size as i32,
+        )
+    };
+    (got == size as i32).then(|| unsafe { bsd.assume_init() }.pbi_ppid as i32)
+}
+
+#[cfg(target_os = "macos")]
 pub fn executable(pid: i32) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let mut buf = vec![0u8; 4096];
@@ -149,6 +169,16 @@ pub fn list_pids() -> Vec<i32> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn parent_pid(pid: i32) -> Option<i32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    text.get(text.rfind(')')? + 2..)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -213,5 +243,10 @@ mod tests {
         assert!(list_pids().contains(&pid));
         assert!(!argv(pid).unwrap().is_empty());
         assert!(info(i32::MAX).is_none());
+        assert_eq!(
+            parent_pid(pid),
+            Some(std::os::unix::process::parent_id() as i32)
+        );
+        assert_eq!(parent_pid(i32::MAX), None);
     }
 }

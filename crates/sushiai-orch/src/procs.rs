@@ -1,8 +1,10 @@
 //! Stopping processes: a whole process group, and every process whose
 //! executable lives inside an orchd-owned directory.
 
-use crate::process::{executable as exe_path, list_pids};
-use std::path::Path;
+use crate::process::{executable as exe_path, list_pids, parent_pid};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// SIGTERM to a group, then SIGKILL, give it this long in between.
@@ -37,6 +39,61 @@ pub async fn kill_group(pgid: Option<i32>, child: &mut tokio::process::Child) {
 /// executable path lies inside `dir`, wait up to [`GRACE`], SIGKILL any
 /// that remain. Does nothing when `dir` cannot be canonicalized.
 pub fn stop_processes_under(dir: &Path) {
+    stop_under(dir, |_| true);
+}
+
+/// Commands running per directory. A sibling's detached daemon is an orphan
+/// too while its test still uses it, so only the last command to end in a
+/// directory sweeps orphans.
+static RUNNING: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
+
+/// One command running in a directory, counted until it is dropped.
+pub struct Running(PathBuf);
+
+pub fn running_in(dir: &Path) -> Running {
+    let mut map = RUNNING.lock().unwrap();
+    *map.get_or_insert_with(HashMap::new)
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
+    Running(dir.to_path_buf())
+}
+
+impl Running {
+    /// Whether no other command runs in this directory now.
+    // ponytail: two commands ending at once both see the other and skip the
+    // sweep; the next command there, or removing the worktree, catches it.
+    pub fn alone(&self) -> bool {
+        RUNNING
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&self.0))
+            == Some(&1)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut map = RUNNING.lock().unwrap();
+        if let Some(map) = map.as_mut() {
+            if let Some(n) = map.get_mut(&self.0) {
+                *n -= 1;
+                if *n == 0 {
+                    map.remove(&self.0);
+                }
+            }
+        }
+    }
+}
+
+/// Like [`stop_processes_under`], only for processes whose parent is PID 1:
+/// what a finished check left behind, never a sibling check's live process.
+// ponytail: an orphan reparented to a subreaper (not PID 1) is not caught; the full sweep at worktree removal still catches it.
+pub fn stop_orphans_under(dir: &Path) {
+    stop_under(dir, |pid| parent_pid(pid) == Some(1));
+}
+
+fn stop_under(dir: &Path, keep: impl Fn(i32) -> bool) {
     let Ok(dir) = dir.canonicalize() else {
         return;
     };
@@ -45,6 +102,7 @@ pub fn stop_processes_under(dir: &Path) {
         list_pids()
             .into_iter()
             .filter(|&pid| pid > 0 && pid != me)
+            .filter(|&pid| keep(pid))
             .filter(|&pid| {
                 exe_path(pid).is_some_and(|exe| {
                     exe.starts_with(&dir) || exe.canonicalize().is_ok_and(|c| c.starts_with(&dir))
@@ -163,6 +221,51 @@ mod tests {
     }
 
     #[test]
+    fn stops_a_detached_orphan_inside_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = testing::place(tmp.path());
+        let pidfile = tmp.path().join("pid");
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(testing::detach(&exe, &pidfile))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::process::executable(pid)
+            .is_none_or(|e| !e.starts_with(tmp.path().canonicalize().unwrap()))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(POLL);
+        }
+        let parent = crate::process::parent_pid(pid);
+        if parent != Some(1) {
+            eprintln!("skipped: the orphan's parent is {parent:?}, not PID 1 (subreaper)");
+            stop_processes_under(tmp.path());
+            return;
+        }
+        stop_orphans_under(tmp.path());
+        assert!(!alive(pid), "the orphan survived");
+    }
+
+    #[test]
+    fn orphan_sweep_spares_a_process_whose_parent_is_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut inside = spawn_insider(tmp.path());
+        let pid = inside.id() as i32;
+        stop_orphans_under(tmp.path());
+        let still = alive(pid);
+        let _ = inside.kill();
+        let _ = inside.wait();
+        assert!(still, "a process with a live parent was signalled");
+    }
+
+    #[test]
     fn leaves_a_process_whose_executable_is_outside_the_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let mut outside = spawn_sleep(Path::new("/bin/sleep"));
@@ -201,5 +304,16 @@ mod tests {
         assert!(!alive(inside_pid), "the insider survived the removal");
         assert!(spared, "the outsider was signalled");
         assert!(!wt.exists());
+    }
+
+    #[test]
+    fn only_the_last_command_in_a_directory_is_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = running_in(dir.path());
+        assert!(first.alone());
+        let second = running_in(dir.path());
+        assert!(!first.alone() && !second.alone());
+        drop(second);
+        assert!(first.alone());
     }
 }

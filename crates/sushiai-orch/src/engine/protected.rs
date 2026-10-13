@@ -253,6 +253,54 @@ pub(super) async fn prepare_tests(
     true
 }
 
+/// Files where whitespace carries meaning: a reformat there is a change.
+const WHITESPACE_SIGNIFICANT: [&str; 7] = ["py", "yaml", "yml", "mk", "haml", "pug", "coffee"];
+
+/// Whether `current` is the protected version of `path` at `rev` with only
+/// whitespace outside string literals changed: a formatter's work (a newer
+/// rustfmt or prettier), not a change to what the test checks.
+fn reformatted_only(worktree: &Path, rev: &str, path: &str, current: Option<&[u8]>) -> bool {
+    let name = Path::new(path);
+    let ext = name.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let file = name.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    if WHITESPACE_SIGNIFICANT.contains(&ext) || file == "Makefile" {
+        return false;
+    }
+    let (Some(current), Some(original)) = (current, git::blob_at(worktree, rev, path)) else {
+        return false;
+    };
+    match (std::str::from_utf8(current), std::str::from_utf8(&original)) {
+        (Ok(a), Ok(b)) => a != b && without_layout(a) == without_layout(b),
+        _ => false,
+    }
+}
+
+/// `text` without whitespace outside quotes (`"`, `'`, `` ` ``); inside them
+/// every character counts, so a reformat may not change what a test asserts.
+/// A Rust lifetime opens a quote too, which only makes the check stricter.
+fn without_layout(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut quote, mut escaped) = (None, false);
+    for c in text.chars() {
+        if let Some(open) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == open {
+                quote = None;
+            }
+        } else if matches!(c, '"' | '\'' | '`') {
+            quote = Some(c);
+            out.push(c);
+        } else if !c.is_whitespace() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// After an attempt: the protected files that changed since the tests
 /// commit or no longer match their stored hash, put back from that commit.
 /// `None` when nothing protected was touched.
@@ -275,10 +323,10 @@ pub(super) async fn guard_protected(
         let mut bad: Vec<String> = hashes
             .iter()
             .filter(|(path, hash)| {
-                changed.iter().any(|c| c == *path)
-                    || std::fs::read(wt.join(path))
-                        .map(|b| sha256_hex(&b) != **hash)
-                        .unwrap_or(true)
+                let current = std::fs::read(wt.join(path)).ok();
+                let touched = changed.iter().any(|c| c == *path)
+                    || current.as_ref().is_none_or(|b| sha256_hex(b) != **hash);
+                touched && !reformatted_only(&wt, &rev, path, current.as_deref())
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -425,5 +473,36 @@ mod tests {
         let pending = git::changed_files(&wt, &new_base).unwrap();
         assert!(pending.contains(&"tests/planner.sh".to_string()));
         assert!(pending.contains(&"implementation.txt".to_string()));
+    }
+
+    #[test]
+    fn a_whitespace_only_reformat_of_a_protected_test_is_no_change() {
+        let wt = tempfile::tempdir().unwrap();
+        let wt = wt.path();
+        init_git_repo(wt);
+        let original = "fn t() { assert_eq!(f(1), \"a b\"); }\n";
+        std::fs::write(wt.join("check.rs"), original).unwrap();
+        std::fs::write(wt.join("check.py"), original).unwrap();
+        git_in(wt, &["add", "."]);
+        git_in(wt, &["commit", "-q", "-m", "tests"]);
+        let rev = git::resolve_commit(wt, "HEAD").unwrap();
+        let check =
+            |path: &str, text: &str| reformatted_only(wt, &rev, path, Some(text.as_bytes()));
+        let reformatted = "fn t() {\n    assert_eq!(f(1), \"a b\");\n}\n";
+        assert!(check("check.rs", reformatted));
+        assert!(
+            !check("check.rs", original),
+            "an unchanged file is no reformat"
+        );
+        assert!(!check("check.rs", "fn t() { assert_eq!(f(1), \"ab\"); }\n"));
+        assert!(!check(
+            "check.rs",
+            "fn t() { assert_eq!(f(2), \"a b\"); }\n"
+        ));
+        assert!(
+            !check("check.py", reformatted),
+            "whitespace counts in Python"
+        );
+        assert!(!check("missing.rs", reformatted));
     }
 }

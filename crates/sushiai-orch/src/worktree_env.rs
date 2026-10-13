@@ -32,6 +32,8 @@ struct SetupFile {
     #[serde(default)]
     setup: Option<Step>,
     #[serde(default)]
+    format: Option<Step>,
+    #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default, rename = "compilerCache")]
     compiler_cache: Option<bool>,
@@ -102,6 +104,31 @@ pub fn scoped_checks_at(repo: &Path, rev: &str) -> Result<Vec<crate::model::Scop
         .collect())
 }
 
+/// A repo's `"format"` command and the file's `env`, read from the base commit
+/// like the check policy.
+pub struct FormatCommand {
+    step: Step,
+    env: BTreeMap<String, String>,
+}
+
+pub fn format_command_at(repo: &Path, rev: &str) -> Result<Option<FormatCommand>, String> {
+    let Some(text) = crate::git::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let parsed = parse_setup(&text)?;
+    match parsed.format {
+        Some(Step::Argv(argv)) if argv.is_empty() => {
+            Err(format!("{SETUP_FILE}: \"format\" is an empty list"))
+        }
+        Some(step) => Ok(Some(FormatCommand {
+            step,
+            env: parsed.env,
+        })),
+        None => Ok(None),
+    }
+}
+
 /// Uses the same reader as setup, including files that have no setup step.
 pub fn compiler_cache_enabled(worktree: &Path) -> Result<bool, String> {
     Ok(read_setup(worktree)?.is_none_or(|s| s.compiler_cache != Some(false)))
@@ -149,15 +176,81 @@ pub async fn run_setup(
     let Some(plan) = plan(worktree)? else {
         return Ok(());
     };
-    let script = match &plan.step {
-        Step::Shell(script) => script.clone(),
+    let script = script_of(&plan.step, &[]);
+    run_script(
+        "worktree setup",
+        &script,
+        &plan.env,
+        main_root,
+        worktree,
+        path,
+        timeout,
+        build,
+        cancelled,
+    )
+    .await
+}
+
+/// Runs the repo's format command in `worktree` with the repo-relative
+/// `paths` as its arguments (`"$@"` for a shell string, appended for argv),
+/// in the same environment as setup.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_format(
+    command: &FormatCommand,
+    paths: &[String],
+    main_root: &Path,
+    worktree: &Path,
+    path: &str,
+    timeout: Duration,
+    build: impl FnOnce(&str) -> tokio::process::Command,
+    cancelled: impl Future<Output = ()>,
+) -> Result<(), String> {
+    let script = script_of(&command.step, paths);
+    run_script(
+        "format command",
+        &script,
+        &command.env,
+        main_root,
+        worktree,
+        path,
+        timeout,
+        build,
+        cancelled,
+    )
+    .await
+}
+
+fn script_of(step: &Step, args: &[String]) -> String {
+    let quoted = args
+        .iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match step {
+        Step::Shell(script) if args.is_empty() => script.clone(),
+        Step::Shell(script) => format!("set -- {quoted}; {script}"),
         Step::Argv(argv) => argv
             .iter()
             .map(|a| shell_quote(a))
+            .chain(args.iter().map(|a| shell_quote(a)))
             .collect::<Vec<_>>()
             .join(" "),
-    };
-    let mut cmd = build(&script);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_script(
+    label: &str,
+    script: &str,
+    env: &BTreeMap<String, String>,
+    main_root: &Path,
+    worktree: &Path,
+    path: &str,
+    timeout: Duration,
+    build: impl FnOnce(&str) -> tokio::process::Command,
+    cancelled: impl Future<Output = ()>,
+) -> Result<(), String> {
+    let mut cmd = build(script);
     #[cfg(target_os = "macos")]
     if let Some(home) = std::env::var_os("HOME") {
         // Under the sandbox's writable ~/Library/Caches.
@@ -171,8 +264,8 @@ pub async fn run_setup(
         .as_std()
         .get_envs()
         .any(|(key, _)| key == "RUSTC_WRAPPER");
-    cmd.envs(&plan.env);
-    if !sandboxed && !plan.env.contains_key("RUSTC_WRAPPER") {
+    cmd.envs(env);
+    if !sandboxed && !env.contains_key("RUSTC_WRAPPER") {
         if let Some(cache) =
             crate::engine::compiler_cache::CompilerCache::for_worktree(worktree, path)
         {
@@ -189,7 +282,7 @@ pub async fn run_setup(
         .kill_on_drop(true);
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("could not start the worktree setup: {e}"))?;
+        .map_err(|e| format!("could not start the {label}: {e}"))?;
     let pgid = child.id().and_then(|p| i32::try_from(p).ok());
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -232,14 +325,11 @@ pub async fn run_setup(
         let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
     }
     let (status, stdout, stderr) = match ended {
-        Ended::Done(r) => r.map_err(|e| format!("worktree setup failed: {e}"))?,
+        Ended::Done(r) => r.map_err(|e| format!("{label} failed: {e}"))?,
         Ended::TimedOut => {
-            return Err(format!(
-                "worktree setup timed out after {}s",
-                timeout.as_secs()
-            ));
+            return Err(format!("{label} timed out after {}s", timeout.as_secs()));
         }
-        Ended::Cancelled => return Err("worktree setup stopped".to_string()),
+        Ended::Cancelled => return Err(format!("{label} stopped")),
     };
     if status.success() {
         return Ok(());
@@ -249,11 +339,7 @@ pub async fn run_setup(
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
-    Err(format!(
-        "worktree setup failed ({}): {}",
-        status,
-        tail(&output)
-    ))
+    Err(format!("{label} failed ({}): {}", status, tail(&output)))
 }
 
 #[cfg(test)]
@@ -332,6 +418,81 @@ mod tests {
         assert!(compiler_cache_enabled(&wt).unwrap());
         write(r#"{"compilerCache": "false"}"#);
         assert!(plan(&wt).is_err(), "compilerCache must be a boolean");
+    }
+
+    #[test]
+    fn setup_json_accepts_a_format_command_as_a_string_or_a_list_and_rejects_bad_types() {
+        let (_tmp, wt) = worktree();
+        let write = |text: &str| std::fs::write(wt.join(SETUP_FILE), text).unwrap();
+        let format = || read_setup(&wt).map(|s| s.unwrap().format);
+        write(r#"{"format": "fmt \"$@\""}"#);
+        assert!(matches!(format().unwrap(), Some(Step::Shell(ref s)) if s == "fmt \"$@\""));
+        write(r#"{"setup": "true", "format": ["fmt", "--write"]}"#);
+        assert!(matches!(format().unwrap(), Some(Step::Argv(ref v)) if v.len() == 2));
+        assert!(
+            plan(&wt).unwrap().is_some(),
+            "format does not replace setup"
+        );
+        write(r#"{"env": {}}"#);
+        assert!(format().unwrap().is_none());
+        write(r#"{"format": 3}"#);
+        assert!(format().is_err());
+        write(r#"{"format": {"cmd": "fmt"}}"#);
+        assert!(format().is_err());
+    }
+
+    #[test]
+    fn a_format_command_gets_the_paths_as_arguments_in_the_worktree() {
+        let (tmp, wt) = worktree();
+        let run = |command: FormatCommand| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let paths = vec!["a b.rs".to_string(), "-x'y.cjs".to_string()];
+            rt.block_on(run_format(
+                &command,
+                &paths,
+                tmp.path(),
+                &wt,
+                SYSTEM_PATH,
+                Duration::from_secs(30),
+                sh,
+                std::future::pending(),
+            ))
+        };
+        let shell = FormatCommand {
+            step: Step::Shell("for f; do echo \"$f\"; done > out.txt".into()),
+            env: BTreeMap::new(),
+        };
+        run(shell).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("out.txt")).unwrap(),
+            "a b.rs\n-x'y.cjs\n"
+        );
+        let argv = FormatCommand {
+            step: Step::Argv(vec![
+                "sh".into(),
+                "-c".into(),
+                "echo \"$@\" > out2.txt".into(),
+                "sh".into(),
+            ]),
+            env: BTreeMap::new(),
+        };
+        run(argv).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("out2.txt")).unwrap(),
+            "a b.rs -x'y.cjs\n"
+        );
+        let failing = FormatCommand {
+            step: Step::Shell("echo boom >&2; exit 4".into()),
+            env: BTreeMap::new(),
+        };
+        let err = run(failing).unwrap_err();
+        assert!(
+            err.starts_with("format command failed") && err.contains("boom"),
+            "{err}"
+        );
     }
 
     #[test]

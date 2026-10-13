@@ -273,6 +273,9 @@ struct Secrets {
     /// Repo path -> project id, for a task made without one (the agent's own
     /// `task.create`): its project's values still reach it.
     repo_projects: HashMap<String, String>,
+    /// The app has sent the values since this daemon started; until then
+    /// every map above is empty, not "no values".
+    received: bool,
 }
 
 struct TaskControl {

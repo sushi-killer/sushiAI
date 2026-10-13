@@ -159,6 +159,7 @@ impl App {
             projects: p.projects,
             project_mcp: p.project_mcp,
             repo_projects: p.repo_projects,
+            received: true,
         };
         secrets::redact_old_run_mcp(&self.data_dir, &secrets);
         Ok(json!({}))

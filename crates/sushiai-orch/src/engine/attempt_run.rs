@@ -476,6 +476,7 @@ pub(super) async fn run_harness(
     cancel: &CancelToken,
     mut guard: Guard,
 ) -> Result<harness::RunOutcome, RunError> {
+    wait_for_app_secrets(app, task_id, cancel).await;
     let RunSecrets {
         env: project_env,
         redaction: redaction_env,
@@ -836,6 +837,30 @@ pub(super) async fn run_harness(
 pub(super) struct RunSecrets {
     pub env: HashMap<String, String>,
     pub redaction: HashMap<String, String>,
+}
+
+/// How long a run of a task with a project waits for the app's values after
+/// a daemon start before it goes on without them.
+const APP_SECRETS_WAIT: Duration = Duration::from_secs(120);
+
+/// After a daemon restart the app sends project values only once it has
+/// reconnected; a task with a project that resumes first waits for them
+/// instead of failing its project check on empty maps.
+pub(super) async fn wait_for_app_secrets(app: &App, task_id: &str, cancel: &CancelToken) {
+    let has_project = app
+        .store
+        .load_task(task_id)
+        .ok()
+        .flatten()
+        .is_some_and(|task| task.project_id.is_some());
+    let deadline = tokio::time::Instant::now() + APP_SECRETS_WAIT;
+    while has_project
+        && !app.secrets.read().unwrap().received
+        && tokio::time::Instant::now() < deadline
+        && !cancel.is_cancelled()
+    {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 pub(super) fn run_secrets(app: &App, task_id: &str) -> Result<RunSecrets, String> {

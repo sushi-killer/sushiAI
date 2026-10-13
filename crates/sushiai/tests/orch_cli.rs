@@ -192,7 +192,7 @@ fn mcp_against_the_real_daemon_lists_the_tools_and_returns_the_modules_tasks() {
     let mut full = Mcp::start(&sandbox, &[]);
     let init = full.request("initialize", json!({"protocolVersion": "2025-06-18"}));
     assert_eq!(init["result"]["serverInfo"]["name"], "sushiai-orchestrator");
-    assert_eq!(full.tool_names().len(), 24);
+    assert_eq!(full.tool_names().len(), 25);
     let out = full.request("tools/call", json!({"name": "task_list", "arguments": {}}));
     assert!(out["result"].get("isError").is_none(), "{out}");
     let text = out["result"]["content"][0]["text"].as_str().expect("text");
@@ -224,7 +224,7 @@ fn mcp_without_a_daemon_still_answers_initialize_and_tools_list() {
     let sandbox = Sandbox::new();
     let mut mcp = Mcp::start(&sandbox, &[]);
     mcp.request("initialize", json!({}));
-    assert_eq!(mcp.tool_names().len(), 24);
+    assert_eq!(mcp.tool_names().len(), 25);
 }
 
 fn hook_command(sandbox: &Sandbox, event: &str, token: Option<&str>) -> Command {

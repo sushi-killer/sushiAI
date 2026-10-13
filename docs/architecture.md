@@ -111,7 +111,7 @@ flowchart TB
     harness["harness.rs<br/>claude -p / codex exec"]
     side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
     store[("data dir<br/>tasks/, runs/, settings.json<br/>(presets, repoPresets),<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
-    mcp["sushiai mcp<br/>task_* tools, stdio"]
+    mcp["sushiai mcp<br/>task_* tools, stdio;<br/>host / hosts_list go as orch.relay.call"]
     chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
@@ -153,6 +153,8 @@ flowchart TB
   taskAgent -->|Stop hook| proto
   side --> repo
   daemonMgr <-->|"NDJSON frames: sessions, attach, asks, catalog"| sushiaiDaemon
+  sushiaiDaemon -->|"orch.relay (from sushiai mcp host argument)"| orchSvc
+  orchSvc -->|"allowlisted task.* / message.inbox / hosts.list on the target host,<br/>orch.relay.reply on the asking daemon's connection"| sushiaiDaemon
   sushiaiDaemon <--> holders
   holders -->|"agent hooks: sushiai hook, sushiai open"| sushiaiDaemon
   sushiaiDaemon -->|task agent launch + project MCP| taskAgent

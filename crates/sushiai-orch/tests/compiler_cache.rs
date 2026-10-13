@@ -4,11 +4,21 @@ use std::time::Duration;
 use sushiai_orch::engine::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
 use sushiai_orch::engine::verify::{run_verify_command, VerifyEnvironment};
 
+/// Written by a child `sh`, never through a descriptor of this process: a
+/// test thread that forks while it is open for writing makes the next exec
+/// of the script fail with ETXTBSY on Linux, and `start_server` ignores that.
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new("sh")
+        .args([
+            "-c",
+            r#"printf '#!/bin/sh\n%s\n' "$1" > "$2" && chmod 755 "$2""#,
+            "sh",
+        ])
+        .arg(body)
+        .arg(dir.join(name))
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 fn assert_no_cache_env(command: &tokio::process::Command) {

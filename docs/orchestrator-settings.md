@@ -111,6 +111,7 @@ A new task worktree is a clean checkout: it has no installed dependencies and no
   "setup": "npm ci",
   "env": { "NAME": "value" },
   "compilerCache": true,
+  "format": "./node_modules/.bin/prettier --write --ignore-unknown \"$@\"",
   "scopedChecks": [
     {
       "command": "npm run test:desktop",
@@ -121,6 +122,8 @@ A new task worktree is a clean checkout: it has no installed dependencies and no
 ```
 
 `setup` is a string (run with `sh -c`) or an argv list (run directly). `env` is optional. The command runs once per worktree, in the worktree, in the same sandbox as the checks (`Host` runs it unsandboxed, as it does a check), with the verify timeout. On macOS it gets `npm_config_cache` under `~/Library/Caches/sushiai/npm`, a path the sandbox lets it write. It gets orchd's own environment plus the extended `PATH`, `ORCHD_ROOT_PATH` (the main checkout), `ORCHD_WORKTREE_PATH` (the worktree) and the `env` of the file. No project secret is added. If `setup.json` is not valid JSON, or the command exits non-zero, the task ends `failed` with no attempt and a decision line `Worktree setup: ...` that holds the tail of the output. Stopping the task stops the setup. A worktree recreated from its branch runs the setup again.
+
+`format` is optional and has the same shape as `setup` (a string run with `sh -c`, or an argv list). After orchd writes the planner's test files and before it commits them, it runs the command in the worktree, in the same sandbox and environment as setup, with the repo-relative test paths as arguments (`"$@"` in a string, appended to an argv). The committed file, its protected hash and the stored task test all hold the formatted text, so the repo's own format check passes on files the task may not edit. Like the check declarations, it is read from the task's base commit. If the command fails or runs longer than 120 seconds, the tests are committed as written and the task records `Orchestrator: format command failed on planner tests (...), committed as written`.
 
 `scopedChecks` is an optional list of `{command, paths}` entries. Unknown keys
 in the file or an entry are rejected. The command is a glob over the complete

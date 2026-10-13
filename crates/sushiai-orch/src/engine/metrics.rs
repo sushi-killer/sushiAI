@@ -223,7 +223,7 @@ pub(super) fn repo_line(repo_tasks: &[Task]) -> String {
         .filter(|(t, _)| t.status == TaskStatus::Done)
         .count();
     let spend: f64 = done.iter().map(|(_, m)| total(m)).sum();
-    let rate = if n == 0 { 0 } else { first * 100 / n };
+    let rate = (first * 100).checked_div(n).unwrap_or(0);
     let average = if landed == 0 {
         "n/a".to_string()
     } else {

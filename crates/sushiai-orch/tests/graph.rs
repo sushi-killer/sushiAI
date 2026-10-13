@@ -791,16 +791,6 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
         }),
     );
     let parent_id = parent["id"].as_str().unwrap().to_string();
-    // Add the part once the parent sits on its question: a parent whose loop
-    // is still starting up refuses subtasks.
-    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
-    assert!(
-        asked["question"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("(stopped)"),
-        "{asked}"
-    );
     let child = daemon.request(
         "task.create",
         serde_json::json!({
@@ -813,6 +803,14 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
     );
     let child_id = child["id"].as_str().unwrap().to_string();
 
+    let asked = poll_until(&daemon, &parent_id, |s| s == "waiting");
+    assert!(
+        asked["question"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("(stopped)"),
+        "{asked}"
+    );
     // Absence check: this window gives a forbidden child start time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));

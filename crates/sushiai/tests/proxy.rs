@@ -455,3 +455,40 @@ fn the_auto_started_daemon_gets_a_clean_environment_and_the_login_path() {
         .expect("PATH");
     assert_eq!(path, "/custom/a:/custom/b");
 }
+
+#[test]
+fn a_daemon_started_without_a_locale_gives_its_sessions_a_utf8_one() {
+    let sandbox = &mut Sandbox::new();
+    // A command over ssh to a macOS host carries no locale; an empty value is no locale.
+    let mut proxy = sandbox.proxy_with(&[("LANG", ""), ("LC_ALL", ""), ("LC_CTYPE", "")]);
+    proxy.hello();
+    let file = sandbox.home().join("charmap.txt");
+    proxy.call(
+        "session.create",
+        json!({
+            "cmd": ["/bin/sh", "-c", format!("/usr/bin/locale charmap > {0}.tmp && mv {0}.tmp {0}", file.display())],
+            "cwd": "/tmp", "cols": 80, "rows": 24
+        }),
+    );
+    wait_until("charmap file", 10, || file.exists());
+    let charmap = fs::read_to_string(&file).expect("charmap");
+    assert_eq!(charmap.trim(), "UTF-8", "sessions need a UTF-8 locale");
+}
+
+#[test]
+fn a_locale_the_host_sets_reaches_the_sessions_unchanged() {
+    let sandbox = &mut Sandbox::new();
+    let mut proxy = sandbox.proxy_with(&[("LANG", "fr_FR.UTF-8"), ("LC_ALL", "")]);
+    proxy.hello();
+    let file = sandbox.home().join("vars.txt");
+    proxy.call(
+        "session.create",
+        json!({
+            "cmd": ["/bin/sh", "-c", format!("/usr/bin/env > {0}.tmp && mv {0}.tmp {0}", file.display())],
+            "cwd": "/tmp", "cols": 80, "rows": 24
+        }),
+    );
+    wait_until("vars file", 10, || file.exists());
+    let vars = fs::read_to_string(&file).expect("vars");
+    assert!(vars.lines().any(|l| l == "LANG=fr_FR.UTF-8"), "{vars}");
+}

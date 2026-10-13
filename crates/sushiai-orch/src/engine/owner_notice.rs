@@ -121,6 +121,18 @@ pub(crate) fn decision_key(task_id: &str, question: &Question) -> String {
     }
 }
 
+/// An owner-only question that parked during quiet hours and is not yet noticed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct QuietParked {
+    decision_key: String,
+    repo: String,
+    task_id: String,
+    kind_title: String,
+    parked_at: i64,
+}
+
+static QUIET_PARKED_LOCK: StdMutex<()> = StdMutex::new(());
+
 fn is_notice(entry: &Entry) -> bool {
     matches!(entry.kind.as_str(), "asked_owner" | "digest")
 }
@@ -300,6 +312,131 @@ impl App {
                 Some(Gate { verdict, keys })
             }
             _ => None,
+        }
+    }
+
+    fn quiet_parked_path(&self) -> PathBuf {
+        self.data_dir.join("quiet-parked.json")
+    }
+
+    fn read_quiet_parked(&self) -> Vec<QuietParked> {
+        std::fs::read_to_string(self.quiet_parked_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// An owner-only question that parks inside quiet hours is written down,
+    /// so the owner hears of it once the window ends. Outside quiet hours the
+    /// owner is already looking at the board and nothing is recorded.
+    pub(super) fn record_quiet_parked(&self, task: &Task) {
+        let Some(question) = task.question.as_ref() else {
+            return;
+        };
+        let now = now_ms();
+        let settings = NoticeSettings::from_settings(&self.settings.read().unwrap());
+        if !in_quiet(settings.quiet, minute_of_day(now)) {
+            return;
+        }
+        let key = decision_key(&task.id, question);
+        let _guard = QUIET_PARKED_LOCK.lock().unwrap();
+        let mut parked = self.read_quiet_parked();
+        if parked.iter().any(|p| p.decision_key == key) {
+            return;
+        }
+        parked.push(QuietParked {
+            decision_key: key,
+            repo: task.repo.clone(),
+            task_id: task.id.clone(),
+            kind_title: crate::overseer::question_title(question.kind, &question.text),
+            parked_at: now,
+        });
+        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &parked) {
+            eprintln!("orch: recording a parked question failed: {e}");
+        }
+    }
+
+    /// Outside quiet hours, one note per repo lists the owner-only questions
+    /// that parked during them and still wait. An entry leaves the file only
+    /// after its note is posted, so a busy chat is retried on the next tick
+    /// and a restart loses none; a question the owner answered, or a notice
+    /// logged after it parked already told, is dropped without a note.
+    pub(super) fn post_quiet_parked_notices(&self, now: i64) {
+        let _guard = QUIET_PARKED_LOCK.lock().unwrap();
+        let parked = self.read_quiet_parked();
+        if parked.is_empty() {
+            return;
+        }
+        let tasks: std::collections::HashMap<String, Task> = self
+            .store
+            .list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.id.clone(), t))
+            .collect();
+        let log = self.notice_log();
+        let mut pending: Vec<(QuietParked, &Task)> = Vec::new();
+        for entry in parked {
+            let task = tasks.get(&entry.task_id).filter(|t| {
+                t.status == TaskStatus::Waiting
+                    && !t.archived
+                    && t.question
+                        .as_ref()
+                        .is_some_and(|q| decision_key(&t.id, q) == entry.decision_key)
+            });
+            let told = log.iter().any(|e| {
+                is_notice(e)
+                    && e.ts >= entry.parked_at
+                    && e.decision_keys().any(|k| k == entry.decision_key)
+            });
+            if let (Some(task), false) = (task, told) {
+                pending.push((entry, task));
+            }
+        }
+        let mut repos: Vec<String> = pending.iter().map(|(p, _)| p.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        let mut left: Vec<String> = pending
+            .iter()
+            .map(|(p, _)| p.decision_key.clone())
+            .collect();
+        for repo in repos {
+            let mut listed: Vec<&(QuietParked, &Task)> =
+                pending.iter().filter(|(p, _)| p.repo == repo).collect();
+            listed.sort_by_key(|(p, _)| p.parked_at);
+            let lines: Vec<String> = listed
+                .iter()
+                .map(|(p, t)| format!("- {} \u{2014} {} ({})", p.kind_title, t.title, p.task_id))
+                .collect();
+            let noun = if lines.len() == 1 {
+                "question needs"
+            } else {
+                "questions need"
+            };
+            let text = format!(
+                "While quiet hours were on, {} {noun} your answer:\n{}",
+                lines.len(),
+                lines.join("\n")
+            );
+            if !chat::post_note(self, &repo, &text) {
+                continue;
+            }
+            let keys: Vec<String> = listed.iter().map(|(p, _)| p.decision_key.clone()).collect();
+            left.retain(|k| !keys.contains(k));
+            let mut told = Entry::new("asked_owner", &repo, None, &text)
+                .with_detail(&text)
+                .with_decision(&keys);
+            told.ts = now.max(told.ts);
+            self.record_overseer(told);
+        }
+        // Answered, archived and already-told entries leave the file too.
+        let rest: Vec<QuietParked> = self
+            .read_quiet_parked()
+            .into_iter()
+            .filter(|p| left.contains(&p.decision_key))
+            .collect();
+        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &rest) {
+            eprintln!("orch: updating parked questions failed: {e}");
         }
     }
 

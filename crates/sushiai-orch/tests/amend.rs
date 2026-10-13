@@ -182,6 +182,94 @@ fn depends_on_amend_queued_task_waits_for_a_running_dependency_then_starts_itsel
     }
 }
 
+/// Commits a setup that fails only in the failing task's worktree until
+/// `fixed` exists: the task ends `failed` and can be requeued once it does.
+fn commit_failing_setup(repo: &Path, fixed: &Path) {
+    let setup = json!({"setup": format!(
+        "case \"$ORCHD_WORKTREE_PATH\" in *failing-task*) test -f {} || {{ echo setup-broke >&2; exit 4; }};; esac",
+        fixed.display()
+    )});
+    std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+    std::fs::write(repo.join(".sushiai/setup.json"), setup.to_string()).unwrap();
+    for args in [
+        &["add", "-f", "."][..],
+        &["commit", "-q", "-m", "add setup"][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+}
+
+#[test]
+fn depends_on_amend_failed_task_waits_for_a_dependency_then_starts_itself() {
+    let scripts = tempfile::tempdir().unwrap();
+    let daemon = dependency_daemon(scripts.path());
+    let repo = init_git_repo();
+    let fixed = scripts.path().join("fixed");
+    commit_failing_setup(repo.path(), &fixed);
+    let failing = dependency_task(&daemon, repo.path(), "Failing task", "Make a change", true);
+    let failed = poll_until(&daemon, failing["id"].as_str().unwrap(), |s| {
+        matches!(s, "failed" | "done" | "waiting")
+    });
+    assert_eq!(failed["status"], "failed", "{failed}");
+
+    let dependency = dependency_task(&daemon, repo.path(), "Dependency", "AMEND_BLOCK_DEP", true);
+    wait_until("the dependency to run", || {
+        scripts
+            .path()
+            .join("dependency-started")
+            .exists()
+            .then_some(())
+    });
+    // The fix the dependency stands for: from now on the setup passes.
+    std::fs::write(&fixed, "").unwrap();
+    let amended = daemon.request(
+        "task.amend",
+        json!({"id": failing["id"], "dependsOn": [dependency["id"]]}),
+    );
+    assert_eq!(amended["pending"], false, "{amended}");
+
+    std::thread::sleep(Duration::from_millis(500));
+    let waiting = daemon.request("task.get", json!({"id": failing["id"]}));
+    assert_eq!(waiting["status"], "queued", "{waiting}");
+    assert_eq!(waiting["dependsOn"], json!([dependency["id"]]), "{waiting}");
+    assert_dependency_decisions(&waiting, "Dependencies: waits for \"Dependency\"");
+    assert!(
+        waiting["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["status"] != "running"),
+        "{waiting}"
+    );
+    let attempts_before = waiting["attempts"].as_array().unwrap().len();
+
+    std::fs::write(scripts.path().join("dependency-go"), "").unwrap();
+    let dependency_done = poll_until(&daemon, dependency["id"].as_str().unwrap(), |s| {
+        matches!(s, "done" | "failed")
+    });
+    assert_eq!(dependency_done["status"], "done", "{dependency_done}");
+    let done = poll_until(&daemon, failing["id"].as_str().unwrap(), |s| {
+        matches!(s, "done" | "failed" | "waiting")
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    let attempts = done["attempts"].as_array().unwrap();
+    assert!(attempts.len() > attempts_before, "{done}");
+    assert!(
+        attempts[attempts_before]["startedAt"].as_i64().unwrap()
+            >= dependency_done["updatedAt"].as_i64().unwrap(),
+        "{done} started before {dependency_done} reached done"
+    );
+    daemon.shutdown_and_wait();
+    for t in [&failing, &dependency] {
+        remove_dir_retrying(t["worktree"].as_str().unwrap());
+    }
+}
+
 #[test]
 fn depends_on_amend_empty_list_starts_without_waiting_for_the_old_dependency() {
     let scripts = tempfile::tempdir().unwrap();

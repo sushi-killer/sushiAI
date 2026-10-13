@@ -503,7 +503,12 @@ pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
     let Some(question) = task.question.as_ref() else {
         return;
     };
-    if !app.settings.read().unwrap().auto_answer || owner_only(question.kind) {
+    if owner_only(question.kind) {
+        // Nobody wakes for it; quiet hours would leave the owner unaware.
+        app.record_quiet_parked(task);
+        return;
+    }
+    if !app.settings.read().unwrap().auto_answer {
         return;
     }
     if answer_like_precedent(app, task, question) {

@@ -48,6 +48,10 @@ impl App {
         if digest_off && !quiet {
             self.post_held_notices(now);
         }
+        // Owner-only questions that parked in quiet hours are noticed once they end.
+        if !quiet {
+            self.post_quiet_parked_notices(now);
+        }
         let mut log: Option<Vec<crate::overseer::Entry>> = None;
         if remind == 0 && default == 0 {
             return;
@@ -876,5 +880,168 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("the pause was never cleared");
+    }
+
+    /// A quiet window that holds the local minute of `at`, in any zone.
+    fn window_around(at: i64) -> String {
+        let m = owner_notice::minute_of_day(at);
+        let to = (m + 120) % 1440;
+        format!("{:02}:{:02}-{:02}:{:02}", m / 60, m % 60, to / 60, to % 60)
+    }
+
+    fn boundary_note(tasks: &[&Task]) -> String {
+        let lines: Vec<String> = tasks
+            .iter()
+            .map(|t| format!("- Permission \u{2014} {} ({})", t.title, t.id))
+            .collect();
+        let noun = if tasks.len() == 1 {
+            "question needs"
+        } else {
+            "questions need"
+        };
+        format!(
+            "While quiet hours were on, {} {noun} your answer:\n{}",
+            tasks.len(),
+            lines.join("\n")
+        )
+    }
+
+    /// Parks an owner-only question while quiet hours are on.
+    fn park_in_quiet(app: &App, repo: &Path, options: &[&str]) -> Task {
+        app.settings.write().unwrap().quiet_hours = window_around(now_ms());
+        let task = waiting_in(repo, QuestionKind::Permission, options);
+        app.store.save_task(&task).unwrap();
+        wake_orchestrator_for_waiting(app, &task);
+        task
+    }
+
+    fn fresh_app(dir: &Path) -> Arc<App> {
+        let app = App::new(dir.join("data"), dir.join("home"), "orchd".to_string()).unwrap();
+        app.assume_harnesses_installed();
+        app.settings.write().unwrap().quiet_hours = String::new();
+        app
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_owner_only_question_is_noticed_once_at_the_boundary() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let first = park_in_quiet(&app, &repo, &["Allow once", "Deny"]);
+        let second = park_in_quiet(&app, &repo, &["Allow always", "Deny"]);
+        let note = boundary_note(&[&first, &second]);
+        let later = now_ms() + HOUR_MS;
+        // The window is still active: nothing is posted.
+        app.settings.write().unwrap().quiet_hours = window_around(later);
+        app.wait_sla_tick(later).await;
+        assert!(!chat::thread_has_text(&app, &repo_str, &note));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 0);
+        // The window ends: one note lists both, and a second tick adds none.
+        app.settings.write().unwrap().quiet_hours = String::new();
+        app.wait_sla_tick(later + 1000).await;
+        assert_eq!(chat::thread_text_count(&app, &repo_str, &note), 1);
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1);
+        app.wait_sla_tick(later + 2000).await;
+        assert_eq!(chat::thread_text_count(&app, &repo_str, &note), 1);
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_digest_that_told_the_question_suppresses_the_boundary_notice() {
+        let _harness = chat::fake_overseer_harness();
+        for digest_hour in [None, Some(7)] {
+            let (app, dir) = test_app();
+            app.settings.write().unwrap().digest_hour = digest_hour;
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_str = repo.to_string_lossy().to_string();
+            let told_task = park_in_quiet(&app, &repo, &["Allow once", "Deny"]);
+            let open_task = park_in_quiet(&app, &repo, &["Allow always", "Deny"]);
+            let later = now_ms() + HOUR_MS;
+            // A digest that ran after the first parked already told the owner.
+            told(&app, &told_task, now_ms() + 1);
+            app.settings.write().unwrap().quiet_hours = String::new();
+            app.wait_sla_tick(later).await;
+            assert!(chat::thread_has_text(
+                &app,
+                &repo_str,
+                &boundary_note(&[&open_task])
+            ));
+            assert!(!chat::thread_has_text(
+                &app,
+                &repo_str,
+                &boundary_note(&[&told_task, &open_task])
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_boundary_notice_survives_a_restart_and_a_full_overseer_log() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let task = park_in_quiet(&app, &repo, &["Allow once", "Deny"]);
+        let note = boundary_note(&[&task]);
+        // Appends past the cap in one write; reads keep the newest `MAX_LINES`.
+        let flood = |app: &App| {
+            use std::io::Write;
+            let mut lines = String::new();
+            for i in 0..crate::overseer::MAX_LINES + 10 {
+                let entry =
+                    crate::overseer::Entry::new("skipped", "/other", None, &format!("n{i}"));
+                lines.push_str(&serde_json::to_string(&entry).unwrap());
+                lines.push('\n');
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(app.data_dir.join("overseer.jsonl"))
+                .unwrap();
+            file.write_all(lines.as_bytes()).unwrap();
+        };
+        // A restart and a full log lose nothing before the notice.
+        let again = fresh_app(dir.path());
+        flood(&again);
+        let later = now_ms() + HOUR_MS;
+        again.wait_sla_tick(later).await;
+        assert_eq!(chat::thread_text_count(&again, &repo_str, &note), 1);
+        // The notice entry is evicted and the daemon restarts: still once.
+        flood(&again);
+        let third = fresh_app(dir.path());
+        third.wait_sla_tick(later + 1000).await;
+        assert_eq!(chat::thread_text_count(&third, &repo_str, &note), 1);
+    }
+
+    #[tokio::test]
+    async fn an_answered_owner_only_question_is_not_noticed_at_the_boundary() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_str = repo.to_string_lossy().to_string();
+        let mut answered = park_in_quiet(&app, &repo, &["Allow once", "Deny"]);
+        let mut archived = park_in_quiet(&app, &repo, &["Allow always", "Deny"]);
+        let kept = park_in_quiet(&app, &repo, &["Allow here", "Deny"]);
+        answered.status = TaskStatus::Running;
+        answered.question = None;
+        app.store.save_task(&answered).unwrap();
+        archived.archived = true;
+        app.store.save_task(&archived).unwrap();
+        app.settings.write().unwrap().quiet_hours = String::new();
+        // Parked outside quiet hours: nothing is recorded for it.
+        let outside = waiting_in(&repo, QuestionKind::Permission, &["Allow outside", "Deny"]);
+        app.store.save_task(&outside).unwrap();
+        wake_orchestrator_for_waiting(&app, &outside);
+        app.wait_sla_tick(now_ms() + HOUR_MS).await;
+        assert!(chat::thread_has_text(
+            &app,
+            &repo_str,
+            &boundary_note(&[&kept])
+        ));
+        assert_eq!(kinds(&app, &repo_str, "asked_owner"), 1);
     }
 }

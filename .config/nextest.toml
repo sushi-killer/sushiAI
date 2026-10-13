@@ -1,0 +1,4 @@
+# The tests mostly wait on daemons and child processes, not the CPU: run more
+# of them at once than the runner has cores.
+[profile.default]
+test-threads = 12

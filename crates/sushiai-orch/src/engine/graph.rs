@@ -1235,6 +1235,12 @@ pub(super) async fn carry_and_check(
         task.planner_tests = tests;
         carried
     });
+    if matches!(
+        carried,
+        Ok(git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. })
+    ) {
+        reformat_carried_tests(app, task, worktree, cancel).await;
+    }
     match carried {
         Ok(git::Rebase::Unchanged) => {}
         Ok(git::Rebase::Moved { new_sha, rewritten }) => {

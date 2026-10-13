@@ -755,6 +755,7 @@ pub fn move_branch(repo: &Path, branch: &str, sha: &str) -> Result<BranchMove, G
 /// Drops the saved work of a task that no longer needs it.
 pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
+    let _ = run(worktree, &["update-ref", "-d", &format_aside_ref(task_id)]);
 }
 
 /// Removes a worktree and its branch that nothing has used yet (best
@@ -1237,6 +1238,143 @@ pub fn commit_paths(
     head_sha(cwd)
 }
 
+/// The ref that keeps the work set aside by [`set_work_aside`].
+pub fn format_aside_ref(task_id: &str) -> String {
+    format!("refs/orchd/format-aside/{task_id}")
+}
+
+/// Commits all uncommitted work (also untracked, not ignored files) on a side
+/// ref and resets the tree to HEAD, so a tool sees only the committed tree.
+/// `None` when there was nothing to set aside.
+pub fn set_work_aside(worktree: &Path, task_id: &str) -> Result<Option<String>, GitError> {
+    let head = head_sha(worktree)?;
+    if run(worktree, &["status", "--porcelain"])?.trim().is_empty() {
+        return Ok(None);
+    }
+    if format_aside_commit(worktree, task_id).is_some() {
+        return Err(GitError(
+            "earlier work is still set aside; it is put back first".into(),
+        ));
+    }
+    let quiet = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=orchd",
+        "-c",
+        "user.email=orchd@localhost",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+    run(worktree, &[&quiet[..], &["add", "-A"]].concat())?;
+    run(
+        worktree,
+        &[
+            &quiet[..],
+            &["commit", "-q", "--no-verify", "-m", "orchd format aside"],
+        ]
+        .concat(),
+    )?;
+    let aside = head_sha(worktree)?;
+    run(
+        worktree,
+        &["update-ref", &format_aside_ref(task_id), &aside],
+    )?;
+    run(worktree, &["reset", "-q", "--hard", &head])?;
+    Ok(Some(aside))
+}
+
+/// Puts `paths` back as they are at HEAD, in the tree and the index.
+pub fn discard_paths(worktree: &Path, paths: &[String]) -> Result<(), GitError> {
+    restore_paths(worktree, "HEAD", paths)
+}
+
+/// The commit that keeps the work set aside for the task, if any.
+pub fn format_aside_commit(worktree: &Path, task_id: &str) -> Option<String> {
+    run(
+        worktree,
+        &["rev-parse", "--verify", "-q", &format_aside_ref(task_id)],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+/// Applies the work set aside at `aside` on top of the current HEAD,
+/// uncommitted, and drops the side ref. The tree is first made exactly HEAD
+/// (a tool may have left edits or new files behind; ignored files stay), so
+/// the apply cannot be refused. If it still fails, the work is restored from
+/// the side commit as it is, with HEAD kept; the ref goes only afterwards.
+pub fn bring_work_back(worktree: &Path, task_id: &str, aside: &str) -> Result<(), GitError> {
+    let head = head_sha(worktree)?;
+    run(worktree, &["reset", "-q", "--hard", "HEAD"])?;
+    run(worktree, &["clean", "-fdq"])?;
+    let picked = run(
+        worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=orchd",
+            "-c",
+            "user.email=orchd@localhost",
+            "cherry-pick",
+            "--no-commit",
+            aside,
+        ],
+    );
+    let _ = run(worktree, &["cherry-pick", "--quit"]);
+    if picked.is_err() {
+        run(worktree, &["reset", "-q", "--hard", aside])?;
+        run(worktree, &["reset", "-q", "--soft", &head])?;
+    }
+    run(worktree, &["reset", "-q"])?;
+    run(worktree, &["update-ref", "-d", &format_aside_ref(task_id)])?;
+    Ok(())
+}
+
+/// Puts back work a crash left set aside. `true` when there was some.
+pub fn recover_format_aside(worktree: &Path, task_id: &str) -> Result<bool, GitError> {
+    match format_aside_commit(worktree, task_id) {
+        Some(aside) => bring_work_back(worktree, task_id, &aside).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+/// Folds the current content of `paths` into the HEAD commit (`commit
+/// --amend`, same message and trailer, orchd as committer) and returns the new
+/// HEAD. `None` when no listed path differs from HEAD. Other uncommitted work
+/// stays uncommitted.
+pub fn amend_paths(cwd: &Path, paths: &[String]) -> Result<Option<String>, GitError> {
+    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    run(cwd, &add)?;
+    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
+    diff.extend(paths.iter().map(String::as_str));
+    if run(cwd, &diff).is_ok() {
+        return Ok(None);
+    }
+    let mut amend = vec![
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=orchd",
+        "-c",
+        "user.email=orchd@localhost",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "--amend",
+        "--no-edit",
+        "--no-verify",
+        "--",
+    ];
+    amend.extend(paths.iter().map(String::as_str));
+    run(cwd, &amend)?;
+    head_sha(cwd).map(Some)
+}
+
 /// The content of `path` at `rev` when it is a file there.
 pub fn blob_at(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
     let out = Command::new("git")
@@ -1530,6 +1668,7 @@ pub fn linked_worktrees(repo_root: &Path) -> Vec<PathBuf> {
 /// Removes a task's branch and saved work (best effort).
 pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
     let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
+    let _ = run(repo_root, &["update-ref", "-d", &format_aside_ref(task_id)]);
     let _ = run(repo_root, &["branch", "-D", branch]);
 }
 
@@ -1558,6 +1697,7 @@ pub fn delete_merged_branches(
         }
         if run(repo_root, &["update-ref", "-d", &full, sha]).is_ok() {
             let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
+            let _ = run(repo_root, &["update-ref", "-d", &format_aside_ref(task_id)]);
             removed.push(branch.clone());
         }
     }

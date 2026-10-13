@@ -114,7 +114,7 @@ impl App {
         }
     }
 
-    pub(super) async fn carry_part_onto_parent(&self, task: &mut Task) {
+    pub(super) async fn carry_part_onto_parent(&self, task: &mut Task, cancel: &CancelToken) {
         let worktree = PathBuf::from(&task.worktree);
         if let Some(chain_base) = task.queue.relay_base.clone() {
             if let Some(parent) = task
@@ -144,7 +144,7 @@ impl App {
                         Ok(()) => {
                             task.base_sha = chain_base;
                             task.base_ref = Some(parent.branch);
-                            carry_onto_newest_base(task, &worktree).await;
+                            carry_onto_newest_base(self, task, &worktree, cancel).await;
                             task.queue.relay_base = Some(task.base_sha.clone());
                             return;
                         }
@@ -159,7 +159,7 @@ impl App {
             }
             return;
         }
-        carry_onto_newest_base(task, &worktree).await;
+        carry_onto_newest_base(self, task, &worktree, cancel).await;
     }
 
     pub(super) async fn handle_task_sync(

@@ -177,6 +177,7 @@ const STAGE_ORDER = [
   "triage",
   "answer_judge",
   "finding_judge",
+  "pr_draft",
   "audit",
   "evolution",
   "chat",

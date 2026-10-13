@@ -784,6 +784,28 @@ function OrchestratorSettingsBody({
           }
         />
       </div>
+      <div className="os-block">
+        <div className="os-row-head">
+          <span className="os-row-title">
+            Repos where a finished task opens a pull request
+          </span>
+        </div>
+        <span className="os-row-desc">
+          When landing on the default branch is refused, a helper drafts the
+          pull request by the repo's own rules and orchd opens it. Use the full
+          repo path.
+        </span>
+        <ChipList
+          values={landRepos(settings.prOnDoneRepos)}
+          label="Add a repo path for pull requests"
+          placeholder="Add a repo path…"
+          onChange={(repos) =>
+            update({
+              prOnDoneRepos: withLandRepos(settings.prOnDoneRepos, repos),
+            })
+          }
+        />
+      </div>
       {row(
         "Max attempts",
         "How many times a task is retried before it comes to you.",

@@ -111,6 +111,18 @@ impl App {
         }
         p.settings.experiments.check_routes(&p.settings.routes)?;
         p.settings.check_presets()?;
+        if !p.settings.pr_route.is_empty()
+            && !p
+                .settings
+                .routes
+                .iter()
+                .any(|r| r.id == p.settings.pr_route)
+        {
+            return Err(format!(
+                "prRoute \"{}\" is not a configured route",
+                p.settings.pr_route
+            ));
+        }
         let answering = |s: &Settings| s.auto_answer && self.chat_route(s).is_some();
         let was_answering = answering(&self.settings.read().unwrap());
         {

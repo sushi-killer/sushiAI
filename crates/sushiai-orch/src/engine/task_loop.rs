@@ -3777,6 +3777,7 @@ pub(super) async fn finish_attempt(
     } else {
         None
     };
+    let mut pr_wanted = false;
     if let Some(landing) = landing {
         match landing {
             Landing::Waiting => {
@@ -3846,6 +3847,7 @@ pub(super) async fn finish_attempt(
                 return Tail::Return;
             }
             Landing::NoParent => {}
+            Landing::DefaultBranchRefused => pr_wanted = true,
         }
     }
 
@@ -3896,6 +3898,9 @@ pub(super) async fn finish_attempt(
         }
     }
     if task.status == TaskStatus::Done {
+        if pr_wanted {
+            super::pr_draft::mark_pr_pending(app, task);
+        }
         task.updated_at = now_ms();
         app.write_report(task).await;
         app.release_worktree(task, "committed on its branch").await;
@@ -3904,6 +3909,7 @@ pub(super) async fn finish_attempt(
     app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
+    super::pr_draft::spawn_pr_on_done(app, task);
     *permit = None;
     app.finish_task_loop(task_id);
     Tail::Return

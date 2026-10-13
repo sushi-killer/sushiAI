@@ -126,11 +126,26 @@ fn start_daemon(socket: &Path) -> Result<Child> {
     };
     let mut command = Command::new(exe);
     command.arg("daemon").env_clear();
+    let mut has_locale = false;
     for (key, value) in std::env::vars_os() {
         let name = key.to_string_lossy();
-        if ENV_ALLOW.contains(&name.as_ref()) || name.starts_with("LC_") {
+        if !value.is_empty() && (ENV_ALLOW.contains(&name.as_ref()) || name.starts_with("LC_")) {
+            if name == "LANG" || name == "LC_ALL" {
+                has_locale = true;
+            }
             command.env(key, value);
         }
+    }
+    if !has_locale {
+        // Sessions inherit this: without a locale a terminal garbles non-ASCII text.
+        command.env(
+            "LANG",
+            if cfg!(target_os = "macos") {
+                "en_US.UTF-8"
+            } else {
+                "C.UTF-8"
+            },
+        );
     }
     command
         .env("SUSHIAI_HOME", &dir)

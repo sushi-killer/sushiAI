@@ -107,7 +107,11 @@ impl App {
             }
         }
         task.updated_at = now_ms();
-        self.store.save_task(task).map_err(|e| e.to_string())?;
+        {
+            let lock = self.task_lock(&task.id);
+            let _guard = lock.lock().unwrap();
+            self.store.save_task(task).map_err(|e| e.to_string())?;
+        }
         if live {
             cancellations.insert(
                 task.id.clone(),

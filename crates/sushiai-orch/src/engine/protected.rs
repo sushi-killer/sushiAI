@@ -169,9 +169,8 @@ pub(super) fn needs_prepare(task: &Task) -> bool {
         || (t.protected.is_none() && (!t.files.is_empty() || !task.checks.is_empty()))
 }
 
-/// Writes the planner's files into `worktree` and commits just those paths;
-/// the new HEAD. Running it again on the result changes nothing.
-fn write_and_commit(worktree: &Path, task: &Task) -> Result<String, String> {
+/// Writes the planner's files into `worktree`; their repo-relative paths.
+fn write_files(worktree: &Path, task: &Task) -> Result<Vec<String>, String> {
     let root = worktree.canonicalize().map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
     for t in &task.planner_tests.files {
@@ -190,13 +189,100 @@ fn write_and_commit(worktree: &Path, task: &Task) -> Result<String, String> {
         }
         paths.push(t.path.clone());
     }
-    git::commit_paths(
+    Ok(paths)
+}
+
+/// How long the repo's format command may run over the planner's files.
+const FORMAT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Runs the repo's declared format command over the written planner files and
+/// stores what it left in `task.planner_tests.files`, so the commit, the
+/// hashes and the task agree. One decision line, or none without a command.
+async fn format_planner_tests(
+    app: &Arc<App>,
+    task: &mut Task,
+    worktree: &Path,
+    paths: &[String],
+    cancel: &CancelToken,
+) -> Option<String> {
+    let command =
+        match crate::worktree_env::format_command_at(Path::new(&task.repo), &task.base_sha) {
+            Ok(Some(command)) => command,
+            Ok(None) => return None,
+            Err(e) => return Some(format_failed(&e)),
+        };
+    let run_dir = app.store.task_dir(&task.id).join("runs/format");
+    let _ = std::fs::create_dir_all(&run_dir);
+    let sandbox = app.task_sandbox(&task.repo, worktree, &run_dir);
+    let ran = crate::worktree_env::run_format(
+        &command,
+        paths,
+        Path::new(&task.repo),
         worktree,
-        &paths,
-        &format!("test: {} (planner tests)", task.title),
-        &task.id,
+        &augmented_path(),
+        FORMAT_TIMEOUT,
+        |script| verify::build_verify_command(worktree, script, sandbox.as_ref(), ""),
+        cancel.cancelled(),
     )
-    .map_err(|e| e.to_string())
+    .await;
+    if let Err(e) = ran {
+        for t in &task.planner_tests.files {
+            let _ = std::fs::write(worktree.join(&t.path), &t.content);
+        }
+        return Some(format_failed(&e));
+    }
+    let mut changed = 0;
+    for t in &mut task.planner_tests.files {
+        if let Ok(text) = std::fs::read_to_string(worktree.join(&t.path)) {
+            if text != t.content && text.len() <= MAX_TEST_BYTES {
+                t.content = text;
+                changed += 1;
+            }
+        }
+    }
+    (changed > 0).then(|| {
+        format!(
+            "Orchestrator: formatted {changed} planner test file(s) with the repo's format command"
+        )
+    })
+}
+
+fn format_failed(reason: &str) -> String {
+    let first = reason.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let short: String = first.chars().take(120).collect();
+    format!("Orchestrator: format command failed on planner tests ({short}), committed as written")
+}
+
+/// Writes the planner's files, formats them when the repo declares a format
+/// command and commits just those paths; the new HEAD and the decision lines.
+/// Running it again on the result changes nothing.
+async fn write_format_commit(
+    app: &Arc<App>,
+    task: &mut Task,
+    worktree: &Path,
+    cancel: &CancelToken,
+) -> Result<(String, Vec<String>), String> {
+    let (wt, snapshot) = (worktree.to_path_buf(), task.clone());
+    let paths = tokio::task::spawn_blocking(move || write_files(&wt, &snapshot))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))?;
+    let mut lines: Vec<String> = format_planner_tests(app, task, worktree, &paths, cancel)
+        .await
+        .into_iter()
+        .collect();
+    let (wt, title, id) = (worktree.to_path_buf(), task.title.clone(), task.id.clone());
+    let sha = tokio::task::spawn_blocking(move || {
+        git::commit_paths(&wt, &paths, &format!("test: {title} (planner tests)"), &id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()))?;
+    lines.push(format!(
+        "Orchestrator: committed {} planner test file(s) at {}",
+        task.planner_tests.files.len(),
+        short_sha(&sha)
+    ));
+    Ok((sha, lines))
 }
 
 /// The steps before attempt 1, each idempotent: write and commit the
@@ -210,17 +296,9 @@ pub(super) async fn prepare_tests(
     cancel: &CancelToken,
 ) -> bool {
     if !task.planner_tests.files.is_empty() && task.planner_tests.commit.is_none() {
-        let (wt, snapshot) = (worktree.to_path_buf(), task.clone());
-        let done = tokio::task::spawn_blocking(move || write_and_commit(&wt, &snapshot))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-        match done {
-            Ok(sha) => {
-                task.decisions.push(format!(
-                    "Orchestrator: committed {} planner test file(s) at {}",
-                    task.planner_tests.files.len(),
-                    short_sha(&sha)
-                ));
+        match write_format_commit(app, task, worktree, cancel).await {
+            Ok((sha, lines)) => {
+                task.decisions.extend(lines);
                 task.planner_tests.commit = Some(sha);
             }
             Err(e) => {
@@ -504,5 +582,77 @@ mod tests {
             "whitespace counts in Python"
         );
         assert!(!check("missing.rs", reformatted));
+    }
+
+    async fn prepared_with_format(
+        setup_json: Option<&str>,
+        content: &str,
+    ) -> (Task, std::path::PathBuf, tempfile::TempDir) {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        if let Some(json) = setup_json {
+            std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+            std::fs::write(repo.join(".sushiai/setup.json"), json).unwrap();
+            git_in(&repo, &["add", "."]);
+            git_in(&repo, &["commit", "-q", "-m", "setup"]);
+        }
+        let wt = dir.path().join("task");
+        let created = git::create_worktree(&repo, "task/format", &wt, "HEAD").unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.planner_tests.files = vec![test("tests/planner.txt", content)];
+        let id = task.id.clone();
+        assert!(prepare_tests(&app, &id, &mut task, &wt, &CancelToken::new()).await);
+        (task, wt, dir)
+    }
+
+    #[tokio::test]
+    async fn planner_tests_are_formatted_by_the_repo_command_before_the_commit() {
+        let json = r#"{"format": "for f; do sed 's/ *$//' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"}"#;
+        let (task, wt, _dir) = prepared_with_format(Some(json), "a  \nb \n").await;
+        assert_eq!(task.planner_tests.files[0].content, "a\nb\n");
+        let sha = task.planner_tests.commit.clone().unwrap();
+        let committed = git::blob_at(&wt, &sha, "tests/planner.txt").unwrap();
+        assert_eq!(committed, b"a\nb\n");
+        let hashes = task.planner_tests.protected.clone().unwrap();
+        assert_eq!(hashes["tests/planner.txt"], sha256_hex(b"a\nb\n"));
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("formatted 1 planner test file(s)")));
+    }
+
+    #[tokio::test]
+    async fn a_failing_format_command_commits_the_planner_tests_as_written() {
+        let json = r#"{"format": ["sh", "-c", "echo mangled > \"$1\"; echo no formatter >&2; exit 2", "sh"]}"#;
+        let (task, wt, _dir) = prepared_with_format(Some(json), "a  \n").await;
+        assert_eq!(task.planner_tests.files[0].content, "a  \n");
+        let sha = task.planner_tests.commit.clone().unwrap();
+        assert_eq!(
+            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
+            b"a  \n"
+        );
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("format command failed on planner tests")
+                && d.contains("committed as written")));
+    }
+
+    #[tokio::test]
+    async fn without_a_format_command_the_planner_tests_stay_as_written() {
+        let (task, wt, _dir) = prepared_with_format(None, "a  \n").await;
+        assert_eq!(task.planner_tests.files[0].content, "a  \n");
+        let sha = task.planner_tests.commit.clone().unwrap();
+        assert_eq!(
+            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
+            b"a  \n"
+        );
+        assert!(!task.decisions.iter().any(|d| d.contains("format")));
     }
 }

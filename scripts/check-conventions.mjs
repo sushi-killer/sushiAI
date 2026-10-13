@@ -14,6 +14,10 @@ const root = process.cwd();
 const CYRILLIC = /[Ѐ-ӿ]/;
 const SOURCE_DIRS = ["src", "electron", "crates"];
 const SOURCE_FILES = /\.(ts|tsx|cjs|mjs|js|css|html|rs)$/;
+// A commit's author and committer reach main and every clone: only an
+// address that names no person (a GitHub noreply, a tool's local address).
+const SAFE_EMAIL =
+  /(@users\.noreply\.github\.com|^noreply@github\.com|@localhost|\.invalid)$/i;
 const TRAILERS = [
   /^\s*co-authored-by:/im,
   /generated with \[?claude/i,
@@ -385,12 +389,16 @@ const head = process.env.HEAD_REF;
 if (base && head) {
   const { stdout } = await run("git", [
     "log",
-    "--format=%H%x1f%B%x1e",
+    "--format=%H%x1f%ae%x1f%ce%x1f%B%x1e",
     `${base}..${head}`,
   ]);
   for (const entry of stdout.split("\x1e")) {
-    const [hash, body] = entry.split("\x1f");
+    const [hash, author, committer, body] = entry.split("\x1f");
     if (!hash?.trim() || !body) continue;
+    if (!SAFE_EMAIL.test(author) || !SAFE_EMAIL.test(committer))
+      problems.push(
+        `commit ${hash.trim().slice(0, 8)} has a personal author or committer address - commit with a noreply address (git config user.email)`,
+      );
     for (const trailer of TRAILERS)
       if (trailer.test(body))
         problems.push(

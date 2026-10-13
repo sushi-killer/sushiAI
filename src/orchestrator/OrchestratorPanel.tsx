@@ -448,6 +448,11 @@ function OrchestratorBody({
   const current: View =
     view && (view.kind !== "task" || picked) ? view : { kind: "home" };
   const selected = current.kind === "task" ? picked : undefined;
+  // A stale error belongs to the task or view it came from.
+  const errorScope = `${current.kind}:${current.kind === "task" ? current.id : ""}`;
+  useEffect(() => {
+    setError("");
+  }, [errorScope]);
   const pendingMessages = messages.filter((m) => !m.delivered).length;
   const latestChat = chatMessages.reduce((max, m) => Math.max(max, m.ts), 0);
   const chatOpen = current.kind === "chat";
@@ -537,6 +542,7 @@ function OrchestratorBody({
   }
 
   async function act(action: () => Promise<Task>) {
+    setError("");
     setBusy(true);
     try {
       const task = await action();

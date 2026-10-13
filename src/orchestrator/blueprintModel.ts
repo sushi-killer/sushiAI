@@ -312,3 +312,16 @@ export function stageEdit(
 export function canPickTaskPreset(task: Task): boolean {
   return !task.attempts.some((a) => a.stage === "implement");
 }
+
+/** The preset id to send to `task.preset`, or null when nothing should be
+ * written: no pick, no change, a task past choosing, or one in flight. */
+export function presetToWrite(
+  task: Pick<Task, "status" | "attempts">,
+  currentPresetId: string,
+  nextId: string,
+): string | null {
+  if (!nextId || nextId === currentPresetId) return null;
+  if (task.status === "running" || task.status === "drafting") return null;
+  if (!canPickTaskPreset(task as Task)) return null;
+  return nextId;
+}

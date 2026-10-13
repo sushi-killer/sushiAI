@@ -20,7 +20,7 @@ fn gh_bin() -> String {
 }
 
 /// Runs a command in `cwd` with a timeout; stdout on success, stderr in the error.
-async fn run_cmd(
+pub(super) async fn run_cmd(
     program: &str,
     args: &[&str],
     cwd: &Path,

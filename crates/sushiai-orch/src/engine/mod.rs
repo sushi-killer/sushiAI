@@ -65,6 +65,7 @@ mod pipeline;
 mod plan;
 mod plan_gate;
 mod pr;
+mod pr_draft;
 mod protected;
 mod questions;
 mod rate_limit;

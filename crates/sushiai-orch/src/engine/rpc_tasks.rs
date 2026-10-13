@@ -1344,14 +1344,19 @@ impl App {
         if task.archived {
             return Err("task is archived".to_string());
         }
-        if !matches!(
-            task.status,
-            TaskStatus::Drafting
-                | TaskStatus::Running
-                | TaskStatus::Waiting
-                | TaskStatus::Queued
-                | TaskStatus::Stopped
-        ) {
+        // A failed task can only be amended to wait for a fixing task.
+        let failed_with_dependencies =
+            task.status == TaskStatus::Failed && amendment.depends_on.is_some();
+        if !failed_with_dependencies
+            && !matches!(
+                task.status,
+                TaskStatus::Drafting
+                    | TaskStatus::Running
+                    | TaskStatus::Waiting
+                    | TaskStatus::Queued
+                    | TaskStatus::Stopped
+            )
+        {
             return Err(format!(
                 "task is {:?}: only drafting, running, waiting, queued or stopped tasks can be amended",
                 task.status
@@ -1359,15 +1364,22 @@ impl App {
             .to_lowercase());
         }
         if let Some(deps) = &amendment.depends_on {
-            if implement_attempt_count(&task) > 0 {
-                return Err("task has already run an implement attempt".to_string());
+            let live_loop = |id: &str| {
+                self.controls
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_some_and(|c| !c.cancel.is_cancelled())
+            };
+            if live_loop(&task.id) && implement_attempt_count(&task) > 0 {
+                return Err("task is implementing".to_string());
             }
             if self.repo_tasks(&task.repo).iter().any(|child| {
                 child.parent.as_deref() == Some(task.id.as_str())
                     && !child.archived
-                    && implement_attempt_count(child) > 0
+                    && live_loop(&child.id)
             }) {
-                return Err("a child has already run an implement attempt".to_string());
+                return Err("a child is implementing".to_string());
             }
             let (deps, _) = self.check_graph_params(&task.repo, deps, None, Some(&task))?;
             amendment.dependency_titles = deps.iter().map(|t| t.title.clone()).collect();
@@ -1421,10 +1433,14 @@ impl App {
             }
         }
         let dependencies_amended = amendment.depends_on.is_some();
+        let has_dependencies = amendment.depends_on.as_ref().is_some_and(|d| !d.is_empty());
         amendment.clone().apply(&mut task);
         baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
         let updated = self.update_task(&id, |fresh| {
             amendment.apply(fresh);
+            if fresh.status == TaskStatus::Failed && has_dependencies {
+                fresh.status = TaskStatus::Queued;
+            }
             if dependencies_amended
                 && fresh.status == TaskStatus::Waiting
                 && fresh

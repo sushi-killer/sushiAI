@@ -10,7 +10,11 @@ test("a different preset on a task that can take it is written", async () => {
   assert.equal(presetToWrite(idle, "", "careful"), "careful");
   assert.equal(presetToWrite(idle, "fast", "careful"), "careful");
   assert.equal(
-    presetToWrite({ status: "waiting", attempts: [{ stage: "plan" }] }, "", "fast"),
+    presetToWrite(
+      { status: "waiting", attempts: [{ stage: "plan" }] },
+      "",
+      "fast",
+    ),
     "fast",
   );
 });

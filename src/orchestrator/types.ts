@@ -130,6 +130,13 @@ export type Settings = {
   /** Repo path -> landing on its default branch is allowed; repos not listed
    * follow the daemon's global `landOnDefault`. */
   landOnDefaultRepos?: Record<string, boolean>;
+  /** A done top-level task that could not land on the default branch gets a
+   * pull request drafted by a read-only helper; `prOnDoneRepos` overrides it
+   * per repo path, `prRoute` names the drafting route ("" = the mechanical
+   * tier's route, else the planner). Absent in older settings. */
+  prOnDone?: boolean;
+  prOnDoneRepos?: Record<string, boolean>;
+  prRoute?: string;
   /** Thresholds for the evolution loop; absent in older settings. */
   evolution?: EvolutionSettings;
   /** Route id of the cheap read-only check of a brief's goal and criteria;

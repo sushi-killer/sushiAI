@@ -81,8 +81,8 @@ async fn mark_redirected_landed(
 /// one task per (repo, branch) at a time: its work is carried onto the
 /// branch's current head, squashed to one commit, checked again on exactly
 /// that tree when the head had moved, and the branch moves to the commit.
-/// `Landing::NoParent` means landing was refused: the task commits on its own
-/// branch instead.
+/// `Landing::NoParent` and `Landing::DefaultBranchRefused` mean landing was
+/// refused: the task commits on its own branch instead.
 pub(super) async fn land_on_base(
     app: &Arc<App>,
     task: &mut Task,
@@ -125,7 +125,7 @@ pub(super) async fn land_on_base(
                 crate::model::land_on_default_refusal(&branch, &task.repo),
                 task.branch
             ));
-            return Landing::NoParent;
+            return Landing::DefaultBranchRefused;
         }
     }
 

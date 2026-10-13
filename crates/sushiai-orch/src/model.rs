@@ -233,6 +233,18 @@ pub struct Settings {
     /// allowed. `land_on_default` decides for repos not in the map.
     #[serde(default)]
     pub land_on_default_repos: std::collections::BTreeMap<String, bool>,
+    /// A finished top-level task that could not land on the default branch
+    /// gets a pull request: a read-only helper drafts it by the repo's own
+    /// rules and orchd opens it. Off by default.
+    #[serde(default)]
+    pub pr_on_done: bool,
+    /// Per repo path: overrides `pr_on_done`.
+    #[serde(default)]
+    pub pr_on_done_repos: std::collections::BTreeMap<String, bool>,
+    /// Route that drafts the pull request. Empty: the `mechanical` tier's
+    /// route, else the planner route.
+    #[serde(default)]
+    pub pr_route: String,
     /// Per repo path: where the whole-repo checks a subtask shares with its
     /// parent run. A repo not in the map uses `Parent`.
     #[serde(default)]
@@ -726,6 +738,27 @@ impl Settings {
             .map(|(_, allowed)| *allowed)
             .unwrap_or(self.land_on_default)
     }
+
+    /// Whether a done task that could not land on `repo`'s default branch
+    /// gets a pull request: the per-repo entry when there is one, else the
+    /// global switch.
+    pub fn may_open_pr_on_done(&self, repo: &str) -> bool {
+        self.pr_on_done_repos
+            .iter()
+            .find(|(k, _)| same_repo_path(k, repo))
+            .map(|(_, on)| *on)
+            .unwrap_or(self.pr_on_done)
+    }
+
+    /// The route that drafts a pull request: `pr_route`, else the
+    /// `mechanical` tier's route, else the planner route.
+    pub fn pr_draft_route(&self) -> Option<&Route> {
+        let id = Some(self.pr_route.as_str())
+            .filter(|id| !id.is_empty())
+            .or_else(|| self.tiers.get(&Tier::Mechanical).map(String::as_str))
+            .unwrap_or(&self.planner);
+        self.routes.iter().find(|r| r.id == id)
+    }
 }
 
 /// Why landing on a default branch was refused, with the one-line way to allow it.
@@ -822,6 +855,9 @@ impl Default for Settings {
             worktree_root: String::new(),
             land_on_default: false,
             land_on_default_repos: Default::default(),
+            pr_on_done: false,
+            pr_on_done_repos: Default::default(),
+            pr_route: String::new(),
             gate_at: Default::default(),
             after_land: vec![],
             scoped_checks: vec![],
@@ -2777,6 +2813,36 @@ pub fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pr_on_done_follows_the_repo_entry_then_the_global_switch() {
+        let mut s = Settings::default();
+        assert!(!s.may_open_pr_on_done("/r/a"));
+        s.pr_on_done = true;
+        assert!(s.may_open_pr_on_done("/r/a"));
+        s.pr_on_done_repos.insert("/r/a".into(), false);
+        assert!(!s.may_open_pr_on_done("/r/a"));
+        assert!(s.may_open_pr_on_done("/r/b"));
+        s.pr_on_done = false;
+        s.pr_on_done_repos.insert("/r/b/".into(), true);
+        assert!(s.may_open_pr_on_done("/r/b"));
+    }
+
+    #[test]
+    fn pr_draft_route_prefers_pr_route_then_mechanical_then_planner() {
+        let mut s = Settings::default();
+        s.tiers.remove(&Tier::Mechanical);
+        let ids: Vec<String> = s.routes.iter().map(|r| r.id.clone()).collect();
+        assert!(ids.len() >= 2);
+        assert_eq!(
+            s.pr_draft_route().map(|r| r.id.as_str()),
+            Some(s.planner.as_str())
+        );
+        s.tiers.insert(Tier::Mechanical, ids[1].clone());
+        assert_eq!(s.pr_draft_route().unwrap().id, ids[1]);
+        s.pr_route = ids[0].clone();
+        assert_eq!(s.pr_draft_route().unwrap().id, ids[0]);
+    }
     use super::*;
 
     #[test]

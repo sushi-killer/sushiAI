@@ -124,6 +124,8 @@ impl App {
             id: String,
             title: Option<String>,
             branch: Option<String>,
+            /// Replaces the generated body when not empty.
+            body: Option<String>,
             /// Set by the MCP bridge; the app sends none.
             #[serde(default)]
             source: Option<String>,
@@ -169,6 +171,13 @@ impl App {
             .filter(|t| !t.is_empty())
             .unwrap_or(&task.title)
             .to_string();
+        let body = p
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| pr_body(&task));
         check_branch_syntax(&branch)?;
         let repo = PathBuf::from(&task.repo);
         run_cmd(
@@ -303,16 +312,8 @@ impl App {
                 let out = run_cmd(
                     &gh,
                     &[
-                        "pr",
-                        "create",
-                        "--base",
-                        &base,
-                        "--head",
-                        &branch,
-                        "--title",
-                        &title,
-                        "--body",
-                        &pr_body(&task),
+                        "pr", "create", "--base", &base, "--head", &branch, "--title", &title,
+                        "--body", &body,
                     ],
                     &repo,
                     GH_TIMEOUT,

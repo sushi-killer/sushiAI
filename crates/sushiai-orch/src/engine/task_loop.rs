@@ -3746,6 +3746,7 @@ pub(super) async fn finish_attempt(
     } else {
         None
     };
+    let mut pr_wanted = false;
     if let Some(landing) = landing {
         match landing {
             Landing::Waiting => {
@@ -3815,6 +3816,7 @@ pub(super) async fn finish_attempt(
                 return Tail::Return;
             }
             Landing::NoParent => {}
+            Landing::DefaultBranchRefused => pr_wanted = true,
         }
     }
 
@@ -3873,6 +3875,9 @@ pub(super) async fn finish_attempt(
     app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
+    if pr_wanted && task.status == TaskStatus::Done {
+        super::pr_draft::spawn_pr_on_done(app, task);
+    }
     *permit = None;
     app.finish_task_loop(task_id);
     Tail::Return

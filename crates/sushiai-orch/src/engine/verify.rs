@@ -1294,6 +1294,7 @@ pub async fn run_verify_command(
     cancelled: impl std::future::Future<Output = ()>,
 ) -> VerifyOutcome {
     let start = std::time::Instant::now();
+    let running = crate::procs::running_in(cwd);
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -1320,9 +1321,15 @@ pub async fn run_verify_command(
     };
     // Whatever the outcome, nothing the command left in its group outlives it.
     crate::procs::kill_group(pgid, &mut child).await;
-    if matches!(outcome, Outcome::TimedOut | Outcome::Cancelled) {
-        // Processes that left the group (`setsid`) but run from this directory.
-        let dir = cwd.to_path_buf();
+    // Processes that left the group (`setsid`) but run from this directory. After a
+    // normal exit only orphans, and only when no sibling check still runs here.
+    let dir = cwd.to_path_buf();
+    if matches!(outcome, Outcome::Done(_)) {
+        if running.alone() {
+            let _ =
+                tokio::task::spawn_blocking(move || crate::procs::stop_orphans_under(&dir)).await;
+        }
+    } else {
         let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
     }
     let (code, tail) = match outcome {

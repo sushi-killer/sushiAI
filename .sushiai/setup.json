@@ -1,3 +1,4 @@
 {
-  "setup": "npm ci"
+  "setup": "npm ci",
+  "format": "if [ $# -gt 0 ]; then ./node_modules/.bin/prettier --write --ignore-unknown \"$@\" || exit 1; fi; for f; do case \"$f\" in *.rs) rustfmt --edition 2021 \"$f\" || exit 1;; esac; done"
 }

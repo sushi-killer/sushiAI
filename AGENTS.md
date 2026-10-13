@@ -137,6 +137,8 @@ shim, a re-export, or an "old and new" fork — one owner, one final shape.
 - The shell/extension import isolation described above.
 - No AI-attribution commit trailers (`co-authored-by:`, "generated with
   claude", etc.) and no Cyrillic in commit messages.
+- A PR's commits carry no personal address: author and committer are a
+  GitHub noreply or a tool's local address.
 
 On top of that: `npm run lint` (ESLint, `eslint.config.mjs`) catches
 React-hooks misuse (`rules-of-hooks`, `exhaustive-deps`) and general

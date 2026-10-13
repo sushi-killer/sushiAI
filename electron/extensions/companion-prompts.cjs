@@ -42,7 +42,6 @@ function createOwnerPrompts({
     active = queue.shift();
     active.shownAt = now();
     active.timer = setTimeout(settle, timeoutMs, active, "timeout");
-    active.timer.unref?.();
     announce({ id: active.id, ...active.question });
   }
 

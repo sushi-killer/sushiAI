@@ -624,6 +624,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turning_auto_answer_on_wakes_the_overseer_for_a_question_parked_while_it_was_off() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
+        app.store.save_task(&task).unwrap();
+        let mut settings = app.settings.read().unwrap().clone();
+        assert!(!settings.auto_answer);
+        wake_orchestrator_for_waiting(&app, &task);
+        assert_eq!(chat::fake_overseer_calls(&repo), 0, "off: no wake");
+
+        settings.auto_answer = true;
+        app.handle_settings_set(json!({ "settings": settings.clone() }))
+            .await
+            .unwrap();
+        calls_reach(&repo, 1).await;
+        chat::wait_idle(&app, &task.repo).await;
+        // Saving settings that were already answering wakes nobody again.
+        app.handle_settings_set(json!({ "settings": settings }))
+            .await
+            .unwrap();
+        chat::wait_idle(&app, &task.repo).await;
+        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+    }
+
+    #[tokio::test]
     async fn a_hold_expires_after_ten_minutes_and_the_tick_releases_it() {
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");

@@ -17,6 +17,10 @@ pub(super) fn is_rate_limit(error: &str) -> bool {
         "rate_limit",
         "usage limit",
         "too many requests",
+        // The Claude CLI printed this 403 for minutes while the account was
+        // refused upstream; a logged-out CLI (401) still fails at once.
+        "403 request not allowed",
+        "overloaded_error",
     ]
     .iter()
     .any(|needle| e.contains(needle))
@@ -139,6 +143,8 @@ mod tests {
             "{\"status\":429,\"error\":\"x\"}",
             "Rate limit exceeded, retry later",
             "error: rate_limit_error",
+            "Failed to authenticate. API Error: 403 Request not allowed",
+            "API Error: 529 {\"type\":\"overloaded_error\"}",
         ] {
             assert!(is_rate_limit(e), "{e}");
         }
@@ -147,6 +153,7 @@ mod tests {
             "Claude exited with an error.",
             "port 14290 is busy",
             "TypeError at cli.js:429:15",
+            "Failed to authenticate. API Error: 401 invalid x-api-key",
         ] {
             assert!(!is_rate_limit(e), "{e}");
         }

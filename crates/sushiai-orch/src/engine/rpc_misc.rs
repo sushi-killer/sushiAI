@@ -111,6 +111,8 @@ impl App {
         }
         p.settings.experiments.check_routes(&p.settings.routes)?;
         p.settings.check_presets()?;
+        let answering = |s: &Settings| s.auto_answer && self.chat_route(s).is_some();
+        let was_answering = answering(&self.settings.read().unwrap());
         {
             let mut settings = self.settings.write().unwrap();
             self.store
@@ -124,6 +126,9 @@ impl App {
         self.refresh_availability();
         set_verify_timeout_secs(p.settings.verify_timeout_secs);
         self.advance_autopilot();
+        if !was_answering && answering(&p.settings) {
+            super::questions::wake_orchestrator_for_parked(self);
+        }
         serde_json::to_value(&p.settings).map_err(|e| e.to_string())
     }
 

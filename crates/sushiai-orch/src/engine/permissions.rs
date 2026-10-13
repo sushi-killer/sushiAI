@@ -477,8 +477,22 @@ fn escapes_worktree(ctx: &HookContext, input: Option<&serde_json::Value>) -> boo
         .iter()
         .find_map(|k| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()))
         .unwrap_or_default();
-    relative_to_worktree(&ctx.worktree, file)
-        .is_none_or(|rel| rel.split('/').any(|part| part == ".."))
+    let Some(rel) = relative_to_worktree(&ctx.worktree, file) else {
+        return true;
+    };
+    if rel.split('/').any(|part| part == "..") {
+        return true;
+    }
+    // A symlink inside the worktree may point out of it: the nearest existing
+    // ancestor must resolve inside the real worktree.
+    let Ok(root) = ctx.worktree.canonicalize() else {
+        return true;
+    };
+    let target = ctx.worktree.join(&rel);
+    let existing = target.ancestors().find(|p| p.exists());
+    !existing
+        .and_then(|p| p.canonicalize().ok())
+        .is_some_and(|p| p.starts_with(&root))
 }
 
 /// `mcp__server__tool` of a connected tool, read or write; other servers are

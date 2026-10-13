@@ -459,9 +459,12 @@ fn an_edit_in_the_own_worktree_is_allowed_and_one_that_climbs_out_is_not() {
         let result = env.hook(&token, "Edit", json!({"file_path": file}));
         assert_eq!(verdict(&result).0, "allow", "{file}: {result}");
     }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(env.repo.path(), Path::new(&worktree).join("out-link")).unwrap();
     for file in [
         format!("{worktree}/../outside.rs"),
         "../outside.rs".to_string(),
+        format!("{worktree}/out-link/escaped.rs"),
     ] {
         let result = env.hook(&token, "Edit", json!({"file_path": file}));
         assert_eq!(verdict(&result).0, "", "{file}: {result}");

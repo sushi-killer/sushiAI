@@ -33,15 +33,9 @@ Root cause: JS tests on a base without the step 5 isolation changed the real hom
 Rule: merge the isolation fix into every lane base before JS tests run.
 Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
 
-## 2026-10-13 — a Node 22 host stopped every task's final check
-
-Root cause: CI and Macs ran Node 24+, lab ran the engines floor (22); there an
-awaited promise held only by an unref'd timer ended the test file, so `npm run ci`
-failed on main and each task waited forever for main to move.
-Rule: prove the engines floor in CI (`node-floor` job); a wait someone awaits keeps its timer referenced.
-
 ## Promoted
 
+- 2026-10-13 Node 22 host: unref'd awaited timer failed `npm run ci` on main → `node-floor` CI job.
 - 2026-10-12 A 2 s background `git status` took index.lock and broke the task commit → read-only git polls pass `--no-optional-locks`.
 - 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-11 Electron 44 has no postinstall; a fresh `npm ci` raced parallel tests into EEXIST → `install-electron` in our postinstall.

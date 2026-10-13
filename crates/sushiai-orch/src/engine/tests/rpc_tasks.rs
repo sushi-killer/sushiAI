@@ -364,36 +364,75 @@ async fn task_amend_depends_on_refuses_cycles_and_invalid_dependencies_without_c
     }
 }
 
+fn live_control(app: &App, id: &str) {
+    app.controls.lock().unwrap().insert(
+        id.to_string(),
+        TaskControl {
+            cancel: CancelToken::new(),
+            pending_answer: Arc::new(StdMutex::new(None)),
+            pending_amend: Arc::new(StdMutex::new(None)),
+            handle: tokio::spawn(async {}),
+        },
+    );
+}
+
 #[tokio::test]
-async fn task_amend_depends_on_refuses_implement_attempts_including_non_archived_children() {
+async fn task_amend_depends_on_accepts_tasks_that_already_ran_attempts() {
     let (app, _dir) = test_app();
-    let mut parent = task_with_status(TaskStatus::Stopped);
+    for status in [TaskStatus::Stopped, TaskStatus::Queued] {
+        let mut task = task_with_status(status);
+        task.attempts.push(attempt_with_failure(1, "old"));
+        // A queued backlog task stays parked, so no loop starts.
+        if status == TaskStatus::Queued {
+            task.queue.backlog = Some(Backlog {
+                bucket: BacklogBucket::Later,
+                order: 0,
+            });
+        }
+        app.store.save_task(&task).unwrap();
+        app.dispatch("task.amend", json!({"id": task.id, "dependsOn": []}))
+            .await
+            .unwrap();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, status);
+        assert_eq!(
+            saved.decisions,
+            ["Amended: dependsOn", "Dependencies: waits for nothing"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_amend_depends_on_refuses_a_task_or_child_that_is_implementing() {
+    let (app, _dir) = test_app();
+    let mut parent = task_with_status(TaskStatus::Running);
     parent.attempts.push(attempt_with_failure(1, "old"));
     app.store.save_task(&parent).unwrap();
+    live_control(&app, &parent.id);
     let err = app
         .dispatch("task.amend", json!({"id": parent.id, "dependsOn": []}))
         .await
         .unwrap_err();
-    assert!(err.contains("implement attempt"), "{err}");
-    assert!(app
-        .store
-        .load_task(&parent.id)
+    assert!(err.contains("implementing"), "{err}");
+    let saved = app.store.load_task(&parent.id).unwrap().unwrap();
+    assert!(saved.decisions.is_empty());
+    assert!(app.controls.lock().unwrap()[&parent.id]
+        .pending_amend
+        .lock()
         .unwrap()
-        .unwrap()
-        .decisions
-        .is_empty());
+        .is_none());
 
-    parent.attempts.clear();
+    let parent = task_with_status(TaskStatus::Stopped);
     app.store.save_task(&parent).unwrap();
-    let mut child = task_with_status(TaskStatus::Stopped);
+    let mut child = task_with_status(TaskStatus::Running);
     child.parent = Some(parent.id.clone());
-    child.attempts.push(attempt_with_failure(1, "child"));
     app.store.save_task(&child).unwrap();
+    live_control(&app, &child.id);
     let err = app
         .dispatch("task.amend", json!({"id": parent.id, "dependsOn": []}))
         .await
         .unwrap_err();
-    assert!(err.contains("implement attempt"), "{err}");
+    assert!(err.contains("implementing"), "{err}");
     assert!(app
         .store
         .load_task(&parent.id)
@@ -401,18 +440,58 @@ async fn task_amend_depends_on_refuses_implement_attempts_including_non_archived
         .unwrap()
         .decisions
         .is_empty());
+}
 
-    child.archived = true;
-    app.store.save_task(&child).unwrap();
-    app.dispatch("task.amend", json!({"id": parent.id, "dependsOn": []}))
+#[tokio::test]
+async fn task_amend_depends_on_failed_task_still_refuses_cycles() {
+    let (app, _dir) = test_app();
+    let mut failed = task_with_status(TaskStatus::Failed);
+    failed.attempts.push(attempt_with_failure(1, "old"));
+    let mut other = task_with_status(TaskStatus::Stopped);
+    other.depends_on = vec![failed.id.clone()];
+    app.store.save_task(&failed).unwrap();
+    app.store.save_task(&other).unwrap();
+    let err = app
+        .dispatch("task.amend", json!({"id": failed.id, "dependsOn": [other.id]}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("dependency cycle"), "{err}");
+    let saved = app.store.load_task(&failed.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Failed);
+    assert!(saved.depends_on.is_empty());
+    assert!(saved.decisions.is_empty());
+}
+
+#[tokio::test]
+async fn task_amend_depends_on_empty_list_does_not_requeue_a_failed_task() {
+    let (app, _dir) = test_app();
+    let mut failed = task_with_status(TaskStatus::Failed);
+    failed.attempts.push(attempt_with_failure(1, "old"));
+    app.store.save_task(&failed).unwrap();
+    app.dispatch("task.amend", json!({"id": failed.id, "dependsOn": []}))
         .await
         .unwrap();
-    let saved = app.store.load_task(&parent.id).unwrap().unwrap();
-    assert_eq!(saved.status, TaskStatus::Stopped);
-    assert_eq!(
-        saved.decisions,
-        ["Amended: dependsOn", "Dependencies: waits for nothing"]
-    );
+    let saved = app.store.load_task(&failed.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Failed);
+}
+
+#[tokio::test]
+async fn task_amend_depends_on_requeues_a_failed_task_behind_its_dependency() {
+    let (app, _dir) = test_app();
+    let mut failed = task_with_status(TaskStatus::Failed);
+    failed.attempts.push(attempt_with_failure(1, "old"));
+    let dependency = task_with_status(TaskStatus::Running);
+    app.store.save_task(&failed).unwrap();
+    app.store.save_task(&dependency).unwrap();
+    app.dispatch(
+        "task.amend",
+        json!({"id": failed.id, "dependsOn": [dependency.id]}),
+    )
+    .await
+    .unwrap();
+    let saved = app.store.load_task(&failed.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Queued);
+    assert_eq!(saved.depends_on, std::slice::from_ref(&dependency.id));
 }
 
 #[tokio::test]

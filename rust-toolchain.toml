@@ -1,0 +1,5 @@
+[toolchain]
+# Same as CI (.github/workflows): a newer local Rust adds clippy lints that
+# fail `npm run test:daemon` on main on that host only.
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

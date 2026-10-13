@@ -3057,6 +3057,32 @@ pub(super) async fn carry_onto_newest_base(task: &mut Task, worktree: &Path) -> 
 
 /// How often a task that waits for its base branch to move looks at it.
 const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
+/// How often that wait fetches the base from `origin`: the base often moves
+/// only by a merge on the remote, which the local branch never sees itself.
+const BASE_FETCH_EVERY: Duration = Duration::from_secs(60);
+
+/// Fetches `origin/<base_ref>` and fast-forwards the local branch to it (only
+/// in a clean checkout, never a diverged branch). Best effort: offline or no
+/// `origin` leaves the branch as it is.
+async fn follow_origin(repo: &Path, base_ref: &str) {
+    if super::pr::run_cmd(
+        "git",
+        &["fetch", "--quiet", "origin", base_ref],
+        repo,
+        Duration::from_secs(60),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    let (r, b) = (repo.to_path_buf(), base_ref.to_string());
+    let _ = tokio::task::spawn_blocking(move || {
+        let sha = git::resolve_commit(&r, &format!("refs/remotes/origin/{b}"))?;
+        git::move_branch(&r, &b, &sha)
+    })
+    .await;
+}
 
 pub(super) enum BaseRetry {
     Ready,
@@ -3078,7 +3104,12 @@ pub(super) async fn carry_after_base_moves(
     loop {
         if let Some(base_ref) = task.base_ref.clone() {
             let mut noted = false;
+            let mut fetched_at: Option<tokio::time::Instant> = None;
             loop {
+                if fetched_at.is_none_or(|at| at.elapsed() >= BASE_FETCH_EVERY) {
+                    fetched_at = Some(tokio::time::Instant::now());
+                    follow_origin(Path::new(&task.repo), &base_ref).await;
+                }
                 let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
                 let now = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &r))
                     .await
@@ -3949,5 +3980,69 @@ mod final_check_tests {
         assert_eq!(result.results[0].code, None);
         assert!(!repo.path().join("DONE").exists());
         assert!(!parent.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod follow_origin_tests {
+    use super::*;
+    use crate::engine::test_support::{git_in, init_git_repo};
+
+    #[tokio::test]
+    async fn a_base_merged_on_origin_moves_the_local_branch_only_by_fast_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        init_git_repo(&seed);
+        git_in(&seed, &["branch", "-M", "main"]);
+        let origin = dir.path().join("origin.git");
+        git_in(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        let repo = dir.path().join("repo");
+        git_in(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        git_in(&repo, &["config", "user.email", "test@example.com"]);
+        git_in(&repo, &["config", "user.name", "Test"]);
+        // The owner merges a fix on the remote; the local main never sees it.
+        std::fs::write(seed.join("fix.txt"), "fixed\n").unwrap();
+        git_in(&seed, &["add", "."]);
+        git_in(&seed, &["commit", "-q", "-m", "fix the base"]);
+        git_in(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+        let merged = git_in(&seed, &["rev-parse", "HEAD"]);
+        assert_ne!(git_in(&repo, &["rev-parse", "main"]), merged);
+
+        follow_origin(&repo, "main").await;
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), merged);
+        assert!(
+            repo.join("fix.txt").exists(),
+            "the clean checkout moved too"
+        );
+
+        // A local main with its own commit is diverged: left alone.
+        std::fs::write(repo.join("local.txt"), "mine\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "local"]);
+        let local = git_in(&repo, &["rev-parse", "main"]);
+        std::fs::write(seed.join("next.txt"), "next\n").unwrap();
+        git_in(&seed, &["add", "."]);
+        git_in(&seed, &["commit", "-q", "-m", "next"]);
+        git_in(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+        follow_origin(&repo, "main").await;
+        assert_eq!(git_in(&repo, &["rev-parse", "main"]), local);
     }
 }

@@ -133,31 +133,21 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
     };
     let home = std::env::var("HOME").ok();
     let title = redact_pr_text(&draft.title, &secrets, home.as_deref());
+    // The task's own body when the draft has none: it is published too.
+    let source = if draft.body.trim().is_empty() {
+        super::pr::pr_body(&task)
+    } else {
+        draft.body.clone()
+    };
     let body = truncate_chars(
-        &redact_pr_text(&draft.body, &secrets, home.as_deref()),
+        &redact_pr_text(&source, &secrets, home.as_deref()),
         MAX_BODY_CHARS,
     );
-    let open = |branch: &str| {
-        app.handle_task_pr(serde_json::json!({
+    let result = app
+        .handle_task_pr(serde_json::json!({
             "id": id, "branch": branch, "title": title, "body": body,
         }))
-    };
-    let mut result = open(&branch).await;
-    if let Err(e) = &result {
-        if branch != task.branch && e.contains("branch") {
-            record(
-                app,
-                id,
-                vec![format!(
-                    "PR: drafted branch {branch} refused ({e}); using {}",
-                    task.branch
-                )],
-                0.0,
-                false,
-            );
-            result = open(&task.branch).await;
-        }
-    }
+        .await;
     let end = match result {
         Ok(_) => Vec::new(),
         Err(e) => vec![format!("PR: not opened: {e}")],

@@ -49,7 +49,7 @@ pub(super) async fn run_cmd(
 }
 
 /// The PR body: goal, criteria as a checklist, then the report summary.
-fn pr_body(task: &Task) -> String {
+pub(super) fn pr_body(task: &Task) -> String {
     let mut body = format!("{}\n", task.goal.trim());
     if !task.criteria.is_empty() {
         body.push_str("\n## Criteria\n\n");

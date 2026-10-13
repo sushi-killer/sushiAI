@@ -512,6 +512,22 @@ pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
     wake_for_waiting(app, task);
 }
 
+/// Wakes the overseer for every question that parked while auto-answer was
+/// off: their own park-time wake found it off and never fires again.
+pub(super) fn wake_orchestrator_for_parked(app: &App) {
+    for task in app.store.list_tasks().unwrap_or_default() {
+        let parked = task.status == TaskStatus::Waiting
+            && !task.archived
+            && task
+                .question
+                .as_ref()
+                .is_some_and(|q| !q.held_now(now_ms()));
+        if parked {
+            wake_orchestrator_for_waiting(app, &task);
+        }
+    }
+}
+
 fn wake_for_waiting(app: &App, task: &Task) {
     let prompt = app.with_precedents(overseer_prompt("overseer_waiting", task), &[task]);
     chat::wake_overseer(app, &task.repo, prompt, false, "waiting", Some(&task.id));

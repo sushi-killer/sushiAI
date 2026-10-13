@@ -623,7 +623,11 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
             .contains("busy"))
         .then_some(())
     });
-    let landed = poll_until(&daemon, &id, |s| s == "done");
+    // The task shows `done` the whole time, so wait for the land itself.
+    let landed = wait_until("the land to record its sha", || {
+        let task = daemon.request("task.get", serde_json::json!({"id": id}));
+        task.get("landedSha").is_some().then_some(task)
+    });
     assert_eq!(
         landed["landedSha"],
         git_out(root, &["rev-parse", "work"]),

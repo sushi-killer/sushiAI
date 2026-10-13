@@ -57,6 +57,11 @@ impl App {
                 }
                 continue;
             }
+            if t.status == TaskStatus::Done {
+                // The draft of a pull request a restart interrupted.
+                pr_draft::spawn_pr_on_done(self, &t);
+                continue;
+            }
             if matches!(
                 t.status,
                 TaskStatus::Queued

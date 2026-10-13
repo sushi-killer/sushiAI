@@ -438,6 +438,32 @@ pub fn build_advisor_brief(task: &Task, diff: &str, failure_detail: &str) -> Str
     out
 }
 
+/// What the pull request drafter is asked: read the repo's own contributor
+/// rules and draft the branch name, title and body of the pull request for
+/// the finished task. Read-only; the reply is one JSON object.
+pub fn build_pr_draft_brief(task: &Task, diff: &str) -> String {
+    let mut out = String::from(
+        "## Pull request draft\n\nThis task is finished on its own branch and will be opened as a pull request. Read-only: do not edit files. First read the repository's contributor rules if they exist: AGENTS.md, CLAUDE.md, CONTRIBUTING.md, .github/pull_request_template.md, and any document those name about pull request titles, branch names or release notes. Then draft the pull request exactly as those rules ask (branch name prefix, title format, body template, release note fragment mentions). Without rules, use a short branch name, a plain title and a body that says what changed and why.\n\nReply with ONLY one JSON object and nothing else: {\"branch\":\"...\",\"title\":\"...\",\"body\":\"...\"}. The branch is the name for the remote branch, never the repository's default branch.\n\n## Task\n\n",
+    );
+    out.push_str(&task.title);
+    out.push_str("\n\n");
+    out.push_str(&task.goal);
+    out.push_str("\n\n## Acceptance criteria\n\n");
+    for c in &task.criteria {
+        out.push_str("- ");
+        out.push_str(c);
+        out.push('\n');
+    }
+    out.push_str(&format!("\nThe task's own branch is `{}`.\n", task.branch));
+    if let Some(report) = task.report.as_deref().filter(|r| !r.trim().is_empty()) {
+        out.push_str("\n## Report\n\n");
+        out.push_str(&untrusted_block("The task's report", report));
+    }
+    out.push_str("\n## Diff against the base\n\n");
+    out.push_str(&untrusted_block("The task's diff", diff));
+    out
+}
+
 /// How an implement attempt reaches the other agents, and the messages
 /// delivered to it with this attempt, each labelled with its sender. Every
 /// message is another agent's text, so it goes in as data.
@@ -2551,6 +2577,8 @@ mod tests {
             findings: vec![],
             archived: false,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,

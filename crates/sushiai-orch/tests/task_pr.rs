@@ -217,7 +217,7 @@ fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
     let repo = task["repo"].as_str().unwrap().to_string();
     s.daemon.request(
         "task.pr",
-        serde_json::json!({"id": s.id, "title": "Owner PR", "branch": "feature/owner"}),
+        serde_json::json!({"id": s.id, "title": "Owner PR"}),
     );
     let log = s.daemon.request("overseer.log", serde_json::json!({}));
     assert_eq!(pr_entries(&log).len(), 0, "{log}");

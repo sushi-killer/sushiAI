@@ -470,6 +470,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     let task_id = task.id.clone();
     let worktree = PathBuf::from(&task.worktree);
     let mut landed = false;
+    let mut pr_wanted = false;
     if task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
@@ -505,6 +506,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
             Landing::Rereview => {}
             // Refused: done on its own branch, as with land off.
             Landing::NoParent => {}
+            Landing::DefaultBranchRefused => pr_wanted = true,
         }
     }
     if !landed {
@@ -535,6 +537,9 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
         git::delete_wip_ref(&worktree, &task_id);
     }
     task.status = TaskStatus::Done;
+    if pr_wanted {
+        super::pr_draft::mark_pr_pending(app, task);
+    }
     task.updated_at = now_ms();
     app.write_report(task).await;
     app.release_worktree(
@@ -550,6 +555,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
+    super::pr_draft::spawn_pr_on_done(app, task);
     ParentEnd::Finished
 }
 
@@ -996,6 +1002,10 @@ pub(super) enum Landing {
     /// The parent is gone, or landing on the base was refused: commit like a
     /// task without one.
     NoParent,
+    /// Landing was refused because the base is the default branch and landing
+    /// there is not allowed: like `NoParent`, and the work may get a pull
+    /// request.
+    DefaultBranchRefused,
     /// The base branch's checkout has uncommitted changes: the task waits
     /// `landing` and is retried.
     Waiting,

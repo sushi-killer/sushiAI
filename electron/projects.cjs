@@ -50,6 +50,30 @@ function secretsOf(id, names) {
     );
 }
 
+/** "local" or an SSH host id: the hosts a project's orchd settings name. */
+function isHostId(value) {
+  return (
+    value === "local" ||
+    (typeof value === "string" && /^ssh:./.test(value) && value.length <= 300)
+  );
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A key that would reach a prototype when the value is merged later. */
+function hasUnsafeKey(value) {
+  if (!value || typeof value !== "object") return false;
+  return Object.keys(value).some(
+    (key) =>
+      key === "__proto__" ||
+      key === "constructor" ||
+      key === "prototype" ||
+      hasUnsafeKey(value[key]),
+  );
+}
+
 function hint(value) {
   return value.length >= 12 ? `••••${value.slice(-4)}` : "••••";
 }
@@ -443,6 +467,8 @@ class Projects {
         ? slugOf(existing)
         : uniqueSlug(projectSlug(input.name), projects),
       dismissed: existing?.dismissed ?? { env: [], mcp: [] },
+      // orchd settings change only through setOrchSettings.
+      ...(existing?.orch ? { orch: existing.orch } : {}),
     };
     // A field still waiting for its module to take it stays on the row.
     for (const name of this.#retiring)
@@ -1125,6 +1151,38 @@ class Projects {
       };
       this.#save(projects);
       return project.hosts[host].overrides;
+    });
+  }
+
+  /** The project's orchd settings: `scope` "project" is the default every
+   * host of the project uses, a host id ("local" or "ssh:...") that host's
+   * override. `patch` replaces what the scope held; an empty one clears it.
+   * Returns the project's whole `orch`. */
+  async setOrchSettings(id, scope, patch) {
+    if (scope !== "project" && !isHostId(scope))
+      throw new Error("Invalid orchestration settings scope.");
+    if (!isPlainObject(patch))
+      throw new Error("Orchestration settings must be an object.");
+    if (hasUnsafeKey(patch))
+      throw new Error("Orchestration settings hold a forbidden key.");
+    const value = JSON.parse(JSON.stringify(patch));
+    return this.#locked(async () => {
+      const projects = this.#load();
+      const project = this.#own(projects, id);
+      if (!project) throw new Error("Unknown project.");
+      const orch = {
+        defaults: { ...project.orch?.defaults },
+        hosts: { ...project.orch?.hosts },
+      };
+      const empty = !Object.keys(value).length;
+      if (scope === "project") orch.defaults = value;
+      else if (empty) delete orch.hosts[scope];
+      else orch.hosts[scope] = value;
+      if (!Object.keys(orch.defaults).length && !Object.keys(orch.hosts).length)
+        delete project.orch;
+      else project.orch = orch;
+      this.#save(projects);
+      return project.orch ?? { defaults: {}, hosts: {} };
     });
   }
 

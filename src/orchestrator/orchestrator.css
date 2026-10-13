@@ -28,13 +28,6 @@
   font-size: var(--text-xs);
 }
 
-.orch-settings-host {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-sm);
-  margin-bottom: var(--gap-md);
-}
-
 .orch-route-row.unavailable {
   opacity: 0.55;
 }

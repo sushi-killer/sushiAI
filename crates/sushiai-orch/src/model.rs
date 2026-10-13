@@ -2063,6 +2063,14 @@ pub struct Task {
     /// The pull request `task.pr` opened for this task's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The remote branch that pull request is from; absent: the task's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_branch: Option<String>,
+    /// The task is done and its pull request is still to be drafted and
+    /// opened; set with `done`, cleared when that flow ends. A restart
+    /// resumes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pr_pending: bool,
     /// The overseer was already woken when this task finished: a restart,
     /// an unarchive or a rebroadcast never wakes it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3071,6 +3079,8 @@ mod tests {
             findings: vec![],
             archived: false,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3334,6 +3344,8 @@ mod tests {
             findings: vec![],
             archived: false,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3403,6 +3415,8 @@ mod tests {
             question_history: vec![],
             archived: false,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3502,6 +3516,8 @@ mod tests {
             findings: vec![],
             archived: true,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,

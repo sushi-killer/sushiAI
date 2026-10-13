@@ -19,7 +19,13 @@ esac
 
 /// One fake claude for both roles: the drafter (brief opens with "## Pull
 /// request draft") replies with `reply`, every other run implements the task.
-fn script(reply: &str) -> String {
+fn script(reply: &str, hold: bool) -> String {
+    let wait = if hold {
+        r#"touch "$(dirname "$0")/draft-started"
+while [ ! -f "$(dirname "$0")/go" ]; do sleep 0.1; done"#
+    } else {
+        ""
+    };
     let result = serde_json::json!({"type": "result", "result": reply});
     format!(
         r###"#!/bin/sh
@@ -27,6 +33,7 @@ brief=$(cat)
 case "$brief" in
 "## Pull request draft"*)
 printf '%s' "$brief" > "$(dirname "$0")/draft-brief.md"
+{wait}
 cat <<'JSON'
 {result}
 JSON
@@ -91,8 +98,12 @@ impl Setup {
 }
 
 fn setup(reply: &str, enabled: bool) -> Setup {
+    setup_with(reply, enabled, false, false)
+}
+
+fn setup_with(reply: &str, enabled: bool, hold: bool, land: bool) -> Setup {
     let tools = tempfile::tempdir().unwrap();
-    let harness = fake_harness_script(tools.path(), "fake-claude.sh", &script(reply));
+    let harness = fake_harness_script(tools.path(), "fake-claude.sh", &script(reply, hold));
     let gh = fake_harness_script(tools.path(), "fake-gh.sh", FAKE_GH);
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
@@ -111,6 +122,9 @@ fn setup(reply: &str, enabled: bool) -> Setup {
     settings["review"] = serde_json::json!("");
     if enabled {
         settings["prOnDoneRepos"] = serde_json::json!({ repo.path().to_str().unwrap(): true });
+    }
+    if land {
+        settings["landOnDefaultRepos"] = serde_json::json!({ repo.path().to_str().unwrap(): true });
     }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     cheap_route_on_claude(&daemon);
@@ -231,5 +245,118 @@ fn settings_refuse_a_pr_route_that_is_no_configured_route() {
         .daemon
         .request_error("settings.set", serde_json::json!({"settings": settings}));
     assert!(err.contains("prRoute"), "{err}");
+    s.daemon.shutdown_and_wait();
+}
+
+fn wait_for(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_decision(s: &Setup, id: &str, text: &str) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+        if task["decisions"].to_string().contains(text) {
+            return task;
+        }
+        assert!(Instant::now() < deadline, "no decision {text}: {task}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_task_that_lands_opens_no_pull_request() {
+    let s = setup_with("{}", true, false, true);
+    let id = s.create(serde_json::json!({}));
+    let task = done(&s, &id);
+    assert!(task["landedSha"].is_string(), "{task}");
+    settle();
+    assert!(s.gh_log().is_empty(), "{}", s.gh_log());
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(
+        task.get("prUrl").is_none() && task.get("prPending").is_none(),
+        "{task}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_drafted_base_branch_is_refused_and_the_tasks_own_branch_is_used() {
+    let s = setup("{\"branch\":\"main\",\"title\":\"t\",\"body\":\"b\"}", true);
+    let id = s.create(serde_json::json!({}));
+    let task = done(&s, &id);
+    let branch = task["branch"].as_str().unwrap().to_string();
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL));
+    let task = wait_decision(&s, &id, "PR: drafted branch main refused");
+    assert!(
+        task["decisions"]
+            .to_string()
+            .contains(&format!("using {branch}")),
+        "{task}"
+    );
+    assert!(
+        s.gh_log().contains(&format!("--head {branch} --title t")),
+        "{}",
+        s.gh_log()
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_pull_request_opened_while_the_draft_runs_is_not_opened_twice() {
+    let s = setup_with(
+        "{\"branch\":\"feature/other\",\"title\":\"t\",\"body\":\"b\"}",
+        true,
+        true,
+        false,
+    );
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    wait_for(&s.tools.path().join("draft-started"));
+    let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
+    assert_eq!(opened["prUrl"], URL, "{opened}");
+    // A different head for the same task is refused while that one is open.
+    let err = s.daemon.request_error(
+        "task.pr",
+        serde_json::json!({"id": id, "branch": "feature/second"}),
+    );
+    assert!(err.contains("already open"), "{err}");
+    std::fs::write(s.tools.path().join("go"), "").unwrap();
+    let task = wait_decision(&s, &id, "draft not used");
+    assert!(task.get("prPending").is_none(), "{task}");
+    assert_eq!(s.gh_log().matches("pr create").count(), 1, "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_restart_resumes_the_pull_request_of_a_done_task() {
+    let reply = "{\"branch\":\"feature/resumed\",\"title\":\"t\",\"body\":\"b\"}";
+    let mut s = setup_with(reply, true, true, false);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    wait_for(&s.tools.path().join("draft-started"));
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert_eq!(task["prPending"], true, "{task}");
+    let fresh = fake_harness_script(s.tools.path(), "fake-claude-2.sh", &script(reply, false));
+    let gh = s.tools.path().join("fake-gh.sh");
+    s.daemon.restart(&[
+        ("ORCHD_CLAUDE_BIN", fresh.to_str().unwrap()),
+        ("ORCHD_GH_BIN", gh.to_str().unwrap()),
+    ]);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    std::fs::write(s.tools.path().join("go"), "").unwrap();
+    assert!(
+        s.gh_log().contains("--head feature/resumed"),
+        "{}",
+        s.gh_log()
+    );
     s.daemon.shutdown_and_wait();
 }

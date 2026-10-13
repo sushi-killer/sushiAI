@@ -7,6 +7,8 @@ use super::*;
 
 /// Longest diff given to the drafter, in characters.
 const MAX_DIFF_CHARS: usize = 20_000;
+/// Longest pull request body sent to GitHub, in characters.
+const MAX_BODY_CHARS: usize = 20_000;
 
 /// What the drafter replied; an empty field falls back to the task's own.
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -25,61 +27,160 @@ fn parse_draft(text: &str) -> Option<Draft> {
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-/// Starts the draft and the pull request for a finished task whose landing
-/// was refused because its base is the default branch, when the repo opted in.
-pub(super) fn spawn_pr_on_done(app: &Arc<App>, task: &Task) {
-    if task.parent.is_some()
-        || task.pr_url.is_some()
+/// Marks a task that is about to be saved `done` as owing a pull request,
+/// when it is a top-level task and its repo opted in. Saved with `done`, so
+/// a restart can resume the flow.
+pub(super) fn mark_pr_pending(app: &App, task: &mut Task) {
+    task.pr_pending = task.parent.is_none()
+        && task.pr_url.is_none()
+        && !task.archived
+        && app.settings.read().unwrap().may_open_pr_on_done(&task.repo);
+}
+
+/// Starts the draft and the pull request for a done task that owes one
+/// (`pr_pending`): a landing refused on the default branch, or a restart that
+/// interrupted the flow.
+pub(super) fn spawn_pr_on_done(app: &App, task: &Task) {
+    if !task.pr_pending || task.status != TaskStatus::Done || task.parent.is_some() {
+        return;
+    }
+    let id = task.id.clone();
+    if task.pr_url.is_some()
         || task.archived
         || !app.settings.read().unwrap().may_open_pr_on_done(&task.repo)
     {
+        let _ = app.update_task(&id, |t| t.pr_pending = false);
         return;
     }
-    let (app, id) = (app.clone(), task.id.clone());
+    let app = app.arc();
     tokio::spawn(async move { open_pr_on_done(&app, &id).await });
 }
 
-fn note(app: &App, id: &str, line: String) {
-    if let Ok(Some(mut task)) = app.store.load_task(id) {
-        task.decisions.push(line);
-        task.updated_at = now_ms();
-        app.save_task_logged(&task);
-        app.broadcast_task(&task);
+/// Adds decision lines and spend to the task and settles the pending mark
+/// when the flow `ends`.
+fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: bool) {
+    let _ = app.update_task(id, |task| {
+        task.decisions.extend(lines);
+        task.cost_usd += cost;
+        if ends {
+            task.pr_pending = false;
+        }
+    });
+}
+
+/// Replaces each secret value with `${NAME}` and the home directory with `~`.
+fn redact_pr_text(
+    text: &str,
+    secrets: &std::collections::HashMap<String, String>,
+    home: Option<&str>,
+) -> String {
+    let mut named: Vec<_> = secrets.iter().filter(|(_, v)| !v.is_empty()).collect();
+    named.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut out = named
+        .into_iter()
+        .fold(text.to_string(), |t, (name, value)| {
+            t.replace(value.as_str(), &format!("${{{name}}}"))
+        });
+    if let Some(home) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty())
+    {
+        out = out.replace(home, "~");
     }
+    out
 }
 
 pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
     let Ok(Some(task)) = app.store.load_task(id) else {
         return;
     };
-    let draft = match draft_pr(app, &task).await {
-        Ok((route, draft)) => {
-            note(app, id, format!("PR: drafted by {route}"));
-            draft
+    let mut cost = 0.0;
+    let (mut lines, draft) = match draft_pr(app, &task, &mut cost).await {
+        Ok((route, draft)) => (vec![format!("PR: drafted by {route}")], draft),
+        Err(reason) => (
+            vec![format!(
+                "PR: draft failed ({reason}); opened with the task's own title and branch"
+            )],
+            Draft::default(),
+        ),
+    };
+    // The overseer may have opened the pull request while the draft ran.
+    if let Ok(Some(now)) = app.store.load_task(id) {
+        if let Some(url) = now.pr_url {
+            lines.push(format!("PR: already open {url}, draft not used"));
+            record(app, id, lines, cost, true);
+            return;
         }
-        Err(reason) => {
-            note(
-                app,
-                id,
-                format!("PR: draft failed ({reason}); opened with the task's own title and branch"),
-            );
-            Draft::default()
+    }
+    let mut branch = task.branch.clone();
+    let drafted = draft.branch.trim();
+    if !drafted.is_empty() && drafted != task.branch {
+        match pr::check_draft_branch(&task, drafted).await {
+            Ok(()) => branch = drafted.to_string(),
+            Err(why) => lines.push(format!(
+                "PR: drafted branch {drafted} refused ({why}); using {}",
+                task.branch
+            )),
+        }
+    }
+    record(app, id, lines, cost, false);
+    let secrets = match run_secrets(app, id) {
+        Ok(secrets) => secrets.redaction,
+        Err(e) => {
+            record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
+            return;
         }
     };
-    let params = serde_json::json!({
-        "id": id,
-        "branch": draft.branch,
-        "title": draft.title,
-        "body": draft.body,
-    });
-    if let Err(e) = app.handle_task_pr(params).await {
-        note(app, id, format!("PR: not opened: {e}"));
+    let home = std::env::var("HOME").ok();
+    let title = redact_pr_text(&draft.title, &secrets, home.as_deref());
+    let body = truncate_chars(
+        &redact_pr_text(&draft.body, &secrets, home.as_deref()),
+        MAX_BODY_CHARS,
+    );
+    let open = |branch: &str| {
+        app.handle_task_pr(serde_json::json!({
+            "id": id, "branch": branch, "title": title, "body": body,
+        }))
+    };
+    let mut result = open(&branch).await;
+    if let Err(e) = &result {
+        if branch != task.branch && e.contains("branch") {
+            record(
+                app,
+                id,
+                vec![format!(
+                    "PR: drafted branch {branch} refused ({e}); using {}",
+                    task.branch
+                )],
+                0.0,
+                false,
+            );
+            result = open(&task.branch).await;
+        }
+    }
+    let end = match result {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![format!("PR: not opened: {e}")],
+    };
+    record(app, id, end, 0.0, true);
+}
+
+/// A temporary detached worktree of a branch, removed when dropped.
+struct TempWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for TempWorktree {
+    fn drop(&mut self) {
+        git::remove_worktree(&self.repo, &self.path);
     }
 }
 
 /// Runs the helper in the task's worktree, else in a temporary detached
-/// worktree of its branch. Returns the route id and the parsed draft.
-async fn draft_pr(app: &Arc<App>, task: &Task) -> Result<(String, Draft), String> {
+/// worktree of its branch. Returns the route id and the parsed draft; `cost`
+/// gets the run's spend.
+async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String, Draft), String> {
     let settings = app.settings.read().unwrap().clone();
     let route = settings
         .pr_draft_route()
@@ -102,21 +203,21 @@ async fn draft_pr(app: &Arc<App>, task: &Task) -> Result<(String, Draft), String
             if let Some(dir) = p.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
             }
-            git::add_detached_worktree(&r, &p, &rev)
+            git::remove_worktree(&r, &p);
+            git::add_detached_worktree(&r, &p, &rev)?;
+            Ok::<_, git::GitError>(TempWorktree { repo: r, path: p })
         })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| format!("could not check out {}: {e}", task.branch))?;
-        Some(path)
+        .map(Some)
+        .map_err(|e| format!("could not check out {}: {e}", task.branch))?
     };
     let worktree = temp
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(&task.worktree));
-    let result = run_draft(app, task, &settings, &route, &worktree).await;
-    if let Some(path) = temp {
-        let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&repo, &path)).await;
-    }
-    result.map(|draft| (route.id, draft))
+        .as_ref()
+        .map_or_else(|| PathBuf::from(&task.worktree), |t| t.path.clone());
+    let draft = run_draft(app, task, &settings, &route, &worktree, cost).await;
+    drop(temp);
+    draft.map(|draft| (route.id, draft))
 }
 
 async fn run_draft(
@@ -125,6 +226,7 @@ async fn run_draft(
     settings: &Settings,
     route: &Route,
     worktree: &Path,
+    cost: &mut f64,
 ) -> Result<Draft, String> {
     let (wt, base) = (worktree.to_path_buf(), task.base_sha.clone());
     let diff = tokio::task::spawn_blocking(move || {
@@ -192,6 +294,7 @@ async fn run_draft(
         Err(RunError::Cancelled) => return Err("the run was stopped".to_string()),
         Err(RunError::Io(e) | RunError::NotFound(e)) => return Err(e),
     };
+    *cost = outcome.cost_usd.unwrap_or(0.0);
     if outcome.timed_out {
         return Err("the run timed out".to_string());
     }
@@ -218,6 +321,23 @@ mod tests {
         let fenced = format!("```json\n{json}\n```");
         assert!(parse_draft(&fenced).is_some());
         assert!(parse_draft(&format!("Here you go: {json} done")).is_some());
+    }
+
+    #[test]
+    fn redaction_names_secrets_and_hides_the_home_directory() {
+        let secrets = std::collections::HashMap::from([
+            ("API_KEY".to_string(), "s3cr3t-value".to_string()),
+            ("SHORT".to_string(), "s3cr3t".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+        let out = redact_pr_text(
+            "key s3cr3t-value and s3cr3t at /home/zed/proj/a.rs",
+            &secrets,
+            Some("/home/zed/"),
+        );
+        assert_eq!(out, "key ${API_KEY} and ${SHORT} at ~/proj/a.rs");
+        assert_eq!(redact_pr_text("/x", &secrets, Some("/")), "/x");
+        assert_eq!(redact_pr_text("plain", &secrets, None), "plain");
     }
 
     #[test]

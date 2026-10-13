@@ -537,6 +537,9 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
         git::delete_wip_ref(&worktree, &task_id);
     }
     task.status = TaskStatus::Done;
+    if pr_wanted {
+        super::pr_draft::mark_pr_pending(app, task);
+    }
     task.updated_at = now_ms();
     app.write_report(task).await;
     app.release_worktree(
@@ -552,9 +555,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
-    if pr_wanted {
-        super::pr_draft::spawn_pr_on_done(app, task);
-    }
+    super::pr_draft::spawn_pr_on_done(app, task);
     ParentEnd::Finished
 }
 

@@ -3867,6 +3867,9 @@ pub(super) async fn finish_attempt(
         }
     }
     if task.status == TaskStatus::Done {
+        if pr_wanted {
+            super::pr_draft::mark_pr_pending(app, task);
+        }
         task.updated_at = now_ms();
         app.write_report(task).await;
         app.release_worktree(task, "committed on its branch").await;
@@ -3875,9 +3878,7 @@ pub(super) async fn finish_attempt(
     app.save_task_logged(task);
     app.broadcast_task(task);
     wake_orchestrator_for_done(app, task);
-    if pr_wanted && task.status == TaskStatus::Done {
-        super::pr_draft::spawn_pr_on_done(app, task);
-    }
+    super::pr_draft::spawn_pr_on_done(app, task);
     *permit = None;
     app.finish_task_loop(task_id);
     Tail::Return

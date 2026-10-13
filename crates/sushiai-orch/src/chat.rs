@@ -3259,6 +3259,8 @@ mod tests {
             findings: vec![],
             archived: false,
             pr_url: None,
+            pr_branch: None,
+            pr_pending: false,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,

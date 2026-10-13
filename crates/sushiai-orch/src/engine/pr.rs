@@ -7,7 +7,7 @@ use super::*;
 use std::collections::HashSet;
 use tokio::process::Command;
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -20,7 +20,7 @@ fn gh_bin() -> String {
 }
 
 /// Runs a command in `cwd` with a timeout; stdout on success, stderr in the error.
-async fn run_cmd(
+pub(super) async fn run_cmd(
     program: &str,
     args: &[&str],
     cwd: &Path,
@@ -92,7 +92,7 @@ impl Drop for InFlight {
 }
 
 /// Syntax rules for the remote branch name the owner typed, before git sees it.
-fn check_branch_syntax(name: &str) -> Result<(), String> {
+pub(super) fn check_branch_syntax(name: &str) -> Result<(), String> {
     let bad = name.is_empty()
         || name.starts_with('-')
         || name.starts_with("refs/")
@@ -102,6 +102,46 @@ fn check_branch_syntax(name: &str) -> Result<(), String> {
         || name == "HEAD";
     if bad {
         return Err(format!("{name:?} is not a usable remote branch name"));
+    }
+    Ok(())
+}
+
+/// Whether the drafted remote branch name `branch` is safe to push for
+/// `task`: well formed, no base branch, and not yet on origin.
+pub(super) async fn check_draft_branch(task: &Task, branch: &str) -> Result<(), String> {
+    check_branch_syntax(branch)?;
+    let repo = PathBuf::from(&task.repo);
+    run_cmd(
+        "git",
+        &["check-ref-format", "--branch", branch],
+        &repo,
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|_| format!("{branch:?} is not a valid branch name"))?;
+    let default = {
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || git::default_branch(&repo))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    if [default.as_deref(), task.base_ref.as_deref()].contains(&Some(branch)) {
+        return Err("it is a base branch".to_string());
+    }
+    let remote = run_cmd(
+        "git",
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ],
+        &repo,
+        GIT_TIMEOUT,
+    )
+    .await?;
+    if ls_remote_sha(&remote).is_some() {
+        return Err("origin already has it".to_string());
     }
     Ok(())
 }
@@ -164,6 +204,14 @@ impl App {
             .filter(|b| !b.is_empty())
             .unwrap_or(&task.branch)
             .to_string();
+        if let Some(url) = &task.pr_url {
+            let open = task.pr_branch.as_deref().unwrap_or(&task.branch);
+            if open != branch {
+                return Err(format!(
+                    "a pull request is already open for this task on {open}: {url}"
+                ));
+            }
+        }
         let title = p
             .title
             .as_deref()
@@ -335,6 +383,7 @@ impl App {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         task.pr_url = Some(url.clone());
+        task.pr_branch = Some(branch.clone());
         task.decisions.push(format!("PR: {verb} {url}"));
         task.updated_at = now_ms();
         self.store.save_task(&task).map_err(|e| e.to_string())?;

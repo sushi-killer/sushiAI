@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[path = "../support/native_sandbox.rs"]
@@ -176,7 +176,47 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    DaemonChild(cmd.spawn().expect("failed to spawn sushiai daemon"))
+    // Another test process running `cargo build` renames its output over the binary for a
+    // moment; that gap is the only reason a spawn finds nothing there.
+    let start = Instant::now();
+    let child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && start.elapsed() < SPAWN_RETRY => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            spawned => break spawned.expect("failed to spawn sushiai daemon"),
+        }
+    };
+    spawned_pids()
+        .lock()
+        .unwrap()
+        .insert(socket_of(home), child.id());
+    DaemonChild(child)
+}
+
+/// How long a spawn retries while the binary is missing.
+const SPAWN_RETRY: Duration = Duration::from_secs(5);
+
+/// The pid of the daemon last spawned for each socket, so `wait_for_socket` can notice a
+/// daemon that died instead of waiting out the deadline.
+fn spawned_pids() -> &'static Mutex<std::collections::HashMap<PathBuf, u32>> {
+    static PIDS: OnceLock<Mutex<std::collections::HashMap<PathBuf, u32>>> = OnceLock::new();
+    PIDS.get_or_init(Default::default)
+}
+
+/// Whether the child `pid` has exited, without reaping it (its owner still waits on it).
+fn has_exited(pid: u32) -> bool {
+    // SAFETY: waitid(2) with a zeroed siginfo_t it owns; WNOWAIT leaves the child waitable.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let r = libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        r == 0 && info.si_signo != 0
+    }
 }
 
 impl Daemon {
@@ -325,18 +365,34 @@ const DAEMON_LOG: &str = "daemon-test.log";
 
 /// Why a request got no answer: the tail of the daemon's log, when there is one.
 fn no_answer(socket: &Path, method: &str) -> String {
-    let log = std::fs::read_to_string(socket.with_file_name(DAEMON_LOG)).unwrap_or_default();
-    let tail: Vec<&str> = log.lines().rev().take(40).collect();
-    let tail: Vec<&str> = tail.into_iter().rev().collect();
     format!(
-        "the daemon closed the connection without answering {method}; log tail:\n{}",
-        tail.join("\n")
+        "the daemon closed the connection without answering {method}; {}",
+        log_tail(socket)
     )
 }
 
+fn log_tail(socket: &Path) -> String {
+    let log = std::fs::read_to_string(socket.with_file_name(DAEMON_LOG)).unwrap_or_default();
+    let tail: Vec<&str> = log.lines().rev().take(40).collect();
+    let tail: Vec<&str> = tail.into_iter().rev().collect();
+    format!("log tail:\n{}", tail.join("\n"))
+}
+
+/// Waits until the daemon of `socket` accepts a connection. A daemon that exits first fails
+/// the wait at once, with its log tail.
 pub fn wait_for_socket(socket: &Path) {
+    let pid = spawned_pids().lock().unwrap().get(socket).copied();
     wait_until("the daemon to open its socket", || {
-        (socket.exists() && UnixStream::connect(socket).is_ok()).then_some(())
+        if socket.exists() && UnixStream::connect(socket).is_ok() {
+            return Some(());
+        }
+        if pid.is_some_and(has_exited) {
+            panic!(
+                "the daemon exited before opening its socket; {}",
+                log_tail(socket)
+            );
+        }
+        None
     });
 }
 

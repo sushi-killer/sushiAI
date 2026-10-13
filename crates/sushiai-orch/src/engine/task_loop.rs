@@ -3249,18 +3249,15 @@ impl App {
             self.controls.lock().unwrap().remove(task_id);
             let end = cancellations.remove(task_id);
             if let Some(end) = &end {
-                if let Ok(Some(mut task)) = self.store.load_task(task_id) {
-                    end.apply(&mut task);
+                let _ = self.update_task(task_id, |task| {
+                    end.apply(task);
                     for attempt in &mut task.attempts {
                         if attempt.status == AttemptStatus::Running {
                             attempt.status = AttemptStatus::Interrupted;
                             attempt.ended_at = Some(now_ms());
                         }
                     }
-                    task.updated_at = now_ms();
-                    let _ = self.store.save_task(&task);
-                    self.broadcast_task(&task);
-                }
+                });
             }
             end.is_some_and(|c| c.restart)
         };
@@ -3270,8 +3267,8 @@ impl App {
             let before = task.decisions.len();
             record_check_outcomes(self, &mut task, &[]);
             if task.decisions.len() != before {
-                self.save_task_logged(&task);
-                self.broadcast_task(&task);
+                let lines = task.decisions.split_off(before);
+                let _ = self.update_task(task_id, |t| record_check_decisions(t, lines));
             }
         }
         if restart {

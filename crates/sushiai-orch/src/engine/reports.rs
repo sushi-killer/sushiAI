@@ -486,7 +486,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::test_support::task_with_status;
+    use crate::engine::test_support::{task_with_status, test_app};
 
     #[test]
     fn a_follow_up_title_is_one_line_naming_the_original() {
@@ -500,5 +500,39 @@ mod tests {
         assert!(!title.contains('\n'));
         task.title = "x".repeat(200);
         assert!(follow_up_title(&task).chars().count() <= 81);
+    }
+
+    /// Metrics are computed from a copy loaded before the overseer log is
+    /// read; the log is a FIFO here, so the owner's mark lands in that gap.
+    #[tokio::test]
+    async fn an_owner_mark_made_while_metrics_are_recorded_is_kept() {
+        let (app, home) = test_app();
+        let task = task_with_status(TaskStatus::Done);
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        let log =
+            std::ffi::CString::new(app.data_dir.join("overseer.jsonl").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(log.as_ptr(), 0o600) }, 0);
+        let recorder = {
+            let (app, id) = (app.clone(), id.clone());
+            std::thread::spawn(move || app.record_task_metrics(&id))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        app.handle_task_lead_touch(json!({"id": id, "touched": true, "note": "fix it"}))
+            .await
+            .unwrap();
+        // Closing a writer ends the blocked read of the log.
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(app.data_dir.join("overseer.jsonl"))
+                .unwrap(),
+        );
+        recorder.join().unwrap();
+        let stored = app.store.load_task(&id).unwrap().unwrap();
+        let mark = stored.lead_touch.expect("the owner's mark survives");
+        assert!(mark.touched && mark.by == "owner");
+        assert!(stored.metrics.is_some());
+        drop(home);
     }
 }

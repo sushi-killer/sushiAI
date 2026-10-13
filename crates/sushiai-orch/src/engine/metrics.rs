@@ -240,14 +240,13 @@ impl App {
     /// the overseer log. Metrics left on a task that is no longer finished
     /// are cleared. Idempotent.
     pub(super) fn record_task_metrics(&self, task_id: &str) {
-        let Ok(Some(mut task)) = self.store.load_task(task_id) else {
+        let Ok(Some(task)) = self.store.load_task(task_id) else {
             return;
         };
         let finished = matches!(task.status, TaskStatus::Done | TaskStatus::Failed);
         if !finished {
-            if task.metrics.take().is_some() {
-                let _ = self.store.save_task(&task);
-                self.broadcast_task(&task);
+            if task.metrics.is_some() {
+                let _ = self.update_task(task_id, |t| t.metrics = None);
             }
             return;
         }
@@ -256,7 +255,6 @@ impl App {
             let records = costs::read_all(&self.data_dir);
             compute(&task, &all, &records, now_ms())
         });
-        task.metrics = Some(metrics.clone());
         if task.parent.is_none() {
             if let Some(current) = all.iter_mut().find(|current| current.id == task.id) {
                 current.metrics = Some(metrics.clone());
@@ -271,10 +269,9 @@ impl App {
                 });
             }
         }
-        if self.store.save_task(&task).is_err() {
-            return;
-        }
-        self.broadcast_task(&task);
+        // Only the metrics are written, under the task lock: the slow work
+        // above must not save a stale copy over an owner's mark.
+        let _ = self.update_task(task_id, |t| t.metrics = Some(metrics));
     }
 }
 

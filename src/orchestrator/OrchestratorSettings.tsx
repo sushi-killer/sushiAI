@@ -17,6 +17,14 @@ import {
 import { Stepper } from "../ui";
 import { formatSettingsJson, parseSettingsJson } from "./settingsJson";
 import { ConnectedTools } from "./ConnectedTools";
+import { CopySettings } from "./CopySettings";
+import {
+  ProjectScopeSettings,
+  ScopePicker,
+  SettingsScopeChoice,
+  type SettingsLayer,
+  type SettingsScope,
+} from "./ProjectScopeSettings";
 import {
   applyPreset,
   countChanges,
@@ -465,11 +473,15 @@ const TIER_CARDS: { tier: Tier; title: string; hint: string }[] = [
 
 function OrchestratorSettingsBody({
   preflight,
+  layer,
 }: {
   preflight: Preflight | null;
+  /** Project scope: the controls show and edit the project's layer over
+   * this host's saved settings instead of the host's own. */
+  layer?: SettingsLayer;
 }) {
   const orchestratorClient = useOrchestratorClient();
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [ownSettings, setOwnSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
@@ -490,7 +502,7 @@ function OrchestratorSettingsBody({
       window.bridge?.chatModels() ?? Promise.resolve({}),
     ])
       .then(([s, m, a, c]) => {
-        setSettings(s);
+        setOwnSettings(s);
         setSaved(s);
         setProfiles(m);
         setAccounts(a);
@@ -507,6 +519,30 @@ function OrchestratorSettingsBody({
         // An older orchd binary: the panel works exactly as before.
       });
   }, [orchestratorClient]);
+
+  const settings = layer && saved ? layer.view(saved) : ownSettings;
+  /** The host's own draft, or in project scope an edit of the layer. */
+  function setSettings(
+    next: Settings | null | ((old: Settings | null) => Settings | null),
+  ) {
+    if (!layer) return setOwnSettings(next);
+    if (!saved) return;
+    const shown = layer.view(saved);
+    const value = typeof next === "function" ? next(shown) : next;
+    if (value) layer.edit(saved, value);
+  }
+  /** A layer's origin marker beside `marker`, outside project scope just
+   * `marker`. */
+  function scoped(path: string, marker: ReactNode) {
+    const origin = layer?.marker(path);
+    if (!origin) return marker;
+    return (
+      <span className="os-scope-marker">
+        {origin}
+        {marker}
+      </span>
+    );
+  }
 
   if (!settings || !saved)
     return error ? (
@@ -529,7 +565,7 @@ function OrchestratorSettingsBody({
   const differing = defaults
     ? settingsDifferingFromDefaults(settings, defaults)
     : [];
-  const changes = countChanges(saved, settings);
+  const changes = layer ? layer.changes : countChanges(saved, settings);
   const preset: AutonomyPreset = presetOf(settings);
 
   function resetToDefault(field: DefaultableSetting) {
@@ -572,14 +608,17 @@ function OrchestratorSettingsBody({
     text: (value: unknown) => string = (value) =>
       typeof value === "boolean" ? (value ? "On" : "Off") : String(value),
   ) {
-    return valueMarker(
-      label,
-      (from) => from.experiments[key],
-      (to, from) => ({
-        ...to,
-        experiments: { ...to.experiments, [key]: from.experiments[key] },
-      }),
-      text,
+    return scoped(
+      `experiments.${key}`,
+      valueMarker(
+        label,
+        (from) => from.experiments[key],
+        (to, from) => ({
+          ...to,
+          experiments: { ...to.experiments, [key]: from.experiments[key] },
+        }),
+        text,
+      ),
     );
   }
   const dollars = (value: unknown) =>
@@ -588,6 +627,9 @@ function OrchestratorSettingsBody({
   /** "changed · default Off ↺" beside a setting saved away from orchd's
    * default. Reset only stages the value; Save still writes it. */
   function defaultMarker(field: DefaultableSetting) {
+    return scoped(field, builtInMarker(field));
+  }
+  function builtInMarker(field: DefaultableSetting) {
     if (!defaults || !settings || !differing.includes(field)) return null;
     const label = SETTING_LABELS[field];
     const value = settingValue(defaults, field);
@@ -765,6 +807,7 @@ function OrchestratorSettingsBody({
           <span className="os-row-title">
             Repos where landing on the default branch is allowed
           </span>
+          {scoped("landOnDefaultRepos", null)}
         </div>
         <span className="os-row-desc">
           Every other repo refuses to land on its default branch. Use the full
@@ -822,6 +865,7 @@ function OrchestratorSettingsBody({
         title="MODELS & ROUTES"
         note="A route is a harness plus a model. Tiers pick a route by how hard the task looks."
       />
+      {scoped("routes", null)}
       <div className="os-routes">
         <div className="os-route-row os-route-header">
           <span>Route</span>
@@ -942,6 +986,7 @@ function OrchestratorSettingsBody({
         title="CONNECTED TOOLS"
         note="Services the orchestrator chat can look things up in. A change waits for your OK in the chat."
       />
+      {scoped("chatTools", null)}
       <ConnectedTools
         tools={settings.chatTools ?? []}
         savedTools={saved.chatTools ?? []}
@@ -1063,11 +1108,14 @@ function OrchestratorSettingsBody({
             value={settings.dailyBudgetUsd}
             onChange={(next) => update({ dailyBudgetUsd: next ?? 0 })}
           />
-          {valueMarker(
-            "Budget per day",
-            (from) => from.dailyBudgetUsd,
-            (to, from) => ({ ...to, dailyBudgetUsd: from.dailyBudgetUsd }),
-            dollars,
+          {scoped(
+            "dailyBudgetUsd",
+            valueMarker(
+              "Budget per day",
+              (from) => from.dailyBudgetUsd,
+              (to, from) => ({ ...to, dailyBudgetUsd: from.dailyBudgetUsd }),
+              dollars,
+            ),
           )}
         </div>
       </div>
@@ -1091,6 +1139,7 @@ function OrchestratorSettingsBody({
             </>,
           )}
         </Select>,
+        scoped("briefCheckRoute", null),
       )}
       {row(
         "Worktree folder",
@@ -1112,6 +1161,7 @@ function OrchestratorSettingsBody({
             }
           />
         </label>,
+        scoped("worktreeRoot", null),
       )}
       {row(
         "Verify timeout (seconds)",
@@ -1132,6 +1182,7 @@ function OrchestratorSettingsBody({
             }
           />
         </label>,
+        scoped("verifyTimeoutSecs", null),
       )}
 
       <button
@@ -1240,13 +1291,23 @@ function OrchestratorSettingsBody({
         <ChevronRight size={13} className={jsonOpen ? "open" : ""} />
         Advanced — all settings as JSON
       </button>
-      {jsonOpen && (
-        <SettingsJsonEditor settings={settings} saving={saving} onSave={save} />
-      )}
+      {jsonOpen &&
+        (layer ? (
+          <p className="os-note">
+            The JSON editor edits one host's own settings: switch the scope to
+            Host to use it.
+          </p>
+        ) : (
+          <SettingsJsonEditor
+            settings={settings}
+            saving={saving}
+            onSave={save}
+          />
+        ))}
 
-      {error && (
+      {(layer?.error || error) && (
         <p className="inline-error" role="alert">
-          {error}
+          {layer?.error || error}
         </p>
       )}
       {changes > 0 && (
@@ -1259,18 +1320,18 @@ function OrchestratorSettingsBody({
           <button
             type="button"
             className="os-ghost"
-            disabled={saving}
-            onClick={() => setSettings(saved)}
+            disabled={saving || layer?.saving}
+            onClick={() => (layer ? layer.discard() : setSettings(saved))}
           >
             Discard
           </button>
           <button
             type="button"
             className="os-primary"
-            disabled={saving}
-            onClick={() => void save()}
+            disabled={saving || layer?.saving}
+            onClick={() => void (layer ? layer.save() : save())}
           >
-            {saving ? "Saving…" : "Save"}
+            {saving || layer?.saving ? "Saving…" : "Save"}
           </button>
         </div>
       )}
@@ -1279,33 +1340,56 @@ function OrchestratorSettingsBody({
 }
 
 /** The orchestration settings of one host's daemon: Local, or a remote host
- * whose routes are marked unavailable when its git/claude/codex says so. */
+ * whose routes are marked unavailable when its git/claude/codex says so. In
+ * project scope, a project's default for all its hosts and per-host
+ * overrides. */
 export function OrchestratorSettings() {
   const { hosts } = useOrchestratorHosts();
+  const [scope, setScope] = useState<SettingsScope>("host");
   const [host, setHost] = useState(LOCAL_HOST);
-  const info = hosts.find((item) => item.id === host);
+  const preflightOf = (id: string) =>
+    hosts.find((item) => item.id === id)?.preflight ?? null;
+  if (scope === "project")
+    return (
+      <>
+        <div className="os-scope-top">
+          <SettingsScopeChoice scope={scope} onChange={setScope} />
+        </div>
+        <ProjectScopeSettings
+          hosts={hosts}
+          render={(shown, layer, key) => (
+            <OrchestratorHostProvider value={shown}>
+              <OrchestratorSettingsBody
+                key={key}
+                preflight={preflightOf(shown)}
+                layer={layer}
+              />
+            </OrchestratorHostProvider>
+          )}
+        />
+      </>
+    );
   return (
     <OrchestratorHostProvider value={host}>
-      {hosts.length > 1 && (
-        <label className="orch-settings-host">
-          <span>Host</span>
-          <select
-            aria-label="Settings host"
+      <div className="os-scope-top">
+        <SettingsScopeChoice scope={scope} onChange={setScope} />
+        {hosts.length > 1 && (
+          <ScopePicker
+            label="Host"
+            ariaLabel="Settings host"
             value={host}
-            onChange={(event) => setHost(event.target.value)}
+            onChange={setHost}
           >
             {hosts.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
               </option>
             ))}
-          </select>
-        </label>
-      )}
-      <OrchestratorSettingsBody
-        key={host}
-        preflight={info?.preflight ?? null}
-      />
+          </ScopePicker>
+        )}
+        <CopySettings source={host} hosts={hosts} />
+      </div>
+      <OrchestratorSettingsBody key={host} preflight={preflightOf(host)} />
     </OrchestratorHostProvider>
   );
 }

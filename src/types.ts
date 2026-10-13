@@ -323,6 +323,9 @@ export type Project = {
     string,
     { withheld?: boolean; overrides?: Record<string, unknown> }
   >;
+  /** orchd settings: the project default every host of the project uses and
+   * per-host overrides. Changed only through `projectOrchSet`. */
+  orch?: import("./orchestrator/projectSettings.ts").ProjectOrch;
 };
 export type ProjectGitFailure = {
   kind: "auth" | "host-key" | "network" | "branch" | "path" | "other";
@@ -972,6 +975,14 @@ export interface Bridge {
     host: string,
     overrides: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /** Replaces one scope of a project's orchd settings: "project" (the
+   * default) or a host id's override; `{}` clears it. Returns the whole
+   * `orch`. */
+  projectOrchSet(
+    id: string,
+    scope: string,
+    patch: Partial<import("./orchestrator/types.ts").Settings>,
+  ): Promise<import("./orchestrator/projectSettings.ts").ProjectOrch>;
   projectHostCheck(
     id: string,
     host: string,

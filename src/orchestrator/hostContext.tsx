@@ -10,7 +10,8 @@ const HostContext = createContext<string>(LOCAL);
 export const OrchestratorHostProvider = HostContext.Provider;
 
 const clients = new Map<string, OrchestratorClient>();
-function clientFor(host: string): OrchestratorClient {
+/** The typed client of `host`; the same object per host. */
+export function clientFor(host: string): OrchestratorClient {
   let client = clients.get(host);
   if (!client) {
     client = orchestratorClientFor(host);

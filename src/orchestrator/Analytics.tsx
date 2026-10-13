@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
-import { useOrchestratorClient } from "./hostContext";
-import type { OrchestratorClient } from "./client";
+import {
+  clientFor,
+  useOrchestratorClient,
+  useOrchestratorHost,
+} from "./hostContext";
+import {
+  loadProjectSpend,
+  loadProjectTasks,
+  type ProjectSource,
+} from "./projectScope";
+import { useProjectScope } from "./useProjectScope";
 import { errorText, formatCost, formatDuration } from "./helpers";
 import { landTasks } from "./ownerAttention";
 import {
@@ -47,13 +56,11 @@ function periodRange(period: Period): string {
 
 /** The period's spend by day, stage and task, windowed by its UTC dates. */
 async function loadSpend(
-  client: OrchestratorClient,
-  cwd: string,
+  sources: ProjectSource[],
   period: Period,
-): Promise<Spend> {
+): Promise<Spend & { failed: string[] }> {
   const query = (groupBy: SpendGroup) =>
-    client.costsSummary({
-      repo: cwd,
+    loadProjectSpend(clientFor, sources, {
       ...spendRange(period),
       groupBy: [groupBy],
     });
@@ -62,7 +69,8 @@ async function loadSpend(
     query("stage"),
     query("task"),
   ]);
-  return { day, stage, task };
+  const failed = [...new Set([...day.failed, ...stage.failed, ...task.failed])];
+  return { day: day.summary, stage: stage.summary, task: task.summary, failed };
 }
 
 /** Lower is better for every delta on this page except "landed". */
@@ -189,44 +197,56 @@ export function AnalyticsView({
   onOpenTask?: (id: string) => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
+  const host = useOrchestratorHost();
+  const { sources, hostName } = useProjectScope(cwd);
   const [offset, setOffset] = useState(0);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [spend, setSpend] = useState<Spend | null>(null);
   const [previous, setPrevious] = useState<SpendSummary | null>(null);
   const [spendError, setSpendError] = useState("");
+  const [unreached, setUnreached] = useState<string[]>([]);
   const [landing, setLanding] = useState(false);
   const [landError, setLandError] = useState("");
   const period = useMemo(() => periodAt(Date.now(), offset), [offset]);
 
   useEffect(() => {
     let cancelled = false;
-    orchestratorClient
-      .taskList(cwd, true)
-      .then((list) => !cancelled && setTasks(list))
+    const report = (failed: string[]) =>
+      setUnreached((old) => [...new Set([...old, ...failed])]);
+    setUnreached([]);
+    loadProjectTasks(clientFor, sources, true)
+      .then((result) => {
+        if (cancelled) return;
+        setTasks(result.tasks);
+        report(result.failed);
+      })
       .catch(() => undefined);
-    loadSpend(orchestratorClient, cwd, period)
+    loadSpend(sources, period)
       .then((result) => {
         if (cancelled) return;
         setSpend(result);
         setSpendError("");
+        report(result.failed);
       })
       .catch((e) => {
         if (cancelled) return;
         setSpend(null);
         setSpendError(errorText(e));
       });
-    orchestratorClient
-      .costsSummary({
-        repo: cwd,
-        ...spendRange(periodAt(period.to - 1, 1)),
-        groupBy: ["day"],
+    loadProjectSpend(clientFor, sources, {
+      ...spendRange(periodAt(period.to - 1, 1)),
+      groupBy: ["day"],
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setPrevious(result.summary);
+        report(result.failed);
       })
-      .then((summary) => !cancelled && setPrevious(summary))
       .catch(() => !cancelled && setPrevious(null));
     return () => {
       cancelled = true;
     };
-  }, [cwd, period, refresh, orchestratorClient]);
+  }, [sources, period, refresh]);
 
   const now = useMemo(() => periodStats(tasks, period), [tasks, period]);
   const before = useMemo<PeriodStats>(
@@ -234,8 +254,13 @@ export function AnalyticsView({
     [tasks, period],
   );
   const inPeriod = useMemo(() => cohort(tasks, period), [tasks, period]);
-  const waiting = landTasks(tasks);
-  const insight = landInsight(waiting.length, landingTasks(tasks));
+  // Only this host's tasks can be opened or landed from here.
+  const own = useMemo(
+    () => tasks.filter((t) => (t.host || "local") === host),
+    [tasks, host],
+  );
+  const waiting = landTasks(own);
+  const insight = landInsight(waiting.length, landingTasks(own));
 
   const total = spend?.day.totals.costUsd ?? null;
   const previousTotal = previous?.totals.costUsd ?? null;
@@ -250,7 +275,9 @@ export function AnalyticsView({
       : null;
 
   const open = (id: string | undefined) =>
-    onOpenTask && id ? () => onOpenTask(id) : undefined;
+    onOpenTask && id && own.some((t) => t.id === id)
+      ? () => onOpenTask(id)
+      : undefined;
   const firstOf = (status: Task["status"]) =>
     open(inPeriod.find((t) => t.status === status)?.id);
 
@@ -491,6 +518,12 @@ export function AnalyticsView({
       {spendError && (
         <p className="an-error" role="alert">
           Spend: {spendError}
+        </p>
+      )}
+      {unreached.length > 0 && (
+        <p className="an-note warning">
+          Not counted: {unreached.map((id) => hostName(id)).join(", ")}{" "}
+          (unreachable)
         </p>
       )}
       {landError && (

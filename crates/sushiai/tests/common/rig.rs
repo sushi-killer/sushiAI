@@ -209,7 +209,18 @@ pub fn status_of(client: &mut Client, id: &str) -> String {
 }
 
 pub fn wait_status(client: &mut Client, id: &str, want: &str) {
-    wait_until(&format!("status {want}"), || status_of(client, id) == want);
+    let deadline = std::time::Instant::now() + super::deadline();
+    loop {
+        let entry = entry(client, id);
+        if entry["status"] == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for status {want}; last entry {entry}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Waits until the agent is idle with a conversation id: the state a session may sleep from.

@@ -103,7 +103,11 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
             if !can_hibernate(&record, true, true) {
                 return Err(needs_launch());
             }
+            // The old holder may still be removing its socket: keep its pid, so the wake
+            // waits for it to go before the new holder binds the same path.
+            let old_holder = record.holder_pid;
             mark_hibernated(&mut record, now_ms());
+            record.holder_pid = old_holder;
             session::start_hibernated(registry.clone(), record)
         }
     };

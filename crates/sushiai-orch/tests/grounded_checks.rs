@@ -590,7 +590,7 @@ fn a_parents_checks_are_baselined_before_the_children_and_run_once_after_they_la
 fn a_failing_parent_held_out_check_fails_the_parent_without_naming_the_command() {
     let (s, parent, _repo) = parent_run(true);
     // A failing parent check goes to agent attempts, then waits.
-    assert_eq!(parent["status"], "waiting", "task JSON: {parent}");
+    assert_eq!(parent["status"], "failed", "task JSON: {parent}");
     assert_eq!(parent["heldOut"]["baseline"], "fail", "{parent}");
     assert!(
         !parent["question"].to_string().contains("c.txt"),

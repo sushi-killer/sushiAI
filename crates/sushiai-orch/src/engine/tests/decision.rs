@@ -163,8 +163,8 @@ fn consecutive_same_signature_counts_trailing_run_only() {
         attempt_with_failure(3, "sig-b"),
         attempt_with_failure(4, "sig-b"),
     ];
-    assert_eq!(consecutive_same_signature(&attempts, "sig-b"), 3);
-    assert_eq!(consecutive_same_signature(&attempts, "sig-a"), 0);
+    assert_eq!(consecutive_same_signature(&attempts, "sig-b", |_| false), 3);
+    assert_eq!(consecutive_same_signature(&attempts, "sig-a", |_| false), 0);
 }
 
 #[test]
@@ -532,5 +532,28 @@ fn ids_and_hashes_do_not_change_a_signature_and_interrupted_attempts_do_not_brea
         interrupted,
         attempt_with_failure(3, "s"),
     ];
-    assert_eq!(consecutive_same_signature(&attempts, "s"), 2);
+    assert_eq!(consecutive_same_signature(&attempts, "s", |_| false), 2);
+}
+
+#[test]
+fn a_criterion_dropped_by_the_judge_is_not_credited_to_the_owner() {
+    let mut task = task_with_status(TaskStatus::Waiting);
+    task.criteria = vec!["zero".into(), "one".into()];
+    task.question_history.push(AnsweredQuestion {
+        question: "Criterion 1 cannot be met as written: one. Evidence: e".into(),
+        options: vec![],
+        kind: QuestionKind::Impossible,
+        asked_by: None,
+        asked_at: None,
+        answer: "drop criterion".into(),
+        answered_at: 0,
+        answered_by: AnsweredBy::Judge,
+        failure_signature: None,
+        commands: vec![],
+    });
+    let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Other);
+    assert_eq!(
+        task.decisions,
+        vec!["Orchestrator: dropped criterion 1 (one) as the answer judge answered"]
+    );
 }

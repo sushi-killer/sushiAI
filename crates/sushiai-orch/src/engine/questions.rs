@@ -31,8 +31,9 @@ pub(super) const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 /// The "attempts keep failing" question: the orchestrator triages it first
 /// (it sees the last failure, e.g. the review findings, and can say what to
 /// fix or that a finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`]
-/// times per task; after that, or with auto-answer off, only the owner. The
-/// answer policy goes first: it continues once on its own.
+/// times per task; after that, or with auto-answer off, the failure ladder
+/// takes one changed approach and then fails the task (`ladder.rs`): the owner
+/// is never asked. The answer policy goes first: it continues once on its own.
 pub(super) async fn wait_for_exhausted_answer(
     app: &Arc<App>,
     task_id: &str,
@@ -58,18 +59,52 @@ pub(super) async fn wait_for_exhausted_answer(
             shown: asked,
         });
     }
-    let continues = non_owner_continues(task);
-    if continues < MAX_ORCHESTRATOR_CONTINUES {
-        wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
-    } else {
-        let shown = task.question.clone();
-        park_for_answer(app, task_id, task, pending_answer, cancel, permit)
-            .await
-            .map(|text| Answered {
-                text,
-                by_owner: app.take_agent_answer(task_id).is_none(),
-                shown,
-            })
+    if non_owner_continues(task) < MAX_ORCHESTRATOR_CONTINUES {
+        if let Some(answered) = wait_for_triaged_answer(
+            app,
+            task_id,
+            task,
+            idx,
+            pending_answer,
+            cancel,
+            permit,
+            false,
+        )
+        .await
+        {
+            return Some(answered);
+        }
+        if cancel.is_cancelled() {
+            return None;
+        }
+    }
+    // The next rung is never an open question: one changed approach, then
+    // the task fails with a report (`ladder.rs`).
+    let shown = task.question.take();
+    if ladder::approach_changed(task) {
+        ladder::end_ladder(app, task);
+        return None;
+    }
+    task.status = TaskStatus::Queued;
+    Some(Answered {
+        text: "change approach".to_string(),
+        by_owner: false,
+        shown,
+    })
+}
+
+/// What an answer to "attempts keep failing" does besides extending the
+/// budget: `change approach` changes how the next attempt works.
+pub(super) fn settle_exhausted_answer(app: &App, task: &mut Task, idx: usize, answer: &str) {
+    if is_option(answer, "change approach") {
+        let settings = app.settings.read().unwrap().clone();
+        let attempt_n = task.attempts[idx].n;
+        ladder::change_approach(task, &settings, attempt_n);
+        task.queue.rate_pauses = 0;
+        // The loop reloads the task from disk before its next attempt.
+        task.updated_at = now_ms();
+        app.save_task_logged(task);
+        app.broadcast_task(task);
     }
 }
 
@@ -783,12 +818,23 @@ pub(super) async fn wait_for_answer_with_triage(
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
     }
-    wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit)
-        .await
-        .map(|a| a.text)
+    wait_for_triaged_answer(
+        app,
+        task_id,
+        task,
+        idx,
+        pending_answer,
+        cancel,
+        permit,
+        true,
+    )
+    .await
+    .map(|a| a.text)
 }
 
 /// [`wait_for_answer_with_triage`] once the answer policy has had its turn.
+/// With `park` false an unanswered question is not handed on: `None` comes
+/// back with the question untouched (the failure ladder has a next rung).
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_triaged_answer(
     app: &Arc<App>,
@@ -798,6 +844,7 @@ async fn wait_for_triaged_answer(
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
+    park: bool,
 ) -> Option<Answered> {
     let question = task.question.clone().unwrap_or_else(|| {
         Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
@@ -881,7 +928,7 @@ async fn wait_for_triaged_answer(
                     shown: Some(question),
                 });
             }
-            brief::TriageAction::Escalate if !auto_answer => {}
+            brief::TriageAction::Escalate if !auto_answer || !park => {}
             brief::TriageAction::Escalate => {
                 task.question = Some(Question {
                     text: decision.question,
@@ -898,6 +945,9 @@ async fn wait_for_triaged_answer(
                     .push(orchestrator_escalate_line(&decision.reason));
             }
         }
+    }
+    if !park {
+        return None;
     }
     let shown = task.question.clone();
     park_for_answer(app, task_id, task, pending_answer, cancel, permit)

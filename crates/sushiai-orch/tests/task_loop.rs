@@ -134,18 +134,27 @@ fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
+    // maxAttempts=2 is spent, the ladder changes the approach once (two more
+    // attempts), then the task fails: nobody is asked.
     let settled = poll_task_status(&daemon, &task_id);
-    assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
+    assert_eq!(settled["status"], "failed", "task JSON: {settled}");
     let attempts = settled["attempts"].as_array().unwrap();
-    assert_eq!(attempts.len(), 2, "should stop after maxAttempts=2");
+    assert_eq!(
+        attempts.len(),
+        3,
+        "maxAttempts=2, then one changed approach"
+    );
     for a in attempts {
         assert_eq!(a["status"], "failed");
         assert_eq!(a["failure"]["kind"], "verify");
     }
-    assert!(settled["question"]["text"]
-        .as_str()
-        .unwrap()
-        .starts_with("Attempts keep failing with"));
+    assert!(settled["question"].is_null(), "{settled}");
+    let decisions = settled["decisions"].to_string();
+    assert!(
+        decisions.contains("Ladder: changed approach"),
+        "{decisions}"
+    );
+    assert!(decisions.contains("Ladder: stopped after"), "{decisions}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -155,10 +164,21 @@ fn engine_loop_waits_after_verify_keeps_failing_and_attempts_are_exhausted() {
 #[test]
 fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     let scripts_dir = tempfile::tempdir().unwrap();
+    // One task asks the owner a question (its brief names it); the other passes.
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        "#!/bin/sh\ncat > /dev/null\necho \"changed\" > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n",
+        r##"#!/bin/sh
+brief=$(cat)
+echo changed > CHANGED_MARKER.txt
+echo '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+case "$brief" in
+*"Always asks"*)
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"blocked\",\"summary\":\"stuck\",\"decisions\":[],\"question\":\"Which one should it be?\"}\n```"}' ;;
+*)
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"##,
     );
     let fake_bins = [("ORCHD_CLAUDE_BIN", script.to_str().unwrap())];
     let data_holder = tempfile::tempdir().unwrap();
@@ -193,7 +213,7 @@ fn a_task_waiting_for_its_owner_does_not_hold_a_parallel_slot() {
     let waiting = call(
         "task.create",
         serde_json::json!({"repo": repo.path().to_str().unwrap(),
-        "title": "Always fails", "goal": "g", "criteria": [], "verify": ["false"], "start": true}),
+        "title": "Always asks", "goal": "g", "criteria": [], "verify": ["true"], "start": true}),
     );
     let waiting_id = waiting["id"].as_str().unwrap().to_string();
     wait_until("the first task to reach waiting", || {
@@ -267,20 +287,19 @@ fn maxattempts_one_still_gives_the_implement_stage_its_own_one_attempt() {
     // If the plan attempt wrongly counted against maxAttempts, the implement
     // stage would already be "exhausted" before it ever got to try -- this
     // proves it actually got its own single attempt instead.
-    let settled = poll_until(&daemon, &task_id, |s| s == "waiting");
+    let settled = poll_until(&daemon, &task_id, |s| s == "failed");
     let attempts = settled["attempts"].as_array().unwrap();
-    assert_eq!(
-        attempts.len(),
-        2,
-        "one plan attempt, one implement attempt: {settled}"
-    );
     assert_eq!(attempts[0]["stage"], "plan");
     assert_eq!(attempts[1]["stage"], "implement");
     assert_eq!(attempts[1]["failure"]["kind"], "verify");
-    assert!(settled["question"]["text"]
-        .as_str()
-        .unwrap()
-        .starts_with("Attempts keep failing with"));
+    // The plan attempt did not count: exactly one implement attempt came
+    // before the ladder changed the approach (one more budget of two).
+    let implements = attempts
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .count();
+    assert_eq!(implements, 3, "{settled}");
+    assert!(settled["question"].is_null(), "{settled}");
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -512,7 +531,7 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
         scripts_dir.path(),
         "fake-claude-silent.sh",
         &format!(
-            "#!/bin/sh\necho $$ > \"$PID_FILE\"\ncat > /dev/null\nexec sleep {}\n",
+            "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in *'An implement attempt at this task failed'*) exit 0;; esac\necho $$ > \"$PID_FILE\"\nexec sleep {}\n",
             deadline().as_secs() * 3
         ),
     );
@@ -542,7 +561,7 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
     let task_id = task["id"].as_str().unwrap().to_string();
 
     let settled = poll_task_status(&daemon, &task_id);
-    assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
+    assert_eq!(settled["status"], "failed", "task JSON: {settled}");
     assert_eq!(
         settled["attempts"][0]["failure"]["kind"], "stall",
         "{settled}"
@@ -565,11 +584,12 @@ fn a_silent_harness_is_stopped_as_stalled_when_the_variant_sets_a_stall_timeout(
 fn a_run_whose_wrapper_is_killed_before_its_exit_file_does_not_hang_the_task() {
     let scripts_dir = tempfile::tempdir().unwrap();
     // The harness SIGKILLs the wrapper shell that is its parent (and the
-    // daemon's own unreaped child), so no exit file is ever written.
+    // daemon's own unreaped child), so no exit file is ever written. The
+    // advisor run is a direct child of the daemon and must not be killed.
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude-orphaned.sh",
-        "#!/bin/sh\ncat > /dev/null\nkill -9 $PPID\nexit 0\n",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in *'An implement attempt at this task failed'*) exit 0;; esac\nkill -9 $PPID\nexit 0\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
@@ -960,9 +980,13 @@ fn a_looping_harness_is_stopped_and_a_second_loop_escalates_the_tier() {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
     let settled = poll_task_status(&daemon, &task_id);
-    assert_eq!(settled["status"], "waiting", "task JSON: {settled}");
+    assert_eq!(settled["status"], "failed", "task JSON: {settled}");
     let attempts = settled["attempts"].as_array().unwrap();
-    assert_eq!(attempts.len(), 3, "{settled}");
+    assert_eq!(
+        attempts.len(),
+        4,
+        "three, then a changed approach: {settled}"
+    );
     for a in attempts {
         assert_eq!(a["failure"]["kind"], "loop", "{settled}");
     }

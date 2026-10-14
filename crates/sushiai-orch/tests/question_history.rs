@@ -147,20 +147,26 @@ fn settled(s: &Setup, id: &str) -> Value {
     })
 }
 
-fn no_verdict_setup() -> Setup {
-    setup(&[("PASS_REVIEW_FROM", "99")], |settings| {
+/// A task whose first run costs more than its budget, so the gate before the
+/// review waits for the owner.
+fn budget_setup() -> Setup {
+    setup(&[("COST", "0.5"), ("PASS_REVIEW_FROM", "0")], |settings| {
         settings["review"] = json!("claude-sonnet");
         settings["answerPolicy"] = json!(false);
     })
 }
 
+fn create_over_budget(s: &Setup) -> String {
+    create(s, json!({"variant": {"maxCostUsd": 0.4}}))
+}
+
 #[test]
 fn a_waiting_question_shows_who_asked_it_and_when() {
-    let s = no_verdict_setup();
-    let id = create(&s, json!({}));
+    let s = budget_setup();
+    let id = create_over_budget(&s);
     let task = finished(&s, &id);
     assert_eq!(task["status"], "waiting", "{task}");
-    assert_eq!(task["question"]["kind"], "review_no_verdict");
+    assert_eq!(task["question"]["kind"], "budget");
     assert_eq!(task["question"]["askedBy"], "review", "{task}");
     assert!(task["question"]["askedAt"].is_i64(), "{task}");
     assert!(history(&task).is_empty(), "{task}");
@@ -179,12 +185,12 @@ fn a_waiting_question_shows_who_asked_it_and_when() {
 
 #[test]
 fn an_owner_answer_to_a_waiting_loop_is_recorded_once() {
-    let s = no_verdict_setup();
-    let id = create(&s, json!({}));
+    let s = budget_setup();
+    let id = create_over_budget(&s);
     let waiting = finished(&s, &id);
     let question = waiting["question"].clone();
     s.daemon
-        .request("task.answer", json!({"id": id, "answer": "approve"}));
+        .request("task.answer", json!({"id": id, "answer": "raise"}));
     let task = settled(&s, &id);
     assert_eq!(task["status"], "done", "{task}");
     assert!(task["question"].is_null(), "{task}");
@@ -192,10 +198,10 @@ fn an_owner_answer_to_a_waiting_loop_is_recorded_once() {
     assert_eq!(h.len(), 1, "{task}");
     assert_eq!(h[0]["question"], question["text"]);
     assert_eq!(h[0]["options"], question["options"]);
-    assert_eq!(h[0]["kind"], "review_no_verdict");
+    assert_eq!(h[0]["kind"], "budget");
     assert_eq!(h[0]["askedBy"], "review");
     assert_eq!(h[0]["askedAt"], question["askedAt"]);
-    assert_eq!(h[0]["answer"], "approve");
+    assert_eq!(h[0]["answer"], "raise");
     assert!(h[0]["answeredAt"].is_i64(), "{task}");
     assert_eq!(h[0]["answeredBy"], "owner");
     cleanup(s, &waiting);
@@ -203,8 +209,8 @@ fn an_owner_answer_to_a_waiting_loop_is_recorded_once() {
 
 #[test]
 fn an_owner_stop_is_recorded_like_any_answer() {
-    let s = no_verdict_setup();
-    let id = create(&s, json!({}));
+    let s = budget_setup();
+    let id = create_over_budget(&s);
     let waiting = finished(&s, &id);
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "stop"}));
@@ -221,8 +227,8 @@ fn an_owner_stop_is_recorded_like_any_answer() {
 
 #[test]
 fn a_question_dropped_by_task_stop_is_not_history() {
-    let s = no_verdict_setup();
-    let id = create(&s, json!({}));
+    let s = budget_setup();
+    let id = create_over_budget(&s);
     let waiting = finished(&s, &id);
     s.daemon.request("task.stop", json!({"id": id}));
     let task = settled(&s, &id);
@@ -232,22 +238,27 @@ fn a_question_dropped_by_task_stop_is_not_history() {
 }
 
 #[test]
-fn a_policy_answer_is_recorded_as_policy() {
-    // A review that may not run again offers no `retry` (two runs per attempt),
-    // so the policy answer here is the "attempts keep failing" one.
+fn attempts_keep_failing_changes_the_approach_once_then_fails_without_a_question() {
     let s = setup(&[], |settings| {
         settings["review"] = json!("");
         settings["planReview"] = json!("");
+        settings["maxAttempts"] = json!(1);
     });
     let id = create(&s, json!({"verify": ["false"]}));
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "waiting", "{task}");
-    let h = history(&task);
-    assert_eq!(h.len(), 1, "{task}");
-    assert_eq!(h[0]["answeredBy"], "policy");
-    assert_eq!(h[0]["answer"], "continue");
-    assert_eq!(h[0]["kind"], "attempts_failing");
-    assert!(h[0]["askedAt"].is_i64(), "{task}");
+    assert_eq!(task["status"], "failed", "{task}");
+    assert!(task["question"].is_null(), "{task}");
+    // Nobody answered: no question was ever asked.
+    assert!(history(&task).is_empty(), "{task}");
+    let decisions = task["decisions"].to_string();
+    assert_eq!(
+        decisions
+            .matches("Ladder: changed approach after attempt")
+            .count(),
+        1,
+        "{decisions}"
+    );
+    assert!(decisions.contains("Ladder: stopped after"), "{decisions}");
     cleanup(s, &task);
 }
 

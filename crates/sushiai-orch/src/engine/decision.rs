@@ -109,15 +109,24 @@ pub fn failure_signature(kind: FailureKind, detail: &str) -> String {
 /// Count trailing attempts (including the most recent) whose failure
 /// signature matches, i.e. how many times in a row this exact failure has
 /// happened.
-pub fn consecutive_same_signature(attempts: &[Attempt], signature: &str) -> u32 {
+/// An attempt for which `skip(index)` holds is passed over: it neither counts
+/// nor ends the run (an environment failure says nothing about the approach).
+pub fn consecutive_same_signature(
+    attempts: &[Attempt],
+    signature: &str,
+    skip: impl Fn(usize) -> bool,
+) -> u32 {
     let mut count = 0;
-    for a in attempts
-        .iter()
-        .rev()
-        .filter(|a| a.status != AttemptStatus::Interrupted)
-    {
+    for (i, a) in attempts.iter().enumerate().rev() {
+        if a.status == AttemptStatus::Interrupted {
+            continue;
+        }
         match &a.failure {
-            Some(f) if f.signature == signature => count += 1,
+            Some(f) if f.signature == signature => {
+                if !skip(i) {
+                    count += 1;
+                }
+            }
             _ => break,
         }
     }
@@ -301,7 +310,9 @@ pub(super) fn advance_after_failure(
         .as_ref()
         .map(|f| f.signature.clone())
         .unwrap_or_default();
-    let mut consecutive = consecutive_same_signature(&task.attempts, &signature);
+    let mut consecutive = consecutive_same_signature(&task.attempts, &signature, |i| {
+        super::ladder::environment_failure(task, i)
+    });
     // A finding that was turned into a check or sent to the judge gets
     // another attempt within the budget, not the owner.
     if task
@@ -559,6 +570,7 @@ pub(super) async fn fail_or_accept(
         app.broadcast_task(task);
         return FailSignal::Accept;
     }
+    settle_exhausted_answer(app, task, idx, &answered.text);
     *attempt_budget += 2;
     FailSignal::Continue
 }
@@ -606,8 +618,19 @@ pub(super) fn drop_criterion(
             c.criterion -= 1;
         }
     }
+    // Who dropped it is on the line: the report lists the criterion as not
+    // done, and the owner must not read a judge's drop as their own answer.
+    let by = match (origin, task.question_history.last().map(|h| h.answered_by)) {
+        (Origin::Owner, _) => "the owner",
+        (_, Some(AnsweredBy::Judge)) => "the answer judge",
+        (_, Some(AnsweredBy::Policy)) => "the answer policy",
+        (_, Some(AnsweredBy::Overseer)) => "the overseer",
+        (_, Some(AnsweredBy::Orchestrator)) => "the orchestrator",
+        (_, Some(AnsweredBy::Lead)) => "the lead",
+        _ => "an agent",
+    };
     task.decisions.push(format!(
-        "Orchestrator: dropped criterion {n} ({text}) as the owner answered"
+        "Orchestrator: dropped criterion {n} ({text}) as {by} answered"
     ));
     Ok(())
 }

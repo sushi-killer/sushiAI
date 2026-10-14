@@ -151,28 +151,18 @@ fn a_task_that_fails_after_its_review_rounds_is_a_review_loop_failure() {
         "start": true,
     }));
     let id = task["id"].as_str().unwrap().to_string();
-    let waiting = poll_until(&rig.daemon, &id, |s| s == "waiting");
-    assert_eq!(
-        waiting["attempts"][0]["failure"]["kind"], "review",
-        "{waiting}"
-    );
-
-    // The branch is gone when the loop picks the task up again: it ends
-    // `failed`, and its last failure is still the review.
-    let repo = rig.repo.path();
-    let worktree = waiting["worktree"].as_str().unwrap().to_string();
-    let branch = waiting["branch"].as_str().unwrap().to_string();
-    git_out(repo, &["worktree", "remove", "--force", &worktree]);
-    git_out(repo, &["branch", "-D", &branch]);
-    git_out(repo, &["update-ref", "-d", &format!("refs/orchd/wip/{id}")]);
-    rig.daemon
-        .request("task.answer", json!({"id": id, "answer": "try again"}));
+    // The review keeps failing: the ladder changes the approach once, then
+    // the task ends `failed`, and its last failure is still the review.
     let failed = poll_until(&rig.daemon, &id, |s| matches!(s, "failed" | "stopped"));
     assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(
+        failed["attempts"][0]["failure"]["kind"], "review",
+        "{failed}"
+    );
     let failed = rig.with_metrics(&id);
     assert_eq!(failed["metrics"]["firstPass"], false, "{failed}");
     assert_eq!(failed["metrics"]["failureCause"], "review_loop", "{failed}");
-    assert_eq!(failed["metrics"]["ownerTouches"], 1, "{failed}");
+    assert_eq!(failed["metrics"]["ownerTouches"], 0, "{failed}");
 
     let entries = rig.done_entries(&id);
     assert_eq!(entries.len(), 1, "{entries:?}");

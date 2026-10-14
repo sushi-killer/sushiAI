@@ -264,33 +264,28 @@ fn review_runs_stop_after_round_two_with_the_last_result() {
 }
 
 #[test]
-fn the_owner_gets_no_retry_after_round_two() {
+fn a_review_without_a_verdict_moves_to_another_route_then_commits_unreviewed() {
     let rig = Rig::new(&[no_verdict()]);
-    let (id, waiting) = rig.run("Write the marker");
-    assert_eq!(waiting["status"], "waiting", "{waiting}");
-    assert!(waiting["question"]["text"]
-        .as_str()
-        .unwrap()
-        .contains("no verdict"));
-    assert_eq!(
-        waiting["question"]["options"],
-        json!(["approve"]),
-        "{waiting}"
-    );
-    assert_eq!(rig.count("review.brief."), 2, "the first run and one rerun");
-    assert_eq!(rig.review_runs(&id, 1), 2, "no third run");
-    assert!(
-        decisions(&waiting)
-            .iter()
-            .any(|d| d == "Orchestrator: attempt 1 review stopped after 2 runs"),
-        "{waiting}"
-    );
-    rig.daemon
-        .request("task.answer", json!({"id": id, "answer": "approve"}));
-    let done = poll_until(&rig.daemon, &id, |s| {
-        matches!(s, "done" | "failed" | "stopped")
-    });
+    let (id, done) = rig.run("Write the marker");
+    // Nobody is asked: the third run (another harness) gave no verdict either.
     assert_eq!(done["status"], "done", "{done}");
+    assert!(done["question"].is_null(), "{done}");
+    assert_eq!(rig.count("review.brief."), 2, "the first run and one rerun");
+    assert_eq!(rig.count("judge.brief."), 1, "one run on the other harness");
+    assert_eq!(rig.review_runs(&id, 1), 3, "no fourth run");
+    let lines = decisions(&done);
+    assert!(
+        lines
+            .iter()
+            .any(|d| d.contains("review gave no verdict") && d.contains("reviewing on codex")),
+        "{done}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|d| d.contains("attempt 1 committed unreviewed")),
+        "{done}"
+    );
     rig.finish(&done);
 }
 

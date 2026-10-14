@@ -138,21 +138,30 @@ fn cleanup(s: Setup, task: &Value) {
 }
 
 #[test]
-fn a_second_no_verdict_on_the_same_attempt_reaches_the_owner_without_retry() {
-    // No review ever gives a verdict: an automatic re-review is the attempt's
-    // second and last review run. The owner is asked with no `retry` offered,
-    // and nothing re-implements.
+fn a_review_that_never_gives_a_verdict_commits_unreviewed_and_asks_nobody() {
+    // No review ever gives a verdict: the same route reads the attempt twice,
+    // another route once. Then the attempt is committed, marked unreviewed,
+    // and nothing re-implements. The owner is not asked.
     let s = setup(&[("PASS_REVIEW_FROM", "99")], |settings| {
         settings["review"] = json!("claude-sonnet");
     });
     let id = create(&s, json!({}));
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "waiting", "task JSON: {task}");
-    assert!(policy_assumptions(&task).is_empty(), "{task}");
+    assert_eq!(task["status"], "done", "task JSON: {task}");
+    assert!(task["question"].is_null(), "{task}");
     assert_eq!(runs(&s, "implement."), 1, "{task}");
-    assert_eq!(runs(&s, "review."), 2, "{task}");
-    assert_eq!(task["question"]["kind"], "review_no_verdict", "{task}");
-    assert_eq!(task["question"]["options"], json!(["approve"]), "{task}");
+    assert!(runs(&s, "review.") >= 2, "{task}");
+    let marked: Vec<Value> = policy_assumptions(&task)
+        .into_iter()
+        .filter(|a| a["kind"] == "review_no_verdict")
+        .collect();
+    assert_eq!(marked.len(), 1, "{task}");
+    assert!(
+        task["decisions"]
+            .to_string()
+            .contains("committed unreviewed"),
+        "{task}"
+    );
     cleanup(s, &task);
 }
 
@@ -333,15 +342,14 @@ fn a_budget_question_still_reaches_the_owner() {
 }
 
 #[test]
-fn with_the_policy_off_a_review_without_a_verdict_waits_for_the_owner() {
+fn with_the_policy_off_a_review_without_a_verdict_still_commits_unreviewed() {
     let s = setup(&[("PASS_REVIEW_FROM", "99")], |settings| {
         settings["review"] = json!("claude-sonnet");
         settings["answerPolicy"] = json!(false);
     });
     let id = create(&s, json!({}));
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "waiting", "task JSON: {task}");
-    assert_eq!(task["question"]["kind"], "review_no_verdict", "{task}");
-    assert!(policy_assumptions(&task).is_empty(), "{task}");
+    assert_eq!(task["status"], "done", "task JSON: {task}");
+    assert!(task["question"].is_null(), "{task}");
     cleanup(s, &task);
 }

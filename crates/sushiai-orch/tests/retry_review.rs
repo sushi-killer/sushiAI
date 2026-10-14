@@ -212,7 +212,7 @@ fn a_full_review_that_fails_after_a_narrow_pass_fails_the_attempt() {
     let (run, settled) = run(true, "FAIL");
     assert_ne!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
-    assert_eq!(attempts.len(), 2, "{settled}");
+    assert_eq!(attempts.len(), 4, "{settled}");
     assert_eq!(attempts[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
     assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
@@ -245,11 +245,11 @@ fn a_narrow_pass_does_not_resolve_a_blocker_before_the_full_review() {
     let (run, settled) = run_script(true, "FAIL", &body);
     assert_ne!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
-    assert_eq!(attempts.len(), 2, "{settled}");
+    assert_eq!(attempts.len(), 4, "{settled}");
     assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
     assert_eq!(attempts[1]["failure"]["kind"], "review", "{settled}");
     assert_eq!(attempts[1]["reviewScope"], "full", "{settled}");
     assert!(run.brief(2, 2).is_some());
-    assert_eq!(run.reviews_run(), 3);
+    assert_eq!(run.reviews_run(), 5);
     run.finish();
 }

@@ -53,6 +53,10 @@ n=$(ls "$LOG_DIR"/implement.* 2>/dev/null | wc -l | tr -d ' ')
 touch "$LOG_DIR/implement.$n"
 echo changed > CHANGED_MARKER.txt
 if [ "$n" = 0 ]; then eval "$IMPL_FIRST"; else eval "$IMPL_REST"; fi
+if [ -n "$BLOCK_FIRST" ] && [ "$n" = 0 ]; then
+  emit "\"\`\`\`sushi-report\\n{\\\"outcome\\\":\\\"blocked\\\",\\\"summary\\\":\\\"cannot decide\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"$BLOCK_FIRST\\\"}\\n\`\`\`\""
+  exit 0
+fi
 emit '"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 "#;
 
@@ -471,7 +475,7 @@ fn a_screenshot_command_that_leaves_the_named_images_missing_still_fails_the_att
         }),
     );
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "waiting", "{task}");
+    assert_eq!(task["status"], "failed", "{task}");
     let first = implements(&task)[0];
     assert_eq!(first["failure"]["kind"], "evidence", "{task}");
     let detail = first["failure"]["detail"].as_str().unwrap();
@@ -530,7 +534,7 @@ fn images_of_an_earlier_attempt_count_when_no_ui_file_it_changed_has_changed() {
 fn images_of_an_earlier_attempt_do_not_count_once_a_ui_file_it_changed_changed_again() {
     let (s, id) = earlier_images("echo x > SECOND; echo b > ui.css", "");
     let task = finished(&s, &id);
-    assert_eq!(task["status"], "waiting", "{task}");
+    assert_eq!(task["status"], "failed", "{task}");
     let attempts = implements(&task);
     assert!(attempts.len() >= 2, "{task}");
     assert_eq!(attempts[1]["failure"]["kind"], "evidence", "{task}");
@@ -588,7 +592,6 @@ fn after_the_first_attempt_a_p1_about_the_tasks_own_work_still_blocks() {
 
 #[test]
 fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review() {
-    let no_verdict = js("Looks fine to me.");
     let unmet = review_reply(
         "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"The button is blue\",\"met\":false,\"evidence\":\"it is not blue\"}]}",
     );
@@ -598,8 +601,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
     );
     let s = setup(
         &[
-            ("REVIEW_0", &no_verdict),
-            ("REVIEW_1", &no_verdict),
+            ("BLOCK_FIRST", "Which colour should the button be?"),
             ("REVIEW_REST", &unmet),
             ("REVIEW_PASS", &pass),
             ("PASS_IF_BRIEF_HAS", "The button is green"),
@@ -612,10 +614,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         json!({"criteria": ["The button is blue -- check: read the CSS"]}),
     );
     let waiting = poll_until(&s.daemon, &id, |st| st == "waiting");
-    assert_eq!(
-        waiting["question"]["kind"], "review_no_verdict",
-        "{waiting}"
-    );
+    assert_eq!(waiting["question"]["kind"], "agent_question", "{waiting}");
     s.daemon.request(
         "task.answer",
         json!({"id": id, "answer": "make the button green, not blue"}),

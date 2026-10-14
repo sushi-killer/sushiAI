@@ -1619,7 +1619,7 @@ impl App {
 
     /// Parks `task` `waiting` on the question of what to do about the
     /// dependencies in `ended`.
-    fn ask_dependency_question(&self, task: &Task, all: &[Task], ended: &[String]) {
+    pub(super) fn ask_dependency_question(&self, task: &Task, all: &[Task], ended: &[String]) {
         let names: Vec<String> = all
             .iter()
             .filter(|t| ended.contains(&t.id))
@@ -1641,13 +1641,16 @@ impl App {
         ));
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
+        if self.restart_environment_dependency(&task, all, ended) {
+            return;
+        }
         // The answer policy retries an ended dependency once before the owner
         // is asked.
         if let Some(question) = task.question.clone() {
             if !all
                 .iter()
                 .any(|t| ended.contains(&t.id) && t.queue.stopped_explicitly)
-                && policy_open(self, &task, question.kind)
+                && policy_open(self, &task, &question)
                 && !task
                     .assumptions
                     .iter()
@@ -1668,6 +1671,69 @@ impl App {
             fresh.status = TaskStatus::Waiting;
         }) {
             eprintln!("orch: updating task {} failed: {e}", task.id);
+        }
+    }
+
+    /// A dependency that failed on the environment (a timeout, a flaky or
+    /// outside-the-diff check, an install error) is restarted once more by
+    /// itself, after a pause; dropping a dependency stays the owner's.
+    /// `true` when this call handled `task` (restarted it or is waiting out
+    /// the pause); `task` carries the dependency question.
+    pub(super) fn restart_environment_dependency(
+        &self,
+        task: &Task,
+        all: &[Task],
+        ended: &[String],
+    ) -> bool {
+        let deps: Vec<&Task> = all.iter().filter(|t| ended.contains(&t.id)).collect();
+        if deps.is_empty()
+            || task
+                .decisions
+                .iter()
+                .any(|d| d == ladder::DEPENDENCY_RESTART_LINE)
+            || deps.iter().any(|d| {
+                d.status != TaskStatus::Failed
+                    || d.queue.stopped_explicitly
+                    || !ladder::failed_on_environment(d)
+            })
+        {
+            return false;
+        }
+        let pause = ladder::dependency_restart_delay().as_millis() as i64;
+        let left = pause - (now_ms() - deps.iter().map(|d| d.updated_at).max().unwrap_or(0));
+        if left > 0 {
+            // The graph comes back to this task when the pause is over.
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let (app, repo) = (self.arc(), task.repo.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(left as u64 + 20)).await;
+                    app.advance_graph(&repo);
+                });
+            }
+            return true;
+        }
+        if let Err(e) = self.update_task(&task.id, |t| {
+            t.decisions
+                .push(ladder::DEPENDENCY_RESTART_LINE.to_string())
+        }) {
+            eprintln!("orch: updating task {} failed: {e}", task.id);
+            return false;
+        }
+        match self.answer_dependency_question(
+            task.clone(),
+            "retry the dependency",
+            Some(AnsweredBy::Policy),
+            None,
+            None,
+        ) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "orch: restarting dependency of task {} failed: {e}",
+                    task.id
+                );
+                false
+            }
         }
     }
 

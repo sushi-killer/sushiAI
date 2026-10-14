@@ -55,16 +55,17 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Criteria the owner (or the answer policy) dropped, as their text: the
-/// live criteria list no longer holds them.
+/// Criteria dropped by the owner, the judge or the policy, as their text: the
+/// live criteria list no longer holds them. The report lists each as not done.
 fn dropped_criteria(task: &Task) -> Vec<String> {
     task.decisions
         .iter()
         .filter_map(|d| {
             let rest = d.strip_prefix("Orchestrator: dropped criterion ")?;
-            let rest = rest.strip_suffix(" as the owner answered")?;
+            let rest = rest.strip_suffix(" answered")?;
+            let (rest, _) = rest.rsplit_once(") as ")?;
             let (_, text) = rest.split_once(" (")?;
-            Some(text.strip_suffix(')').unwrap_or(text).to_string())
+            Some(text.to_string())
         })
         .collect()
 }
@@ -164,7 +165,7 @@ fn push_criteria(out: &mut String, task: &Task, facts: &Facts, used: &mut HashSe
         }
     }
     for text in dropped_criteria(task) {
-        out.push_str(&format!("- {text} - dropped\n"));
+        out.push_str(&format!("- {text} - dropped, not done\n"));
     }
 }
 

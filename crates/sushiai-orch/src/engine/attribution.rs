@@ -5,6 +5,7 @@
 //! caution holds only when the test names it gives appear in the base output.
 
 use super::*;
+use crate::engine::finding_judge::resolve_judge_route;
 use std::hash::{Hash, Hasher};
 
 const RUN_HEAD_CHARS: usize = 1500;
@@ -198,7 +199,6 @@ async fn run_turn(
     // A route other than the implementer's when there is one; the session is
     // new either way.
     let route = resolve_judge_route(&settings, None, &implementer, &implementer, task.tier)
-        .0
         .unwrap_or(&implementer)
         .clone();
     let worktree = PathBuf::from(&task.worktree);

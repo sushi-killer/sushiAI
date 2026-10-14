@@ -18,6 +18,7 @@ emit() {
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
 *"You check a coding task brief"*)
@@ -217,6 +218,7 @@ emit() {
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
 *"You check a coding task brief"*)

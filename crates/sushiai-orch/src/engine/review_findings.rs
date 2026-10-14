@@ -13,37 +13,21 @@ pub(super) fn review_stopped_note(attempt_n: u32) -> String {
 /// Reviews of a finding after the first that make it a repeat to handle.
 const HANDLE_AT_REPEATS: u32 = 2;
 
-/// `text` split into the part before the ` [F-id]` mark `with_id` appended
-/// and the id in the mark.
-fn split_id(text: &str) -> (&str, Option<&str>) {
+/// `text` without the ` [F-id]` mark `with_id` appended.
+fn strip_finding_id(text: &str) -> &str {
     let t = text.trim_end();
     if let Some(start) = t.rfind(" [F-") {
         if let Some(id) = t[start + 2..].strip_suffix(']') {
             if id.len() > 2 && id[2..].chars().all(|c| c.is_ascii_alphanumeric()) {
-                return (t[..start].trim_end(), Some(id));
+                return t[..start].trim_end();
             }
         }
     }
-    (t, None)
-}
-
-fn strip_finding_id(text: &str) -> &str {
-    split_id(text).0
+    t
 }
 
 fn with_id(text: &str, id: &str) -> String {
     format!("{} [{id}]", strip_finding_id(text))
-}
-
-/// The id a finding text carries, when it carries one.
-pub(super) fn id_of(text: &str) -> Option<String> {
-    split_id(text).1.map(str::to_string)
-}
-
-/// Whether `text` names the finding `id` as a whole word.
-pub(super) fn names_id(text: &str, id: &str) -> bool {
-    text.split(|c: char| !c.is_alphanumeric() && c != '-')
-        .any(|word| word == id)
 }
 
 /// The first `F-<n>` no registered finding has.
@@ -189,28 +173,20 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
 }
 
 /// What the loop does about the findings that repeated for the second time:
-/// a failing scenario becomes a criterion and a check; every other one goes
-/// to the finding judge (with the implementer's report as the rebuttal when
-/// the attempt disputed nothing). They no longer count as repeated, so the
-/// next step is another attempt, not an owner question. Returns the
-/// (finding, why) pairs the judge ruled invalid.
-#[allow(clippy::too_many_arguments)]
+/// a failing scenario becomes a criterion and a check. Every other one stays
+/// open and blocking: the implementer may decline it with evidence, and the
+/// next review rules on that (`apply_declines`). They no longer count as
+/// repeated, so the next step is another attempt, not an owner question.
 pub(super) async fn handle_repeated_findings(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
     attempt_n: u32,
     r: &mut ReviewResult,
-    implementer_note: &str,
-    settings: &Settings,
-    review_route: &Route,
-    implementer: &Route,
     worktree: &Path,
     cancel: &CancelToken,
-) -> Vec<(String, String)> {
+) {
     let own = r.severities.len().min(r.findings.len());
-    let mut to_judge: Vec<String> = Vec::new();
-    let mut made_checks = false;
+    let mut changed = false;
     for i in 0..own {
         let finding = r.findings[i].clone();
         let Some(id) = r.details.get(i).and_then(|d| d.id.clone()) else {
@@ -227,6 +203,7 @@ pub(super) async fn handle_repeated_findings(
             continue;
         }
         task.findings[pos].handled = true;
+        changed = true;
         r.repeated.retain(|t| *t != finding);
         let run = r
             .details
@@ -235,73 +212,131 @@ pub(super) async fn handle_repeated_findings(
             .map(|s| s.run.clone())
             .or_else(|| task.findings[pos].scenarios.last().cloned())
             .filter(|run| !run.trim().is_empty());
-        if let Some(run) = run {
-            let dir = app
-                .store
-                .run_dir(&task.id, attempt_n)
-                .join(format!("finding-scenario-{id}"));
-            let _ = std::fs::create_dir_all(&dir);
-            let sandbox = app.task_sandbox(&task.repo, worktree, &dir);
-            let results = run_verify_commands(
-                CheckContext::new(app, Some(&task.id)),
-                worktree,
-                &dir,
-                std::slice::from_ref(&run),
-                sandbox.as_ref(),
-                &task.base_sha,
-                cancel,
-            )
-            .await;
-            if cancel.is_cancelled() {
-                break;
-            }
-            if results.first().is_some_and(|v| v.code != Some(0)) {
-                task.criteria
-                    .push(format!("Review finding {id} is fixed -- check: {run}"));
-                task.checks.push(Check {
-                    criterion: task.criteria.len() - 1,
-                    run: run.clone(),
-                    baseline: Some(Baseline::Fail),
-                });
-                task.decisions.push(format!(
-                    "Orchestrator: review finding {id} repeated twice and its scenario fails in the worktree; added a criterion and a check: {run}"
-                ));
-                made_checks = true;
-                continue;
-            }
+        let Some(run) = run else {
             task.decisions.push(format!(
-                "Orchestrator: review finding {id} repeated twice; its scenario passes in the worktree, so the judge rules on it"
+                "Orchestrator: review finding {id} repeated twice with no scenario; it stays open"
             ));
-        } else {
-            task.decisions.push(format!(
-                "Orchestrator: review finding {id} repeated twice with no scenario; the judge rules on it"
-            ));
+            continue;
+        };
+        let dir = app
+            .store
+            .run_dir(&task.id, attempt_n)
+            .join(format!("finding-scenario-{id}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let sandbox = app.task_sandbox(&task.repo, worktree, &dir);
+        let results = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
+            worktree,
+            &dir,
+            std::slice::from_ref(&run),
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            break;
         }
-        to_judge.push(finding);
+        if results.first().is_some_and(|v| v.code != Some(0)) {
+            task.criteria
+                .push(format!("Review finding {id} is fixed -- check: {run}"));
+            task.checks.push(Check {
+                criterion: task.criteria.len() - 1,
+                run: run.clone(),
+                baseline: Some(Baseline::Fail),
+            });
+            task.decisions.push(format!(
+                "Orchestrator: review finding {id} repeated twice and its scenario fails in the worktree; added a criterion and a check: {run}"
+            ));
+            continue;
+        }
+        task.decisions.push(format!(
+            "Orchestrator: review finding {id} repeated twice; its scenario passes in the worktree, so it stays open"
+        ));
     }
-    if made_checks || !to_judge.is_empty() {
+    if changed {
         task.updated_at = now_ms();
         app.save_task_logged(task);
     }
-    if to_judge.is_empty() || cancel.is_cancelled() {
-        return Vec::new();
+}
+
+/// Rules on the declines the attempt under review made, by the ids the
+/// review gave them. An upheld decline resolves its open finding, and the
+/// reviewer's copy of that finding is dropped. A decline that is not upheld,
+/// or has no ruling, keeps the finding open and blocking: the reviewer's copy
+/// stays, or the registered finding is put back into the review.
+pub(super) fn apply_declines(
+    task: &mut Task,
+    attempt_n: u32,
+    r: &mut ReviewResult,
+    declines: &[Decline],
+    rulings: &[DeclineRuling],
+) {
+    let mut ids: Vec<String> = Vec::new();
+    for d in declines {
+        let open = task
+            .findings
+            .iter()
+            .any(|f| f.id == d.id && f.status == FindingStatus::Open);
+        if open && !ids.contains(&d.id) {
+            ids.push(d.id.clone());
+        }
     }
-    let judge_route = task.variant().judge_route;
-    judge_disputed_findings(
-        app,
-        task,
-        idx,
-        attempt_n,
-        &to_judge,
-        Some(&truncate_chars(implementer_note.trim(), 2000)),
-        settings,
-        judge_route.as_deref(),
-        review_route,
-        implementer,
-        task.tier,
-        cancel,
-    )
-    .await
+    for id in ids {
+        let Some(pos) = task.findings.iter().position(|f| f.id == id) else {
+            continue;
+        };
+        let Some(decline) = declines.iter().find(|d| d.id == id) else {
+            continue;
+        };
+        let text = task.findings[pos].text.clone();
+        let copies: Vec<usize> = (0..r.findings.len())
+            .filter(|i| r.details.get(*i).and_then(|d| d.id.as_deref()) == Some(id.as_str()))
+            .collect();
+        if rulings.iter().any(|g| g.id == id && g.upheld) {
+            task.findings[pos].status = FindingStatus::Resolved;
+            remove_findings(r, &copies);
+            task.decisions.push(format!(
+                "Orchestrator: review finding {id} declined by the implementer and upheld by the review; resolved: {text}"
+            ));
+            task.assumptions.push(Assumption {
+                question: format!("Review finding declined by the implementer: {text}"),
+                answer: "finding dropped".to_string(),
+                evidence: decline.evidence.join("; "),
+                by: "review".to_string(),
+                kind: Some(QuestionKind::ReviewDispute),
+                attempt: Some(attempt_n),
+                commands: Vec::new(),
+                overturned: false,
+                owner_answer: None,
+            });
+            continue;
+        }
+        task.decisions.push(format!(
+            "Orchestrator: review finding {id} declined by the implementer but not upheld; it stays open: {text}"
+        ));
+        if !copies.is_empty() {
+            continue;
+        }
+        // Put the registered finding back among the reviewer's own findings.
+        let at = r.severities.len().min(r.findings.len());
+        let severity = brief::severity_of(&text);
+        if r.details.len() < at {
+            r.details.resize(at, Default::default());
+        }
+        r.findings.insert(at, with_id(&text, &id));
+        r.severities.insert(at, severity);
+        r.details.insert(
+            at,
+            FindingDetail {
+                id: Some(id.clone()),
+                ..Default::default()
+            },
+        );
+        if matches!(severity, Some(0 | 1)) {
+            r.verdict = Verdict::Fail;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -333,7 +368,6 @@ mod tests {
     fn a_mark_is_added_stripped_and_read_back() {
         let marked = with_id("P1: the parser drops the last row", "F-7");
         assert_eq!(marked, "P1: the parser drops the last row [F-7]");
-        assert_eq!(id_of(&marked).as_deref(), Some("F-7"));
         assert_eq!(
             strip_finding_id(&marked),
             "P1: the parser drops the last row"
@@ -342,9 +376,6 @@ mod tests {
             with_id(&marked, "F-8"),
             "P1: the parser drops the last row [F-8]"
         );
-        assert_eq!(id_of("P1: a [not an id]"), None);
-        assert!(names_id("see F-1, not F-12", "F-1"));
-        assert!(!names_id("see F-12", "F-1"));
     }
 
     #[test]
@@ -433,6 +464,132 @@ mod tests {
             assert_eq!(task.findings[0].repeats, repeats);
             assert_eq!(again.repeated.len(), usize::from(repeated));
         }
+    }
+
+    fn decline(id: &str) -> Decline {
+        Decline {
+            id: id.into(),
+            reason: DeclineReason::Wrong,
+            evidence: vec!["src/parse.rs:9 keeps the row".into()],
+        }
+    }
+
+    fn ruling(id: &str, upheld: bool) -> DeclineRuling {
+        DeclineRuling {
+            id: id.into(),
+            upheld,
+        }
+    }
+
+    #[test]
+    fn an_upheld_decline_resolves_its_finding_with_no_judge_turn() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&["P1: the parser drops the last row"]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let id = task.findings[0].id.clone();
+        let mut next = review(&["P1: other problem entirely"]);
+        apply_declines(
+            &mut task,
+            2,
+            &mut next,
+            &[decline(&id)],
+            &[ruling(&id, true)],
+        );
+        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+        assert_eq!(next.findings, ["P1: other problem entirely"]);
+        assert!(task.decisions.iter().any(|d| d.contains("upheld")));
+        register_findings(&mut task, 2, 1, &mut next);
+        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+        assert_eq!(task.findings.len(), 2);
+    }
+
+    #[test]
+    fn an_upheld_decline_drops_the_reviewers_copy_of_its_finding() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&["P1: the parser drops the last row"]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let id = task.findings[0].id.clone();
+        let mut next = review(&["P1: the parser drops the last row"]);
+        named(&mut next, &[Some(id.as_str())]);
+        apply_declines(
+            &mut task,
+            2,
+            &mut next,
+            &[decline(&id)],
+            &[ruling(&id, true)],
+        );
+        assert!(next.findings.is_empty(), "{:?}", next.findings);
+        assert_eq!(next.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_declined_finding_the_review_does_not_uphold_stays_blocking() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&["P1: the parser drops the last row"]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let id = task.findings[0].id.clone();
+        let mut next = review(&["P1: other problem entirely"]);
+        apply_declines(
+            &mut task,
+            2,
+            &mut next,
+            &[decline(&id)],
+            &[ruling(&id, false)],
+        );
+        assert_eq!(next.verdict, Verdict::Fail);
+        assert!(
+            next.findings
+                .iter()
+                .any(|f| f == &format!("P1: the parser drops the last row [{id}]")),
+            "{:?}",
+            next.findings
+        );
+        register_findings(&mut task, 2, 1, &mut next);
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
+        assert_eq!(next.details[1].id.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn a_decline_pairs_only_by_the_id_it_names() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&[
+            "P1: the parser drops the last row",
+            "P1: the cache is stale",
+        ]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let (f1, f2) = (task.findings[0].id.clone(), task.findings[1].id.clone());
+        // F-1 is the open finding; the decline names no registered id, so
+        // it is never paired with F-1 by position or by wording.
+        let mut next = review(&[
+            "P1: the parser drops the last row",
+            "P1: the cache is stale",
+        ]);
+        named(&mut next, &[Some(f1.as_str()), Some(f2.as_str())]);
+        apply_declines(
+            &mut task,
+            2,
+            &mut next,
+            &[decline("F-99")],
+            &[ruling("F-99", true)],
+        );
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
+        assert_eq!(task.findings[1].status, FindingStatus::Open);
+        assert_eq!(next.findings.len(), 2, "{:?}", next.findings);
+        assert_eq!(next.verdict, Verdict::Fail);
+        assert!(task.assumptions.is_empty());
+    }
+
+    #[test]
+    fn a_decline_with_no_ruling_is_blocking_too() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&["P1: the parser drops the last row"]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let id = task.findings[0].id.clone();
+        let mut next = review(&["P1: other problem entirely"]);
+        apply_declines(&mut task, 2, &mut next, &[decline(&id)], &[]);
+        assert_eq!(next.verdict, Verdict::Fail);
+        register_findings(&mut task, 2, 1, &mut next);
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
     }
 
     #[test]

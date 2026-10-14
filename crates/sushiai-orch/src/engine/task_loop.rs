@@ -978,7 +978,7 @@ pub(super) async fn run_task_loop(
                 status: AttemptStatus::Running,
                 summary: None,
                 handoff: None,
-                disputes: vec![],
+                declines: vec![],
                 changed_files: vec![],
                 verify: vec![],
                 gate_blocks: 0,
@@ -1489,9 +1489,9 @@ pub(super) async fn run_task_loop(
             _ => implementer_note,
         };
         task.attempts[idx].summary = report.as_ref().map(|r| r.summary.clone());
-        task.attempts[idx].disputes = report
+        task.attempts[idx].declines = report
             .as_ref()
-            .map(|r| r.disputes.clone())
+            .map(|r| r.declines.clone())
             .unwrap_or_default();
         task.attempts[idx].handoff = report
             .as_ref()
@@ -2488,8 +2488,6 @@ pub(super) async fn run_task_loop(
                 // A review run that errored is tried again after a pause,
                 // twice, before it counts as no verdict.
                 let mut harness_retries = 0u32;
-                // Findings a judge dropped in this attempt.
-                let mut dropped: Vec<(String, String)> = Vec::new();
                 // After a narrow PASS that left files no open finding names,
                 // every later round of this attempt is a full review; the
                 // escalation happens at most once.
@@ -2514,7 +2512,6 @@ pub(super) async fn run_task_loop(
                         &mut review_cost,
                         &mut review_fingerprint,
                         after_no_verdict,
-                        &dropped,
                         // Reserve the last review run for the whole change.
                         force_full || round == MAX_REVIEW_RUNS,
                     )
@@ -2538,6 +2535,10 @@ pub(super) async fn run_task_loop(
                             task.attempts[idx].review_tree = saw.tree.clone();
                             task.attempts[idx].review_base = Some(base_sha.clone());
                             task.attempts[idx].review_scope = Some(saw.scope);
+                            // Rulings first: a narrow PASS is judged on the findings
+                            // that are still open after them.
+                            let declines = task.attempts[idx].declines.clone();
+                            apply_declines(&mut task, attempt_n, &mut r, &declines, &saw.rulings);
                             if r.verdict == Verdict::Pass
                                 && saw.scope == ReviewScope::Narrow
                                 && !force_full
@@ -2571,19 +2572,8 @@ pub(super) async fn run_task_loop(
                                 );
                             }
                             if r.verdict == Verdict::Fail {
-                                let task_tier = task.tier;
-                                let mut newly = handle_repeated_findings(
-                                    &app,
-                                    &mut task,
-                                    idx,
-                                    attempt_n,
-                                    &mut r,
-                                    &implementer_note,
-                                    &settings,
-                                    &review_route_now,
-                                    &route,
-                                    &worktree,
-                                    &cancel,
+                                handle_repeated_findings(
+                                    &app, &mut task, attempt_n, &mut r, &worktree, &cancel,
                                 )
                                 .await;
                                 if cancel.is_cancelled() {
@@ -2591,38 +2581,6 @@ pub(super) async fn run_task_loop(
                                     drop(permit);
                                     app.finish_task_loop(&task_id);
                                     return;
-                                }
-                                if newly.is_empty()
-                                    && !r.repeated.is_empty()
-                                    && !task.attempts[idx].disputes.is_empty()
-                                {
-                                    let judge_route = task.variant().judge_route;
-                                    newly = judge_disputed_findings(
-                                        &app,
-                                        &mut task,
-                                        idx,
-                                        attempt_n,
-                                        &r.repeated,
-                                        None,
-                                        &settings,
-                                        judge_route.as_deref(),
-                                        review_route,
-                                        &route,
-                                        task_tier,
-                                        &cancel,
-                                    )
-                                    .await;
-                                }
-                                if !newly.is_empty() {
-                                    dropped.extend(newly);
-                                    if round < MAX_REVIEW_RUNS {
-                                        round += 1;
-                                        after_no_verdict = false;
-                                        continue;
-                                    }
-                                    task.decisions.push(review_stopped_note(attempt_n));
-                                    review_result = Some(r);
-                                    break;
                                 }
                                 if review_cancel.is_cancelled() && !cancel.is_cancelled() {
                                     break;

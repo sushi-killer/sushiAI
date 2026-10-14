@@ -16,6 +16,7 @@ fn fake(implement: &str) -> String {
     format!(
         r#"#!/bin/sh
 cat > "$LOG_DIR/brief.$$"
+if head -c 19 "$LOG_DIR/brief.$$" | grep -q 'Route the review'; then exit 0; fi
 if head -c 9 "$LOG_DIR/brief.$$" | grep -q '## Review'; then
   cp "$LOG_DIR/brief.$$" "$LOG_DIR/review-brief.md"
   printf '%s\n' '{{"type":"result","result":"```sushi-review\n{{\"verdict\":\"PASS\",\"findings\":[]}}\n```"}}'

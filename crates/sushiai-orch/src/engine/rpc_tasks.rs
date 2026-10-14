@@ -666,7 +666,6 @@ impl App {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,

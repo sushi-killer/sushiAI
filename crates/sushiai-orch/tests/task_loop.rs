@@ -760,6 +760,7 @@ fn a_repeated_review_finding_starts_a_fresh_implement_session() {
         r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   n=$(cat "$LOG_DIR/implements")
   if [ "$n" = 1 ]; then

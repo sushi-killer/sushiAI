@@ -4,8 +4,9 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Dispute, FindingStatus, Message, MessageKind,
-    ReviewResult, ScopedCheck, Stage, Task, TaskStatus, Tier, Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Decline, DeclineReason, DeclineRuling, FindingStatus,
+    Message, MessageKind, ReviewResult, ScopedCheck, Stage, Task, TaskStatus, Tier, Variant,
+    VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
@@ -61,7 +62,7 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
     }
 }
 
-const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding's id, such as F-1>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
+const DECLINES_BLOCK: &str = "\nThe last attempt failed review. If a review finding is wrong, already satisfied, or its smaller fix would change behaviour, decline it with evidence instead of working around it: add a `declines` array to the report, `\"declines\":[{\"id\":\"<the finding's id, such as F-1>\",\"reason\":\"wrong|already_satisfied|changes_behaviour\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. The review of this attempt rules on each decline by its id. A decline it does not uphold leaves the finding blocking, and a decline without evidence is ignored.\n";
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
@@ -418,7 +419,7 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
         .and_then(|a| a.failure.as_ref())
         .is_some_and(|f| f.kind == crate::model::FailureKind::Review);
     if last_failed_review {
-        out.push_str(DISPUTES_BLOCK);
+        out.push_str(DECLINES_BLOCK);
     }
 
     out
@@ -774,8 +775,8 @@ pub struct Report {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub question: String,
-    #[serde(default, deserialize_with = "lenient_disputes")]
-    pub disputes: Vec<Dispute>,
+    #[serde(default, deserialize_with = "lenient_declines")]
+    pub declines: Vec<Decline>,
     /// Protected tests the agent says are wrong, with the reason.
     #[serde(default, rename = "testClaims", deserialize_with = "lenient_claims")]
     pub test_claims: Vec<TestClaim>,
@@ -812,38 +813,22 @@ fn lenient_claims<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<TestClai
         .collect())
 }
 
-/// Disputes of review findings: entries that are not objects, or lack a
-/// finding or a rebuttal, are dropped; anything but an array is empty.
-fn lenient_disputes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Dispute>, D::Error> {
+/// Declines of review findings. An entry is refused unless it parses as a
+/// `Decline` (an id, a known reason and an `evidence` array) and at least
+/// one piece of its evidence is not blank. Anything but an array is empty.
+fn lenient_declines<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Decline>, D::Error> {
     let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
     let serde_json::Value::Array(entries) = v else {
         return Ok(Vec::new());
     };
-    let text = |o: &serde_json::Map<String, serde_json::Value>, key: &str| {
-        o.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
     Ok(entries
-        .iter()
-        .filter_map(|e| {
-            let o = e.as_object()?;
-            let evidence = match o.get("evidence") {
-                Some(serde_json::Value::Array(items)) => items
-                    .iter()
-                    .filter_map(|i| i.as_str())
-                    .map(str::to_string)
-                    .collect(),
-                Some(serde_json::Value::String(one)) => vec![one.clone()],
-                _ => Vec::new(),
-            };
-            Some(Dispute {
-                finding: text(o, "finding")?,
-                rebuttal: text(o, "rebuttal")?,
-                evidence,
-            })
+        .into_iter()
+        .filter_map(|e| serde_json::from_value::<Decline>(e).ok())
+        .map(|d| Decline {
+            id: d.id.trim().to_string(),
+            ..d
         })
+        .filter(|d| !d.id.is_empty() && d.evidence.iter().any(|e| !e.trim().is_empty()))
         .collect())
 }
 
@@ -872,6 +857,22 @@ pub(crate) fn tagged_json(text: &str, tag: &str) -> Option<String> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_review(text: &str) -> Option<ReviewResult> {
     parse_review_with_rule(text, &[]).map(|(result, _)| result)
+}
+
+/// The review object of a reply: the first candidate with a verdict.
+fn review_object(text: &str) -> Option<serde_json::Value> {
+    review_candidates(text)
+        .iter()
+        .filter_map(|body| parse_json_object(body))
+        .find(has_verdict_shape)
+}
+
+/// The ruling on each declined finding, from the review's `declineRulings`.
+/// A malformed list rules on nothing, so every decline stays blocking.
+pub fn parse_decline_rulings(text: &str) -> Vec<DeclineRuling> {
+    review_object(text)
+        .and_then(|v| serde_json::from_value(v.get("declineRulings")?.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// A leading P0-P3 token (optionally bracketed) followed by a
@@ -1097,10 +1098,7 @@ fn finding_detail(o: &serde_json::Map<String, serde_json::Value>) -> crate::mode
 /// is unmet. All findings are kept. A ruling names its criterion by its
 /// index in `criteria`; one that names none of them rules on no criterion.
 pub fn parse_review_with_rule(text: &str, criteria: &[String]) -> Option<(ReviewResult, bool)> {
-    let v = review_candidates(text)
-        .iter()
-        .filter_map(|body| parse_json_object(body))
-        .find(has_verdict_shape)?;
+    let v = review_object(text)?;
     let verdict = v
         .get("verdict")
         .and_then(|x| serde_json::from_value(x.clone()).ok())
@@ -1915,18 +1913,31 @@ pub(crate) fn untrusted_block(label: &str, text: &str) -> String {
     )
 }
 
-/// The review brief's section for findings a tie-break judge dropped
-/// (finding, judge's reason): the reviewer must not raise them again.
-pub fn dropped_findings_block(dropped: &[(String, String)]) -> String {
-    if dropped.is_empty() {
+/// The review brief's section for the declines of the attempt under review.
+/// The reviewer rules on each one by its id in `declineRulings`.
+fn declines_block(declines: &[Decline]) -> String {
+    if declines.is_empty() {
         return String::new();
     }
+    let lines: Vec<String> = declines
+        .iter()
+        .map(|d| {
+            let reason = match d.reason {
+                DeclineReason::Wrong => "wrong",
+                DeclineReason::AlreadySatisfied => "already_satisfied",
+                DeclineReason::ChangesBehaviour => "changes_behaviour",
+            };
+            format!("{} ({reason}): {}", d.id, d.evidence.join("; "))
+        })
+        .collect();
     let mut out = String::from(
-        "\n## Findings dropped by a tie-break judge\n\nThe implementer disputed these findings and a judge on another harness ruled them invalid. Do not report them again and do not fail a criterion on them.\n\n",
+        "\n## Declined findings\n\nThe implementer declined these findings with the evidence shown. Rule on each one by its id: add `\"declineRulings\":[{\"id\":\"<id>\",\"upheld\":true|false}]` to your one JSON object, one entry per decline. `upheld` true when the decline holds (the finding is wrong, already satisfied, or its smaller fix would change behaviour). `upheld` false when it does not: the finding stays open and must be fixed. Do not report a declined finding again as a new one.\n\n",
     );
-    for (finding, why) in dropped {
-        out.push_str(&format!("- {finding} (judge: {why})\n"));
-    }
+    out.push_str(&untrusted_block(
+        "The implementer's declines",
+        &lines.join("\n"),
+    ));
+    out.push('\n');
     out
 }
 
@@ -1952,9 +1963,117 @@ const REVIEW_SCOPE_RULE: &str = "Report only correctness bugs and requirement ga
 
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
+/// The review areas a change can break, as a route turn chose them. A full
+/// review is briefed with these areas only; a narrow re-review never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub struct Lenses {
+    pub seams: bool,
+    pub code: bool,
+    pub tests: bool,
+    pub errors: bool,
+    pub docs: bool,
+}
+
+impl Lenses {
+    /// Every area: the review when the route turn gave no usable answer.
+    pub const ALL: Lenses = Lenses {
+        seams: true,
+        code: true,
+        tests: true,
+        errors: true,
+        docs: true,
+    };
+
+    /// The names of the chosen areas, in review order.
+    pub fn chosen(&self) -> Vec<&'static str> {
+        [
+            (self.seams, "seams"),
+            (self.code, "code"),
+            (self.tests, "tests"),
+            (self.errors, "errors"),
+            (self.docs, "docs"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name)
+        .collect()
+    }
+}
+
+/// The route turn's reply: the areas and one sentence of why.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct LensRouting {
+    pub lenses: Lenses,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A route reply with every area named. An area missing from the reply
+/// refuses the whole reply.
+pub fn parse_lens_routing(text: &str) -> Option<LensRouting> {
+    serde_json::from_str(&tagged_json(text, "sushi-route")?).ok()
+}
+
+const LENS_SEAMS: &str = "Seams: the change touches callers, consumers or contracts outside its own diff. Check what depends on the code it changed, including callers the diff does not touch.";
+const LENS_CODE: &str = "Code: read the changed logic for correctness against the criteria.";
+const LENS_TESTS: &str = "Tests: check that the checks the task relies on prove the criteria, and that they would fail on the old behaviour.";
+const LENS_ERRORS: &str =
+    "Errors: check the failure, timeout and empty-input paths the change adds or alters.";
+const LENS_DOCS: &str = "Docs: check the documentation and user-facing text the change touches against what it now does.";
+
+/// The review's section naming the chosen areas. Criteria and the scope rule
+/// apply to every review; a defect outside the areas is still reported.
+pub fn review_lens_block(lenses: &Lenses) -> String {
+    let mut out = String::from(
+        "\n## Review areas\n\nThe orchestrator routed this review to the areas below. Spend the review on them and on the criteria. A clear defect elsewhere is still reported.\n\n",
+    );
+    let areas = [
+        (lenses.seams, LENS_SEAMS),
+        (lenses.code, LENS_CODE),
+        (lenses.tests, LENS_TESTS),
+        (lenses.errors, LENS_ERRORS),
+        (lenses.docs, LENS_DOCS),
+    ];
+    let chosen: Vec<&str> = areas
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, text)| *text)
+        .collect();
+    if chosen.is_empty() {
+        out.push_str("- None beyond the acceptance criteria.\n");
+    }
+    for text in chosen {
+        out.push_str(&format!("- {text}\n"));
+    }
+    out
+}
+
+const ROUTE_INSTRUCTIONS: &str = "Decide which review areas this change can break. Depth follows what a change can break, not its size: a large mechanical rename inside one module can break little, while a one-line change to a shared contract can break a great deal. Set an area true only when this change can break something in it.\n\n- seams: callers, consumers or contracts outside the diff that the change touches.\n- code: the logic it changes, against the criteria.\n- tests: whether the checks prove the criteria.\n- errors: failure, timeout and empty-input paths.\n- docs: documentation and user-facing text.\n\nYou may read files in the working directory but change nothing. Read the repository where the file list is not enough.";
+
+const ROUTE_REPORT_FORMAT: &str = "## Report format\n\nReply with:\n\n```sushi-route\n{\"lenses\":{\"seams\":true|false,\"code\":true|false,\"tests\":true|false,\"errors\":true|false,\"docs\":true|false},\"reason\":\"<one sentence>\"}\n```\n";
+
+/// The route turn's brief: the goal, the criteria and the changed files.
+pub fn build_route_brief(task: &Task, changed: &[String]) -> String {
+    let criteria = task
+        .criteria
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{i}. {c}\n"))
+        .collect::<String>();
+    let files = changed
+        .iter()
+        .map(|f| format!("- {f}\n"))
+        .collect::<String>();
+    format!(
+        "## Route the review\n\n{}\n\n## Acceptance criteria\n\n{criteria}\n## Changed files\n\n{files}\n{ROUTE_INSTRUCTIONS}\n\n{ROUTE_REPORT_FORMAT}",
+        task.goal
+    )
+}
+
 /// The review session's brief. Pure: `screenshots` are paths relative to the
 /// worktree, each with the attempt that produced it, `agent_decisions` the
-/// attempt's own `Agent: ...` lines.
+/// attempt's own `Agent: ...` lines, `declines` the attempt's declined findings.
+#[allow(clippy::too_many_arguments)]
 pub fn build_review_brief(
     task: &Task,
     implementer_note: &str,
@@ -1963,6 +2082,8 @@ pub fn build_review_brief(
     screenshots: &[(String, Option<u32>)],
     evidence_from: Option<u32>,
     diff: &str,
+    declines: &[Decline],
+    lenses: &Lenses,
 ) -> String {
     review_brief(
         task,
@@ -1971,7 +2092,8 @@ pub fn build_review_brief(
         verify_results,
         screenshots,
         evidence_from,
-        ReviewBody::Full(diff),
+        ReviewBody::Full { diff, lenses },
+        declines,
     )
 }
 
@@ -1986,7 +2108,7 @@ pub struct NarrowReview<'a> {
 }
 
 enum ReviewBody<'a> {
-    Full(&'a str),
+    Full { diff: &'a str, lenses: &'a Lenses },
     Narrow(&'a NarrowReview<'a>),
 }
 
@@ -1994,6 +2116,7 @@ enum ReviewBody<'a> {
 /// criteria still to rule on and the task's own changes since the reviewed
 /// tree, instead of every criterion and the full diff. Everything else is the
 /// full review's brief.
+#[allow(clippy::too_many_arguments)]
 pub fn build_narrow_review_brief(
     task: &Task,
     implementer_note: &str,
@@ -2002,6 +2125,7 @@ pub fn build_narrow_review_brief(
     screenshots: &[(String, Option<u32>)],
     evidence_from: Option<u32>,
     narrow: &NarrowReview,
+    declines: &[Decline],
 ) -> String {
     review_brief(
         task,
@@ -2011,6 +2135,7 @@ pub fn build_narrow_review_brief(
         screenshots,
         evidence_from,
         ReviewBody::Narrow(narrow),
+        declines,
     )
 }
 
@@ -2043,6 +2168,7 @@ pub fn finding_paths(findings: &[String]) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn review_brief(
     task: &Task,
     implementer_note: &str,
@@ -2051,12 +2177,13 @@ fn review_brief(
     screenshots: &[(String, Option<u32>)],
     evidence_from: Option<u32>,
     body: ReviewBody,
+    declines: &[Decline],
 ) -> String {
     let mut out = String::new();
     out.push_str("## Review\n\n");
     out.push_str(&task.goal);
     match &body {
-        ReviewBody::Full(_) => {
+        ReviewBody::Full { .. } => {
             out.push_str("\n\n## Acceptance criteria\n\nEach criterion has a number; rule on it by that number.\n\n");
             for (i, c) in task.criteria.iter().enumerate() {
                 out.push_str(&format!("{i}. {c}\n"));
@@ -2097,6 +2224,9 @@ fn review_brief(
     out.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n\n");
     out.push_str(REVIEW_VERDICT_RULE);
     out.push_str(REVIEW_SCOPE_RULE);
+    if let ReviewBody::Full { lenses, .. } = &body {
+        out.push_str(&review_lens_block(lenses));
+    }
     let evidence = variant.review_evidence;
     out.push_str("\n## Verify results\n\n");
     for v in verify_results.iter().filter(|v| !is_held_out(v)) {
@@ -2138,8 +2268,9 @@ fn review_brief(
         ));
         out.push_str("\nThe implementer has tried to fix the open ones. Set `id` on each finding you report now to the id of the registered finding it is about, or null when it is a new problem.\n");
     }
+    out.push_str(&declines_block(declines));
     match &body {
-        ReviewBody::Full(diff) => {
+        ReviewBody::Full { diff, .. } => {
             out.push_str("\n## Diff\n\n```diff\n");
             out.push_str(diff);
         }
@@ -2564,7 +2695,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -2623,7 +2753,7 @@ mod tests {
             status: AttemptStatus::Failed,
             summary: None,
             handoff: None,
-            disputes: vec![],
+            declines: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -2863,7 +2993,7 @@ mod tests {
             status: AttemptStatus::Passed,
             summary: Some("Drafted: Add a button".into()),
             handoff: None,
-            disputes: vec![],
+            declines: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -2959,7 +3089,7 @@ mod tests {
     fn the_review_brief_numbers_the_criteria_and_carries_the_findings_registry() {
         let mut task = sample_task();
         task.criteria = vec!["Alpha".into(), "Alpha and beta".into()];
-        let one = build_review_brief(&task, "note", &[], &[], &[], None, "d");
+        let one = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
         assert!(!one.contains("## Previous review"), "{one}");
         assert!(one.contains("\n0. Alpha\n1. Alpha and beta\n"), "{one}");
         assert!(one.contains("\"causedByDiff\":true"), "{one}");
@@ -2986,7 +3116,7 @@ mod tests {
                 handled: false,
             },
         ];
-        let two = build_review_brief(&task, "note", &[], &[], &[], None, "d");
+        let two = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
         assert!(two.contains("## Previous review"), "{two}");
         assert!(
             two.contains(
@@ -3336,7 +3466,7 @@ mod tests {
             status: AttemptStatus::Failed,
             summary: None,
             handoff: None,
-            disputes: vec![],
+            declines: vec![],
             changed_files: vec![],
             verify: vec![],
             gate_blocks: 0,
@@ -3815,6 +3945,8 @@ mod tests {
             &[("artifacts/a.png".into(), Some(1))],
             None,
             "diff body",
+            &[],
+            &Lenses::ALL,
         );
         assert!(text.starts_with("## Review"));
         assert!(text.contains("FAIL only for an unmet acceptance criterion or a P0/P1 finding"));
@@ -4017,11 +4149,31 @@ mod tests {
             ms: 1,
             ..Default::default()
         };
-        let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], None, "");
+        let failed = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[ran(Some(1))],
+            &[],
+            None,
+            "",
+            &[],
+            &Lenses::ALL,
+        );
         assert!(failed.contains("`vacuous-cmd` already passed on the base, so it is not grounded"));
         assert!(failed.contains("Held-out check for criterion 1 (Click saves settings): failed."));
         assert!(!failed.contains("SECRET-held-out-cmd"));
-        let passed = build_review_brief(&task, "note", &[], &[ran(Some(0))], &[], None, "");
+        let passed = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[ran(Some(0))],
+            &[],
+            None,
+            "",
+            &[],
+            &Lenses::ALL,
+        );
         assert!(passed.contains("Held-out check for criterion 1 (Click saves settings): passed."));
         // The held-out outcome is not also listed as a verify result.
         assert!(!passed.contains("-> exit"));
@@ -4039,7 +4191,8 @@ mod tests {
                 ms: 1,
                 ..Default::default()
             };
-            let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "");
+            let text =
+                build_review_brief(&task, "note", &[], &[ran], &[], None, "", &[], &Lenses::ALL);
             let result =
                 format!("Held-out check for criterion 1 (Click saves settings): {outcome}.");
             assert_eq!(text.matches(&result).count(), 1, "{text}");
@@ -4181,7 +4334,7 @@ mod tests {
         dep.status = TaskStatus::Done;
         dep.decisions.clear();
         let mut attempt = Attempt {
-            disputes: vec![],
+            declines: vec![],
             n: 1,
             stage: Stage::Implement,
             route_id: "claude-sonnet".into(),
@@ -4347,60 +4500,206 @@ mod tests {
     }
 
     #[test]
-    fn a_report_reads_well_formed_disputes() {
-        let text = "```sushi-report\n{\"outcome\":\"complete\",\"disputes\":[{\"finding\":\" f1 \",\"rebuttal\":\"r1\",\"evidence\":[\"a.rs:1\",\"artifacts/x.png\"]},{\"finding\":\"f2\",\"rebuttal\":\"r2\"}]}\n```";
+    fn a_report_reads_well_formed_declines() {
+        let text = "```sushi-report\n{\"outcome\":\"complete\",\"declines\":[{\"id\":\" F-1 \",\"reason\":\"already_satisfied\",\"evidence\":[\"a.rs:1\",\"artifacts/x.png\"]},{\"id\":\"F-2\",\"reason\":\"changes_behaviour\",\"evidence\":[\"b.rs:9\"]}]}\n```";
         let report = parse_report(text).unwrap();
-        assert_eq!(report.disputes.len(), 2);
-        assert_eq!(report.disputes[0].finding, "f1");
-        assert_eq!(report.disputes[0].evidence, ["a.rs:1", "artifacts/x.png"]);
-        assert!(report.disputes[1].evidence.is_empty());
+        assert_eq!(
+            report.declines,
+            [
+                Decline {
+                    id: "F-1".into(),
+                    reason: DeclineReason::AlreadySatisfied,
+                    evidence: vec!["a.rs:1".into(), "artifacts/x.png".into()],
+                },
+                Decline {
+                    id: "F-2".into(),
+                    reason: DeclineReason::ChangesBehaviour,
+                    evidence: vec!["b.rs:9".into()],
+                },
+            ]
+        );
     }
 
     #[test]
-    fn malformed_disputes_are_dropped_and_the_report_still_parses() {
-        let parse = |disputes: &str| {
+    fn a_decline_without_evidence_or_a_known_reason_is_refused() {
+        let parse = |decline: &str| {
             parse_report(&format!(
-                "```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"s\",\"disputes\":{disputes}}}\n```"
+                "```sushi-report\n{{\"outcome\":\"complete\",\"declines\":[{decline}]}}\n```"
+            ))
+            .unwrap()
+            .declines
+        };
+        assert!(parse(r#"{"id":"F-1","reason":"wrong"}"#).is_empty());
+        assert!(parse(r#"{"id":"F-1","reason":"wrong","evidence":"a.rs:1"}"#).is_empty());
+        assert!(parse(r#"{"id":"F-1","reason":"wrong","evidence":[" "]}"#).is_empty());
+        assert!(parse(r#"{"id":"F-1","reason":"because","evidence":["a.rs:1"]}"#).is_empty());
+        assert!(parse(r#"{"reason":"wrong","evidence":["a.rs:1"]}"#).is_empty());
+        assert!(parse(r#"{"id":"F-1","rebuttal":"r","evidence":["a.rs:1"]}"#).is_empty());
+        assert_eq!(
+            parse(r#"{"id":"F-1","reason":"wrong","evidence":["a.rs:1"]}"#).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_declines_are_dropped_and_the_report_still_parses() {
+        let parse = |declines: &str| {
+            parse_report(&format!(
+                "```sushi-report\n{{\"outcome\":\"complete\",\"summary\":\"s\",\"declines\":{declines}}}\n```"
             ))
             .unwrap()
         };
-        for not_an_array in ["\"nope\"", "{\"finding\":\"f\"}", "null", "3"] {
+        for not_an_array in ["\"nope\"", "{\"id\":\"F-1\"}", "null", "3"] {
             let report = parse(not_an_array);
-            assert!(report.disputes.is_empty(), "{not_an_array}");
+            assert!(report.declines.is_empty(), "{not_an_array}");
             assert_eq!(report.summary, "s");
         }
         let report = parse(
-            "[1, \"x\", {\"finding\":\"f\"}, {\"rebuttal\":\"r\"}, {\"finding\":\"\",\"rebuttal\":\"r\"}, {\"finding\":\"ok\",\"rebuttal\":\"r\",\"evidence\":\"one\"}]",
+            "[1, \"x\", {\"id\":\"\",\"reason\":\"wrong\",\"evidence\":[\"a\"]}, {\"id\":\"F-3\",\"reason\":\"wrong\",\"evidence\":[\"ok\"]}]",
         );
-        assert_eq!(report.disputes.len(), 1);
-        assert_eq!(report.disputes[0].finding, "ok");
-        assert_eq!(report.disputes[0].evidence, ["one"]);
+        assert_eq!(report.declines.len(), 1);
+        assert_eq!(report.declines[0].id, "F-3");
     }
 
     #[test]
-    fn the_disputes_field_is_explained_only_after_a_review_failure() {
+    fn review_rulings_are_read_by_id_and_a_malformed_list_rules_on_nothing() {
+        let reply = |rulings: &str| {
+            format!(
+                "```sushi-review\n{{\"verdict\":\"FAIL\",\"findings\":[],\"declineRulings\":{rulings}}}\n```"
+            )
+        };
+        assert_eq!(
+            parse_decline_rulings(&reply(
+                r#"[{"id":"F-1","upheld":true},{"id":"F-2","upheld":false}]"#
+            )),
+            [
+                DeclineRuling {
+                    id: "F-1".into(),
+                    upheld: true
+                },
+                DeclineRuling {
+                    id: "F-2".into(),
+                    upheld: false
+                },
+            ]
+        );
+        assert!(parse_decline_rulings(&reply(r#"[{"id":"F-1"}]"#)).is_empty());
+        assert!(parse_decline_rulings(&reply("null")).is_empty());
+        assert!(parse_decline_rulings("no review here").is_empty());
+    }
+
+    #[test]
+    fn the_declines_field_is_explained_only_after_a_review_failure() {
         let mut task = sample_task();
-        assert!(!build_brief(&task, "", "").contains("disputes"));
+        assert!(!build_brief(&task, "", "").contains("declines"));
         task.attempts.push(failed_implement_attempt("x".into()));
-        assert!(!build_brief(&task, "", "").contains("disputes"));
+        assert!(!build_brief(&task, "", "").contains("declines"));
         task.attempts[0].failure.as_mut().unwrap().kind = crate::model::FailureKind::Review;
         let brief = build_brief(&task, "", "");
-        assert!(brief.contains("\"disputes\""));
-        assert!(brief.contains("instead of working around a real finding"));
+        assert!(brief.contains("\"declines\""));
+        assert!(brief.contains("decline it with evidence instead of working around it"));
+        assert!(!brief.contains("judge"));
         // Only the latest implement attempt counts.
         let mut second = task.attempts[0].clone();
         second.n = 2;
         second.failure.as_mut().unwrap().kind = FailureKind::Verify;
         task.attempts.push(second);
-        assert!(!build_brief(&task, "", "").contains("disputes"));
+        assert!(!build_brief(&task, "", "").contains("declines"));
     }
 
     #[test]
-    fn dropped_findings_get_a_review_section() {
-        assert_eq!(dropped_findings_block(&[]), "");
-        let block = dropped_findings_block(&[("f".into(), "wrong".into())]);
-        assert!(block.contains("## Findings dropped by a tie-break judge"));
-        assert!(block.contains("- f (judge: wrong)"));
+    fn a_route_reply_chooses_the_areas_the_full_review_is_briefed_with() {
+        let reply = "```sushi-route\n{\"lenses\":{\"seams\":false,\"code\":true,\"tests\":true,\"errors\":false,\"docs\":false},\"reason\":\"logic only\"}\n```";
+        let routing = parse_lens_routing(reply).unwrap();
+        assert_eq!(routing.lenses.chosen(), ["code", "tests"]);
+        assert_eq!(routing.reason, "logic only");
+        let text = build_review_brief(
+            &sample_task(),
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &[],
+            &routing.lenses,
+        );
+        assert!(text.contains("## Review areas"));
+        assert!(text.contains(LENS_CODE) && text.contains(LENS_TESTS));
+        assert!(
+            !text.contains(LENS_SEAMS) && !text.contains(LENS_ERRORS) && !text.contains(LENS_DOCS)
+        );
+    }
+
+    #[test]
+    fn a_route_reply_missing_an_area_is_refused_and_every_area_is_reviewed() {
+        let partial = "```sushi-route\n{\"lenses\":{\"seams\":true,\"code\":true,\"tests\":true,\"errors\":true},\"reason\":\"x\"}\n```";
+        assert!(parse_lens_routing(partial).is_none());
+        assert!(parse_lens_routing("no route here").is_none());
+        let text = build_review_brief(
+            &sample_task(),
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &[],
+            &Lenses::ALL,
+        );
+        assert!(text.contains(LENS_SEAMS) && text.contains(LENS_DOCS));
+    }
+
+    #[test]
+    fn a_narrow_re_review_is_briefed_with_the_delta_and_the_prior_report_only() {
+        let mut task = sample_task();
+        task.findings.push(crate::model::FindingRecord {
+            id: "F-1".into(),
+            text: "P1: a.rs:1 - null check missing".into(),
+            status: FindingStatus::Open,
+            attempt: 1,
+            round: 1,
+            repeats: 0,
+            scenarios: Vec::new(),
+            handled: false,
+        });
+        let narrow = NarrowReview {
+            open_criteria: &[],
+            settled_criteria: &[],
+            delta: "+let checked = true;",
+        };
+        let text = build_narrow_review_brief(&task, "note", &[], &[], &[], None, &narrow, &[]);
+        assert!(text.contains("+let checked = true;"));
+        assert!(text.contains("## Previous review"));
+        assert!(text.contains("P1: a.rs:1 - null check missing"));
+        assert!(!text.contains("## Diff"));
+        assert!(!text.contains("## Review areas"));
+    }
+
+    #[test]
+    fn declined_findings_get_a_review_section_the_reviewer_rules_on() {
+        let task = sample_task();
+        let declines = [Decline {
+            id: "F-1".into(),
+            reason: DeclineReason::Wrong,
+            evidence: vec!["a.rs:4 keeps the row".into()],
+        }];
+        let text = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &declines,
+            &Lenses::ALL,
+        );
+        assert!(text.contains("## Declined findings"));
+        assert!(text.contains("F-1 (wrong): a.rs:4 keeps the row"));
+        assert!(text.contains("\"declineRulings\""));
+        let none = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
+        assert!(!none.contains("## Declined findings"));
     }
 }
 

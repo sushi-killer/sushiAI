@@ -17,6 +17,7 @@ fn fake(implement: &str, first_review: &str, next_review: &str) -> String {
         r###"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  '## Route the review'*) exit 0 ;;
   "## Review"*)
     r=$(ls "$LOG_DIR"/review.* 2>/dev/null | wc -l | tr -d ' ')
     touch "$LOG_DIR/review.$r"

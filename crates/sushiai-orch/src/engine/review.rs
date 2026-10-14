@@ -446,11 +446,12 @@ pub(super) fn head_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// What a review run looked at: the scope it ran with and the worktree tree
-/// it saw (`None` when the snapshot failed).
+/// What a review run looked at: the scope it ran with, the worktree tree it
+/// saw (`None` when the snapshot failed) and its ruling on each decline.
 pub(super) struct ReviewSaw {
     pub scope: ReviewScope,
     pub tree: Option<String>,
+    pub rulings: Vec<DeclineRuling>,
 }
 
 /// The earlier implement attempt a retry review builds on: the latest one
@@ -473,6 +474,123 @@ pub(super) fn narrow_basis(task: &Task, attempt_n: u32) -> Option<&Attempt> {
     })
 }
 
+/// The route a route turn runs on: the cheapest configured route, else the
+/// review's own route.
+fn route_turn_route(settings: &Settings, review_route: &Route) -> Route {
+    cheapest_route_at(settings, 0, &[], review_route, false)
+        .map_or_else(|| review_route.clone(), |(route, _)| route.clone())
+}
+
+/// Asks a read-only agent which review areas this change can break: one cheap
+/// turn before a full review. Returns the areas and the decision line that
+/// says what was chosen. A turn with no usable answer reviews every area, so
+/// a failed route never narrows the review.
+#[allow(clippy::too_many_arguments)]
+async fn route_lenses(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    task: &Task,
+    worktree: &Path,
+    base_sha: &str,
+    review_route: &Route,
+    cancel: &CancelToken,
+    cost_usd: &mut f64,
+) -> (brief::Lenses, String) {
+    match route_turn(app, task_id, attempt_n, task, worktree, base_sha, review_route, cancel, cost_usd).await {
+        Ok(routing) => {
+            let chosen = routing.lenses.chosen();
+            let areas = if chosen.is_empty() { "none".to_string() } else { chosen.join(", ") };
+            let note = format!(
+                "Orchestrator: attempt {attempt_n} review areas: {areas} ({})",
+                routing.reason
+            );
+            (routing.lenses, note)
+        }
+        Err(why) => (
+            brief::Lenses::ALL,
+            format!("Orchestrator: attempt {attempt_n} review route gave no areas ({why}); reviewing every area"),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn route_turn(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    task: &Task,
+    worktree: &Path,
+    base_sha: &str,
+    review_route: &Route,
+    cancel: &CancelToken,
+    cost_usd: &mut f64,
+) -> Result<brief::LensRouting, String> {
+    let settings = app.settings.read().unwrap().clone();
+    let route = route_turn_route(&settings, review_route);
+    let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
+    let changed =
+        tokio::task::spawn_blocking(move || git::diff_name_only(&wt, &base).unwrap_or_default())
+            .await
+            .unwrap_or_default();
+    let brief_text = brief::build_route_brief(task, &changed);
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(task_id, "route-review", Some(attempt_n))
+        .map_err(|e| e.to_string())?;
+    let mcp_path = run_dir.join("mcp.json");
+    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
+    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let events_path = run_dir.join("events.jsonl");
+    let settings_path = run_dir.join("settings.json");
+    let key_path = run_dir.join("key");
+    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
+    if matches!(route.harness, Harness::Claude) {
+        write_readonly_claude_settings_with_profile(
+            &route,
+            app,
+            &key_path,
+            &settings,
+            &deny_read,
+            &settings_path,
+        );
+    }
+    let req = harness::RunRequest {
+        repo_settings: false,
+        resume: None,
+        ..review_request(&route, worktree, &mcp_path, &settings_path, &[])
+    };
+    let limit = app.helper_timeout();
+    let result = run_harness(
+        app,
+        task_id,
+        attempt_n,
+        RunTrack::No,
+        worktree,
+        &req,
+        CostTag::task("review", &route.id),
+        &brief_text,
+        &events_path,
+        cancel,
+        Guard::helper("review route", limit),
+    )
+    .await;
+    let _ = std::fs::remove_file(&key_path);
+    let outcome = result.map_err(|_| "the route turn was stopped or did not start".to_string())?;
+    *cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    if outcome.timed_out {
+        return Err("the route turn timed out".to_string());
+    }
+    if let Some(error) = outcome.error {
+        return Err(format!(
+            "the route turn errored: {}",
+            head_chars(&error, 200)
+        ));
+    }
+    brief::parse_lens_routing(&outcome.final_text.unwrap_or_default())
+        .ok_or_else(|| "the route turn gave no lenses".to_string())
+}
+
 /// A review of an attempt in a new helper folder. A re-run after a reply
 /// without a verdict (`after_no_verdict`) carries a note.
 #[allow(clippy::too_many_arguments)]
@@ -492,7 +610,6 @@ pub(super) async fn run_review(
     cost_usd: &mut f64,
     fingerprint: &mut Option<Fingerprint>,
     after_no_verdict: bool,
-    dropped: &[(String, String)],
     force_full: bool,
 ) -> Result<(ReviewResult, bool, ReviewSaw), ReviewFailure> {
     let wt = worktree.to_path_buf();
@@ -554,6 +671,7 @@ pub(super) async fn run_review(
             .map(|s| (s, Some(source_attempt)))
             .collect()
     };
+    let declines = this_attempt.map(|a| a.declines.clone()).unwrap_or_default();
     let mut brief_text = match &narrow {
         Some(n) => brief::build_narrow_review_brief(
             task,
@@ -567,18 +685,35 @@ pub(super) async fn run_review(
                 settled_criteria: &n.settled,
                 delta: &n.delta,
             },
+            &declines,
         ),
-        None => brief::build_review_brief(
-            task,
-            implementer_note,
-            agent_decisions,
-            verify_results,
-            &shown,
-            evidence_from,
-            &diff,
-        ),
+        None => {
+            let (lenses, note) = route_lenses(
+                app,
+                task_id,
+                attempt_n,
+                task,
+                worktree,
+                base_sha,
+                review_route,
+                cancel,
+                cost_usd,
+            )
+            .await;
+            task.decisions.push(note);
+            brief::build_review_brief(
+                task,
+                implementer_note,
+                agent_decisions,
+                verify_results,
+                &shown,
+                evidence_from,
+                &diff,
+                &declines,
+                &lenses,
+            )
+        }
     };
-    brief_text.push_str(&brief::dropped_findings_block(dropped));
     if after_no_verdict {
         brief_text.push('\n');
         brief_text.push_str(&brief::review_retry_note());
@@ -649,7 +784,16 @@ pub(super) async fn run_review(
                     }
                     None => ReviewScope::Full,
                 };
-                return Ok((result, recorded_as_pass, ReviewSaw { scope, tree }));
+                let rulings = brief::parse_decline_rulings(&text);
+                return Ok((
+                    result,
+                    recorded_as_pass,
+                    ReviewSaw {
+                        scope,
+                        tree,
+                        rulings,
+                    },
+                ));
             }
             Err(match outcome.error {
                 Some(error) => ReviewFailure::Harness(format!("review did not run ({error})")),
@@ -907,13 +1051,21 @@ mod timeout_tests {
             &mut cost,
             &mut fingerprint,
             false,
-            &[],
             false,
         )
         .await;
         assert!(
             matches!(result, Err(ReviewFailure::Harness(ref e)) if e.contains("reviewer timed out after 0.25s"))
         );
-        assert_helper_timeout(&task, "reviewer");
+        // The route turn runs first on the same slow fake: two calls, and the
+        // timed-out reviewer is still not started again.
+        let line = helper_timeout_message("reviewer", std::time::Duration::from_millis(250));
+        assert_eq!(
+            task.decisions.iter().filter(|d| d.contains(&line)).count(),
+            1,
+            "{:?}",
+            task.decisions
+        );
+        assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 2);
     }
 }

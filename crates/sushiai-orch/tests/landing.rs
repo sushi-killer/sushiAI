@@ -795,6 +795,7 @@ emit() {
 }
 name=$(printf '%s' "$input" | grep -o 'FILE_[a-z]*' | head -1 | sed 's/FILE_//')
 case "$input" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo "$name" >> "$GATES/reviews"
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;

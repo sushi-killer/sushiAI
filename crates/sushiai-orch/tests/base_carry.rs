@@ -19,6 +19,7 @@ out() {
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
   *'## Conflict-only attempt'*) printf 'base\nchild\n' > README.md; out "$report" ;;
+  *'You review a coding task plan'*) out '"{\"findings\": []}"' ;;
   *sushi-plan*)
     case "$input" in
       *OWN_TARGET*) out '"```sushi-plan\n{\"title\":\"Fix target check\",\"goal\":\"OWN_TARGET: fix grep -q fixed status.txt\",\"verify\":[\"true\"],\"finalVerify\":[\"grep -q fixed status.txt\"]}\n```"' ;;

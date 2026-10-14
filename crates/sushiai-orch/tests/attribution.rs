@@ -29,6 +29,10 @@ esac
 /// The same failing test on both sides, and other output that differs.
 const CHECK: &str = "printf 'not ok 1 - alpha\\n'; case \"$PWD\" in */base-runs/*) echo 'ERROR connecting to db: refused';; *) echo 'ERROR connecting to db: timeout';; esac; exit 1";
 
+/// The same unparsed output on the base and in the task: only the name `alpha`
+/// in a line says what fails.
+const SAME_OUTPUT: &str = "echo alpha; exit 1";
+
 fn spawn(scripts: &Path, count: &Path, reply: &str) -> Daemon {
     let body = FAKE
         .replace("COUNT", &count.display().to_string())
@@ -48,7 +52,7 @@ fn start(daemon: &Daemon, repo: &Path) -> String {
             "title": "Red base",
             "goal": "Write the marker",
             "verify": ["true"],
-            "finalVerify": [CHECK],
+            "finalVerify": [SAME_OUTPUT],
             "start": true,
         }),
     );

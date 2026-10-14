@@ -66,15 +66,17 @@ fn in_lines(tail: &str, name: &str) -> bool {
         })
 }
 
-/// Whether the failed run's own output is covered by the base run: every
-/// failing name code parsed from it is a failing name of the base. A run
-/// with no parsed names is covered only when its output fingerprint matches
-/// the base's, so a new error next to the base's failure is not.
+/// Whether the failed run's own output is covered by the base run: the same
+/// output fingerprint, no crash and no early stop, every failing name code
+/// parsed from it a failing name of the base, and every passing test of the
+/// base still passing. A new error next to the base's failure, a crash after
+/// it, and a fail-fast run that stopped at it are not covered.
 fn failed_run_covered(failed: &VerifyOutcome, base: &VerifyOutcome) -> bool {
-    if failed.failing.is_empty() {
-        return failed.output_key == base.output_key;
-    }
-    failed.failing.iter().all(|n| base.failing.contains(n))
+    failed.output_key == base.output_key
+        && !failed.crashed
+        && !failed.stopped_early
+        && failed.failing.iter().all(|n| base.failing.contains(n))
+        && base.passing.iter().all(|n| failed.passing.contains(n))
 }
 
 /// The verdict code accepts. A cause other than `introduced` needs evidence;
@@ -410,13 +412,49 @@ mod tests {
             &base,
         );
         assert_eq!(got.cause, Blame::Introduced);
+        // The same names with a different output fingerprint: a new error.
         run.failing = vec!["suite > alpha".into()];
         let got = checked(
             reply(Blame::Inherited, &["suite > alpha"], "same"),
             &run,
             &base,
         );
+        assert_eq!(got.cause, Blame::Introduced);
+        run.output_key = base.output_key.clone();
+        let got = checked(
+            reply(Blame::Inherited, &["suite > alpha"], "same"),
+            &run,
+            &base,
+        );
         assert_eq!(got.cause, Blame::Inherited);
+    }
+
+    #[test]
+    fn a_crash_a_fail_fast_stop_or_a_lost_pass_is_not_inherited() {
+        let mut base = base();
+        base.failing = vec!["suite > alpha".into()];
+        base.passing = vec!["suite > ok".into()];
+        let mut run = failed();
+        run.failing = vec!["suite > alpha".into()];
+        run.passing = vec!["suite > ok".into()];
+        let ask = |run: &VerifyOutcome| {
+            checked(
+                reply(Blame::Inherited, &["suite > alpha"], "same"),
+                run,
+                &base,
+            )
+            .cause
+        };
+        assert_eq!(ask(&run), Blame::Inherited);
+        let mut crashed = run.clone();
+        crashed.crashed = true;
+        assert_eq!(ask(&crashed), Blame::Introduced);
+        let mut early = run.clone();
+        early.stopped_early = true;
+        assert_eq!(ask(&early), Blame::Introduced);
+        let mut lost = run.clone();
+        lost.passing.clear();
+        assert_eq!(ask(&lost), Blame::Introduced);
     }
 
     #[test]

@@ -216,6 +216,7 @@ pub(super) fn slow_helper_task() -> (Arc<App>, tempfile::TempDir, Task, Route) {
     chat::fake_overseer_harness();
     let (app, dir) = test_app();
     app.helper_timeout_ms.store(250, Ordering::SeqCst);
+    app.plan_timeout_override_ms.store(250, Ordering::SeqCst);
     let worktree = dir.path().join("repo");
     std::fs::create_dir(&worktree).unwrap();
     init_git_repo(&worktree);

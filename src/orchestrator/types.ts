@@ -151,6 +151,9 @@ export type Settings = {
   /** Seconds one verify command may run; absent on an orchd without the
    * setting (the daemon then uses its own default, 1200). */
   verifyTimeoutSecs?: number;
+  /** Seconds the planner may run; its one resumed retry gets twice this.
+   * 0 or absent = the daemon default, 1800. Advanced JSON only. */
+  planTimeoutSecs?: number;
   /** Minutes an implement attempt may run before it is stopped and asked
    * for a short report (failure kind "time_budget"). 0 = no limit; the
    * daemon default is 45. Advanced JSON only, no Settings field. */

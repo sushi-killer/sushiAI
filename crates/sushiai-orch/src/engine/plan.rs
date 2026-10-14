@@ -631,7 +631,7 @@ async fn correct_draft(
     let brief_text =
         brief::build_plan_correction_brief(conflict, &task.variant(), task.parent.is_none());
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-    let limit = app.helper_timeout();
+    let limit = app.planner_timeout();
     let result = run_harness(
         app,
         task_id,
@@ -931,7 +931,7 @@ pub(super) async fn run_plan_stage(
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));
-            let limit = app.helper_timeout() * if doubled { 2 } else { 1 };
+            let limit = app.planner_timeout() * if doubled { 2 } else { 1 };
             let req = harness::RunRequest {
                 resume: resume_session.as_deref(),
                 ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
@@ -1772,6 +1772,37 @@ mod timeout_tests {
         );
         // Never a third run.
         assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 2);
+    }
+
+    #[tokio::test]
+    async fn planner_limit_is_the_setting_and_the_retry_doubles_it() {
+        let (app, _dir, mut task, _) = slow_helper_task();
+        app.plan_timeout_override_ms.store(0, Ordering::SeqCst);
+        assert_eq!(app.planner_timeout(), Duration::from_secs(1800));
+        app.settings.write().unwrap().plan_timeout_secs = 0;
+        assert_eq!(app.planner_timeout(), Duration::from_secs(1800));
+        app.settings.write().unwrap().plan_timeout_secs = 1;
+        assert_eq!(app.planner_timeout(), Duration::from_secs(1));
+        task.status = TaskStatus::Drafting;
+        task.attempts.clear();
+        task.request = Some("Ship the change".into());
+        app.store.save_task(&task).unwrap();
+        let pending = Arc::new(StdMutex::new(None));
+        let mut permit = None;
+        let _ = run_plan_stage(
+            &app,
+            &task.id,
+            &pending,
+            &CancelToken::new(),
+            &mut permit,
+            true,
+        )
+        .await;
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(
+            task.attempts[0].failure.as_ref().unwrap().detail,
+            "planner timed out after 2s"
+        );
     }
 
     #[tokio::test]

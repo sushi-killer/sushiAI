@@ -10,6 +10,9 @@ const FAKE: &str = r###"#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
 brief = sys.stdin.read()
 gates = pathlib.Path(os.environ['GATES'])
+if 'You review a coding task plan' in brief:
+    print(json.dumps({'type': 'result', 'result': json.dumps({'findings': []})}))
+    sys.exit(0)
 if 'sushi-plan' in brief and (gates / 'relay_plan').exists():
     plan = {'title': 'Relay graph', 'goal': 'Complete both parts', 'verify': ['true'], 'subtasks': [
         {'key': 'first', 'title': 'First', 'goal': 'CASE_first: change shared.txt', 'request': 'CASE_first: change shared.txt', 'criteria': ['Change shared.txt'], 'verify': ['true'], 'paths': ['shared.txt'], 'tier': 'standard'},

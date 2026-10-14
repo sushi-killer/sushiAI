@@ -268,29 +268,6 @@ pub(super) fn last_review_repeated(task: &Task) -> bool {
         })
 }
 
-/// Whether the owner may be offered `brief::ACCEPT_LAST_ATTEMPT`: the last
-/// attempt failed only its review or its screenshot evidence, and everything
-/// that ran on it exited 0. A change to a protected path is not offered after
-/// an evidence failure, because that gate runs before the protected-path
-/// approval and accepting must never skip it.
-pub(super) fn accept_offered(last: &Attempt, protected_paths: &[String]) -> bool {
-    let Some(failure) = &last.failure else {
-        return false;
-    };
-    let clean = last.verify.iter().all(|v| v.code == Some(0));
-    match failure.kind {
-        FailureKind::Review => clean,
-        FailureKind::Evidence => {
-            clean
-                && !last
-                    .changed_files
-                    .iter()
-                    .any(|f| matches_any_protected(f, protected_paths))
-        }
-        _ => false,
-    }
-}
-
 /// The hard bound behind the relaxed `maxAttempts` count: every implement
 /// attempt, however it ended, except those a usage or rate limit paused, stops
 /// the task at twice the budget.
@@ -299,10 +276,17 @@ fn ceiling_hit(task: &Task, max_attempts: u32) -> bool {
         >= max_attempts.saturating_mul(2)
 }
 
-pub(super) fn advance_after_failure(
+#[cfg(test)]
+pub(super) fn advance_after_failure(task: &mut Task, max_attempts: u32) -> bool {
+    advance_after_failure_with(task, max_attempts, &|_| None)
+}
+
+/// [`advance_after_failure`] with the base checkout's output per command,
+/// which backs the environment verdict of a flaky or outside-diff failure.
+pub(super) fn advance_after_failure_with(
     task: &mut Task,
     max_attempts: u32,
-    protected_paths: &[String],
+    base: super::ladder::BaseTail,
 ) -> bool {
     let last = task.attempts.last().expect("failure just recorded");
     let signature = last
@@ -311,7 +295,7 @@ pub(super) fn advance_after_failure(
         .map(|f| f.signature.clone())
         .unwrap_or_default();
     let mut consecutive = consecutive_same_signature(&task.attempts, &signature, |i| {
-        super::ladder::environment_failure(task, i)
+        super::ladder::environment_failure(task, i, base)
     });
     // A finding that was turned into a check or sent to the judge gets
     // another attempt within the budget, not the owner.
@@ -370,27 +354,8 @@ pub(super) fn advance_after_failure(
             true
         }
         FailureDecision::Waiting { question } => {
-            let retries = task
-                .question_history
-                .iter()
-                .filter(|q| {
-                    q.failure_signature.as_deref() == Some(signature.as_str())
-                        && !is_option(&q.answer, "stop")
-                        && !is_accept_option(&q.answer)
-                })
-                .count();
-            if retries >= 3 {
-                let reason = format!(
-                    "{} failed again after 3 retries; fix the cause, then start it",
-                    signature_phrase(&signature)
-                );
-                return retry_or_fail(task, &reason);
-            }
-            let mut options: Vec<String> = vec!["continue".into(), "change approach".into()];
-            if accept_offered(&task.attempts[task.attempts.len() - 1], protected_paths) {
-                options.push(brief::ACCEPT_LAST_ATTEMPT.into());
-            }
-            options.push("stop".into());
+            let options: Vec<String> =
+                vec!["continue".into(), "change approach".into(), "stop".into()];
             task.question = Some(Question::new(
                 question,
                 options,
@@ -409,86 +374,10 @@ pub(super) enum LoopSignal {
     Stop,
 }
 
-/// [`LoopSignal`] for the failures the owner may accept as done.
-pub(super) enum FailSignal {
-    Continue,
-    Stop,
-    /// The owner accepted the last attempt as done: its final checks and
-    /// commit still run (`finish_after_review`).
-    Accept,
-}
-
-/// The decision line an accepted attempt leaves; the post-restart relaunch
-/// finds a pending acceptance by it (`pending_acceptance`).
-pub(super) fn accept_line(attempt_n: u32) -> String {
-    format!("Owner: accepted attempt {attempt_n} as done; review skipped")
-}
-
-pub(super) fn is_accept_option(answer: &str) -> bool {
-    answer
-        .trim()
-        .eq_ignore_ascii_case(brief::ACCEPT_LAST_ATTEMPT)
-}
-
-/// Remembers the owner's acceptance as an assumption and a decision line, the
-/// line after the `Owner: <answer>` one.
-pub(super) fn record_owner_accept(
-    task: &mut Task,
-    question: &str,
-    answer: &str,
-    evidence: &str,
-    attempt_n: u32,
-) {
-    task.assumptions.push(Assumption {
-        question: question.to_string(),
-        answer: answer.to_string(),
-        evidence: evidence.to_string(),
-        by: "owner".to_string(),
-        kind: Some(QuestionKind::AttemptsFailing),
-        attempt: Some(attempt_n),
-        commands: Vec::new(),
-        overturned: false,
-        owner_answer: None,
-    });
-    task.decisions.push(accept_line(attempt_n));
-}
-
-/// Whether an owner's answer to `shown` accepts the last attempt, and why:
-/// the option itself, or free text the orchestrator route reads as
-/// accepting. Only when the option was on the question the owner saw.
-async fn owner_accept_reason(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    answered: &Answered,
-    cancel: &CancelToken,
-) -> Option<&'static str> {
-    let shown = answered.shown.as_ref()?;
-    if !answered.by_owner || !shown.options.iter().any(|o| is_accept_option(o)) {
-        return None;
-    }
-    if is_accept_option(&answered.text) {
-        return Some("owner picked the option");
-    }
-    if shown
-        .options
-        .iter()
-        .any(|o| o.trim().eq_ignore_ascii_case(answered.text.trim()))
-    {
-        return None;
-    }
-    owner_accepts(app, task_id, task, idx, shown, &answered.text, cancel)
-        .await
-        .then_some("owner free text classified as accept")
-}
-
-/// Record a failure, apply the tier/waiting rules, and -- when now waiting
-/// -- park for an answer (the orchestrator's, within its bound, else the
-/// owner's), extending the attempt budget by 2 on any
-/// answer (spec step 9; every waiting state `advance_after_failure` reaches
-/// is the "attempts exhausted" kind). Only a review or evidence failure can
-/// come back as `LoopSignal::Accept`; use [`fail_or_accept`] there.
+/// Record a failure, apply the tier/waiting rules, and -- when attempts are
+/// exhausted -- walk the failure ladder (`ladder.rs`): a policy or triage
+/// answer, one changed approach, then `failed`. The owner is never asked.
+/// A continue extends the attempt budget by 2.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fail_and_continue(
     app: &Arc<App>,
@@ -502,93 +391,24 @@ pub(super) async fn fail_and_continue(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> LoopSignal {
-    match fail_or_accept(
-        app,
-        task_id,
-        task,
-        idx,
-        kind,
-        detail,
-        attempt_budget,
-        pending_answer,
-        cancel,
-        permit,
-    )
-    .await
-    {
-        FailSignal::Continue => LoopSignal::Continue,
-        FailSignal::Stop => LoopSignal::Stop,
-        FailSignal::Accept => {
-            debug_assert!(false, "only review and evidence failures offer acceptance");
-            LoopSignal::Continue
-        }
-    }
-}
-
-/// [`fail_and_continue`] for the failures the owner may accept as done.
-/// Accepting never extends `attempt_budget`; the attempt is cleared of its
-/// failure and set running again, ready for its final checks.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn fail_or_accept(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    kind: FailureKind,
-    detail: String,
-    attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> FailSignal {
     record_failure(task, idx, kind, detail);
-    let protected = app.settings.read().unwrap().protected_paths.clone();
-    let should_continue = advance_after_failure(task, *attempt_budget, &protected);
+    let base = super::ladder::base_tails(app, &task.base_sha);
+    let should_continue = advance_after_failure_with(task, *attempt_budget, &base);
     if should_continue {
         app.save_task_logged(task);
         app.broadcast_task(task);
-        return FailSignal::Continue;
+        return LoopSignal::Continue;
     }
     // Not persisted here: the wait does it itself, after the one-shot is
     // installed (see `wait_for_answer`).
     let Some(answered) =
         wait_for_exhausted_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
     else {
-        return FailSignal::Stop;
+        return LoopSignal::Stop;
     };
-    if let Some(evidence) = owner_accept_reason(app, task_id, task, idx, &answered, cancel).await {
-        let question = answered.shown.map(|q| q.text).unwrap_or_default();
-        let attempt_n = task.attempts[idx].n;
-        record_owner_accept(task, &question, &answered.text, evidence, attempt_n);
-        let a = &mut task.attempts[idx];
-        a.status = AttemptStatus::Running;
-        a.ended_at = None;
-        a.failure = None;
-        task.status = TaskStatus::Running;
-        task.updated_at = now_ms();
-        app.save_task_logged(task);
-        app.broadcast_task(task);
-        return FailSignal::Accept;
-    }
     settle_exhausted_answer(app, task, idx, &answered.text);
     *attempt_budget += 2;
-    FailSignal::Continue
-}
-
-/// A task relaunched after the owner accepted its last attempt while no
-/// loop was live: that attempt (failed on review or evidence) and its index.
-pub(super) fn pending_acceptance(task: &Task) -> Option<usize> {
-    let idx = task
-        .attempts
-        .iter()
-        .rposition(|a| a.stage == Stage::Implement)?;
-    let a = &task.attempts[idx];
-    let failed = a.status == AttemptStatus::Failed
-        && matches!(
-            a.failure.as_ref().map(|f| f.kind),
-            Some(FailureKind::Review | FailureKind::Evidence)
-        );
-    (failed && task.decisions.last() == Some(&accept_line(a.n))).then_some(idx)
+    LoopSignal::Continue
 }
 
 /// Owner answer `drop criterion`: removes criterion `n`, its checks and a

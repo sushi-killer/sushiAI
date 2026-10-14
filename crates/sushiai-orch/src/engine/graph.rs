@@ -1694,7 +1694,7 @@ impl App {
             || deps.iter().any(|d| {
                 d.status != TaskStatus::Failed
                     || d.queue.stopped_explicitly
-                    || !ladder::failed_on_environment(d)
+                    || !ladder::failed_on_environment(d, &ladder::base_tails(self, &d.base_sha))
             })
         {
             return false;

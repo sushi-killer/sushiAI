@@ -226,7 +226,7 @@ fn failing_lines(tail: &str) -> Vec<&str> {
         .collect()
 }
 
-fn failing_tests(tail: &str) -> BTreeSet<String> {
+pub fn failing_tests(tail: &str) -> BTreeSet<String> {
     crate::test_failures::failing_tests(tail)
 }
 

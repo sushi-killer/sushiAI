@@ -271,6 +271,9 @@ fn a_review_without_a_verdict_is_committed_marked_unreviewed_and_nobody_is_asked
     assert!(settled["question"].is_null(), "task JSON: {settled}");
     let decisions = settled["decisions"].to_string();
     assert!(decisions.contains("committed unreviewed"), "{decisions}");
+    // Flagged for the pull request, and never landed by itself.
+    assert_eq!(settled["unreviewed"], true, "{settled}");
+    assert!(!decisions.contains("Land:"), "{decisions}");
     let marked = settled["assumptions"]
         .as_array()
         .unwrap()

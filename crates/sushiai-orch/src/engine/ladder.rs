@@ -3,10 +3,10 @@
 //! (a timeout, a flaky or outside-the-diff test, an install error) say nothing
 //! about the approach and never count as "the same failure again".
 //!
-//! Rungs, in order: the answer policy's one continue, the orchestrator's
-//! continues (`MAX_ORCHESTRATOR_CONTINUES`), one changed approach (a higher
-//! tier when the settings define one, and a forced advisor run on the planner
-//! route that re-plans the remaining work), then `failed`.
+//! Rungs, in order: the orchestrator's continues (`MAX_ORCHESTRATOR_CONTINUES`,
+//! only with auto-answer on), one changed approach (a higher tier when the
+//! settings define one, and a forced advisor run on the planner route that
+//! re-plans the remaining work), then `failed`.
 
 use super::*;
 use crate::overseer::Entry;
@@ -36,15 +36,64 @@ pub(super) fn approach_pending(task: &Task) -> bool {
         })
 }
 
+/// What the base checkout printed for a check command (`None`: no run known).
+pub(super) type BaseTail<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The base results `app` holds for `base_sha`, by command.
+pub(super) fn base_tails<'a>(app: &'a App, base_sha: &str) -> impl Fn(&str) -> Option<String> + 'a {
+    let base_sha = base_sha.to_string();
+    move |command| {
+        app.base_runs
+            .lock()
+            .unwrap()
+            .get(&(base_sha.clone(), command.to_string()))
+            .map(|run| run.tail.clone())
+    }
+}
+
 /// Whether attempt `at` failed on its checks for a reason that is the
-/// environment, not the approach (see `precedents::signals_of`).
-pub(super) fn environment_failure(task: &Task, at: usize) -> bool {
-    !crate::precedents::attempt_signals(task, at).is_empty()
+/// environment, not the approach. A timeout or an install error always is.
+/// A flaky or outside-the-diff signal only is when the evidence backs it: every
+/// failing test also fails on the base, or a test passed and failed on the
+/// same tree. A change that breaks a test it did not touch is not.
+pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> bool {
+    let signals = crate::precedents::attempt_signals(task, at);
+    if signals.iter().any(|s| s == "timeout" || s == "install") {
+        return true;
+    }
+    if signals.is_empty() {
+        return false;
+    }
+    let attempt = &task.attempts[at];
+    attempt
+        .verify
+        .iter()
+        .filter(|o| o.code != Some(0))
+        .any(|o| {
+            let now = crate::precedents::failing_tests(&o.tail);
+            if now.is_empty() {
+                return false;
+            }
+            let on_base = base(&o.command).map(|t| crate::precedents::failing_tests(&t));
+            if on_base.is_some_and(|b| now.iter().all(|t| b.contains(t))) {
+                return true;
+            }
+            // The same tree ran this command before with another outcome.
+            task.attempts[..at].iter().any(|earlier| {
+                earlier.changed_files == attempt.changed_files
+                    && earlier.diff_stat == attempt.diff_stat
+                    && earlier
+                        .verify
+                        .iter()
+                        .filter(|e| e.command == o.command)
+                        .any(|e| crate::precedents::failing_tests(&e.tail) != now)
+            })
+        })
 }
 
 /// Whether a task failed on the environment: a timeout, or a check failure
-/// with an environment signal in its last implement attempt.
-pub(super) fn failed_on_environment(task: &Task) -> bool {
+/// that [`environment_failure`] holds for its last implement attempt.
+pub(super) fn failed_on_environment(task: &Task, base: BaseTail) -> bool {
     let Some(at) = task
         .attempts
         .iter()
@@ -56,7 +105,7 @@ pub(super) fn failed_on_environment(task: &Task) -> bool {
             .and_then(|a| a.failure.as_ref())
             .is_some_and(|f| f.detail.contains("timed out"));
     };
-    environment_failure(task, at)
+    environment_failure(task, at, base)
         || task.attempts[at].failure.as_ref().is_some_and(|f| {
             matches!(f.kind, FailureKind::Stall | FailureKind::TimeBudget)
                 || f.detail.contains("timed out")
@@ -126,7 +175,7 @@ pub(super) fn failure_report(task: &Task) -> String {
 
 /// Ends the ladder: the task is `failed`, no question is left open. The
 /// caller returns `Stop`; the loop's end tells the owner (`notify_task_failed`).
-pub(super) fn end_ladder(app: &Arc<App>, task: &mut Task) {
+pub(super) fn end_ladder(app: &App, task: &mut Task) {
     let signature = task
         .attempts
         .iter()
@@ -135,7 +184,7 @@ pub(super) fn end_ladder(app: &Arc<App>, task: &mut Task) {
         .map(|f| decision::signature_phrase(&f.signature))
         .unwrap_or_else(|| "a failure".to_string());
     task.question = None;
-    task.status = TaskStatus::Failed;
+    task.mark_failed();
     task.decisions.push(format!(
         "Ladder: stopped after {} attempt(s) on {signature}; continue, a changed approach and the orchestrator's continues were used up",
         implement_attempt_count(task)
@@ -199,10 +248,104 @@ pub(super) fn dependency_restart_delay() -> Duration {
     Duration::from_millis(pause_ms("ORCHD_DEPENDENCY_RESTART_MS", 120_000, 50))
 }
 
+/// Decision line of the one restart of a failed task an agent may make.
+pub(super) const AGENT_RESTART_LINE: &str = "Orchestrator: restarted a failed task";
+
 pub(super) const DEPENDENCY_RESTART_LINE: &str =
     "Orchestrator: restarted a dependency that failed on the environment";
 
+/// The decision line of an attempt committed unreviewed because its open
+/// "no verdict" question was retired; the relaunched loop finds it by it.
+pub(super) fn unreviewed_line(attempt_n: u32) -> String {
+    format!("Orchestrator: attempt {attempt_n} committed unreviewed: its open review question was retired")
+}
+
+/// A task relaunched after its "no verdict" question was retired while no
+/// loop was live: the blocked attempt, which only needs its final checks and
+/// the commit.
+pub(super) fn pending_unreviewed(task: &Task) -> Option<usize> {
+    let idx = task
+        .attempts
+        .iter()
+        .rposition(|a| a.stage == Stage::Implement)?;
+    let a = &task.attempts[idx];
+    (task.unreviewed
+        && a.status == AttemptStatus::Blocked
+        && task.decisions.last() == Some(&unreviewed_line(a.n)))
+    .then_some(idx)
+}
+
 impl App {
+    /// One-time migration of questions the failure ladder no longer asks.
+    /// An open "attempts keep failing" question ends the ladder (the task
+    /// fails with its report); an open "no verdict" question becomes the
+    /// unreviewed path (the attempt is committed, marked, and not landed).
+    pub(super) fn retire_ladder_questions(&self) {
+        for mut task in self.store.list_tasks().unwrap_or_default() {
+            let Some(kind) = task.question.as_ref().map(|q| q.kind) else {
+                continue;
+            };
+            if task.status != TaskStatus::Waiting || task.archived {
+                continue;
+            }
+            match kind {
+                QuestionKind::AttemptsFailing => {
+                    end_ladder(self, &mut task);
+                    self.notify_task_failed(&task);
+                }
+                QuestionKind::ReviewNoVerdict => {
+                    let Some(n) = task
+                        .attempts
+                        .iter()
+                        .rfind(|a| a.stage == Stage::Implement)
+                        .map(|a| a.n)
+                    else {
+                        continue;
+                    };
+                    task.question = None;
+                    task.unreviewed = true;
+                    task.decisions.push(unreviewed_line(n));
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    self.save_task_logged(&task);
+                    self.broadcast_task(&task);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A top-level task that finished with an attempt no review read tells
+    /// the owner once that its work is unreviewed and was not landed.
+    pub(super) fn notify_task_unreviewed(&self, task: &Task) {
+        if !task.unreviewed || task.status != TaskStatus::Done || task.parent.is_some() {
+            return;
+        }
+        let key = format!("{}|task_unreviewed|{}", task.id, task.attempts.len());
+        if self
+            .notice_log()
+            .iter()
+            .any(|e| e.decision_keys().any(|k| k == key))
+        {
+            return;
+        }
+        let text = format!(
+            "Task \"{}\" is done but unreviewed: no review route gave a verdict. Its work was not landed; it waits on branch {} and a pull request marked unreviewed is opened.",
+            task.title, task.branch
+        );
+        chat::post_note(self, &task.repo, &text);
+        self.record_overseer(
+            Entry::new(
+                "asked_owner",
+                &task.repo,
+                Some(&task.id),
+                &truncate_chars(&text, overseer::MAX_TEXT_CHARS),
+            )
+            .with_detail(&text)
+            .with_decision(&[key]),
+        );
+    }
+
     /// A top-level task that ended `failed` tells the owner once, with the
     /// report, and wakes the overseer when auto-answer is on. The overseer log
     /// remembers the notice by a key made of the task and its attempt count,
@@ -211,7 +354,7 @@ impl App {
         if task.status != TaskStatus::Failed || task.parent.is_some() || task.archived {
             return;
         }
-        let key = format!("{}|task_failed|{}", task.id, task.attempts.len());
+        let key = format!("{}|task_failed|{}", task.id, task.failed_count);
         if self
             .notice_log()
             .iter()
@@ -271,18 +414,14 @@ mod tests {
             .map(|n| timed_out_attempt(n, "verify:timeout"))
             .collect();
         // Three timeouts in a row: the environment, so the task goes on.
-        assert!(
-            advance_after_failure(&mut slow, 10, &[]),
-            "{:?}",
-            slow.question
-        );
+        assert!(advance_after_failure(&mut slow, 10), "{:?}", slow.question);
         assert!(slow.question.is_none());
         // The same three failures without such a signal stop the loop.
         let mut real = task_with_status(TaskStatus::Running);
         real.attempts = (1..=3)
             .map(|n| attempt_with_failure(n, "verify:timeout"))
             .collect();
-        assert!(!advance_after_failure(&mut real, 10, &[]));
+        assert!(!advance_after_failure(&mut real, 10));
         assert_eq!(
             real.question.as_ref().map(|q| q.kind),
             Some(QuestionKind::AttemptsFailing)
@@ -381,5 +520,116 @@ mod tests {
         );
         settings.routes.retain(|r| r.id == current.id);
         assert!(fallback_review_route(&app, &settings, &current).is_none());
+    }
+    fn broken_untouched_test(n: u32) -> Attempt {
+        let mut a = attempt_with_failure(n, "verify:untouched test fails");
+        a.changed_files = vec!["src/engine.rs".into()];
+        a.verify = vec![VerifyOutcome {
+            command: "npm test".into(),
+            code: Some(1),
+            tail: "not ok 1 - tests/untouched.test.cjs\n".into(),
+            ms: 1,
+            load: 0.0,
+            cores: 1,
+            load_timeout: false,
+            decisions: vec![],
+        }];
+        a
+    }
+
+    #[test]
+    fn a_change_that_breaks_an_untouched_test_three_times_still_stops_the_loop() {
+        let mut task = task_with_status(TaskStatus::Running);
+        task.attempts = (1..=3).map(broken_untouched_test).collect();
+        // The signal is there (the failing file is outside the diff) ...
+        assert!(!crate::precedents::attempt_signals(&task, 2).is_empty());
+        // ... but nothing backs it up: it is the approach, not the environment.
+        assert!(!advance_after_failure(&mut task, 10));
+        assert_eq!(
+            task.question.as_ref().map(|q| q.kind),
+            Some(QuestionKind::AttemptsFailing)
+        );
+        assert!(!failed_on_environment(&task, &|_| None));
+    }
+
+    #[test]
+    fn an_outside_diff_failure_that_also_fails_on_the_base_is_the_environment() {
+        let mut task = task_with_status(TaskStatus::Running);
+        task.attempts = (1..=3).map(broken_untouched_test).collect();
+        let base = |_: &str| Some("not ok 1 - tests/untouched.test.cjs\n".to_string());
+        assert!(failed_on_environment(&task, &base));
+        assert!(advance_after_failure_with(&mut task, 10, &base));
+        assert!(task.question.is_none());
+    }
+
+    #[test]
+    fn a_dependency_that_broke_an_untouched_test_is_not_restarted_by_itself() {
+        let mut dep = task_with_status(TaskStatus::Failed);
+        dep.attempts = (1..=3).map(broken_untouched_test).collect();
+        assert!(!failed_on_environment(&dep, &|_| None));
+    }
+
+    #[tokio::test]
+    async fn a_task_that_fails_again_with_the_same_attempts_is_told_again() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.attempts = vec![attempt_with_failure(1, "verify:boom")];
+        task.mark_failed();
+        app.notify_task_failed(&task);
+        app.notify_task_failed(&task);
+        // A restart whose setup fails three times: Failed again, same attempts.
+        task.status = TaskStatus::Running;
+        task.mark_failed();
+        app.notify_task_failed(&task);
+        let told = app
+            .notice_log()
+            .into_iter()
+            .filter(|e| e.kind == "asked_owner" && e.task_id.as_deref() == Some(task.id.as_str()))
+            .count();
+        assert_eq!(told, 2);
+    }
+
+    #[tokio::test]
+    async fn open_attempts_failing_and_no_verdict_questions_are_retired_on_start() {
+        let (app, _dir) = test_app();
+        let mut exhausted = task_with_status(TaskStatus::Waiting);
+        exhausted.attempts = vec![attempt_with_failure(1, "verify:boom")];
+        exhausted.question = Some(Question::new(
+            "Attempts keep failing",
+            vec!["continue".into(), "stop".into()],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        ));
+        let mut silent = task_with_status(TaskStatus::Waiting);
+        silent.id = "silent".into();
+        let mut attempt = attempt_with_failure(1, "blocked:no verdict");
+        attempt.status = AttemptStatus::Blocked;
+        silent.attempts = vec![attempt];
+        silent.question = Some(Question::new(
+            "The review gave no verdict",
+            vec!["approve".into()],
+            QuestionKind::ReviewNoVerdict,
+            AskedBy::Review,
+        ));
+        app.store.save_task(&exhausted).unwrap();
+        app.store.save_task(&silent).unwrap();
+
+        app.retire_ladder_questions();
+
+        let exhausted = app.store.load_task(&exhausted.id).unwrap().unwrap();
+        assert_eq!(exhausted.status, TaskStatus::Failed);
+        assert!(exhausted.question.is_none());
+        let silent = app.store.load_task("silent").unwrap().unwrap();
+        assert!(silent.question.is_none() && silent.unreviewed);
+        assert_eq!(silent.status, TaskStatus::Queued);
+        assert_eq!(pending_unreviewed(&silent), Some(0));
+    }
+
+    #[test]
+    fn the_resumed_planner_gets_a_continuation_not_the_parse_failure_brief() {
+        let variant = Variant::default();
+        let text = crate::brief::build_plan_continue_brief(&variant, true);
+        assert!(text.contains("cut off"), "{text}");
+        assert!(!text.contains("did not contain"), "{text}");
     }
 }

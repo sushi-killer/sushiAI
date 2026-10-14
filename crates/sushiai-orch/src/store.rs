@@ -599,6 +599,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,

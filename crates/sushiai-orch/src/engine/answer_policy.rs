@@ -1013,12 +1013,12 @@ mod tests {
         task.attempts = vec![attempt_with_failure(1, "review:x")];
         let q = Question::new(
             "Attempts keep failing",
-            opts(&["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"]),
+            opts(&["continue", "stop"]),
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
         );
         // The failure ladder owns this kind: a changed approach, never a
-        // plain continue, and never the accept option.
+        // plain continue.
         assert!(rule_answer(&task, &q, 1).is_none());
     }
 

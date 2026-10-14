@@ -79,9 +79,13 @@ overseer_done: |
 overseer_done_pr_owned: |
   Task {id} ("{title}") is done. orchd opens its pull request itself; do not call task_pr. Read it with task_get only if you need to. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by title in text for the owner.
 
+# A top-level task finished with an attempt no review read (wakes the orchestrator when autoAnswer is on).
+overseer_done_unreviewed: |
+  Task {id} ("{title}") is done but unreviewed: no review route gave a verdict, so its work was not landed and waits on its branch. orchd opens its pull request itself (its body says "Unreviewed"); do not call task_pr and never merge. Read it with task_get only if you need to. Tell the owner in one line that the work is unreviewed; refer to the task by its title in text for the owner.
+
 # A top-level task ended failed after the failure ladder (wakes the orchestrator when autoAnswer is on).
 overseer_failed: |
-  Task {id} ("{title}") failed and the owner was told. Read it with task_get. Do not retry it in a loop: restart it with task_start only if its last failure was the environment (a timeout, an install or a flaky check) and it has not been restarted yet. Never merge and never open a pull request for a failed task. Write to the owner only what they do not know yet, in one or two lines; otherwise end with no text. Refer to the task by its title in text for the owner.
+  Task {id} ("{title}") failed and the owner was told. Read it with task_get. Do not retry it in a loop: restart it with task_start only if its last failure was the environment (a timeout or an install error); you get one restart per task, a second one is refused. Never merge and never open a pull request for a failed task. Write to the owner only what they do not know yet, in one or two lines; otherwise end with no text. Refer to the task by its title in text for the owner.
 
 # What a task gets as the instructions of its sushiai-messages server (`sushiai mcp --task`).
 mcp_task_instructions: |

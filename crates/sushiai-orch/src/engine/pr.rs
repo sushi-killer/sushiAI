@@ -48,13 +48,21 @@ pub(super) async fn run_cmd(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// First line of the body of a pull request for work no review read.
+pub(super) const UNREVIEWED_LINE: &str = "Unreviewed: no review route gave a verdict";
+
 /// The PR body: goal, criteria as a checklist, then the report summary.
 pub(super) fn pr_body(task: &Task) -> String {
-    let mut body = format!("{}\n", task.goal.trim());
+    let mark = if task.unreviewed { " " } else { "x" };
+    let mut body = String::new();
+    if task.unreviewed {
+        body.push_str(&format!("{UNREVIEWED_LINE}\n\n"));
+    }
+    body.push_str(&format!("{}\n", task.goal.trim()));
     if !task.criteria.is_empty() {
         body.push_str("\n## Criteria\n\n");
         for c in &task.criteria {
-            body.push_str(&format!("- [x] {}\n", c.trim()));
+            body.push_str(&format!("- [{mark}] {}\n", c.trim()));
         }
     }
     if let Some(report) = task.report.as_deref().filter(|r| !r.trim().is_empty()) {
@@ -406,5 +414,26 @@ impl App {
             );
         }
         serde_json::to_value(&task).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod unreviewed_tests {
+    use super::*;
+    use crate::engine::test_support::task_with_status;
+
+    #[test]
+    fn an_unreviewed_task_opens_with_the_warning_and_unchecked_criteria() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.goal = "Add the toggle".into();
+        task.criteria = vec!["It toggles".into()];
+        assert!(pr_body(&task).contains("- [x] It toggles"));
+        task.unreviewed = true;
+        let body = pr_body(&task);
+        assert!(
+            body.starts_with("Unreviewed: no review route gave a verdict\n"),
+            "{body}"
+        );
+        assert!(body.contains("- [ ] It toggles"), "{body}");
     }
 }

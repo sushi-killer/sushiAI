@@ -674,6 +674,8 @@ impl App {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -718,9 +720,31 @@ impl App {
         #[derive(Deserialize)]
         struct P {
             id: String,
+            /// Set by the bridge for an agent caller (overseer, chat, MCP);
+            /// absent for the owner.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
+        // An agent restarts a failed task once; the second time is the
+        // owner's, or the ladder would loop through the overseer.
+        if p.source.is_some() {
+            if let Ok(Some(task)) = self.store.load_task(&p.id) {
+                if task.status == TaskStatus::Failed {
+                    if task
+                        .decisions
+                        .iter()
+                        .any(|d| d == ladder::AGENT_RESTART_LINE)
+                    {
+                        return Err("this failed task was already restarted once by an agent: only the owner restarts it again".to_string());
+                    }
+                    self.update_task(&p.id, |t| {
+                        t.decisions.push(ladder::AGENT_RESTART_LINE.to_string())
+                    })?;
+                }
+            }
+        }
         let already_running = self
             .controls
             .lock()
@@ -1030,26 +1054,6 @@ impl App {
                     return Err(why);
                 }
             }
-            if is_accept_option(&p.answer) {
-                return Err(
-                    "accepting an attempt as done is the owner's to pick: an agent cannot"
-                        .to_string(),
-                );
-            }
-            let exhausted = task
-                .question
-                .as_ref()
-                .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing);
-            let continues = non_owner_continues(&task);
-            if exhausted
-                && continues >= MAX_ORCHESTRATOR_CONTINUES
-                && !p.answer.trim().eq_ignore_ascii_case("stop")
-            {
-                return Err(
-                    "this task already got the orchestrator's continues: the owner decides now"
-                        .to_string(),
-                );
-            }
             if let Some(q) = task.question.as_ref().filter(|q| {
                 q.kind == QuestionKind::PreexistingFailure
                     && !q.commands.is_empty()
@@ -1217,28 +1221,6 @@ impl App {
                         if is_option(&p.answer, PRE_EXISTING_DROP) {
                             self.verify_cache.lock().unwrap().remove(&task.id);
                         }
-                    }
-                }
-                // The owner accepted the last attempt: the relaunched loop
-                // commits it instead of starting another (`pending_acceptance`).
-                if let Some(q) = task.question.clone().filter(|q| {
-                    q.kind == QuestionKind::AttemptsFailing
-                        && is_accept_option(&p.answer)
-                        && q.options.iter().any(|o| is_accept_option(o))
-                }) {
-                    if let Some(a) = task
-                        .attempts
-                        .iter()
-                        .rfind(|a| a.stage == Stage::Implement)
-                        .filter(|a| {
-                            matches!(
-                                a.failure.as_ref().map(|f| f.kind),
-                                Some(FailureKind::Review | FailureKind::Evidence)
-                            )
-                        })
-                    {
-                        let n = a.n;
-                        record_owner_accept(task, &q.text, &p.answer, "owner picked the option", n);
                     }
                 }
                 if task
@@ -2291,64 +2273,6 @@ mod answer_caller_tests {
         app.shutdown();
     }
 
-    #[tokio::test]
-    async fn lead_acceptance_is_refused_and_mixed_non_owner_continues_hit_the_cap() {
-        let (app, _dir) = test_app();
-        for callers in [
-            [AnsweredBy::Lead, AnsweredBy::Overseer],
-            [AnsweredBy::Orchestrator, AnsweredBy::Lead],
-            [AnsweredBy::Overseer, AnsweredBy::Orchestrator],
-        ] {
-            let id = waiting(
-                &app,
-                QuestionKind::AttemptsFailing,
-                &["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"],
-            );
-            let err = answer(&app, &id, brief::ACCEPT_LAST_ATTEMPT, Some("lead"))
-                .await
-                .unwrap_err();
-            assert!(err.contains("owner's to pick"), "{err}");
-            let mut task = app.store.load_task(&id).unwrap().unwrap();
-            let question = task.question.clone().unwrap();
-            record_answer(&mut task, Some(&question), "continue", AnsweredBy::Owner);
-            assert_eq!(non_owner_continues(&task), 0);
-            for caller in callers {
-                record_answer(&mut task, Some(&question), "continue", caller);
-            }
-            assert_eq!(non_owner_continues(&task), MAX_ORCHESTRATOR_CONTINUES);
-            app.store.save_task(&task).unwrap();
-            for source in ["lead", "overseer", "chat"] {
-                let err = answer(&app, &id, "continue", Some(source))
-                    .await
-                    .unwrap_err();
-                assert!(err.contains("the owner decides now"), "{err}");
-            }
-            let saved = app.store.load_task(&id).unwrap().unwrap();
-            assert_eq!(saved.status, TaskStatus::Waiting);
-            assert_eq!(
-                saved.question.as_ref().unwrap().text,
-                task.question.as_ref().unwrap().text
-            );
-            assert_eq!(saved.decisions, task.decisions);
-            answer(&app, &id, "continue", None).await.unwrap();
-            let saved = app.store.load_task(&id).unwrap().unwrap();
-            assert_eq!(
-                saved.question_history.last().unwrap().answered_by,
-                AnsweredBy::Owner
-            );
-            let mut task = saved;
-            task.question = Some(question);
-            task.status = TaskStatus::Waiting;
-            app.store.save_task(&task).unwrap();
-            answer(&app, &id, "stop", Some("lead")).await.unwrap();
-            assert_eq!(
-                app.store.load_task(&id).unwrap().unwrap().status,
-                TaskStatus::Stopped
-            );
-        }
-        app.shutdown();
-    }
-
     fn base_retry_task(commands: &[&str]) -> Task {
         let mut task = task_with_status(TaskStatus::Waiting);
         let failed: Vec<VerifyOutcome> = commands
@@ -2498,6 +2422,44 @@ mod answer_caller_tests {
             .iter()
             .any(|d| d.starts_with("Lead: dropped from")));
         assert!(child.parent.is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_restart_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_agent_restarts_a_failed_task_once_and_the_owner_any_time() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Failed);
+        task.repo = std::env::temp_dir().display().to_string();
+        app.store.save_task(&task).unwrap();
+        let start = |source: Option<&str>| {
+            let mut params = json!({"id": task.id});
+            if let Some(s) = source {
+                params["source"] = json!(s);
+            }
+            params
+        };
+        app.handle_task_start(start(Some("overseer")))
+            .await
+            .unwrap();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert!(saved
+            .decisions
+            .contains(&ladder::AGENT_RESTART_LINE.to_string()));
+        // Failed again: the agent's second restart is refused, the owner's is not.
+        let mut failed = saved;
+        failed.mark_failed();
+        app.store.save_task(&failed).unwrap();
+        let err = app
+            .handle_task_start(start(Some("overseer")))
+            .await
+            .unwrap_err();
+        assert!(err.contains("only the owner"), "{err}");
+        app.handle_task_start(start(None)).await.unwrap();
+        app.shutdown();
     }
 }
 

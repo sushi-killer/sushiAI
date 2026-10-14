@@ -680,7 +680,7 @@ async fn correct_draft(
             FailureKind::Error,
             o.error.clone().unwrap_or_default(),
         );
-        task.status = TaskStatus::Failed;
+        task.mark_failed();
         task.updated_at = now_ms();
         app.save_task_logged(&task);
         app.broadcast_task(&task);
@@ -792,7 +792,7 @@ pub(super) async fn run_plan_stage(
             // "" -- never a silent fallback to some route the owner never
             // chose for this.
             if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-                t.status = TaskStatus::Failed;
+                t.mark_failed();
                 t.updated_at = now_ms();
                 app.save_task_logged(&t);
                 app.broadcast_task(&t);
@@ -913,6 +913,12 @@ pub(super) async fn run_plan_stage(
                     &task.repo,
                 ),
             );
+            // A resumed session holds the request already: it continues.
+            let brief_text = if resume_session.is_some() {
+                brief::build_plan_continue_brief(&task.variant(), task.parent.is_none())
+            } else {
+                brief_text
+            };
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));
@@ -974,7 +980,7 @@ pub(super) async fn run_plan_stage(
                             continue;
                         }
                         record_failure(&mut task, idx, FailureKind::Error, err);
-                        task.status = TaskStatus::Failed;
+                        task.mark_failed();
                         task.updated_at = now_ms();
                         app.save_task_logged(&task);
                         app.broadcast_task(&task);
@@ -993,7 +999,7 @@ pub(super) async fn run_plan_stage(
                 }
                 Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
                     record_failure(&mut task, idx, FailureKind::Error, msg);
-                    task.status = TaskStatus::Failed;
+                    task.mark_failed();
                     task.updated_at = now_ms();
                     app.save_task_logged(&task);
                     app.broadcast_task(&task);
@@ -1035,7 +1041,7 @@ pub(super) async fn run_plan_stage(
             if clarify_rounds >= 2 {
                 // Already asked the owner twice for more detail; a third
                 // unparseable round in a row means this isn't going anywhere.
-                task.status = TaskStatus::Failed;
+                task.mark_failed();
                 task.updated_at = now_ms();
                 app.save_task_logged(&task);
                 app.broadcast_task(&task);

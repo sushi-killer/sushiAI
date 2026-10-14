@@ -2108,6 +2108,14 @@ pub struct Task {
     /// an unarchive or a rebroadcast never wakes it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overseer_woken: bool,
+    /// An attempt was committed with no review verdict: the work is never
+    /// landed by itself, it reaches the owner as a pull request marked so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unreviewed: bool,
+    /// How many times the task went into `failed`; the owner notice is keyed
+    /// on it, so a restart that fails again is told once more.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub failed_count: u32,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -2119,6 +2127,14 @@ pub struct PrPlan {
     pub branch: String,
     pub title: String,
     pub body: String,
+}
+
+impl Task {
+    /// Puts the task into `failed` and counts the transition.
+    pub fn mark_failed(&mut self) {
+        self.status = TaskStatus::Failed;
+        self.failed_count += 1;
+    }
 }
 
 /// A task's place in the file queue (`engine/leases.rs`, `engine/graph.rs`).
@@ -3148,6 +3164,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3415,6 +3433,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3488,6 +3508,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3591,6 +3613,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,

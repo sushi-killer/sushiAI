@@ -15,8 +15,6 @@ pub(crate) enum HardLimit {
     /// Permission, protected path and budget questions. The standing grant is
     /// the owner's own `Always for this repo` answer.
     OwnerOnlyKind,
-    /// Accepting an attempt as done.
-    AcceptAttempt,
     /// Dropping a check or criterion.
     SharedCheckDrop,
     /// Loosening the sandbox, or anything about secrets and security.
@@ -147,9 +145,6 @@ fn words(text: &str) -> String {
 pub(crate) fn hard_limit(question: &Question, answer: &str) -> Option<HardLimit> {
     if owner_only(question.kind) {
         return Some(HardLimit::OwnerOnlyKind);
-    }
-    if is_accept_option(answer) {
-        return Some(HardLimit::AcceptAttempt);
     }
     let drops = match question.kind {
         QuestionKind::PreexistingFailure => is_option(answer, PRE_EXISTING_DROP),
@@ -423,11 +418,7 @@ mod tests {
     fn exhausted_q() -> Question {
         Question::new(
             "Attempts keep failing with a review failure: continue, change approach, or stop?",
-            vec![
-                "continue".into(),
-                brief::ACCEPT_LAST_ATTEMPT.into(),
-                "stop".into(),
-            ],
+            vec!["continue".into(), "stop".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
         )
@@ -771,11 +762,6 @@ mod tests {
         );
         let cases: Vec<(HardLimit, Question, &str)> = vec![
             (HardLimit::OwnerOnlyKind, permission, "Allow once"),
-            (
-                HardLimit::AcceptAttempt,
-                exhausted_q(),
-                brief::ACCEPT_LAST_ATTEMPT,
-            ),
             (HardLimit::SharedCheckDrop, base_q(), PRE_EXISTING_DROP),
             (
                 HardLimit::SandboxOrSecurity,
@@ -857,18 +843,6 @@ mod tests {
             .decisions
             .iter()
             .any(|d| is_orchestrator_answer_decision(d)));
-        // At the cap the guard refuses and the overseer is woken.
-        let mut capped = waiting_task(&repo, exhausted_q());
-        for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
-            capped
-                .decisions
-                .push(format!("{EXHAUSTED_ANSWER_PREFIX} -> continue (r)"));
-        }
-        let (answer, _) = park(&app, capped).await;
-        assert_eq!(answer, None);
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
-
         // One non-owner retry per base.
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
@@ -880,7 +854,7 @@ mod tests {
         let (answer, _) = park(&app, retried).await;
         assert_eq!(answer, None);
         chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 2);
+        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
     }
 
     #[tokio::test]

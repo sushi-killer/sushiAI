@@ -152,6 +152,7 @@ fn drafting_task_created_with_start_false_stops_after_planning_for_review() {
 const GARBAGE_PLANNER_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"no fenced block here, sorry"}'
@@ -173,6 +174,7 @@ esac
 const CLARIFY_THEN_SUCCEED_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     case "$input" in
@@ -485,6 +487,7 @@ fn the_plan_brief_asks_for_a_contract() {
 const VISUAL_COMMAND_CRITERION_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Parser\",\"goal\":\"Handle X\",\"criteria\":[{\"text\":\"the parser handles X -- check: cargo test\",\"visual\":true}],\"verify\":[\"true\"],\"questions\":[]}\n```"}'
@@ -549,6 +552,7 @@ fn a_visual_flag_on_a_command_checked_criterion_does_not_demand_an_image() {
 const SCREENSHOT_PLAN_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     json='{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Panel\",\"goal\":\"Change the panel\",\"criteria\":[\"the panel shows X -- check: screenshot artifacts/panel.png\"],\"verify\":[\"true\"],\"screenshot\":\"  mkdir -p artifacts && echo png > artifacts/panel.png  \",\"questions\":[]}\n```"}'
@@ -624,6 +628,7 @@ out() {
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
   *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *CHILD_REQ_B*) out '"```sushi-plan\n{\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"]}\n```"' ;;
@@ -757,6 +762,7 @@ out() {
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
   *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*) out '"```sushi-plan\n{\"title\":\"One part\",\"goal\":\"Create a.txt\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"true\"],\"checks\":[{\"criterion\":0,\"run\":\"test -f a.txt\"},{\"criterion\":9,\"run\":\"test -f nowhere.txt\"}],\"heldOut\":{\"criterion\":0,\"run\":\"test -s a.txt\"},\"screenshot\":\"  mkdir -p artifacts && echo png > artifacts/a.png  \",\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\",\"request\":\"CHILD_REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"b.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"CHILD_REQ_B\"}]}\n```"' ;;
   *MAKE_A*) echo a > a.txt; out "$report" ;;
   *MAKE_B*) echo b > b.txt; out "$report" ;;

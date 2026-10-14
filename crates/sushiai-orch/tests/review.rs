@@ -109,6 +109,7 @@ fn a_preflight_ruling_drops_a_failing_final_before_review_starts() {
         r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+*"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
 *sushi-plan*)
   cat "$LOG_DIR/plan.jsonl" ;;
 *"You check a coding task brief"*)

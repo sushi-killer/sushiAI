@@ -528,6 +528,7 @@ if [ -n "$WITH_HELD" ]; then
   held=',\"heldOut\":{\"criterion\":0,\"run\":\"test -f b.txt && echo x >> $LOG_DIR/held.log; test -f c.txt\"}'
 fi
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;

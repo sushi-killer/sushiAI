@@ -19,6 +19,7 @@ emit() {
 }
 report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_X*) emit '```sushi-plan\n{\"title\":\"Part X\",\"goal\":\"PART_X: x.txt\",\"verify\":[\"test -f x.txt\"]}\n```' ;;

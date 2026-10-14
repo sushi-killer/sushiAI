@@ -16,6 +16,7 @@ case "$brief" in
   printf '%s\n' '{"type":"result","total_cost_usd":0.05,"usage":{"input_tokens":4,"cache_read_input_tokens":6,"output_tokens":2},"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *"An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Create SECOND."}' ;;
+*"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
 *sushi-plan*)
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
   printf '%s\n' '{"type":"result","total_cost_usd":0.02,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Two tries\",\"goal\":\"Needs a second attempt\",\"criteria\":[\"SECOND exists\"],\"verify\":[\"test -f SECOND\"],\"questions\":[]}\n```"}' ;;

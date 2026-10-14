@@ -434,6 +434,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_SIDE*) out '"```sushi-plan\n{\"title\":\"Side\",\"goal\":\"PART_SIDE: side.txt\",\"verify\":[\"test -f side.txt\"]}\n```"' ;;
@@ -524,6 +525,7 @@ out() {
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 plan() { out "\"\`\`\`sushi-plan\\n{\\\"title\\\":\\\"$1\\\",\\\"goal\\\":\\\"$2: write $3.txt\\\",\\\"verify\\\":[\\\"test -f $3.txt\\\"]}\\n\`\`\`\""; }
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) plan "Part A" PART_A a ;;
@@ -705,6 +707,7 @@ case "$input" in
   *"You check a coding task brief"*)
     sleep 1
     result '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) which=a ;;

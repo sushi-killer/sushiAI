@@ -537,6 +537,7 @@ impl App {
             branch: branch.clone(),
             title: p.title.clone().unwrap_or_default(),
             body: p.body.clone().unwrap_or_default(),
+            branch_from: crate::model::BranchFrom::Owner,
         };
         run_cmd("git", &["fetch", "origin", &base], &repo, GIT_TIMEOUT).await?;
         let up_to_date = run_cmd(

@@ -94,6 +94,7 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         pr_url: None,
         pr_branch: None,
         pr_pending: false,
+        pr_plan: None,
         overseer_woken: false,
         planned_tier: None,
         planned_by_parent: false,

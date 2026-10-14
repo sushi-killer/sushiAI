@@ -1,5 +1,6 @@
-//! A done top-level task that could not land on the default branch gets a
-//! pull request drafted by a read-only helper and opened through `task.pr`.
+//! A done top-level task whose work did not land gets a pull request drafted
+//! by a read-only helper and opened through `task.pr`, by default and without
+//! the overseer.
 
 mod common;
 
@@ -33,6 +34,7 @@ brief=$(cat)
 case "$brief" in
 "## Pull request draft"*)
 printf '%s' "$brief" > "$(dirname "$0")/draft-brief.md"
+echo draft >> "$(dirname "$0")/drafts.log"
 {wait}
 cat <<'JSON'
 {result}
@@ -97,18 +99,43 @@ impl Setup {
     }
 }
 
+/// What the settings say about pull requests.
+#[derive(Clone, Copy, PartialEq)]
+enum Pr {
+    /// Settings untouched: the default.
+    Default,
+    /// A per-repo entry turns it on.
+    On,
+    /// `prOnDoneOff`.
+    Off,
+}
+
 fn setup(reply: &str, enabled: bool) -> Setup {
     setup_with(reply, enabled, false, false)
 }
 
 fn setup_with(reply: &str, enabled: bool, hold: bool, land: bool) -> Setup {
+    let pr = if enabled { Pr::On } else { Pr::Off };
+    setup_full(reply, pr, hold, land, FAKE_GH, &[])
+}
+
+fn setup_full(
+    reply: &str,
+    pr: Pr,
+    hold: bool,
+    land: bool,
+    gh_body: &str,
+    env: &[(&str, &str)],
+) -> Setup {
     let tools = tempfile::tempdir().unwrap();
     let harness = fake_harness_script(tools.path(), "fake-claude.sh", &script(reply, hold));
-    let gh = fake_harness_script(tools.path(), "fake-gh.sh", FAKE_GH);
-    let daemon = Daemon::spawn(&[
+    let gh = fake_harness_script(tools.path(), "fake-gh.sh", gh_body);
+    let mut vars = vec![
         ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
         ("ORCHD_GH_BIN", gh.to_str().unwrap()),
-    ]);
+    ];
+    vars.extend_from_slice(env);
+    let daemon = Daemon::spawn(&vars);
     let repo = init_git_repo();
     git_out(repo.path(), &["branch", "-M", "main"]);
     let remote = tempfile::tempdir().unwrap();
@@ -120,8 +147,14 @@ fn setup_with(reply: &str, enabled: bool, hold: bool, land: bool) -> Setup {
     git_out(repo.path(), &["push", "-q", "origin", "main"]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
-    if enabled {
-        settings["prOnDoneRepos"] = serde_json::json!({ repo.path().to_str().unwrap(): true });
+    match pr {
+        Pr::On => {
+            settings["prOnDoneRepos"] = serde_json::json!({ repo.path().to_str().unwrap(): true });
+        }
+        Pr::Off => settings["prOnDoneOff"] = serde_json::json!(true),
+        // The shipped default (pinned in the model test); the shared test
+        // setup turns it off for every other suite.
+        Pr::Default => settings["prOnDoneOff"] = serde_json::json!(false),
     }
     if land {
         settings["landOnDefaultRepos"] = serde_json::json!({ repo.path().to_str().unwrap(): true });
@@ -358,5 +391,313 @@ fn a_restart_resumes_the_pull_request_of_a_done_task() {
         "{}",
         s.gh_log()
     );
+    s.daemon.shutdown_and_wait();
+}
+
+/// A gh that fails `pr list` while `$dir/fail-<kind>` exists with `stderr`.
+const GH_FAILING: &str = r#"#!/bin/sh
+dir="$(dirname "$0")"
+printf '%s\n' "$*" >> "$dir/gh.log"
+case "$1 $2" in
+  "pr list")
+    if [ -f "$dir/auth-broken" ]; then
+      echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+      exit 1
+    fi
+    n=$(cat "$dir/fails" 2>/dev/null || echo 0)
+    if [ "$n" -lt "$(cat "$dir/fail-first" 2>/dev/null || echo 0)" ]; then
+      echo $((n + 1)) > "$dir/fails"
+      echo "error connecting to api.github.example: connection reset" >&2
+      exit 1
+    fi
+    [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
+  "pr create") touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+esac
+"#;
+
+const FAST_RETRY: (&str, &str) = ("ORCHD_PR_RETRY_MS", "100,100,100,100");
+
+/// Assistant notes in the repo's chat that mention a pull request.
+fn notices(s: &Setup, id: &str) -> usize {
+    note_texts(s, id).len()
+}
+
+/// Assistant notes in the repo's chat that mention a pull request.
+fn note_texts(s: &Setup, id: &str) -> Vec<String> {
+    let repo = s.daemon.request("task.get", serde_json::json!({"id": id}))["repo"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let thread = s
+        .daemon
+        .request("chat.get", serde_json::json!({"repo": repo}));
+    thread["messages"]
+        .as_array()
+        .map(|m| {
+            m.iter()
+                .filter_map(|m| m["text"].as_str())
+                .filter(|t| t.to_lowercase().contains("pull request"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn wait_notice(s: &Setup, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while notices(s, id) == 0 {
+        assert!(Instant::now() < deadline, "no owner notice");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn default_settings_and_no_overseer_open_the_pull_request_of_a_refused_landing() {
+    let reply = "{\"branch\":\"feature/by-default\",\"title\":\"feat: by default\",\"body\":\"b\"}";
+    let s = setup_full(reply, Pr::Default, false, false, FAKE_GH, &[]);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let log = s.gh_log();
+    assert!(
+        log.contains("--head feature/by-default --title feat: by default"),
+        "{log}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_task_with_land_off_gets_a_pull_request_too() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[]);
+    let id = s.create(serde_json::json!({"land": false}));
+    let task = done(&s, &id);
+    assert!(task.get("landedSha").is_none(), "{task}");
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_transient_gh_failure_is_retried_and_the_pull_request_opens_without_a_notice() {
+    let s = setup_full("{}", Pr::Default, false, false, GH_FAILING, &[FAST_RETRY]);
+    std::fs::write(s.tools.path().join("fail-first"), "2").unwrap();
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let task = wait_decision(&s, &id, "PR: try 2 failed");
+    assert!(
+        task["decisions"].to_string().contains("connection reset"),
+        "{task}"
+    );
+    assert_eq!(s.gh_log().matches("pr create").count(), 1, "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 0);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_transient_failure_that_never_clears_stops_after_the_bound_with_one_notice() {
+    let s = setup_full("{}", Pr::Default, false, false, GH_FAILING, &[FAST_RETRY]);
+    std::fs::write(s.tools.path().join("fail-first"), "100").unwrap();
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "PR: not opened after 5 tries");
+    assert_eq!(task["status"], "done", "{task}");
+    wait_notice(&s, &id);
+    settle();
+    assert_eq!(s.gh_log().matches("pr list").count(), 5, "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 1);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_auth_failure_sends_one_notice_does_not_loop_and_task_pr_opens_it_later() {
+    let s = setup_full("{}", Pr::Default, false, false, GH_FAILING, &[FAST_RETRY]);
+    std::fs::write(s.tools.path().join("auth-broken"), "").unwrap();
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "PR: not opened: ");
+    assert_eq!(task["status"], "done", "{task}");
+    assert!(
+        task["decisions"].to_string().contains("gh auth login"),
+        "{task}"
+    );
+    wait_notice(&s, &id);
+    settle();
+    assert_eq!(s.gh_log().matches("pr list").count(), 1, "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 1);
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(task.get("prUrl").is_none() && task.get("prPending").is_none());
+    // Logged in again: the owner opens it later.
+    std::fs::remove_file(s.tools.path().join("auth-broken")).unwrap();
+    let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
+    assert_eq!(opened["prUrl"], URL, "{opened}");
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_base_checkout_that_stays_dirty_leaves_the_work_on_its_branch_and_opens_the_pull_request() {
+    let s = setup_full(
+        "{}",
+        Pr::Default,
+        false,
+        true,
+        FAKE_GH,
+        &[("ORCHD_LANDING_DIRTY_LIMIT_MS", "4000")],
+    );
+    std::fs::write(s.repo.path().join("README.md"), "hello\nmy edit\n").unwrap();
+    let id = s.create(serde_json::json!({}));
+    let waiting = poll_until(&s.daemon, &id, |st| {
+        matches!(st, "landing" | "done" | "failed" | "stopped")
+    });
+    assert_eq!(waiting["status"], "landing", "{waiting}");
+    // A retry before the bound changes nothing: the retry is its own loop, so
+    // wait for its decision to be the only state we can see.
+    s.daemon
+        .request("task.start", serde_json::json!({"id": id}));
+    std::thread::sleep(Duration::from_millis(1000));
+    let early = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert_eq!(early["status"], "landing", "{early}");
+    assert!(
+        !early["decisions"].to_string().contains("Land: gave up"),
+        "{early}"
+    );
+    std::thread::sleep(Duration::from_millis(3500));
+    s.daemon
+        .request("task.start", serde_json::json!({"id": id}));
+    let task = done(&s, &id);
+    assert!(task.get("landedSha").is_none(), "{task}");
+    assert!(
+        task["decisions"].to_string().contains("Land: gave up"),
+        "{task}"
+    );
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    assert_eq!(
+        std::fs::read_to_string(s.repo.path().join("README.md")).unwrap(),
+        "hello\nmy edit\n"
+    );
+    wait_notice(&s, &id);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_dirty_give_up_does_not_promise_a_pull_request_when_they_are_off() {
+    let s = setup_full(
+        "{}",
+        Pr::Off,
+        false,
+        true,
+        FAKE_GH,
+        &[("ORCHD_LANDING_DIRTY_LIMIT_MS", "300")],
+    );
+    std::fs::write(s.repo.path().join("README.md"), "hello\nmy edit\n").unwrap();
+    let id = s.create(serde_json::json!({}));
+    poll_until(&s.daemon, &id, |st| st == "landing");
+    std::thread::sleep(Duration::from_millis(600));
+    s.daemon
+        .request("task.start", serde_json::json!({"id": id}));
+    done(&s, &id);
+    wait_notice(&s, &id);
+    let texts = note_texts(&s, &id);
+    assert!(texts.iter().all(|t| !t.contains("is opened")), "{texts:?}");
+    assert!(s.gh_log().is_empty(), "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn landing_a_done_task_while_its_pull_request_is_drafted_cancels_the_pull_request() {
+    let reply = "{\"branch\":\"feature/late\",\"title\":\"t\",\"body\":\"b\"}";
+    let s = setup_full(reply, Pr::Default, true, false, FAKE_GH, &[]);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    wait_for(&s.tools.path().join("draft-started"));
+    // The owner turns landing on and lands the task while the draft runs.
+    let mut settings = s.daemon.request("settings.get", serde_json::json!({}));
+    settings["landOnDefaultRepos"] = serde_json::json!({ s.repo.path().to_str().unwrap(): true });
+    s.daemon
+        .request("settings.set", serde_json::json!({"settings": settings}));
+    s.daemon.request("task.land", serde_json::json!({"id": id}));
+    let landed = poll_until(&s.daemon, &id, |st| st == "done" || st == "failed");
+    assert!(landed["landedSha"].is_string(), "{landed}");
+    std::fs::write(s.tools.path().join("go"), "").unwrap();
+    wait_for(&s.tools.path().join("drafts.log"));
+    settle();
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(
+        task.get("prPending").is_none() && task.get("prUrl").is_none(),
+        "{task}"
+    );
+    assert!(
+        !task["decisions"].to_string().contains("PR: not opened"),
+        "{task}"
+    );
+    assert!(s.gh_log().is_empty(), "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 0);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_restart_reuses_the_saved_draft_instead_of_drafting_again() {
+    let reply = "{\"branch\":\"feature/kept\",\"title\":\"t\",\"body\":\"b\"}";
+    let mut s = setup_full(reply, Pr::Default, false, false, GH_FAILING, &[]);
+    std::fs::write(s.tools.path().join("fail-first"), "1").unwrap();
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    // The first try fails and the flow sleeps with the draft saved.
+    wait_decision(&s, &id, "PR: try 1 failed");
+    let drafts = |s: &Setup| {
+        std::fs::read_to_string(s.tools.path().join("drafts.log"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    assert_eq!(drafts(&s), 1);
+    let other = s.tools.path().join("fake-claude-b.sh");
+    std::fs::copy(s.tools.path().join("fake-claude.sh"), &other).unwrap();
+    let gh = s.tools.path().join("fake-gh.sh");
+    s.daemon.restart(&[
+        ("ORCHD_CLAUDE_BIN", other.to_str().unwrap()),
+        ("ORCHD_GH_BIN", gh.to_str().unwrap()),
+    ]);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    assert_eq!(drafts(&s), 1, "drafted again after the restart");
+    assert!(s.gh_log().contains("--head feature/kept"), "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_repo_without_an_origin_is_noted_once_with_no_draft_and_no_notice() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[]);
+    git_out(s.repo.path(), &["remote", "remove", "origin"]);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "no origin remote");
+    assert_eq!(task["status"], "done", "{task}");
+    settle();
+    assert!(
+        !s.tools.path().join("drafts.log").exists(),
+        "a draft ran without an origin"
+    );
+    assert!(s.gh_log().is_empty(), "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 0);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_remote_that_is_no_github_host_gets_one_notice_for_the_repo() {
+    let gh = GH_FAILING.replace(
+        "echo \"To get started with GitHub CLI, please run:  gh auth login\" >&2",
+        "echo \"none of the git remotes configured for this repository point to a known GitHub host\" >&2",
+    );
+    let s = setup_full("{}", Pr::Default, false, false, &gh, &[FAST_RETRY]);
+    std::fs::write(s.tools.path().join("auth-broken"), "").unwrap();
+    let first = s.create(serde_json::json!({}));
+    done(&s, &first);
+    wait_decision(&s, &first, "known GitHub host");
+    wait_notice(&s, &first);
+    let second = s.create(serde_json::json!({"title": "Second"}));
+    done(&s, &second);
+    wait_decision(&s, &second, "known GitHub host");
+    settle();
+    assert_eq!(notices(&s, &first), 1);
+    assert_eq!(s.gh_log().matches("pr list").count(), 2, "{}", s.gh_log());
     s.daemon.shutdown_and_wait();
 }

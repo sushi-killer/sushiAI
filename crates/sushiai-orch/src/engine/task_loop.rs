@@ -3789,7 +3789,6 @@ pub(super) async fn finish_attempt(
     } else {
         None
     };
-    let mut pr_wanted = false;
     if let Some(landing) = landing {
         match landing {
             Landing::Waiting => {
@@ -3858,8 +3857,8 @@ pub(super) async fn finish_attempt(
                 app.finish_task_loop(task_id);
                 return Tail::Return;
             }
-            Landing::NoParent => {}
-            Landing::DefaultBranchRefused => pr_wanted = true,
+            // Refused: done on its own branch, which gets a pull request.
+            Landing::NoParent | Landing::DefaultBranchRefused => {}
         }
     }
 
@@ -3910,9 +3909,7 @@ pub(super) async fn finish_attempt(
         }
     }
     if task.status == TaskStatus::Done {
-        if pr_wanted {
-            super::pr_draft::mark_pr_pending(app, task);
-        }
+        super::pr_draft::mark_pr_pending(app, task);
         task.updated_at = now_ms();
         app.write_report(task).await;
         app.release_worktree(task, "committed on its branch").await;

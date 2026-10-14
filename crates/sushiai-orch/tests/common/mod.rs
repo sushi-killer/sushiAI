@@ -237,6 +237,9 @@ impl Daemon {
             // The answer policy answers routine questions itself; the other
             // tests wait for them. Its own tests turn it back on.
             settings["answerPolicy"] = serde_json::json!(false);
+            // A done task opens its pull request on its own, which runs the PR
+            // drafter; the pull request tests turn it back on.
+            settings["prOnDoneOff"] = serde_json::json!(true);
             if native_sandbox_unavailable() {
                 fit_sandbox(&mut settings);
             }

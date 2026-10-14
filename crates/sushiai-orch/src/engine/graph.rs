@@ -470,7 +470,6 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     let task_id = task.id.clone();
     let worktree = PathBuf::from(&task.worktree);
     let mut landed = false;
-    let mut pr_wanted = false;
     if task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
@@ -504,9 +503,8 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
             }
             // A parent has no review to run again.
             Landing::Rereview => {}
-            // Refused: done on its own branch, as with land off.
-            Landing::NoParent => {}
-            Landing::DefaultBranchRefused => pr_wanted = true,
+            // Refused: done on its own branch, which gets a pull request.
+            Landing::NoParent | Landing::DefaultBranchRefused => {}
         }
     }
     if !landed {
@@ -537,9 +535,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
         git::delete_wip_ref(&worktree, &task_id);
     }
     task.status = TaskStatus::Done;
-    if pr_wanted {
-        super::pr_draft::mark_pr_pending(app, task);
-    }
+    super::pr_draft::mark_pr_pending(app, task);
     task.updated_at = now_ms();
     app.write_report(task).await;
     app.release_worktree(

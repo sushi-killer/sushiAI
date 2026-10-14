@@ -885,6 +885,7 @@ impl App {
         }
         self.leases.lock().unwrap().remove(&task.id);
         self.permission_waits.lock().unwrap().remove(&task.id);
+        task.queue.dirty_since = None;
     }
 
     /// Registers `token` for a run's Stop hook and keeps it in the run's token

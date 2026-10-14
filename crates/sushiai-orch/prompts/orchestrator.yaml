@@ -75,6 +75,10 @@ overseer_restart: |
 overseer_done: |
   Task {id} ("{title}") is done. Read it with task_get. If its checks are green and it has no pull request yet, open one with task_pr; never merge. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by its title in text for the owner.
 
+# A top-level task finished and orchd opens its pull request itself (wakes the orchestrator when autoAnswer is on).
+overseer_done_pr_owned: |
+  Task {id} ("{title}") is done. orchd opens its pull request itself; do not call task_pr. Read it with task_get only if you need to. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by title in text for the owner.
+
 # What a task gets as the instructions of its sushiai-messages server (`sushiai mcp --task`).
 mcp_task_instructions: |
   You are one of several task agents working in the same repository, coordinated by the orchestrator. peer_list shows the other tasks, peer_send messages one of them, inbox_read shows what was sent to you, and ask_orchestrator asks the owner's orchestrator a question without stopping your work. Replies and messages reach you with your next attempt's brief, so keep working meanwhile.

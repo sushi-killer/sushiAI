@@ -949,8 +949,8 @@ mod tests {
     #[test]
     fn the_impossible_question_yields_its_criterion_and_evidence() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.criteria = vec!["zero".into(), "one".into()];
-        // The evidence holds the old separator: it is not parsed back.
+        task.criteria = vec!["zero".into(), "one. Evidence: nope".into()];
+        // The criterion and the evidence hold the old separator: nothing is parsed back.
         let evidence = "see a. Evidence: b";
         let claim = brief::Impossible {
             criterion: 1,

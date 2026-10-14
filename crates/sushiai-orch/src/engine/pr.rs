@@ -94,6 +94,18 @@ pub(super) fn pr_body(task: &Task) -> String {
         body.push_str(report.trim());
         body.push('\n');
     }
+    let waived: Vec<&Assumption> = task
+        .assumptions
+        .iter()
+        .filter(|a| a.by == WAIVER_BY && a.answer == WAIVED && !a.overturned)
+        .collect();
+    if !waived.is_empty() {
+        body.push_str("\n## Waived base failures\n\n");
+        for a in waived {
+            let command = a.commands.join(", ");
+            body.push_str(&format!("- {command}: {}\n", a.evidence.trim()));
+        }
+    }
     body
 }
 
@@ -550,5 +562,26 @@ mod unreviewed_tests {
         let body = pr_body(&parent);
         assert!(body.starts_with(UNREVIEWED_LINE), "{body}");
         assert!(body.contains("subtask \"Part\""), "{body}");
+    }
+
+    #[test]
+    fn a_waived_base_failure_is_listed_until_the_owner_overturns_it() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.assumptions.push(Assumption {
+            question: "q".into(),
+            answer: WAIVED.into(),
+            evidence: "alpha fails on the base".into(),
+            by: WAIVER_BY.into(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: Some(1),
+            commands: vec!["check".into()],
+            overturned: false,
+            owner_answer: None,
+        });
+        let body = pr_body(&task);
+        assert!(body.contains("## Waived base failures"), "{body}");
+        assert!(body.contains("- check: alpha fails on the base"), "{body}");
+        task.assumptions[0].overturned = true;
+        assert!(!pr_body(&task).contains("Waived"));
     }
 }

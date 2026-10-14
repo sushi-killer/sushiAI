@@ -1004,6 +1004,7 @@ pub(super) async fn run_task_loop(
                 advisor_fingerprint: None,
                 candidates: vec![],
                 criteria_results: vec![],
+                cause: None,
                 diff_stat: None,
             };
             if !carry_conflicts.is_empty() {

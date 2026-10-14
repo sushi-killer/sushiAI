@@ -58,21 +58,14 @@ pub(super) fn policy_open(app: &App, task: &Task, question: &Question) -> bool {
 /// store reads here so the answer rule itself remains deterministic.
 fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool>, bool) {
     let changed = git::changed_files(Path::new(&task.worktree), &task.base_sha).unwrap_or_default();
-    let base_runs = app.base_runs.lock().unwrap();
     let targeted = question
         .commands
         .iter()
-        .enumerate()
-        .map(|(i, command)| {
-            let output = base_runs
-                .get(&(task.base_sha.clone(), command.clone()))
-                .map(|run| run.tail.clone())
-                .or_else(|| question.base_tails.get(i).cloned())
-                .unwrap_or_default();
-            base_check::is_task_target(task, command, &output, &changed)
+        .map(|command| {
+            base_check::is_task_target(task, command, &changed)
+                || attributed_target(app, &task.base_sha, command)
         })
         .collect();
-    drop(base_runs);
     let may_land_on_default = app.settings.read().unwrap().may_land_on_default(&task.repo);
     let base_moves = task.base_ref.as_ref().is_some_and(|base_ref| {
         // Nothing lands on a default branch that landing may not move, so a
@@ -1069,8 +1062,8 @@ mod tests {
     #[test]
     fn preexisting_policy_keeps_targets_retries_only_moving_bases_and_otherwise_defers() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
-        let command = "cargo test -p sushiai-orch --test base_retry";
+        let command = "node --test tests/focus.test.cjs";
+        task.request = Some(format!("Make {command} pass"));
         let question = base_check::pre_existing_question(
             &[VerifyOutcome {
                 command: command.into(),
@@ -1080,24 +1073,18 @@ mod tests {
             }],
             &task.base_sha,
         );
-        let targeted = base_check::is_task_target(
-            &task,
-            command,
-            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
-            &[],
-        );
+        let targeted = base_check::is_task_target(&task, command, &[]);
         let (answer, evidence) =
             rule_answer_with_context(&task, &question, 1, &[targeted], false).unwrap();
         assert_eq!(answer, base_check::KEEP_ALL);
         assert!(evidence.contains("task is meant to make the check pass"));
 
         task.request = None;
-        let path_command = "cargo test -p sushiai-orch --test base_retry";
+        let path_command = "node --test crates/sushiai-orch/tests/base_retry.rs";
         let path_output = "error in crates/sushiai-orch/tests/base_retry.rs:17:2";
         let path_target = base_check::is_task_target(
             &task,
             path_command,
-            path_output,
             &["crates/sushiai-orch/tests/base_retry.rs".into()],
         );
         assert!(path_target);

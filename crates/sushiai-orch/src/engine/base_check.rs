@@ -146,35 +146,6 @@ fn path_without_location(path: &str) -> &str {
     }
 }
 
-fn looks_like_identifier_or_path(token: &str) -> bool {
-    token.len() >= 6
-        && (token.contains('_')
-            || token.contains("::")
-            || token.contains('/')
-            || token.rsplit_once('.').is_some_and(|(name, ext)| {
-                !name.is_empty()
-                    && !ext.is_empty()
-                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            }))
-}
-
-fn text_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| c.is_whitespace() || "`\"'[](){}".contains(c))
-        .filter(|token| !token.is_empty())
-}
-
-fn output_paths(output: &str) -> Vec<String> {
-    output
-        .split(|c: char| c.is_whitespace() || "`\"'[](){}<>,;".contains(c))
-        .filter_map(|token| {
-            let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | ')' | '('));
-            let path = path_without_location(token);
-            (path != token || check_targets(path).iter().any(|t| t == path))
-                .then(|| path.strip_prefix("./").unwrap_or(path).to_string())
-        })
-        .collect()
-}
-
 /// Whether the request, goal or criteria name `command` itself: the explicit
 /// evidence that the task is meant to make a failing check pass.
 pub(super) fn command_named_by_task(task: &Task, command: &str) -> bool {
@@ -216,42 +187,19 @@ pub(super) fn failing_test_named_by_task(task: &Task, tests: &[String]) -> bool 
         .any(|name| name.chars().count() >= 4 && text.contains(name.as_str()))
 }
 
-/// Whether a pre-existing failing check is part of this task's target.
-/// `output` is the cached base-run tail, or the tail quoted in the question;
-/// changed files are relative to the task's base SHA.
-pub(super) fn is_task_target(
-    task: &Task,
-    command: &str,
-    output: &str,
-    changed_files: &[String],
-) -> bool {
-    if command_named_by_task(task, command) {
-        return true;
-    }
-    let named_tokens: Vec<String> = task
-        .request
-        .iter()
-        .chain(std::iter::once(&task.goal))
-        .chain(task.criteria.iter())
-        .flat_map(|text| text_tokens(text))
-        .filter(|token| looks_like_identifier_or_path(token))
-        .map(str::to_string)
-        .collect();
-    if named_tokens.iter().any(|token| output.contains(token)) {
-        return true;
-    }
-
-    let mut paths = check_targets(command);
-    paths.extend(output_paths(output));
-    paths.iter().any(|path| {
-        let path = path_without_location(path);
-        changed_files.iter().any(|changed| {
-            let changed = changed.strip_prefix("./").unwrap_or(changed);
-            changed == path
-                || changed.ends_with(&format!("/{path}"))
-                || path.ends_with(&format!("/{changed}"))
+/// Whether a pre-existing failing check is part of this task's target: the
+/// task names the command, or the command names a file the task changed.
+/// Changed files are relative to the task's base SHA.
+pub(super) fn is_task_target(task: &Task, command: &str, changed_files: &[String]) -> bool {
+    command_named_by_task(task, command)
+        || check_targets(command).iter().any(|path| {
+            changed_files.iter().any(|changed| {
+                let changed = changed.strip_prefix("./").unwrap_or(changed);
+                changed == path
+                    || changed.ends_with(&format!("/{path}"))
+                    || path.ends_with(&format!("/{changed}"))
+            })
         })
-    })
 }
 
 /// Whether `target` (a file, a directory or a glob) names something in
@@ -1961,41 +1909,45 @@ mod tests {
     }
 
     #[test]
-    fn task_target_detection_uses_request_output_and_changed_paths_but_ignores_ci_gates() {
+    fn task_target_detection_uses_the_command_and_changed_paths_but_ignores_ci_gates() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
-        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
+        task.request = Some("Make node --test tests/focus.test.cjs green".into());
         assert!(is_task_target(
             &task,
-            "cargo test -p sushiai-orch --lib",
-            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
+            "node --test tests/focus.test.cjs",
             &[]
         ));
 
         task.request = None;
         assert!(is_task_target(
             &task,
-            "cargo test -p sushiai-orch",
-            "error in crates/sushiai-orch/tests/base_retry.rs:17:2",
+            "node --test crates/sushiai-orch/tests/base_retry.rs",
             &["crates/sushiai-orch/tests/base_retry.rs".into()]
         ));
 
         task.criteria = vec!["Checks pass -- check: npm run ci".into()];
-        assert!(!is_task_target(&task, "npm run ci", "ci failed", &[]));
+        assert!(!is_task_target(&task, "npm run ci", &[]));
         task.criteria =
             vec!["Run the focused test -- check: node --test tests/base_retry.test.cjs".into()];
         assert!(is_task_target(
             &task,
             "node --test tests/base_retry.test.cjs",
-            "test failed",
             &[]
         ));
+    }
+
+    #[test]
+    fn a_name_in_the_check_output_alone_does_not_make_a_target() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
         task.criteria = vec!["Checks pass -- check: npm run ci".into()];
         task.goal = "Fix the failing a_base_retry_carries_the_planner_test_commit test".into();
-        assert!(is_task_target(
+        // The output names a path the task changed and a token of the goal:
+        // neither decides any more.
+        assert!(!is_task_target(&task, "npm run ci", &[]));
+        assert!(!is_task_target(
             &task,
-            "npm run ci",
-            "a_base_retry_carries_the_planner_test_commit ... FAILED",
-            &[]
+            "cargo test",
+            &["crates/sushiai-orch/tests/base_retry.rs".into()]
         ));
     }
 

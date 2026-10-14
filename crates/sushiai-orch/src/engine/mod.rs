@@ -35,6 +35,7 @@ mod messages;
 mod advisor;
 mod answer_policy;
 mod attempt_run;
+mod attribution;
 mod availability;
 mod backlog;
 mod base_check;
@@ -99,6 +100,7 @@ use advisor::*;
 pub(crate) use answer_policy::owner_only;
 use answer_policy::*;
 use attempt_run::*;
+use attribution::*;
 use availability::*;
 use backlog::*;
 pub(crate) use base_check::is_environment_result;
@@ -437,6 +439,9 @@ pub struct App {
     /// disk (`base-results.json`), so a restart does not run them again; an
     /// interrupted, cancelled or environment-failed run is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// The attribution turn's verdict per (base sha, command, run key, base
+    /// run key); a failed turn is kept as `None`. Memory only.
+    attributions: StdMutex<HashMap<AttributionKey, Option<Attribution>>>,
     /// Exit-0 checks on exact worktree trees, in insertion order, memory only.
     gate_passes: StdMutex<PassedChecks>,
     /// Retry decisions from background base runs, keyed by (base sha, command).
@@ -715,6 +720,7 @@ impl App {
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
+            attributions: StdMutex::new(HashMap::new()),
             gate_passes: StdMutex::new(Default::default()),
             base_run_decisions: StdMutex::new(HashMap::new()),
             base_jobs: StdMutex::new(HashMap::new()),

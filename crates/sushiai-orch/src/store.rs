@@ -729,6 +729,7 @@ mod tests {
                 advisor_fingerprint: None,
                 candidates: vec![],
                 criteria_results: vec![],
+                cause: None,
                 diff_stat: None,
             }],
             cost_usd: 0.0,

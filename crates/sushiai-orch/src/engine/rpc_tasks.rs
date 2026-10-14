@@ -1717,6 +1717,25 @@ mod answer_caller_tests {
     }
 
     #[tokio::test]
+    async fn a_retry_that_only_asks_to_look_again_is_open_to_agents_on_a_harness_or_daily_budget_wait(
+    ) {
+        let (app, _dir) = test_app();
+        for (kind, options, allow) in [
+            (QuestionKind::HarnessMissing, &["retry"][..], "retry"),
+            (
+                QuestionKind::DailyBudget,
+                &["run anyway", "stop"][..],
+                "run anyway",
+            ),
+        ] {
+            let id = waiting(&app, kind, options);
+            let _rx = park_permission(&app, &id);
+            let err = answer(&app, &id, allow, Some("mcp")).await;
+            assert_eq!(err.is_ok(), allow == "retry", "{kind:?}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn an_mcp_allow_on_an_owner_only_question_is_refused_and_it_stays_pending() {
         let (app, _dir) = test_app();
         for (kind, options, allow) in [
@@ -1736,7 +1755,6 @@ mod answer_caller_tests {
                 &["run anyway", "stop"][..],
                 "run anyway",
             ),
-            (QuestionKind::HarnessMissing, &["retry"][..], "retry"),
         ] {
             let id = waiting(&app, kind, options);
             let mut rx = park_permission(&app, &id);

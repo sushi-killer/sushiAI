@@ -3128,6 +3128,16 @@ const BASE_FETCH_EVERY: Duration = Duration::from_secs(60);
 /// How many times a failed carry is retried before the agent gets it as a
 /// conflict to fix.
 const CARRY_RETRIES: u32 = 3;
+
+/// The pause before a failed carry is tried again; `ORCHD_CARRY_RETRY_MS`
+/// shortens it for tests.
+fn carry_retry_pause() -> Duration {
+    let ms = std::env::var("ORCHD_CARRY_RETRY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15_000);
+    Duration::from_millis(ms)
+}
 /// The longest a task waits for its base to move, in seconds; after it the
 /// baseline rule judges the check against the base as it is. A test run may
 /// shorten it with `ORCHD_BASE_WAIT_SECS`.
@@ -3289,6 +3299,10 @@ pub(super) async fn carry_after_base_moves(
                 task.updated_at = now_ms();
                 app.save_task_logged(task);
                 app.broadcast_task(task);
+                tokio::select! {
+                    _ = cancel.cancelled() => return BaseRetry::Stopped,
+                    _ = tokio::time::sleep(carry_retry_pause()) => {}
+                }
             }
         }
     }
@@ -4196,6 +4210,7 @@ mod carry_retry_tests {
 
     #[tokio::test]
     async fn a_carry_that_keeps_failing_becomes_a_conflict_attempt_and_asks_nobody() {
+        std::env::set_var("ORCHD_CARRY_RETRY_MS", "0");
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
         task.base_ref = None;

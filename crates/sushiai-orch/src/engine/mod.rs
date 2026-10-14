@@ -50,6 +50,7 @@ mod decision_memory;
 mod deliverables;
 mod digest;
 mod finding_judge;
+mod fresh_base;
 mod graph;
 mod healing;
 mod hooks;
@@ -278,6 +279,9 @@ struct Secrets {
     /// The app has sent the values since this daemon started; until then
     /// every map above is empty, not "no values".
     received: bool,
+    /// Repo path -> its project's default branch: what a task made with no
+    /// `base` branches from.
+    project_branches: HashMap<String, String>,
 }
 
 struct TaskControl {
@@ -392,6 +396,8 @@ pub struct App {
     overseer_turn_timeout_ms: std::sync::atomic::AtomicU64,
     /// How long any task helper may run (ms).
     helper_timeout_ms: std::sync::atomic::AtomicU64,
+    /// How long fetching a task's base branch may take (ms).
+    base_fetch_timeout_ms: std::sync::atomic::AtomicU64,
     /// Keyed by audit id: the `repo.audit` runs still in flight.
     audits: std::sync::Mutex<HashMap<String, CancelToken>>,
     /// Every agent-to-agent message, mirrored to `<data>/messages.json`.
@@ -683,6 +689,9 @@ impl App {
             chat_turns: std::sync::Mutex::new(HashMap::new()),
             overseer_turn_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
             helper_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
+            base_fetch_timeout_ms: std::sync::atomic::AtomicU64::new(
+                fresh_base::FETCH_TIMEOUT.as_millis() as u64,
+            ),
             audits: std::sync::Mutex::new(HashMap::new()),
             messages: StdMutex::new(messages),
             hook_tokens: RwLock::new(HashMap::new()),

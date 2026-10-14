@@ -347,6 +347,7 @@ test("settings.set pushes a full-replace secrets.set: each route's resolved prof
     projects: {},
     projectMcp: {},
     projectRepos: {},
+    projectBranches: {},
   });
 });
 
@@ -373,6 +374,7 @@ test("secrets.set is always pushed, even to clear it: no profiles means profiles
     projects: {},
     projectMcp: {},
     projectRepos: {},
+    projectBranches: {},
   });
 });
 
@@ -418,6 +420,7 @@ test("a remote daemon receives only trusted project values and project MCP confi
     projects: { [project.id]: { PROJECT_KEY: "invented" } },
     projectMcp: { [project.id]: { LOOKUP_TOKEN: "invented-mcp" } },
     projectRepos: {},
+    projectBranches: {},
   });
 });
 

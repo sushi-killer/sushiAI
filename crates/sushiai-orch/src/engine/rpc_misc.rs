@@ -162,6 +162,8 @@ impl App {
             project_mcp: HashMap<String, HashMap<String, String>>,
             #[serde(default, rename = "projectRepos")]
             repo_projects: HashMap<String, String>,
+            #[serde(default, rename = "projectBranches")]
+            project_branches: HashMap<String, String>,
         }
         let p: P = serde_json::from_value(params).unwrap_or_default();
         let mut secrets = self.secrets.write().unwrap();
@@ -172,6 +174,12 @@ impl App {
             project_mcp: p.project_mcp,
             repo_projects: p.repo_projects,
             received: true,
+            project_branches: p
+                .project_branches
+                .into_iter()
+                .map(|(folder, branch)| (folder, branch.trim().to_string()))
+                .filter(|(_, branch)| !branch.is_empty())
+                .collect(),
         };
         secrets::redact_old_run_mcp(&self.data_dir, &secrets);
         Ok(json!({}))

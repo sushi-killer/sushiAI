@@ -418,6 +418,7 @@ impl App {
             request: Some(request),
             branch: None,
             base,
+            base_from: fresh_base::BaseFrom::Plain,
             variant,
             depends_on: vec![],
             parent: None,

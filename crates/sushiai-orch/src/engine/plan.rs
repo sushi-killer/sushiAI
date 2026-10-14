@@ -1525,6 +1525,7 @@ async fn split_into_subtasks(
                 request: Some(subtask_request(&parent, &request)),
                 branch: None,
                 base: parent.branch.clone(),
+                base_from: fresh_base::BaseFrom::Plain,
                 variant: parent.variant(),
                 depends_on: depends_on.clone(),
                 parent: Some(parent.id.clone()),

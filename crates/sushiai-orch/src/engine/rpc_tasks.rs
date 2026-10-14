@@ -19,6 +19,8 @@ pub(super) struct NewTask {
     pub(super) request: Option<String>,
     pub(super) branch: Option<String>,
     pub(super) base: String,
+    /// Whether `base` is fetched first (see `fresh_base`).
+    pub(super) base_from: fresh_base::BaseFrom,
     pub(super) variant: Variant,
     pub(super) depends_on: Vec<String>,
     pub(super) parent: Option<String>,
@@ -371,15 +373,16 @@ impl App {
             self.check_graph_params(&repo, &p.depends_on, p.parent.as_deref(), None)?;
         let depends_on: Vec<String> = depends_on.into_iter().map(|t| t.id).collect();
         let base = p.base.clone().filter(|b| !b.trim().is_empty());
-        let base = match (&parent, base) {
+        let (base, base_from) = match (&parent, base) {
             (Some(parent), Some(base)) if base != parent.branch => {
                 return Err(format!(
                     "a subtask starts from its parent's branch {}, not {base}",
                     parent.branch
                 ))
             }
-            (Some(parent), _) => parent.branch.clone(),
-            (None, base) => base.unwrap_or_else(|| "HEAD".to_string()),
+            (Some(parent), _) => (parent.branch.clone(), fresh_base::BaseFrom::Plain),
+            (None, Some(base)) => (base, fresh_base::BaseFrom::Given),
+            (None, None) => self.default_base(&repo),
         };
         let source = match p.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(s) if TASK_SOURCES.contains(&s) => s.to_string(),
@@ -413,6 +416,7 @@ impl App {
                 request: request_text.clone(),
                 branch: p.branch.clone(),
                 base,
+                base_from,
                 variant,
                 depends_on,
                 parent: parent.map(|t| t.id),
@@ -585,7 +589,8 @@ impl App {
         let repo_root = new.repo_root.clone();
         let title_for_branch = new.title.clone();
         let branch_opt = new.branch.clone();
-        let base = new.base.clone();
+        let (base, base_from) = (new.base.clone(), new.base_from);
+        let fetch_timeout = self.base_fetch_timeout();
         let wt_root = self.settings.read().unwrap().worktree_root.clone();
         let home = self.home.clone();
         let created = tokio::task::spawn_blocking(move || {
@@ -597,18 +602,20 @@ impl App {
                 git::exclude_worktree_root(&repo_root, dir)
                     .map_err(|e| git::GitError(e.to_string()))?;
             }
-            let base_ref = git::branch_of(&repo_root, &base);
-            let created = git::create_worktree(&repo_root, &branch, &wt_path, &base)?;
+            // A named base is fetched first, so the task branches from the
+            // branch as its remote has it now.
+            let prepared = fresh_base::prepare_new(&repo_root, &base, base_from, fetch_timeout);
+            let created = git::create_worktree(&repo_root, &branch, &wt_path, &prepared.rev)?;
             if let Err(e) = git::bootstrap_worktree(&repo_root, &created.path) {
                 git::discard_worktree(&repo_root, &created.path, &branch);
                 return Err(git::GitError(e.to_string()));
             }
-            Ok::<_, git::GitError>((branch, created, base_ref))
+            Ok::<_, git::GitError>((branch, created, prepared))
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        let (branch, created, base_ref) = created;
+        let (branch, created, prepared) = created;
 
         let task = Task {
             id: new.id,
@@ -645,13 +652,14 @@ impl App {
             follow_ups: vec![],
             branch,
             base_sha: created.base_sha,
-            base_ref,
+            base_ref: prepared.base_ref,
+            fresh_base: prepared.fresh,
             depends_on: new.depends_on,
             paths: new.paths,
             parent: new.parent,
             tier: Tier::Standard,
             question: None,
-            decisions: vec![],
+            decisions: prepared.warnings,
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,

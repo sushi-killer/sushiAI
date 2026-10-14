@@ -276,6 +276,46 @@ pub(super) fn rebuild_tests_commit(
     git::commit_paths(wt, &paths, &planner_tests_title(title), task_id).map_err(|e| e.to_string())
 }
 
+/// The recorded tests commit is not in the branch any more (something else
+/// rebased or rewrote it): find the commit that carries the planner's files
+/// now, and record it and its parent as the tests commit and the base.
+/// `Some((commit, base))` when the record was changed.
+pub(super) fn reanchor_tests_commit(
+    task: &mut Task,
+    worktree: &Path,
+) -> Result<Option<(String, String)>, String> {
+    let Some(recorded) = task.planner_tests.commit.clone() else {
+        return Ok(None);
+    };
+    if task.planner_tests.files.is_empty()
+        || git::is_ancestor(worktree, &recorded, "HEAD") == Some(true)
+    {
+        return Ok(None);
+    }
+    let holds_the_files = |c: &str| {
+        task.planner_tests
+            .files
+            .iter()
+            .all(|f| git::blob_at(worktree, c, &f.path).is_some_and(|b| b == f.content.as_bytes()))
+    };
+    let found = git::commits_with_task_id(worktree, &task.id)
+        .into_iter()
+        .find(|c| {
+            git::resolve_commit(worktree, &format!("{c}^2")).is_err() && holds_the_files(c)
+        })
+        .ok_or_else(|| {
+            format!(
+                "the recorded tests commit {} is not in the branch and no commit there holds the planner tests",
+                short_sha(&recorded)
+            )
+        })?;
+    let base = git::resolve_commit(worktree, &format!("{found}^")).map_err(|e| e.to_string())?;
+    task.planner_tests.protected = Some(protected_hashes(worktree, &found, task));
+    task.planner_tests.commit = Some(found.clone());
+    task.base_sha = base.clone();
+    Ok(Some((found, base)))
+}
+
 /// A tests commit that is not the single commit on `base_sha` (the branch
 /// holds more commits, or `base_sha` moved by a merge the branch already
 /// contains) is rebuilt on `base_sha`, so the carry accepts it again. The new
@@ -298,7 +338,10 @@ pub(super) fn normalise_tests_commit(
         return Ok(None);
     }
     if git::is_ancestor(worktree, &task.base_sha, "HEAD") != Some(true) {
-        return Ok(None);
+        return Err(format!(
+            "the base {} is not in the branch history",
+            short_sha(&task.base_sha)
+        ));
     }
     let sha = rebuild_tests_commit(
         worktree,
@@ -323,25 +366,54 @@ pub(super) async fn repair_protection(
     worktree: &Path,
     cancel: &CancelToken,
 ) {
+    let note = |task: &mut Task, line: String| {
+        if !task.decisions.contains(&line) {
+            task.decisions.push(line);
+        }
+    };
     if task.planner_tests.commit.is_some() && !task.planner_tests.files.is_empty() {
         let (wt, mut snapshot) = (worktree.to_path_buf(), task.clone());
-        let rebuilt = tokio::task::spawn_blocking(move || {
-            let r = normalise_tests_commit(&mut snapshot, &wt);
-            (r, snapshot.planner_tests)
+        let repaired = tokio::task::spawn_blocking(move || {
+            let anchored = reanchor_tests_commit(&mut snapshot, &wt);
+            let rebuilt = if anchored.is_ok() {
+                normalise_tests_commit(&mut snapshot, &wt)
+            } else {
+                Ok(None)
+            };
+            (anchored, rebuilt, snapshot)
         })
         .await;
-        match rebuilt {
-            Ok((Ok(Some(sha)), tests)) => {
-                task.planner_tests = tests;
-                task.decisions.push(format!(
-                    "Orchestrator: rebuilt the planner tests commit on the task's base, now at {}",
-                    short_sha(&sha)
-                ));
+        if let Ok((anchored, rebuilt, snapshot)) = repaired {
+            match &anchored {
+                Ok(Some((commit, base))) => {
+                    task.planner_tests = snapshot.planner_tests.clone();
+                    task.base_sha = snapshot.base_sha.clone();
+                    task.decisions.push(format!(
+                        "Orchestrator: the branch was rebased outside orchd; the planner tests are now commit {} on base {}",
+                        short_sha(commit),
+                        short_sha(base)
+                    ));
+                }
+                Err(e) => note(
+                    task,
+                    format!("Orchestrator: the planner tests commit was not repaired: {e}"),
+                ),
+                Ok(None) => {}
             }
-            Ok((Err(e), _)) => task.decisions.push(format!(
-                "Orchestrator: could not rebuild the planner tests commit ({e})"
-            )),
-            _ => {}
+            match rebuilt {
+                Ok(Some(sha)) => {
+                    task.planner_tests = snapshot.planner_tests;
+                    task.decisions.push(format!(
+                        "Orchestrator: rebuilt the planner tests commit on the task's base, now at {}",
+                        short_sha(&sha)
+                    ));
+                }
+                Err(e) => note(
+                    task,
+                    format!("Orchestrator: the planner tests commit was not rebuilt: {e}"),
+                ),
+                Ok(None) => {}
+            }
         }
         if !task.planner_tests.format_checked && !cancel.is_cancelled() {
             let (wt, commit) = (worktree.to_path_buf(), task.planner_tests.commit.clone());
@@ -351,6 +423,11 @@ pub(super) async fn repair_protection(
             if at_tests {
                 reformat_carried_tests(app, task, worktree, cancel).await;
                 task.planner_tests.format_checked = !cancel.is_cancelled();
+            } else {
+                note(
+                    task,
+                    "Orchestrator: the planner tests were not formatted: the branch is not at the tests commit".to_string(),
+                );
             }
         }
     }
@@ -1339,6 +1416,88 @@ mod tests {
         git_in(&repo, &["commit", "-q", "-m", "base moved again"]);
         let carried = carry_with_planner_tests(&mut task, &wt, &base_ref).unwrap();
         assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
+    }
+
+    #[tokio::test]
+    async fn a_branch_rebased_outside_orchd_gets_its_tests_commit_and_base_re_anchored_and_formatted(
+    ) {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().sandbox = SandboxMode::Host;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+        init_git_repo(&repo);
+        let json = r#"{"format": "for f; do sed 's/ *$//' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"}"#;
+        std::fs::write(repo.join(".sushiai/setup.json"), json).unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "setup"]);
+        let main = git::branch_of(&repo, "HEAD").unwrap();
+        // The recorded base sits on a side line; main has an older commit.
+        git_in(&repo, &["branch", "side"]);
+        std::fs::write(repo.join("older.txt"), "o\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "older main"]);
+        let older_main = git::head_sha(&repo).unwrap();
+        git_in(&repo, &["checkout", "-q", "side"]);
+        std::fs::write(repo.join("side.txt"), "s\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "side base"]);
+        let side = git::head_sha(&repo).unwrap();
+        git_in(&repo, &["checkout", "-q", &main]);
+
+        let wt = dir.path().join("task");
+        git::create_worktree(&repo, "task/rebased", &wt, &side).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = side.clone();
+        task.base_ref = Some(main.clone());
+        task.planner_tests.files = vec![test("tests/planner.txt", "a  \nb \n")];
+        std::fs::create_dir_all(wt.join("tests")).unwrap();
+        std::fs::write(wt.join("tests/planner.txt"), "a  \nb \n").unwrap();
+        let recorded = git::commit_paths(
+            &wt,
+            &["tests/planner.txt".to_string()],
+            "test: planner tests for x",
+            &task.id,
+        )
+        .unwrap();
+        task.planner_tests.commit = Some(recorded.clone());
+        task.planner_tests.protected = Some(protected_hashes(&wt, &recorded, &task));
+        // Something else rebases the branch onto main's older commit.
+        git_in(&wt, &["rebase", "-q", "--onto", &older_main, &side]);
+        let now = git::head_sha(&wt).unwrap();
+        assert_ne!(now, recorded);
+        std::fs::write(wt.join("impl.txt"), "work\n").unwrap();
+
+        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
+        let sha = task.planner_tests.commit.clone().unwrap();
+        assert_eq!(task.base_sha, older_main, "{:?}", task.decisions);
+        assert_eq!(git::head_sha(&wt).unwrap(), sha);
+        assert_eq!(git_in(&wt, &["rev-parse", &format!("{sha}^")]), older_main);
+        assert_eq!(
+            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
+            b"a\nb\n"
+        );
+        assert_eq!(
+            task.planner_tests.protected.as_ref().unwrap()["tests/planner.txt"],
+            sha256_hex(b"a\nb\n")
+        );
+        assert!(task.planner_tests.format_checked);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("impl.txt")).unwrap(),
+            "work\n"
+        );
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.contains("rebased outside orchd")));
+        // The carry onto main no longer skips.
+        let mut snapshot = task.clone();
+        let carried = carry_with_planner_tests(&mut snapshot, &wt, &main).unwrap();
+        assert!(
+            matches!(carried, git::Rebase::Moved { .. } | git::Rebase::Unchanged),
+            "{carried:?}"
+        );
     }
 
     #[test]

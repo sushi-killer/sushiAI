@@ -204,6 +204,25 @@ pub fn resolve_commit(repo_root: &Path, rev: &str) -> Result<String, GitError> {
     .map(|s| s.trim().to_string())
 }
 
+/// The commits reachable from HEAD whose message carries `Task-Id: <task_id>`,
+/// newest first (at most 300).
+pub fn commits_with_task_id(cwd: &Path, task_id: &str) -> Vec<String> {
+    run(
+        cwd,
+        &[
+            "log",
+            "-n",
+            "300",
+            "--format=%H",
+            "--grep",
+            &format!("^Task-Id: {task_id}$"),
+            "HEAD",
+        ],
+    )
+    .map(|out| out.lines().map(str::to_string).collect())
+    .unwrap_or_default()
+}
+
 /// The best common ancestor of two revisions.
 pub fn merge_base_of(repo_root: &Path, a: &str, b: &str) -> Result<String, GitError> {
     run(repo_root, &["merge-base", a, b]).map(|s| s.trim().to_string())

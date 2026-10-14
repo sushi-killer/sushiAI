@@ -521,6 +521,7 @@ pub(super) async fn run_task_loop(
         }
         let wt = PathBuf::from(&task.worktree);
         recover_format_aside(&mut task, &wt).await;
+        repair_protection(&app, &mut task, &wt, &cancel).await;
         if task.parent.is_some() {
             let _ = app.sync_graph_base(&task.id, false).await;
             app.carry_part_onto_parent(&mut task, &cancel).await;
@@ -549,10 +550,6 @@ pub(super) async fn run_task_loop(
             }
             app.save_task_logged(&task);
             app.broadcast_task(&task);
-        }
-        {
-            let wt = PathBuf::from(&task.worktree);
-            repair_protection(&app, &mut task, &wt, &cancel).await;
         }
         let dependencies_before = task.depends_on.clone();
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
@@ -1481,6 +1478,11 @@ pub(super) async fn run_task_loop(
             task.attempts[idx].changed_files = changed.clone();
         }
         let mut restored = restored;
+        if !restored.is_empty() {
+            // An agent that edits a planner file is usually formatting it: the
+            // next attempt starts with the formatter run over the tests again.
+            task.planner_tests.format_checked = false;
+        }
         restored.extend(best_of_discarded);
         restored.sort();
         restored.dedup();

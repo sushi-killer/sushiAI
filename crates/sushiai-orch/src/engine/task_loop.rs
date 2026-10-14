@@ -358,6 +358,7 @@ pub(super) async fn run_task_loop(
             a.status = AttemptStatus::Running;
             a.ended_at = None;
             a.failure = None;
+            task.loop_state.unreviewed_attempt = None;
             task.status = TaskStatus::Running;
             task.updated_at = now_ms();
             app.save_task_logged(&task);

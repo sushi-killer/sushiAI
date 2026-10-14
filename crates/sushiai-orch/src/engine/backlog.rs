@@ -140,6 +140,7 @@ impl App {
             }
             let resumed = task.queue.park.take().is_some();
             task.queue.stopped_explicitly = false;
+            task.loop_state.stuck_retries = 0;
             if let Some(end) = cancellations.get_mut(id) {
                 end.restart = true;
                 end.restart_children = task.queue.restart_children;
@@ -212,6 +213,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_task_started_again_after_it_got_stuck_has_fresh_pauses() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        while stuck::retry_or_fail(&mut task, "x broke") {}
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task.loop_state.stuck_retries > 0);
+        app.store.save_task(&task).unwrap();
+        app.start_task(&task.id, Starter::Owner);
+        let restarted = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(restarted.loop_state.stuck_retries, 0);
+        // The old "Retry later" lines are still there; they count for nothing.
+        assert!(restarted
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Retry later")));
+    }
 
     #[tokio::test]
     async fn graph_control_autopilot_does_not_restart_an_explicit_stop() {

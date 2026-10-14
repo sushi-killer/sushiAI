@@ -8,7 +8,7 @@ use super::*;
 /// may shorten it with `ORCHD_STUCK_PAUSE_SECS`.
 const RETRY_PAUSE_SECS: i64 = 30 * 60;
 /// How many pauses a task gets before it fails.
-const MAX_RETRIES: usize = 2;
+const MAX_RETRIES: u32 = 2;
 const RETRY_PREFIX: &str = "Retry later: ";
 
 fn pause_secs() -> i64 {
@@ -18,20 +18,14 @@ fn pause_secs() -> i64 {
         .unwrap_or(RETRY_PAUSE_SECS)
 }
 
-fn retries_so_far(task: &Task) -> usize {
-    task.decisions
-        .iter()
-        .filter(|d| d.starts_with(RETRY_PREFIX))
-        .count()
-}
-
 /// Replaces an eternal park. `true`: the task goes on after a pause (the loop
 /// sleeps through `paused_until` holding no slot). `false`: it has failed and
 /// the caller must stop asking about it.
 pub(super) fn retry_or_fail(task: &mut Task, reason: &str) -> bool {
     task.question = None;
-    let tried = retries_so_far(task);
+    let tried = task.loop_state.stuck_retries;
     if tried < MAX_RETRIES {
+        task.loop_state.stuck_retries += 1;
         task.decisions.push(format!(
             "{RETRY_PREFIX}{reason}; trying again in {} s (retry {} of {MAX_RETRIES})",
             pause_secs(),
@@ -67,5 +61,6 @@ mod tests {
             .last()
             .unwrap()
             .starts_with("Failed: x broke"));
+        assert_eq!(task.loop_state.stuck_retries, MAX_RETRIES);
     }
 }

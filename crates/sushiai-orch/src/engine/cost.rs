@@ -151,12 +151,13 @@ pub(super) fn settle_interrupted_advisor(task: &mut Task, store: &Store, prices:
     true
 }
 
-/// Starts every question the budget gate asks; `task.answer` uses it to
-/// apply a "raise" that arrives with no live loop to deliver it to.
+/// Starts the text of the budget question.
 const BUDGET_QUESTION_PREFIX: &str = "This task has spent";
 
+/// Whether `answer` raises the budget; `task.answer` applies a "raise" that
+/// arrives with no live loop to deliver it to.
 pub(super) fn is_budget_raise(question: &Question, answer: &str) -> bool {
-    question.text.starts_with(BUDGET_QUESTION_PREFIX) && answer.trim().eq_ignore_ascii_case("raise")
+    question.kind == QuestionKind::Budget && answer.trim().eq_ignore_ascii_case("raise")
 }
 
 /// The option of the daily budget question that lets the task go on.

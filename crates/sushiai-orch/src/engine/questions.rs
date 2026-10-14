@@ -53,7 +53,7 @@ pub(super) async fn wait_for_exhausted_answer(
     if let Some(text) = try_policy_answer(app, task, cancel).await {
         return Some(Answered { text });
     }
-    if non_owner_continues(task) < MAX_ORCHESTRATOR_CONTINUES {
+    if (task.loop_state.non_owner_continues as usize) < MAX_ORCHESTRATOR_CONTINUES {
         if let Some(answered) = wait_for_triaged_answer(
             app,
             task_id,
@@ -222,38 +222,6 @@ pub(super) fn answer_line_question(q: &Question) -> &str {
     } else {
         &q.text
     }
-}
-
-/// Counts chat, overseer and lead extensions of the attempt budget,
-/// including legacy orchestrator lines.
-pub(super) fn non_owner_continues(task: &Task) -> usize {
-    let orchestrator = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-        .count();
-    let like = task
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.starts_with(LIKE_PREFIX) && d.contains(&format!(" -- {EXHAUSTED_QUESTION} -> "))
-        })
-        .count();
-    let legacy_lead = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with("Lead: Attempts keep failing -> "))
-        .count();
-    let lead = task
-        .question_history
-        .iter()
-        .filter(|q| {
-            q.kind == QuestionKind::AttemptsFailing
-                && q.answered_by == AnsweredBy::Lead
-                && !is_option(&q.answer, "stop")
-        })
-        .count();
-    orchestrator + like + lead.max(legacy_lead)
 }
 
 /// Records a parked question's answer and its caller.
@@ -849,6 +817,9 @@ async fn wait_for_triaged_answer(
                     held_at: None,
                     commands: question.commands.clone(),
                     failure_signature: question.failure_signature.clone(),
+                    criterion: question.criterion,
+                    evidence: question.evidence.clone(),
+                    base_tails: question.base_tails.clone(),
                 });
                 task.decisions
                     .push(orchestrator_escalate_line(&decision.reason));

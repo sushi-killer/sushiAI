@@ -148,7 +148,14 @@ fn two_disjoint_parts_stay_two_children() {
     for kid in &kids {
         assert_eq!(kid["status"], "done", "{kid}");
         assert!(
-            kid["request"].as_str().unwrap().contains("Check: test -f"),
+            !kid["request"].as_str().unwrap().contains("Check:"),
+            "{kid}"
+        );
+        assert!(
+            kid["briefCheck"]["check"]
+                .as_str()
+                .unwrap()
+                .starts_with("test -f"),
             "{kid}"
         );
     }

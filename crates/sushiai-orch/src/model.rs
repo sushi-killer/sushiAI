@@ -524,6 +524,11 @@ pub struct BriefCheck {
     /// orchd runs it itself once verify has passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<String>,
+    /// The one targeted command the planner named for this subtask's part. A
+    /// subtask at its parent runs it in place of the full CI entry, which the
+    /// parent runs on the combined tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
     /// Every check command was run on the base once (see `base_check`).
     #[serde(default)]
     pub feasibility_done: bool,

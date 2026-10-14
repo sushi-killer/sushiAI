@@ -666,7 +666,9 @@ pub(super) async fn failing_on_base(
     if is_interrupted(failed) {
         return None;
     }
-    let key = (task.base_sha.clone(), failed.command.clone());
+    // The same commit the baselines ran on: the base with the planner's tests.
+    let rev = base_rev(task).ok()?;
+    let key = (rev.clone(), failed.command.clone());
     let mut job = app
         .final_base_jobs
         .lock()
@@ -678,7 +680,7 @@ pub(super) async fn failing_on_base(
             app,
             Some(&task.id),
             &task.repo,
-            &task.base_sha,
+            &rev,
             std::slice::from_ref(&failed.command),
             run_dir,
             true,
@@ -691,8 +693,8 @@ pub(super) async fn failing_on_base(
             .or_default()
             .extend(jobs);
     }
-    let base = wait_for_base_job(app, &task.base_sha, &failed.command, job, cancel).await;
-    record_base_run_decisions(app, task, std::slice::from_ref(&failed.command));
+    let base = wait_for_base_job(app, &rev, &failed.command, job, cancel).await;
+    record_base_run_decisions(app, task, &rev, std::slice::from_ref(&failed.command));
     base.filter(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
 }
 
@@ -1159,16 +1161,16 @@ pub(super) async fn failing_twice_on_base(
     if cancel.is_cancelled() {
         return Vec::new();
     }
-    record_base_run_decisions(app, task, &commands);
+    record_base_run_decisions(app, task, &task.base_sha.clone(), &commands);
     note_flaky_base_checks(app, task, &commands);
     failing
 }
 
-fn record_base_run_decisions(app: &App, task: &mut Task, commands: &[String]) {
+fn record_base_run_decisions(app: &App, task: &mut Task, rev: &str, commands: &[String]) {
     let decisions = app.base_run_decisions.lock().unwrap();
     let mut lines = Vec::new();
     for command in commands {
-        if let Some(recorded) = decisions.get(&(task.base_sha.clone(), command.clone())) {
+        if let Some(recorded) = decisions.get(&(rev.to_string(), command.clone())) {
             for line in recorded {
                 let line = if let Some(held) = task.held_out.as_ref().filter(|h| &h.run == command)
                 {
@@ -1200,6 +1202,22 @@ fn planned_base_commands(app: &App, task: &Task, checks: &[String]) -> Vec<Strin
     )
 }
 
+/// The base commit with the planner's tests written over it, or the base
+/// itself without any: a commit no branch holds, the same sha for the same
+/// input. Baselines and final base checks both run on it.
+pub(super) fn base_rev(task: &Task) -> Result<String, git::GitError> {
+    if task.planner_tests.files.is_empty() {
+        return Ok(task.base_sha.clone());
+    }
+    let files: Vec<(String, Vec<u8>)> = task
+        .planner_tests
+        .files
+        .iter()
+        .map(|t| (t.path.clone(), t.content.clone().into_bytes()))
+        .collect();
+    git::commit_over(Path::new(&task.repo), &task.base_sha, &files)
+}
+
 /// Starts the background base jobs of the task's `finalVerify` that are not
 /// answered yet; the first attempt does not wait for them.
 pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
@@ -1217,16 +1235,12 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
     if commands.is_empty() {
         return;
     }
+    // The key `failing_on_base` reads: the base with the planner's tests.
+    let Ok(rev) = base_rev(task) else {
+        return;
+    };
     let dir = app.store.task_dir(&task.id);
-    let jobs = start_base_jobs(
-        app,
-        Some(&task.id),
-        &task.repo,
-        &task.base_sha,
-        &commands,
-        &dir,
-        true,
-    );
+    let jobs = start_base_jobs(app, Some(&task.id), &task.repo, &rev, &commands, &dir, true);
     app.final_base_jobs
         .lock()
         .unwrap()
@@ -1251,25 +1265,8 @@ pub(super) async fn baseline_on_base(
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
     // The base with the planner's tests: a commit no branch holds.
-    let (repo, base, files) = (
-        PathBuf::from(&task.repo),
-        task.base_sha.clone(),
-        task.planner_tests
-            .files
-            .iter()
-            .map(|t| (t.path.clone(), t.content.clone().into_bytes()))
-            .collect::<Vec<_>>(),
-    );
-    let rev = if files.is_empty() {
-        base
-    } else {
-        match tokio::task::spawn_blocking(move || git::commit_over(&repo, &base, &files))
-            .await
-            .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
-        {
-            Ok(rev) => rev,
-            Err(_) => return false,
-        }
+    let Ok(rev) = base_rev(task) else {
+        return false;
     };
     match run_on_base(
         app,
@@ -1284,7 +1281,7 @@ pub(super) async fn baseline_on_base(
     {
         Ok(results) if results.len() == todo.len() && !cancel.is_cancelled() => {
             record_check_outcomes(app, task, &results);
-            record_base_run_decisions(app, task, &commands);
+            record_base_run_decisions(app, task, &rev, &commands);
             record_baselines(task, &todo, &results)
         }
         _ => false,

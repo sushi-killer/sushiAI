@@ -29,29 +29,75 @@ pub(super) struct Attribution {
     pub evidence: String,
 }
 
-/// Base sha, command, run key and base run key.
-pub(super) type AttributionKey = (String, String, String, String);
+/// Task id, hash of the task's diff, base sha, command, run key and base run
+/// key.
+pub(super) type AttributionKey = (String, String, String, String, String, String);
+
+/// A hash of the task's changes against its base, so a verdict is not reused
+/// for another task or another diff.
+fn diff_hash(task: &Task) -> String {
+    let worktree = Path::new(&task.worktree);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    git::diff_full(worktree, &task.base_sha, usize::MAX)
+        .unwrap_or_default()
+        .hash(&mut h);
+    git::changed_files(worktree, &task.base_sha)
+        .unwrap_or_default()
+        .hash(&mut h);
+    format!("{:016x}", h.finish())
+}
 
 /// The reply's last `sushi-attribution` block, else its outermost `{...}`.
 pub(super) fn parse_attribution(text: &str) -> Option<Attribution> {
     serde_json::from_str(&brief::tagged_json(text, "sushi-attribution")?).ok()
 }
 
-/// Whether `name` is in the base run's output, literally.
-fn in_base_output(base: &VerifyOutcome, name: &str) -> bool {
+/// Whether `name` is a whole line of `tail`, or the end of one after
+/// whitespace (`FAIL suite > alpha` holds `suite > alpha`, not `FAIL`).
+fn in_lines(tail: &str, name: &str) -> bool {
     let name = name.trim();
-    !name.is_empty() && (base.tail.contains(name) || base.failing.iter().any(|f| f == name))
+    !name.is_empty()
+        && tail.lines().any(|line| {
+            let line = line.trim();
+            line == name
+                || line
+                    .strip_suffix(name)
+                    .is_some_and(|rest| rest.ends_with(char::is_whitespace))
+        })
+}
+
+/// Whether the failed run's own output is covered by the base run: every
+/// failing name code parsed from it is a failing name of the base. A run
+/// with no parsed names is covered only when its output fingerprint matches
+/// the base's, so a new error next to the base's failure is not.
+fn failed_run_covered(failed: &VerifyOutcome, base: &VerifyOutcome) -> bool {
+    if failed.failing.is_empty() {
+        return failed.output_key == base.output_key;
+    }
+    failed.failing.iter().all(|n| base.failing.contains(n))
 }
 
 /// The verdict code accepts. A cause other than `introduced` needs evidence;
-/// `inherited` also needs a non-empty `pre_existing`, no `new_failures`, and
-/// every name in `pre_existing` literally in the base run. Anything else is
+/// `inherited` also needs a non-empty `pre_existing`, no `new_failures`, the
+/// failed run covered by the base run (see `failed_run_covered`), and every
+/// name in `pre_existing` a failing name or a line of the base run, and for
+/// a run with no parsed names a line of the failed run too. `new_failures`
+/// can only withhold a waiver, never grant one. Anything else is
 /// `introduced`.
-pub(super) fn checked(mut att: Attribution, base: &VerifyOutcome) -> Attribution {
+pub(super) fn checked(
+    mut att: Attribution,
+    failed: &VerifyOutcome,
+    base: &VerifyOutcome,
+) -> Attribution {
     let evidenced = !att.evidence.trim().is_empty();
     let inherited_holds = !att.pre_existing.is_empty()
         && att.new_failures.is_empty()
-        && att.pre_existing.iter().all(|n| in_base_output(base, n));
+        && failed_run_covered(failed, base)
+        && att.pre_existing.iter().all(|n| {
+            let n = n.trim();
+            (base.failing.iter().any(|f| f == n) || in_lines(&base.tail, n))
+                && (!failed.failing.is_empty() || in_lines(&failed.tail, n))
+        });
     let holds = match att.cause {
         Blame::Introduced => true,
         Blame::Inherited => evidenced && inherited_holds,
@@ -64,12 +110,13 @@ pub(super) fn checked(mut att: Attribution, base: &VerifyOutcome) -> Attribution
 }
 
 /// What identifies one run's output: its fingerprint and test names, or its
-/// tail when it has neither.
+/// tail when it has no fingerprint.
 fn run_key(run: &VerifyOutcome) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     run.output_key.hash(&mut h);
     run.failing.hash(&mut h);
-    if run.output_key.is_empty() && run.failing.is_empty() {
+    // An empty fingerprint says nothing about the output: use the tail.
+    if run.output_key.is_empty() {
         run.tail.hash(&mut h);
     }
     format!("{:016x}", h.finish())
@@ -136,7 +183,7 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
 }
 
 /// The verdict of one attribution turn for `failed` against `base`, checked by
-/// code. One turn per (base, command, run, base run): a second call on the
+/// code. One turn per (task, diff, base, command, run, base run): a second call on the
 /// same evidence gets the first verdict. `None` when no turn gave a valid
 /// reply.
 pub(super) async fn attribute(
@@ -147,6 +194,8 @@ pub(super) async fn attribute(
     cancel: &CancelToken,
 ) -> Option<Attribution> {
     let key = (
+        task.id.clone(),
+        diff_hash(task),
         task.base_sha.clone(),
         failed.command.clone(),
         run_key(failed),
@@ -165,15 +214,20 @@ pub(super) async fn attribute(
     verdict
 }
 
-/// Whether the verdict of an attribution turn for `command` on this base says
-/// the task is meant to make the check pass.
-pub(super) fn attributed_target(app: &App, base_sha: &str, command: &str) -> bool {
+/// Whether the verdict of an attribution turn of this task, on its current
+/// diff, for `command` says the task is meant to make the check pass.
+pub(super) fn attributed_target(app: &App, task: &Task, command: &str) -> bool {
+    let diff = diff_hash(task);
     app.attributions
         .lock()
         .unwrap()
         .iter()
-        .any(|((sha, c, _, _), v)| {
-            sha == base_sha && c == command && v.as_ref().is_some_and(|a| a.target)
+        .any(|((id, d, sha, c, _, _), v)| {
+            *id == task.id
+                && *d == diff
+                && *sha == task.base_sha
+                && c == command
+                && v.as_ref().is_some_and(|a| a.target)
         })
 }
 
@@ -253,7 +307,7 @@ async fn run_turn(
     if outcome.timed_out || outcome.error.is_some() {
         return None;
     }
-    parse_attribution(&outcome.final_text.unwrap_or_default()).map(|a| checked(a, base))
+    parse_attribution(&outcome.final_text.unwrap_or_default()).map(|a| checked(a, failed, base))
 }
 
 #[cfg(test)]
@@ -261,6 +315,16 @@ mod tests {
     use super::*;
 
     fn base() -> VerifyOutcome {
+        VerifyOutcome {
+            command: "check".into(),
+            code: Some(1),
+            tail: "FAIL suite > alpha\nFAIL suite > beta\n".into(),
+            ..Default::default()
+        }
+    }
+
+    /// The task's run: the base's failures and nothing else.
+    fn failed() -> VerifyOutcome {
         VerifyOutcome {
             command: "check".into(),
             code: Some(1),
@@ -282,7 +346,7 @@ mod tests {
     #[test]
     fn a_verdict_without_evidence_is_the_tasks() {
         for cause in [Blame::Inherited, Blame::Environment, Blame::Incomplete] {
-            let got = checked(reply(cause, &["suite > alpha"], "  "), &base());
+            let got = checked(reply(cause, &["suite > alpha"], "  "), &failed(), &base());
             assert_eq!(got.cause, Blame::Introduced, "{cause:?}");
         }
     }
@@ -291,6 +355,7 @@ mod tests {
     fn inherited_needs_every_name_in_the_base_output() {
         let ok = checked(
             reply(Blame::Inherited, &["suite > alpha", "suite > beta"], "same"),
+            &failed(),
             &base(),
         );
         assert_eq!(ok.cause, Blame::Inherited);
@@ -300,14 +365,78 @@ mod tests {
                 &["suite > alpha", "suite > gamma"],
                 "same",
             ),
+            &failed(),
             &base(),
         );
         assert_eq!(invented.cause, Blame::Introduced);
-        let none = checked(reply(Blame::Inherited, &[], "same"), &base());
+        let none = checked(reply(Blame::Inherited, &[], "same"), &failed(), &base());
         assert_eq!(none.cause, Blame::Introduced);
         let mut with_new = reply(Blame::Inherited, &["suite > alpha"], "same");
         with_new.new_failures = vec!["suite > gamma".into()];
-        assert_eq!(checked(with_new, &base()).cause, Blame::Introduced);
+        assert_eq!(
+            checked(with_new, &failed(), &base()).cause,
+            Blame::Introduced
+        );
+    }
+
+    #[test]
+    fn a_bare_marker_is_not_a_test_name() {
+        let got = checked(
+            reply(Blame::Inherited, &["FAIL"], "same"),
+            &failed(),
+            &base(),
+        );
+        assert_eq!(got.cause, Blame::Introduced);
+    }
+
+    #[test]
+    fn a_new_error_next_to_a_base_failure_is_not_inherited() {
+        let mut run = failed();
+        run.tail = "error TS2322: type mismatch\nFAIL suite > alpha\n".into();
+        run.output_key = "ts".into();
+        let mut base = base();
+        base.output_key = "plain".into();
+        for name in ["suite > alpha", "FAIL"] {
+            let got = checked(reply(Blame::Inherited, &[name], "same"), &run, &base);
+            assert_eq!(got.cause, Blame::Introduced, "{name}");
+        }
+        // Even with the same names listed, a failing name the base lacks
+        // outweighs the agent's list.
+        run.failing = vec!["suite > alpha".into(), "suite > gamma".into()];
+        base.failing = vec!["suite > alpha".into()];
+        let got = checked(
+            reply(Blame::Inherited, &["suite > alpha"], "same"),
+            &run,
+            &base,
+        );
+        assert_eq!(got.cause, Blame::Introduced);
+        run.failing = vec!["suite > alpha".into()];
+        let got = checked(
+            reply(Blame::Inherited, &["suite > alpha"], "same"),
+            &run,
+            &base,
+        );
+        assert_eq!(got.cause, Blame::Inherited);
+    }
+
+    #[test]
+    fn new_failures_never_grant_inherited() {
+        let mut run = failed();
+        run.tail = "error TS2322\n".into();
+        run.output_key = "ts".into();
+        let mut att = reply(Blame::Inherited, &["suite > alpha"], "same");
+        att.new_failures = vec![];
+        assert_eq!(checked(att, &run, &base()).cause, Blame::Introduced);
+    }
+
+    #[test]
+    fn a_run_without_a_fingerprint_is_keyed_by_its_tail() {
+        let mut a = failed();
+        let mut b = failed();
+        a.failing = vec!["x".into()];
+        b.failing = vec!["x".into()];
+        b.tail = "other".into();
+        assert_ne!(run_key(&a), run_key(&b));
     }
 
     #[test]

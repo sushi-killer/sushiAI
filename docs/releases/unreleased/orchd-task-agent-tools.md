@@ -1,0 +1,1 @@
+- orchd's plan and implement briefs tell the agent to search the code with `rg` (it skips ignored build output), falling back to `git grep`.

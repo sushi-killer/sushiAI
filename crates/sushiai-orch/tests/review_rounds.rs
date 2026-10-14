@@ -190,7 +190,7 @@ fn id_mark(finding: &str) -> String {
 fn every_finding_gets_a_stable_id_and_a_status() {
     let rig = Rig::new(&[
         fail(json!(["P1: a.rs:1 - null check missing"])),
-        fail(json!([{"finding": "P1: a.rs:9 - null check missing", "repeat": true}])),
+        fail(json!([{"finding": "P1: a.rs:9 - null check missing", "id": "F-1"}])),
         pass(json!(["P2: z.rs:3 - a minor thing"])),
     ]);
     let (_, settled) = rig.run("Write the marker");
@@ -200,8 +200,7 @@ fn every_finding_gets_a_stable_id_and_a_status() {
     let first = attempts[0]["review"]["findings"][0].as_str().unwrap();
     let second = attempts[1]["review"]["findings"][0].as_str().unwrap();
     let id = id_mark(first);
-    assert_eq!(id.len(), 8, "{id}");
-    assert!(id.starts_with("F-") && id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(id, "F-1");
     assert_eq!(id, id_mark(second), "the same finding keeps its id");
     let registry = settled["findings"].as_array().unwrap();
     assert_eq!(registry.len(), 2, "{settled}");
@@ -221,10 +220,11 @@ fn review_runs_stop_after_round_two_with_the_last_result() {
             "P1: b.rs:2 - second problem"
         ])),
         fail(json!([
-            {"finding": "P1: a.rs:1 - first problem", "repeat": true},
-            {"finding": "P1: b.rs:2 - second problem", "repeat": true}
+            {"finding": "P1: a.rs:1 - first problem", "id": "F-1"},
+            {"finding": "P1: b.rs:2 - second problem", "id": "F-2"},
+            {"finding": "P1: c.rs:3 - third problem", "id": null}
         ])),
-        fail(json!([{"finding": "P1: c.rs:3 - third problem", "repeat": true}])),
+        fail(json!([{"finding": "P1: c.rs:3 - third problem", "id": "F-3"}])),
         pass(json!([])),
     ]);
     rig.file(
@@ -232,9 +232,9 @@ fn review_runs_stop_after_round_two_with_the_last_result() {
         &report(
             "done",
             json!([
-                {"finding": "a.rs:1 - first problem", "rebuttal": "wrong", "evidence": []},
-                {"finding": "b.rs:2 - second problem", "rebuttal": "wrong", "evidence": []},
-                {"finding": "c.rs:3 - third problem", "rebuttal": "wrong", "evidence": []}
+                {"finding": "F-1", "rebuttal": "wrong", "evidence": []},
+                {"finding": "F-2", "rebuttal": "wrong", "evidence": []},
+                {"finding": "F-3", "rebuttal": "wrong", "evidence": []}
             ]),
         ),
     );
@@ -289,7 +289,7 @@ fn a_review_without_a_verdict_moves_to_another_route_then_commits_unreviewed() {
     rig.finish(&done);
 }
 
-/// Attempt 1 reports A, attempt 2 reports B (A is resolved), attempt 3
+/// Attempt 1 reports A (F-1), attempt 2 reports B (A is resolved), attempt 3
 /// reports A again as `returning`.
 fn returning_plan(returning: Value) -> Vec<String> {
     vec![
@@ -301,9 +301,9 @@ fn returning_plan(returning: Value) -> Vec<String> {
 }
 
 #[test]
-fn a_returning_finding_without_a_new_scenario_is_dropped() {
+fn a_returning_finding_without_a_scenario_goes_to_the_judge_not_away_by_its_id() {
     let rig = Rig::new(&returning_plan(
-        json!({"finding": "P1: a.rs:5 - null check missing"}),
+        json!({"finding": "P1: a.rs:5 - null check missing", "id": "F-1"}),
     ));
     let (_, settled) = rig.run("Write the marker");
     assert_eq!(settled["status"], "done", "{settled}");
@@ -313,7 +313,7 @@ fn a_returning_finding_without_a_new_scenario_is_dropped() {
     assert!(
         decisions(&settled)
             .iter()
-            .any(|d| d.contains(&id) && d.contains("came back") && d.contains("dropped")),
+            .any(|d| d.contains(&id) && d.contains("came back") && d.contains("kept")),
         "{settled}"
     );
     assert_eq!(attempts[2]["review"]["verdict"], "PASS", "{settled}");
@@ -321,11 +321,23 @@ fn a_returning_finding_without_a_new_scenario_is_dropped() {
 }
 
 #[test]
-fn a_returning_finding_with_a_new_scenario_is_kept() {
-    let rig = Rig::new(&returning_plan(json!({
+fn a_returning_finding_with_a_failing_scenario_becomes_a_check_at_once() {
+    let rig = Rig::new(&[]);
+    let scenario = json!({
+        "run": format!("test -f {}", rig.dir.path().join("fixed").display()),
+        "fails": "the fix was never made"
+    });
+    let mut plan = returning_plan(json!({
         "finding": "P1: a.rs:5 - null check missing",
-        "scenario": {"run": "test -f NEVER_THERE", "fails": "the file is missing"}
-    })));
+        "id": "F-1",
+        "scenario": scenario
+    }));
+    plan[2] = fail(json!([{
+        "finding": "P1: a.rs:5 - null check missing",
+        "id": "F-1",
+        "scenario": scenario
+    }]));
+    rig.plan(&plan);
     let (_, settled) = rig.run("Write the marker");
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
@@ -335,14 +347,21 @@ fn a_returning_finding_with_a_new_scenario_is_kept() {
     let finding = third["findings"][0].as_str().unwrap();
     assert!(finding.contains("null check missing"), "{finding}");
     assert!(
-        !finding.contains("NEVER_THERE"),
+        !finding.contains("fixed"),
         "the scenario is not part of the finding text: {finding}"
     );
     let id = id_mark(finding);
+    let lines = decisions(&settled);
     assert!(
-        decisions(&settled)
+        lines
             .iter()
-            .any(|d| d.contains(&id) && d.contains("new failing scenario") && d.contains("kept")),
+            .any(|d| d.contains(&id) && d.contains("came back") && d.contains("kept")),
+        "{settled}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|d| d.contains(&id) && d.contains("added a criterion and a check")),
         "{settled}"
     );
     rig.finish(&settled);
@@ -359,7 +378,7 @@ fn a_twice_repeated_finding_with_a_failing_scenario_becomes_a_check() {
     });
     let first = json!({"finding": "P1: a.rs:1 - null check missing", "scenario": scenario});
     let again =
-        json!({"finding": "P1: a.rs:1 - null check missing", "scenario": scenario, "repeat": true});
+        json!({"finding": "P1: a.rs:1 - null check missing", "id": "F-1", "scenario": scenario});
     rig.plan(&[
         fail(json!([first])),
         fail(json!([again])),
@@ -403,7 +422,7 @@ fn a_twice_repeated_finding_with_a_failing_scenario_becomes_a_check() {
 
 #[test]
 fn a_twice_repeated_finding_without_a_scenario_goes_to_the_judge() {
-    let again = json!({"finding": "P1: a.rs:1 - null check missing", "repeat": true});
+    let again = json!({"finding": "P1: a.rs:1 - null check missing", "id": "F-1"});
     let rig = Rig::new(&[
         fail(json!(["P1: a.rs:1 - null check missing"])),
         fail(json!([again])),

@@ -80,6 +80,7 @@ pub(super) async fn refresh_diff_stat(task: &mut Task) {
 /// Stamps a landing: `landed_at` now, and the diff stat of what landed.
 pub(super) async fn record_landing(task: &mut Task) {
     task.landed_at = Some(now_ms());
+    task.loop_state.rereviews = 0;
     refresh_diff_stat(task).await;
 }
 
@@ -488,6 +489,14 @@ impl App {
 mod tests {
     use super::*;
     use crate::engine::test_support::{task_with_status, test_app};
+
+    #[tokio::test]
+    async fn the_rereviews_of_a_landing_start_over_with_the_next_one() {
+        let mut task = task_with_status(TaskStatus::Landing);
+        task.loop_state.rereviews = 3;
+        record_landing(&mut task).await;
+        assert_eq!(task.loop_state.rereviews, 0);
+    }
 
     #[test]
     fn a_follow_up_title_is_one_line_naming_the_original() {

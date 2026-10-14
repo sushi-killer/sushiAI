@@ -6,18 +6,15 @@
 //! test, and cargo-style `... FAILED` lines. A name is accepted only when the
 //! line looks like a test id, so a log line is never taken for a test.
 
+use crate::model::VerifyOutcome;
 use std::collections::BTreeSet;
-
-/// Most names kept per list for one run; a run with more is marked truncated.
-pub const MAX_NAMES: usize = 500;
+use std::path::Path;
 
 /// One parsed run.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Report {
     pub failing: Vec<String>,
     pub passing: Vec<String>,
-    /// A list held more than [`MAX_NAMES`] names and was cut.
-    pub truncated: bool,
     /// The output shows a crash, an abort or a build that did not finish.
     pub crashed: bool,
     /// A cargo run that stopped at its first failing test binary: tests of
@@ -283,14 +280,67 @@ pub fn parse(output: &str, cwd: &str) -> Report {
             fnv(&mut hash, if digit { b'#' } else { byte });
         }
     }
-    let truncated = failing.len() > MAX_NAMES || passing.len() > MAX_NAMES;
     Report {
-        failing: failing.into_iter().take(MAX_NAMES).collect(),
-        passing: passing.into_iter().take(MAX_NAMES).collect(),
-        truncated,
+        failing: failing.into_iter().collect(),
+        passing: passing.into_iter().collect(),
         crashed,
         stopped_early: first_stop && !all_targets,
         rest_key: format!("{hash:016x}"),
+    }
+}
+
+const LISTS_DIR: &str = "test-lists";
+
+/// Writes the lists of `outcome` to `data_dir/test-lists/<key>.json` (one file
+/// per distinct pair of lists) and sets its counts and `tests_key`. A write
+/// that fails leaves the lists in memory and the key empty.
+pub fn stash_lists(data_dir: &Path, outcome: &mut VerifyOutcome) {
+    outcome.failing_count = outcome.failing.len();
+    outcome.passing_count = outcome.passing.len();
+    outcome.tests_key = String::new();
+    if outcome.failing.is_empty() && outcome.passing.is_empty() {
+        return;
+    }
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for name in outcome.failing.iter().chain(&outcome.passing) {
+        name.bytes().chain([0xff]).for_each(|b| fnv(&mut hash, b));
+    }
+    for byte in outcome.failing.len().to_le_bytes() {
+        fnv(&mut hash, byte);
+    }
+    let key = format!("{hash:016x}");
+    let dir = data_dir.join(LISTS_DIR);
+    let path = dir.join(format!("{key}.json"));
+    let lists = serde_json::json!({"failing": outcome.failing, "passing": outcome.passing});
+    if path.exists()
+        || (std::fs::create_dir_all(&dir).is_ok()
+            && std::fs::write(&path, lists.to_string()).is_ok())
+    {
+        outcome.tests_key = key;
+    }
+}
+
+/// Reads the lists `stash_lists` wrote back into `outcome`. Unchanged when the
+/// file is missing or does not match the counts: such a run is not comparable.
+pub fn hydrate_lists(data_dir: &Path, outcome: &mut VerifyOutcome) {
+    if outcome.tests_key.is_empty() || !outcome.failing.is_empty() || !outcome.passing.is_empty() {
+        return;
+    }
+    let lists: Option<serde_json::Value> = std::fs::read_to_string(
+        data_dir
+            .join(LISTS_DIR)
+            .join(format!("{}.json", outcome.tests_key)),
+    )
+    .ok()
+    .and_then(|t| serde_json::from_str(&t).ok());
+    let names = |key: &str| -> Option<Vec<String>> {
+        serde_json::from_value(lists.as_ref()?.get(key)?.clone()).ok()
+    };
+    if let (Some(failing), Some(passing)) = (names("failing"), names("passing")) {
+        if failing.len() == outcome.failing_count && passing.len() == outcome.passing_count {
+            outcome.failing = failing;
+            outcome.passing = passing;
+        }
     }
 }
 
@@ -368,12 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn more_than_the_cap_marks_the_run_truncated() {
-        let many: String = (0..=MAX_NAMES)
-            .map(|i| format!("not ok {i} - t{i}\n"))
+    fn a_long_run_keeps_every_name() {
+        let many: String = (0..1200)
+            .map(|i| format!("not ok {i} - t{i}\nok {i} - p{i}\n"))
             .collect();
         let report = parse(&many, "");
-        assert!(report.truncated);
-        assert_eq!(report.failing.len(), MAX_NAMES);
+        assert_eq!(report.failing.len(), 1200);
+        assert_eq!(report.passing.len(), 1200);
     }
 }

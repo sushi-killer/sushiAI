@@ -8,62 +8,22 @@ const MAX_PAUSE_SECS: u64 = 6 * 3600;
 /// Pauses in a row before the limit counts as an ordinary failure.
 const MAX_PAUSES: u32 = 12;
 
-/// Whether a harness error line reports a usage or rate limit. Substrings
-/// only: no harness message shape is pinned in this repo.
-pub(super) fn is_rate_limit(error: &str) -> bool {
-    let e = error.to_ascii_lowercase();
-    [
-        "rate limit",
-        "rate_limit",
-        "usage limit",
-        "too many requests",
-        // The Claude CLI printed this 403 for minutes while the account was
-        // refused upstream; a logged-out CLI (401) still fails at once.
-        "403 request not allowed",
-        "overloaded_error",
-    ]
-    .iter()
-    .any(|needle| e.contains(needle))
-        // A bare 429 is a line number or a port as often as a status.
-        || [
-            "429 too many",
-            "status 429",
-            "status code 429",
-            "\"status\":429",
-            "\"status\": 429",
-            "http 429",
-            "http/1.1 429",
-            "http/2 429",
-        ]
-        .iter()
-        .any(|needle| e.contains(needle))
-}
-
-/// The reset time (Unix seconds) a message states after a `|`, the shape the
-/// Claude CLI has printed ("... limit reached|1760000000").
-fn stated_reset(error: &str) -> Option<i64> {
-    let digits: String = error
-        .rsplit_once('|')?
-        .1
-        .trim()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    (digits.len() == 10).then(|| digits.parse().ok()).flatten()
-}
-
-/// How long to pause for `error`, or `None` when it is no limit (or the
-/// pauses ran out): the stated reset time, else 5, 15, then 45 minutes;
-/// at most six hours.
-pub(super) fn rate_limit_wait_secs(error: &str, pauses: u32, now_secs: i64) -> Option<u64> {
-    if !is_rate_limit(error) || pauses >= MAX_PAUSES {
+/// How long to pause for a provider failure, or `None` when it is no limit
+/// (or the pauses ran out): the stated reset time, else 5, 15, then 45
+/// minutes; at most six hours.
+pub(super) fn rate_limit_wait_secs(failure: harness::ProviderFailure, pauses: u32) -> Option<u64> {
+    let retry_after_ms = match failure {
+        harness::ProviderFailure::RateLimited { retry_after_ms }
+        | harness::ProviderFailure::Overloaded { retry_after_ms } => retry_after_ms,
+        harness::ProviderFailure::QuotaExhausted { .. }
+        | harness::ProviderFailure::Auth
+        | harness::ProviderFailure::Other => return None,
+    };
+    if pauses >= MAX_PAUSES {
         return None;
     }
     let backoff = BACKOFF_MINUTES[(pauses as usize).min(BACKOFF_MINUTES.len() - 1)] * 60;
-    let wait = match stated_reset(error) {
-        Some(reset) if reset > now_secs => (reset - now_secs) as u64 + 30,
-        _ => backoff,
-    };
+    let wait = retry_after_ms.map_or(backoff, |ms| ms / 1000);
     Some(wait.min(MAX_PAUSE_SECS))
 }
 
@@ -135,47 +95,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn limit_messages_are_told_from_other_errors() {
-        for e in [
-            "Claude AI usage limit reached|1760000000",
-            "429 Too Many Requests",
-            "request failed: HTTP 429",
-            "{\"status\":429,\"error\":\"x\"}",
-            "Rate limit exceeded, retry later",
-            "error: rate_limit_error",
-            "Failed to authenticate. API Error: 403 Request not allowed",
-            "API Error: 529 {\"type\":\"overloaded_error\"}",
-        ] {
-            assert!(is_rate_limit(e), "{e}");
-        }
-        for e in [
-            "model not supported",
-            "Claude exited with an error.",
-            "port 14290 is busy",
-            "TypeError at cli.js:429:15",
-            "Failed to authenticate. API Error: 401 invalid x-api-key",
-        ] {
-            assert!(!is_rate_limit(e), "{e}");
-        }
-    }
-
-    #[test]
     fn the_wait_backs_off_then_follows_a_stated_reset_and_is_capped() {
-        let now = 1_760_000_000;
-        let secs = |e: &str, n| rate_limit_wait_secs(e, n, now);
-        assert_eq!(secs("rate limit", 0), Some(300));
-        assert_eq!(secs("rate limit", 1), Some(900));
-        assert_eq!(secs("rate limit", 2), Some(2700));
-        assert_eq!(secs("rate limit", 7), Some(2700));
-        assert_eq!(secs("usage limit reached|1760003600", 3), Some(3630));
+        let limit = |retry_after_ms| harness::ProviderFailure::RateLimited { retry_after_ms };
+        let secs = rate_limit_wait_secs;
+        assert_eq!(secs(limit(None), 0), Some(300));
+        assert_eq!(secs(limit(None), 1), Some(900));
+        assert_eq!(secs(limit(None), 2), Some(2700));
+        assert_eq!(secs(limit(None), 7), Some(2700));
+        assert_eq!(secs(limit(Some(3_630_000)), 3), Some(3630));
         assert_eq!(
-            secs("usage limit reached|1760999999", 0),
+            secs(limit(Some(MAX_PAUSE_SECS * 1000 + 1000)), 0),
             Some(MAX_PAUSE_SECS)
         );
-        // A reset in the past falls back to the backoff.
-        assert_eq!(secs("usage limit reached|1759999000", 0), Some(300));
-        assert_eq!(secs("rate limit", MAX_PAUSES), None);
-        assert_eq!(secs("model not supported", 0), None);
+        let overloaded = harness::ProviderFailure::Overloaded {
+            retry_after_ms: None,
+        };
+        assert_eq!(secs(overloaded, 0), Some(300));
+        assert_eq!(secs(limit(None), MAX_PAUSES), None);
+        assert_eq!(secs(harness::ProviderFailure::Auth, 0), None);
+        assert_eq!(secs(harness::ProviderFailure::Other, 0), None);
+        let billing = harness::ProviderFailure::QuotaExhausted {
+            retry_after_ms: None,
+        };
+        assert_eq!(secs(billing, 0), None);
     }
 
     #[test]

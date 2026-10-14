@@ -13,21 +13,16 @@ const MAX_DIFF_CHARS: usize = 20_000;
 /// Longest pull request body sent to GitHub, in characters.
 const MAX_BODY_CHARS: usize = 20_000;
 
+/// The reply shape the drafter must match, enforced by the harness
+/// (`--json-schema` / `--output-schema`).
+const DRAFT_SCHEMA: &str = r#"{"type":"object","properties":{"branch":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"}},"required":["branch","title","body"],"additionalProperties":false}"#;
+
 /// What the drafter replied; an empty field falls back to the task's own.
 #[derive(Debug, Default, PartialEq, Deserialize)]
 struct Draft {
-    #[serde(default)]
     branch: String,
-    #[serde(default)]
     title: String,
-    #[serde(default)]
     body: String,
-}
-
-/// The JSON object in a reply, with or without a code fence or prose around it.
-fn parse_draft(text: &str) -> Option<Draft> {
-    let (start, end) = (text.find('{')?, text.rfind('}')?);
-    serde_json::from_str(text.get(start..=end)?).ok()
 }
 
 /// Pauses between the tries to open a pull request: five tries over about
@@ -787,7 +782,13 @@ async fn run_draft(
         repo_settings: true,
         resume: None,
     };
-    let result = run_harness(
+    let schema_path = run_dir.join("schema.json");
+    let _ = std::fs::write(&schema_path, DRAFT_SCHEMA);
+    let schema = harness::OutputSchema {
+        json: DRAFT_SCHEMA,
+        path: &schema_path,
+    };
+    let result = run_harness_schema(
         app,
         &task.id,
         0,
@@ -799,6 +800,7 @@ async fn run_draft(
         &events_path,
         &CancelToken::new(),
         Guard::helper("pr-draft", app.helper_timeout()),
+        Some(&schema),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -808,14 +810,20 @@ async fn run_draft(
         Err(RunError::Io(e) | RunError::NotFound(e)) => return Err(e),
     };
     *cost = outcome.cost_usd.unwrap_or(0.0);
+    draft_reply(&outcome)
+}
+
+/// The drafter's reply: the schema-checked JSON object, or why the turn failed.
+/// A reply that does not deserialize is a failed turn, never read leniently.
+fn draft_reply(outcome: &harness::RunOutcome) -> Result<Draft, String> {
     if outcome.timed_out {
         return Err("the run timed out".to_string());
     }
-    if let Some(error) = outcome.error {
-        return Err(error);
+    if let Some(error) = &outcome.error {
+        return Err(error.clone());
     }
-    parse_draft(&outcome.final_text.unwrap_or_default())
-        .ok_or_else(|| "the reply was not a JSON object".to_string())
+    serde_json::from_str(outcome.final_text.as_deref().unwrap_or_default())
+        .map_err(|_| "the reply did not match the draft schema".to_string())
 }
 
 #[cfg(test)]
@@ -823,17 +831,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_plain_fenced_and_surrounded_json() {
+    fn a_schema_checked_reply_is_read_and_anything_else_fails_the_turn() {
+        let json = r#"{"branch":"feat/x","title":"feat: x","body":"Why\n"}"#;
         let want = Draft {
             branch: "feat/x".into(),
             title: "feat: x".into(),
             body: "Why\n".into(),
         };
-        let json = r#"{"branch":"feat/x","title":"feat: x","body":"Why\n"}"#;
-        assert_eq!(parse_draft(json), Some(want));
-        let fenced = format!("```json\n{json}\n```");
-        assert!(parse_draft(&fenced).is_some());
-        assert!(parse_draft(&format!("Here you go: {json} done")).is_some());
+        let reply = |text: &str| {
+            let stream = format!(
+                "{}\n",
+                serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": text})
+            );
+            harness::replay_events(Harness::Claude, &stream)
+        };
+        assert_eq!(draft_reply(&reply(json)), Ok(want));
+        for bad in [
+            format!("```json\n{json}\n```"),
+            format!("Here you go: {json} done"),
+            r#"{"title":"t"}"#.to_string(),
+            r#"{"branch":"b","title":5,"body":""}"#.to_string(),
+            "no json here".to_string(),
+        ] {
+            assert_eq!(
+                draft_reply(&reply(&bad)),
+                Err("the reply did not match the draft schema".to_string()),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_draft_turn_passes_its_schema_to_each_harness() {
+        let wt = Path::new("/worktree");
+        let schema_path = Path::new("/run/schema.json");
+        let schema = harness::OutputSchema {
+            json: DRAFT_SCHEMA,
+            path: schema_path,
+        };
+        let req = |harness| harness::RunRequest {
+            harness,
+            worktree: wt,
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            review: true,
+            task_run: false,
+            task_sandbox: None,
+            mcp_config: None,
+            settings_path: None,
+            network_allowed: false,
+            codex_mcp: &[],
+            images: &[],
+            repo_settings: true,
+            resume: None,
+        };
+        let claude = harness::build_argv_with_schema(&req(Harness::Claude), Some(&schema));
+        let flag = claude.iter().position(|a| a == "--json-schema").unwrap();
+        assert_eq!(claude[flag + 1], DRAFT_SCHEMA);
+        let codex = harness::build_argv_with_schema(&req(Harness::Codex), Some(&schema));
+        let flag = codex.iter().position(|a| a == "--output-schema").unwrap();
+        assert_eq!(codex[flag + 1], "/run/schema.json");
+        assert_eq!(codex.last().map(String::as_str), Some("-"));
     }
 
     #[test]
@@ -875,14 +934,5 @@ mod tests {
         ] {
             assert!(is_permanent(e), "{e}");
         }
-    }
-
-    #[test]
-    fn rejects_text_without_a_json_object_and_defaults_missing_fields() {
-        assert_eq!(parse_draft("no json here"), None);
-        assert_eq!(parse_draft("} backwards {"), None);
-        assert_eq!(parse_draft(r#"{"title":5}"#), None);
-        let draft = parse_draft(r#"{"title":"t"}"#).unwrap();
-        assert_eq!((draft.title.as_str(), draft.branch.as_str()), ("t", ""));
     }
 }

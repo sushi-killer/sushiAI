@@ -11,17 +11,14 @@
 use super::*;
 use crate::overseer::Entry;
 
-/// Decision line a changed approach leaves; the next attempt's advisor run
-/// finds it by the attempt number.
+/// Decision line a changed approach leaves for the owner to read.
 pub(super) fn approach_line(attempt_n: u32) -> String {
     format!("Ladder: changed approach after attempt {attempt_n}")
 }
 
 /// Whether the ladder already changed the approach once for this task.
 pub(super) fn approach_changed(task: &Task) -> bool {
-    task.decisions
-        .iter()
-        .any(|d| d.starts_with("Ladder: changed approach after attempt "))
+    task.loop_state.approach_changed_after.is_some()
 }
 
 /// Whether the failed attempt the next one follows is the one the ladder
@@ -30,10 +27,7 @@ pub(super) fn approach_pending(task: &Task) -> bool {
     task.attempts
         .iter()
         .rfind(|a| a.stage == Stage::Implement)
-        .is_some_and(|a| {
-            let line = approach_line(a.n);
-            task.decisions.iter().any(|d| d.starts_with(&line))
-        })
+        .is_some_and(|a| task.loop_state.approach_changed_after == Some(a.n))
 }
 
 /// What the base checkout printed for a check command (`None`: no run known).
@@ -126,6 +120,7 @@ pub(super) fn change_approach(task: &mut Task, settings: &Settings, attempt_n: u
     } else {
         "the same tier".to_string()
     };
+    task.loop_state.approach_changed_after = Some(attempt_n);
     task.decisions.push(format!(
         "{} ({tier_note}; the planner re-plans the rest)",
         approach_line(attempt_n)
@@ -253,7 +248,23 @@ pub(super) const AGENT_RESTART_LINE: &str = "Orchestrator: restarted a failed ta
 
 /// An agent may restart a failed task once; the owner any time.
 pub(super) fn agent_may_restart(task: &Task) -> bool {
-    task.status != TaskStatus::Failed || !task.decisions.iter().any(|d| d == AGENT_RESTART_LINE)
+    task.status != TaskStatus::Failed || !task.loop_state.agent_restarted
+}
+
+/// Whether a failed top-level task ended on the environment by the typed
+/// cause of its last implement attempt, and no agent restarted it yet.
+pub(super) fn restartable_on_environment(task: &Task) -> bool {
+    task.status == TaskStatus::Failed
+        && task.parent.is_none()
+        && !task.archived
+        && !task.queue.stopped_explicitly
+        && agent_may_restart(task)
+        && task
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| a.stage == Stage::Implement)
+            .is_some_and(|a| a.cause == Some(Blame::Environment))
 }
 
 /// A parent is unreviewed while any landed, unarchived subtask is: derived
@@ -267,7 +278,16 @@ pub(super) fn inherit_unreviewed(app: &App, task: &mut Task) {
             && !child.archived
         {
             task.unreviewed = true;
-            if !task.decisions.iter().any(|d| d.contains(&child.id)) {
+            if !task
+                .loop_state
+                .unreviewed_parts
+                .iter()
+                .any(|p| p.id == child.id)
+            {
+                task.loop_state.unreviewed_parts.push(UnreviewedPart {
+                    id: child.id.clone(),
+                    title: child.title.clone(),
+                });
                 task.decisions.push(super::pr::unreviewed_part_line(&child));
             }
         }
@@ -278,7 +298,7 @@ pub(super) const DEPENDENCY_RESTART_LINE: &str =
     "Orchestrator: restarted a dependency that failed on the environment";
 
 /// The decision line of an attempt committed unreviewed because its open
-/// "no verdict" question was retired; the relaunched loop finds it by it.
+/// "no verdict" question was retired.
 pub(super) fn unreviewed_line(attempt_n: u32) -> String {
     format!("Orchestrator: attempt {attempt_n} committed unreviewed: its open review question was retired")
 }
@@ -294,7 +314,7 @@ pub(super) fn pending_unreviewed(task: &Task) -> Option<usize> {
     let a = &task.attempts[idx];
     (task.unreviewed
         && a.status == AttemptStatus::Blocked
-        && task.decisions.last() == Some(&unreviewed_line(a.n)))
+        && task.loop_state.unreviewed_attempt == Some(a.n))
     .then_some(idx)
 }
 
@@ -322,7 +342,10 @@ impl App {
             }
         }
         for id in &failed {
-            self.update_task(id, |t| t.decisions.push(AGENT_RESTART_LINE.to_string()))?;
+            self.update_task(id, |t| {
+                t.loop_state.agent_restarted = true;
+                t.decisions.push(AGENT_RESTART_LINE.to_string());
+            })?;
         }
         Ok(())
     }
@@ -355,6 +378,7 @@ impl App {
                     };
                     task.question = None;
                     task.unreviewed = true;
+                    task.loop_state.unreviewed_attempt = Some(n);
                     task.decisions.push(unreviewed_line(n));
                     task.status = TaskStatus::Queued;
                     task.updated_at = now_ms();
@@ -405,6 +429,26 @@ impl App {
         if task.status != TaskStatus::Failed || task.parent.is_some() || task.archived {
             return;
         }
+        // An environment failure is restarted once by code, like a dependency;
+        // the owner hears of it only if the restart cannot start or fails again.
+        if restartable_on_environment(task) && tokio::runtime::Handle::try_current().is_ok() {
+            let (app, id) = (self.arc(), task.id.clone());
+            tokio::spawn(async move {
+                let started = app
+                    .handle_task_start(json!({"id": id, "source": "orchd"}))
+                    .await;
+                if started.is_err() {
+                    if let Ok(Some(failed)) = app.store.load_task(&id) {
+                        app.announce_task_failed(&failed);
+                    }
+                }
+            });
+            return;
+        }
+        self.announce_task_failed(task);
+    }
+
+    fn announce_task_failed(&self, task: &Task) {
         let key = format!("{}|task_failed|{}", task.id, task.failed_count);
         if self
             .notice_log()
@@ -656,7 +700,8 @@ mod tests {
         retry().unwrap();
         let stored = app.store.load_task("dep").unwrap().unwrap();
         assert!(
-            stored.decisions.contains(&AGENT_RESTART_LINE.to_string()),
+            stored.loop_state.agent_restarted
+                && stored.decisions.contains(&AGENT_RESTART_LINE.to_string()),
             "{:?}",
             stored.decisions
         );
@@ -780,6 +825,23 @@ mod tests {
         assert!(silent.question.is_none() && silent.unreviewed);
         assert_eq!(silent.status, TaskStatus::Queued);
         assert_eq!(pending_unreviewed(&silent), Some(0));
+        // A decision line pushed later does not hide the pending attempt.
+        let mut later = silent.clone();
+        later.decisions.push("Owner: looked at it".into());
+        assert_eq!(pending_unreviewed(&later), Some(0));
+        later.loop_state.unreviewed_attempt = None;
+        assert_eq!(pending_unreviewed(&later), None);
+    }
+
+    #[test]
+    fn the_changed_approach_is_a_field_not_a_decision_line() {
+        let mut task = task_with_status(TaskStatus::Running);
+        task.attempts = vec![attempt_with_failure(1, "verify:x")];
+        assert!(!approach_changed(&task) && !approach_pending(&task));
+        change_approach(&mut task, &Settings::default(), 1);
+        assert!(approach_changed(&task) && approach_pending(&task));
+        task.decisions.clear();
+        assert!(approach_changed(&task) && approach_pending(&task));
     }
 
     #[test]
@@ -788,5 +850,48 @@ mod tests {
         let text = crate::brief::build_plan_continue_brief(&variant, true);
         assert!(text.contains("cut off"), "{text}");
         assert!(!text.contains("did not contain"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_environment_failure_of_a_top_level_task_is_restarted_once_by_code() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Failed);
+        task.repo = std::env::temp_dir().display().to_string();
+        task.attempts = vec![attempt_with_failure(1, "verify:check")];
+        task.attempts[0].stage = Stage::Implement;
+        // Only the typed cause counts: the failure text says nothing.
+        assert!(!restartable_on_environment(&task));
+        task.attempts[0].cause = Some(Blame::Environment);
+        assert!(restartable_on_environment(&task));
+        app.store.save_task(&task).unwrap();
+        let restarts = |app: &App| {
+            app.store
+                .load_task(&task.id)
+                .unwrap()
+                .unwrap()
+                .decisions
+                .iter()
+                .filter(|d| *d == AGENT_RESTART_LINE)
+                .count()
+        };
+
+        app.notify_task_failed(&task);
+        for _ in 0..200 {
+            if restarts(&app) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(restarts(&app), 1);
+
+        // Failed again: no second restart, the owner is told.
+        let mut again = app.store.load_task(&task.id).unwrap().unwrap();
+        again.mark_failed();
+        app.store.save_task(&again).unwrap();
+        assert!(!restartable_on_environment(&again));
+        app.notify_task_failed(&again);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(restarts(&app), 1);
+        app.shutdown();
     }
 }

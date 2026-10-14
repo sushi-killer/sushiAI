@@ -7,7 +7,8 @@
 //! file for the next read.
 
 use crate::model::{
-    AttemptStatus, Audit, AuditReport, AuditStatus, Proposal, RepoNote, Settings, Task, TaskStatus,
+    AnsweredBy, AttemptStatus, Audit, AuditReport, AuditStatus, Proposal, QuestionKind, RepoNote,
+    Settings, Stage, Task, TaskStatus, UnreviewedPart, STATE_VERSION,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -22,6 +23,151 @@ struct HelperRun {
 
 pub struct Store {
     data_dir: PathBuf,
+}
+
+/// Reads a task file; a task from before typed loop state is migrated once.
+fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
+    let mut task: Task = serde_json::from_str(text)?;
+    migrate_loop_state(&mut task);
+    Ok(task)
+}
+
+/// Version 1 of the loop state: derives the typed fields from the decision
+/// lines and question texts older versions wrote them into. This is the only
+/// reader of those formats; afterwards the fields are the state.
+fn migrate_loop_state(task: &mut Task) {
+    if task.loop_state.state_version >= STATE_VERSION {
+        return;
+    }
+    let decisions = &task.decisions;
+    let lines = |prefix: &'static str| decisions.iter().filter(move |d| d.starts_with(prefix));
+    let unreviewed_attempt = task
+        .attempts
+        .iter()
+        .rfind(|a| a.stage == Stage::Implement)
+        .filter(|a| {
+            task.unreviewed
+                && a.status == AttemptStatus::Blocked
+                && task.decisions.last().map(String::as_str)
+                    == Some(&format!(
+                        "Orchestrator: attempt {} committed unreviewed: its open review question was retired",
+                        a.n
+                    ))
+        })
+        .map(|a| a.n);
+    let agent_restarted = task
+        .decisions
+        .iter()
+        .any(|d| d == "Orchestrator: restarted a failed task");
+    let dependency_restarted = task
+        .decisions
+        .iter()
+        .any(|d| d == "Orchestrator: restarted a dependency that failed on the environment");
+    let approach_changed_after = lines("Ladder: changed approach after attempt ")
+        .filter_map(|d| {
+            let rest = d.strip_prefix("Ladder: changed approach after attempt ")?;
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
+        .next_back();
+    let stuck_retries = lines("Retry later: ").count() as u32;
+    // The count belonged to the landing in progress; a landed task has none.
+    let rereviews = if task.landed_at.is_some() {
+        0
+    } else {
+        lines("Land: the carry").count() as u32
+    };
+    let exhausted = "Attempts keep failing";
+    let orchestrator = lines("Orchestrator: Attempts keep failing").count();
+    let like = lines("Overseer: answered like ")
+        .filter(|d| d.contains(&format!(" -- {exhausted} -> ")))
+        .count();
+    let legacy_lead = lines("Lead: Attempts keep failing -> ").count();
+    let lead = task
+        .question_history
+        .iter()
+        .filter(|q| {
+            q.kind == QuestionKind::AttemptsFailing
+                && q.answered_by == AnsweredBy::Lead
+                && !q.answer.trim().eq_ignore_ascii_case("stop")
+        })
+        .count();
+    let non_owner_continues = (orchestrator + like + lead.max(legacy_lead)) as u32;
+    let part_suffix = ") landed unreviewed: no review route gave a verdict";
+    let unreviewed_parts: Vec<UnreviewedPart> = lines("Orchestrator: subtask \"")
+        .filter_map(|d| {
+            let rest = d
+                .strip_prefix("Orchestrator: subtask \"")?
+                .strip_suffix(part_suffix)?;
+            let (title, id) = rest.rsplit_once("\" (")?;
+            Some(UnreviewedPart {
+                id: id.to_string(),
+                title: title.to_string(),
+            })
+        })
+        .collect();
+    let impossible_answers: Vec<usize> = task
+        .assumptions
+        .iter()
+        .filter(|a| {
+            (a.by == "policy" || a.by == "judge") && a.kind == Some(QuestionKind::Impossible)
+        })
+        .filter_map(|a| legacy_criterion(&a.question))
+        .collect();
+    if let Some(q) = task.question.as_mut() {
+        if q.kind == QuestionKind::Impossible {
+            q.criterion = legacy_criterion(&q.text);
+            q.evidence = q
+                .text
+                .split_once(". Evidence: ")
+                .map(|(_, e)| e.to_string());
+        }
+        if q.kind == QuestionKind::AgentQuestion && q.text.starts_with("This task has spent") {
+            q.kind = QuestionKind::Budget;
+        }
+        if q.kind == QuestionKind::PreexistingFailure && q.base_tails.is_empty() {
+            q.base_tails = q
+                .commands
+                .iter()
+                .map(|command| legacy_base_tail(&q.text, command))
+                .collect();
+        }
+    }
+    let state = &mut task.loop_state;
+    state.state_version = STATE_VERSION;
+    state.unreviewed_attempt = unreviewed_attempt;
+    state.agent_restarted = agent_restarted;
+    state.dependency_restarted = dependency_restarted;
+    state.approach_changed_after = approach_changed_after;
+    state.stuck_retries = stuck_retries;
+    state.rereviews = rereviews;
+    state.non_owner_continues = non_owner_continues;
+    state.unreviewed_parts = unreviewed_parts;
+    state.impossible_answers = impossible_answers;
+}
+
+/// The criterion number in the text of an impossible question.
+fn legacy_criterion(text: &str) -> Option<usize> {
+    text.strip_prefix("Criterion ")?
+        .split_once(" cannot be met as written")?
+        .0
+        .parse()
+        .ok()
+}
+
+/// What a base-check question text quoted for `command`.
+fn legacy_base_tail(text: &str, command: &str) -> String {
+    let listed = format!("- {command}: ");
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix(&listed).map(str::to_string).or_else(|| {
+                line.strip_prefix(&format!("{command} already fails on base "))
+                    .and_then(|rest| rest.split_once(": ").map(|(_, tail)| tail.to_string()))
+            })
+        })
+        .unwrap_or_default()
 }
 
 impl Store {
@@ -144,8 +290,7 @@ impl Store {
             return Ok(None);
         }
         let text = fs::read_to_string(&path)?;
-        let task = serde_json::from_str(&text)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let task = parse_task(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Some(task))
     }
 
@@ -171,7 +316,7 @@ impl Store {
                     continue;
                 }
             };
-            match serde_json::from_str::<Task>(&text) {
+            match parse_task(&text) {
                 Ok(task) => out.push(task),
                 Err(e) => {
                     eprintln!("orch: parsing task {} failed: {e}", task_json.display());
@@ -584,6 +729,7 @@ mod tests {
                 advisor_fingerprint: None,
                 candidates: vec![],
                 criteria_results: vec![],
+                cause: None,
                 diff_stat: None,
             }],
             cost_usd: 0.0,
@@ -601,6 +747,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -729,6 +876,71 @@ mod tests {
         let loaded = store.load_settings().unwrap();
         assert_eq!(loaded.brief_check_route, "claude-haiku");
         assert!(!loaded.routes.iter().any(|r| r.id == "claude-haiku"));
+    }
+
+    #[test]
+    fn a_task_with_legacy_state_lines_loads_with_typed_fields() {
+        use crate::model::{Question, QuestionKind};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut task = sample_task("legacy", TaskStatus::Queued, AttemptStatus::Blocked);
+        task.unreviewed = true;
+        task.decisions = vec![
+            "Orchestrator: restarted a failed task".into(),
+            "Orchestrator: restarted a dependency that failed on the environment".into(),
+            "Ladder: changed approach after attempt 1 (the same tier; the planner re-plans the rest)".into(),
+            "Retry later: x; trying again in 30 s (retry 1 of 2)".into(),
+            "Retry later: x; trying again in 30 s (retry 2 of 2)".into(),
+            "Land: the carry onto b changed f which the review saw".into(),
+            "Orchestrator: Attempts keep failing -> continue (r)".into(),
+            "Overseer: answered like owner precedent -- Attempts keep failing -> continue".into(),
+            "Lead: Attempts keep failing -> continue".into(),
+            "Orchestrator: subtask \"Part (a)\" (child-1) landed unreviewed: no review route gave a verdict".into(),
+            "Orchestrator: attempt 1 committed unreviewed: its open review question was retired".into(),
+        ];
+        let mut question = Question::new(
+            "Criterion 2 cannot be met as written: x. Evidence: a. Evidence: b",
+            vec![],
+            QuestionKind::Impossible,
+            crate::model::AskedBy::Implement,
+        );
+        question.commands = vec!["npm test".into(), "npm run lint".into()];
+        task.question = Some(question);
+        store.save_task(&task).unwrap();
+        // Written by an older version: no state version, no typed fields.
+        let path = store.task_path("legacy");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("stateVersion");
+        fs::write(&path, value.to_string()).unwrap();
+
+        let loaded = store.load_task("legacy").unwrap().unwrap();
+        let state = &loaded.loop_state;
+        assert_eq!(state.state_version, STATE_VERSION);
+        assert_eq!(state.unreviewed_attempt, Some(1));
+        assert!(state.agent_restarted && state.dependency_restarted);
+        assert_eq!(state.approach_changed_after, Some(1));
+        assert_eq!((state.stuck_retries, state.rereviews), (2, 1));
+        assert_eq!(state.non_owner_continues, 3);
+        assert_eq!(state.unreviewed_parts.len(), 1);
+        assert_eq!(state.unreviewed_parts[0].id, "child-1");
+        assert_eq!(state.unreviewed_parts[0].title, "Part (a)");
+        let q = loaded.question.unwrap();
+        assert_eq!(q.criterion, Some(2));
+        assert_eq!(q.evidence.as_deref(), Some("a. Evidence: b"));
+        // Loaded and saved again, the state stays as it is: the lines are not read twice.
+        let mut again = store.load_task("legacy").unwrap().unwrap();
+        again.loop_state.stuck_retries = 0;
+        store.save_task(&again).unwrap();
+        assert_eq!(
+            store
+                .load_task("legacy")
+                .unwrap()
+                .unwrap()
+                .loop_state
+                .stuck_retries,
+            0
+        );
     }
 
     #[test]

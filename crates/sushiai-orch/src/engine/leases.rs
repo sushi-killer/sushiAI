@@ -305,12 +305,9 @@ impl App {
             let Some(other) = self.store.load_task(&id).ok().flatten() else {
                 continue;
             };
-            let (worktree, base) = (
-                PathBuf::from(&other.worktree),
-                other.work_base().to_string(),
-            );
+            let (worktree, own) = (PathBuf::from(&other.worktree), other.own_diff());
             let files = tokio::task::spawn_blocking(move || {
-                git::changed_files(&worktree, &base).unwrap_or_default()
+                own.changed_files(&worktree).unwrap_or_default()
             })
             .await
             .unwrap_or_default();
@@ -394,16 +391,15 @@ impl Drop for LeaseWatch {
 
 pub(super) fn watch_lease(app: &Arc<App>, task: &Task) -> LeaseWatch {
     let (app, id) = (app.clone(), task.id.clone());
-    let (worktree, base) = (PathBuf::from(&task.worktree), task.work_base().to_string());
+    let (worktree, own) = (PathBuf::from(&task.worktree), task.own_diff());
     LeaseWatch(tokio::spawn(async move {
         loop {
             tokio::time::sleep(LEASE_POLL).await;
-            let (wt, b) = (worktree.clone(), base.clone());
-            let files = tokio::task::spawn_blocking(move || {
-                git::changed_files(&wt, &b).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let (wt, own) = (worktree.clone(), own.clone());
+            let files =
+                tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())
+                    .await
+                    .unwrap_or_default();
             app.sync_lease(&id, &files);
         }
     }))
@@ -413,12 +409,11 @@ pub(super) fn watch_lease(app: &Arc<App>, task: &Task) -> LeaseWatch {
 /// the files the worktree already changed. `true`: go on; `false`: the task
 /// was parked `queued` with the file wait and the loop ends.
 pub(super) async fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool) -> bool {
-    let (worktree, base) = (PathBuf::from(&task.worktree), task.work_base().to_string());
-    let changed = tokio::task::spawn_blocking(move || {
-        git::changed_files(&worktree, &base).unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
+    let (worktree, own) = (PathBuf::from(&task.worktree), task.own_diff());
+    let changed =
+        tokio::task::spawn_blocking(move || own.changed_files(&worktree).unwrap_or_default())
+            .await
+            .unwrap_or_default();
     match app.acquire_lease(task, &changed, force) {
         None => {
             if matches!(task.queue.wait, Some(Wait::File { .. })) {

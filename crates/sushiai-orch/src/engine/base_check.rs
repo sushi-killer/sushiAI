@@ -61,6 +61,7 @@ fn base_check_question(failed: &[VerifyOutcome], base_sha: &str, options: [&str;
         AskedBy::Verify,
     );
     q.commands = failed.iter().map(|f| f.command.clone()).collect();
+    q.base_tails = failed.iter().map(|f| f.tail.trim().to_string()).collect();
     q
 }
 
@@ -145,35 +146,6 @@ fn path_without_location(path: &str) -> &str {
     }
 }
 
-fn looks_like_identifier_or_path(token: &str) -> bool {
-    token.len() >= 6
-        && (token.contains('_')
-            || token.contains("::")
-            || token.contains('/')
-            || token.rsplit_once('.').is_some_and(|(name, ext)| {
-                !name.is_empty()
-                    && !ext.is_empty()
-                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            }))
-}
-
-fn text_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| c.is_whitespace() || "`\"'[](){}".contains(c))
-        .filter(|token| !token.is_empty())
-}
-
-fn output_paths(output: &str) -> Vec<String> {
-    output
-        .split(|c: char| c.is_whitespace() || "`\"'[](){}<>,;".contains(c))
-        .filter_map(|token| {
-            let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | ')' | '('));
-            let path = path_without_location(token);
-            (path != token || check_targets(path).iter().any(|t| t == path))
-                .then(|| path.strip_prefix("./").unwrap_or(path).to_string())
-        })
-        .collect()
-}
-
 /// Whether the request, goal or criteria name `command` itself: the explicit
 /// evidence that the task is meant to make a failing check pass.
 pub(super) fn command_named_by_task(task: &Task, command: &str) -> bool {
@@ -215,42 +187,19 @@ pub(super) fn failing_test_named_by_task(task: &Task, tests: &[String]) -> bool 
         .any(|name| name.chars().count() >= 4 && text.contains(name.as_str()))
 }
 
-/// Whether a pre-existing failing check is part of this task's target.
-/// `output` is the cached base-run tail, or the tail quoted in the question;
-/// changed files are relative to the task's base SHA.
-pub(super) fn is_task_target(
-    task: &Task,
-    command: &str,
-    output: &str,
-    changed_files: &[String],
-) -> bool {
-    if command_named_by_task(task, command) {
-        return true;
-    }
-    let named_tokens: Vec<String> = task
-        .request
-        .iter()
-        .chain(std::iter::once(&task.goal))
-        .chain(task.criteria.iter())
-        .flat_map(|text| text_tokens(text))
-        .filter(|token| looks_like_identifier_or_path(token))
-        .map(str::to_string)
-        .collect();
-    if named_tokens.iter().any(|token| output.contains(token)) {
-        return true;
-    }
-
-    let mut paths = check_targets(command);
-    paths.extend(output_paths(output));
-    paths.iter().any(|path| {
-        let path = path_without_location(path);
-        changed_files.iter().any(|changed| {
-            let changed = changed.strip_prefix("./").unwrap_or(changed);
-            changed == path
-                || changed.ends_with(&format!("/{path}"))
-                || path.ends_with(&format!("/{changed}"))
+/// Whether a pre-existing failing check is part of this task's target: the
+/// task names the command, or the command names a file the task changed.
+/// Changed files are relative to the task's base SHA.
+pub(super) fn is_task_target(task: &Task, command: &str, changed_files: &[String]) -> bool {
+    command_named_by_task(task, command)
+        || check_targets(command).iter().any(|path| {
+            changed_files.iter().any(|changed| {
+                let changed = changed.strip_prefix("./").unwrap_or(changed);
+                changed == path
+                    || changed.ends_with(&format!("/{path}"))
+                    || path.ends_with(&format!("/{changed}"))
+            })
         })
-    })
 }
 
 /// Whether `target` (a file, a directory or a glob) names something in
@@ -501,11 +450,11 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
+/// A result the environment caused: its setup failed before the command ran.
+/// The command's own output never says so (an install error in a check's
+/// tail is that check's failure).
 pub(crate) fn is_environment_result(outcome: &VerifyOutcome) -> bool {
-    let tail = outcome.tail.to_ascii_lowercase();
-    ["setup failed", "eexist", "failed to install"]
-        .iter()
-        .any(|marker| tail.contains(marker))
+    outcome.setup_failed
 }
 
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
@@ -516,6 +465,10 @@ pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), Verif
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+    let mut rows = rows;
+    for row in rows.iter_mut() {
+        crate::test_failures::hydrate_lists(data_dir, &mut row.outcome);
+    }
     let poisoned = rows
         .iter()
         .any(|r| is_interrupted(&r.outcome) || is_environment_result(&r.outcome));
@@ -559,8 +512,8 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
-/// same command on an unchanged base runs once. Environment results and
-/// checkout errors get one retry in a fresh worktree and are never cached.
+/// same command on an unchanged base runs once. A checkout error gets one retry
+/// in a fresh worktree.
 /// `Err` when neither checkout could be made; nothing is known about the base.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
@@ -654,13 +607,8 @@ pub(super) async fn run_on_base(
             Err(e) if known.is_empty() => return Err(e),
             Err(_) => break,
         };
-        let mut retry = Vec::new();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
-            if is_environment_result(&r) {
-                retry.push(c.clone());
-                continue;
-            }
             // An interrupted run says nothing about the commit.
             if !cancelled && r.code.is_some() && !is_interrupted(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
@@ -668,7 +616,7 @@ pub(super) async fn run_on_base(
             known.insert(c.clone(), r);
         }
         save_base_runs(&app.data_dir, &cache);
-        missing = retry;
+        missing.clear();
     }
     Ok(commands
         .iter()
@@ -1287,9 +1235,9 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         .extend(jobs);
 }
 
-/// Baselines the checks that have none yet on the base commit, or on the
-/// planner's tests commit when the task has one (not in the
-/// task's worktree, which may hold the implementer's changes). `false` when
+/// Baselines the checks that have none yet on the base commit with the
+/// planner's tests written over it (not in the task's worktree, which may hold
+/// the implementer's changes). `false` when
 /// cancelled or the base could not be checked out; nothing is stored then.
 pub(super) async fn baseline_on_base(
     app: &Arc<App>,
@@ -1302,7 +1250,27 @@ pub(super) async fn baseline_on_base(
     }
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
-    let rev = task.work_base().to_string();
+    // The base with the planner's tests: a commit no branch holds.
+    let (repo, base, files) = (
+        PathBuf::from(&task.repo),
+        task.base_sha.clone(),
+        task.planner_tests
+            .files
+            .iter()
+            .map(|t| (t.path.clone(), t.content.clone().into_bytes()))
+            .collect::<Vec<_>>(),
+    );
+    let rev = if files.is_empty() {
+        base
+    } else {
+        match tokio::task::spawn_blocking(move || git::commit_over(&repo, &base, &files))
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+        {
+            Ok(rev) => rev,
+            Err(_) => return false,
+        }
+    };
     match run_on_base(
         app,
         Some(&task.id),
@@ -1465,6 +1433,18 @@ mod tests {
             ms: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_a_failed_setup_is_an_environment_result_never_a_tail() {
+        let mut eexist = outcome("cargo test", 1);
+        eexist.tail = "Error: EEXIST: file already exists, mkdir 'target'".into();
+        let mut install = outcome("npm test", 1);
+        install.tail = "setup failed (exit 1): npm ERR! failed to install".into();
+        assert!(!is_environment_result(&eexist));
+        assert!(!is_environment_result(&install));
+        install.setup_failed = true;
+        assert!(is_environment_result(&install));
     }
 
     #[tokio::test]
@@ -1929,41 +1909,45 @@ mod tests {
     }
 
     #[test]
-    fn task_target_detection_uses_request_output_and_changed_paths_but_ignores_ci_gates() {
+    fn task_target_detection_uses_the_command_and_changed_paths_but_ignores_ci_gates() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
-        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
+        task.request = Some("Make node --test tests/focus.test.cjs green".into());
         assert!(is_task_target(
             &task,
-            "cargo test -p sushiai-orch --lib",
-            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
+            "node --test tests/focus.test.cjs",
             &[]
         ));
 
         task.request = None;
         assert!(is_task_target(
             &task,
-            "cargo test -p sushiai-orch",
-            "error in crates/sushiai-orch/tests/base_retry.rs:17:2",
+            "node --test crates/sushiai-orch/tests/base_retry.rs",
             &["crates/sushiai-orch/tests/base_retry.rs".into()]
         ));
 
         task.criteria = vec!["Checks pass -- check: npm run ci".into()];
-        assert!(!is_task_target(&task, "npm run ci", "ci failed", &[]));
+        assert!(!is_task_target(&task, "npm run ci", &[]));
         task.criteria =
             vec!["Run the focused test -- check: node --test tests/base_retry.test.cjs".into()];
         assert!(is_task_target(
             &task,
             "node --test tests/base_retry.test.cjs",
-            "test failed",
             &[]
         ));
+    }
+
+    #[test]
+    fn a_name_in_the_check_output_alone_does_not_make_a_target() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
         task.criteria = vec!["Checks pass -- check: npm run ci".into()];
         task.goal = "Fix the failing a_base_retry_carries_the_planner_test_commit test".into();
-        assert!(is_task_target(
+        // The output names a path the task changed and a token of the goal:
+        // neither decides any more.
+        assert!(!is_task_target(&task, "npm run ci", &[]));
+        assert!(!is_task_target(
             &task,
-            "npm run ci",
-            "a_base_retry_carries_the_planner_test_commit ... FAILED",
-            &[]
+            "cargo test",
+            &["crates/sushiai-orch/tests/base_retry.rs".into()]
         ));
     }
 

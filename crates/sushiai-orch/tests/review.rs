@@ -420,7 +420,7 @@ case "$brief" in
 "## Review"*)
   case "$brief" in
   *"Rule on every acceptance criterion"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Marker exists\",\"met\":false,\"evidence\":\"wrong file\"}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"wrong file\"}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
   esac
@@ -462,7 +462,8 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
     assert_eq!(
-        attempt["review"]["findings"][0], "Unmet criterion: Marker exists (wrong file)",
+        attempt["review"]["findings"][0],
+        "Unmet criterion: Marker exists -- check: CHANGED_MARKER.txt (wrong file)",
         "{settled}"
     );
 
@@ -996,7 +997,7 @@ case "$brief" in
   printf '%s' "$brief" > "$LOG_DIR/review.$$"
   case "$brief" in
   *"## Previous review"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"id\":\"F-1\"}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
   esac
@@ -1111,7 +1112,7 @@ case "$brief" in
   *"## Findings dropped by a tie-break judge"*)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
   *"## Previous review"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"id\":\"F-1\"}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
   esac

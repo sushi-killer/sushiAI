@@ -108,6 +108,7 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         overseer_woken: false,
         unreviewed: false,
         failed_count: 0,
+        loop_state: Default::default(),
         planned_tier: None,
         planned_by_parent: false,
         tier_fallback: None,
@@ -140,7 +141,7 @@ pub(super) fn test_app_parallel_one() -> (Arc<App>, tempfile::TempDir) {
     (app, dir)
 }
 
-pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
+pub(crate) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
     Attempt {
         n,
         stage: Stage::Implement,
@@ -185,6 +186,7 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         advisor_fingerprint: None,
         candidates: vec![],
         criteria_results: vec![],
+        cause: None,
         diff_stat: None,
     }
 }

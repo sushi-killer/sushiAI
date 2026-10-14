@@ -460,6 +460,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         advisor_fingerprint: None,
         candidates: vec![],
         criteria_results: vec![],
+        cause: None,
         diff_stat: None,
     }
 }
@@ -1152,8 +1153,8 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        // The plan gate: code checks and one plan review by another model
-        // family. A critical finding replans once.
+        // The plan gate: one typed plan review, then the code checks. A
+        // critical finding replans once.
         match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
             plan_gate::GateAction::Replan => continue,
             plan_gate::GateAction::Cancelled => {
@@ -1566,7 +1567,16 @@ async fn split_into_subtasks(
             (text, plan_gate::checklist_of(parts, &unit.members), paths)
         } else {
             let part = &parts[unit.members[0]];
-            let drafted_verify = non_empty(&part.verify);
+            let mut drafted_verify = non_empty(&part.verify);
+            // A complete draft leads with the part's targeted check, so the
+            // subtask runs that check (the full CI entry is the parent's).
+            let check = part.check.trim();
+            if part.is_complete()
+                && !check.is_empty()
+                && !drafted_verify.iter().any(|c| c.trim() == check)
+            {
+                drafted_verify.insert(0, check.to_string());
+            }
             let (verify, judged) = if review_on {
                 split_verify_commands(&parent_worktree, &drafted_verify)
             } else {
@@ -1588,12 +1598,7 @@ async fn split_into_subtasks(
             drafted.verify = verify;
             drafted.final_verify = non_empty(&part.final_verify);
             drafted.part = Some(part);
-            let request = if part.check.trim().is_empty() {
-                part.request.trim().to_string()
-            } else {
-                format!("{}\n\nCheck: {}", part.request.trim(), part.check_command())
-            };
-            (request, vec![], part.paths.clone())
+            (part.request.trim().to_string(), vec![], part.paths.clone())
         };
         let relay_of = links[unit.members[0]].and_then(|at| {
             let id = id_of_key[parts[at].key.trim()];
@@ -1655,6 +1660,8 @@ async fn split_into_subtasks(
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
                 .map(str::to_string);
+            let check = part.check.trim();
+            child.brief_check.check = (!check.is_empty()).then(|| check.to_string());
             child.planned_by_parent = drafted.complete;
             if drafted.complete {
                 child.record_planner_commands();

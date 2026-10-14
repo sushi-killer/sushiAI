@@ -13,7 +13,7 @@ pub(super) enum BaseVerdict {
     Waived,
     /// The task fails a test the base does not: an ordinary failure.
     /// The task's own run to report (a full run when the first was fail-fast).
-    NewFailures(VerifyOutcome),
+    NewFailures(Box<VerifyOutcome>),
     /// Neither output names tests and they differ: the existing question.
     Unclear,
 }
@@ -28,7 +28,7 @@ pub(super) enum Compared {
     Covered(Vec<String>),
     /// Tests failing here and not on the base.
     New(BTreeSet<String>),
-    /// Not comparable: no parsed run, a crash, a cut list, an early stop or
+    /// Not comparable: no parsed run, a crash, an early stop or
     /// output beyond the test lines that differs.
     Unparsed,
 }
@@ -42,7 +42,7 @@ pub(super) fn compare(run: &VerifyOutcome, base: &VerifyOutcome) -> Compared {
     if run.stopped_early || base.stopped_early {
         return Compared::Unparsed;
     }
-    if run.truncated || base.truncated || run.crashed || base.crashed {
+    if run.crashed || base.crashed {
         return Compared::Unparsed;
     }
     if run.failing.is_empty() || base.failing.is_empty() {
@@ -106,7 +106,7 @@ pub(super) async fn judge_against_base(
     // A fail-fast run is not comparable: take full runs of both sides, or
     // give up (never a waiver).
     let Some(full) = no_fail_fast(&failed.command) else {
-        return BaseVerdict::Unclear;
+        return settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await;
     };
     let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let ran = run_verify_commands(
@@ -136,9 +136,118 @@ pub(super) async fn judge_against_base(
         (Some(t), Some(b)) if usable(t) && usable(b) && !t.stopped_early && !b.stopped_early => {
             judge_pair(app, task, t, b, worktree, run_dir, cancel).await
         }
-        _ => BaseVerdict::Unclear,
+        _ => settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await,
     }
 }
+
+/// Reads a pair the comparison cannot settle with one attribution turn. A
+/// turn that gives no valid verdict leaves the question to the owner.
+/// `introduced`, or a check the task is meant to turn green, is an ordinary
+/// failure; a verified `inherited` waives it as an assumption the owner can
+/// overturn. `environment` and `incomplete` first rerun the check once on the
+/// task tree; only a verdict that is still one of them stays a question.
+async fn settle_unclear(
+    app: &Arc<App>,
+    task: &mut Task,
+    failed: &VerifyOutcome,
+    base_run: &VerifyOutcome,
+    worktree: &Path,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> BaseVerdict {
+    // ponytail: the turn reads the diff and both runs but cannot run
+    // commands; it should become a sandboxed, command-capable read-only turn
+    // that reproduces the narrowest failing piece on the base itself.
+    let Some(mut att) = attribute(app, task, failed, base_run, cancel).await else {
+        return BaseVerdict::Unclear;
+    };
+    let mut run = failed.clone();
+    if !att.target && matches!(att.cause, Blame::Environment | Blame::Incomplete) {
+        let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+        let again = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
+            worktree,
+            &run_dir.join("final"),
+            std::slice::from_ref(&failed.command),
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        let Some(again) = again.into_iter().next().filter(|r| !is_interrupted(r)) else {
+            set_cause(task, Some(att.cause));
+            return BaseVerdict::Unclear;
+        };
+        if again.code == Some(0) {
+            // The failure did not come back: it was the environment's.
+            set_cause(task, None);
+            waive(task, failed, &failed.failing, true);
+            return BaseVerdict::Waived;
+        }
+        match compare(&again, base_run) {
+            Compared::Covered(tests) => {
+                set_cause(task, None);
+                waive(task, &again, &tests, true);
+                return BaseVerdict::Waived;
+            }
+            Compared::New(_) => {
+                set_cause(task, Some(Blame::Introduced));
+                return BaseVerdict::NewFailures(Box::new(again));
+            }
+            Compared::Unparsed => {}
+        }
+        let Some(second) = attribute(app, task, &again, base_run, cancel).await else {
+            set_cause(task, Some(att.cause));
+            return BaseVerdict::Unclear;
+        };
+        att = second;
+        run = again;
+    }
+    set_cause(task, Some(att.cause));
+    if att.target || att.cause == Blame::Introduced {
+        return BaseVerdict::NewFailures(Box::new(run));
+    }
+    if att.cause != Blame::Inherited {
+        return BaseVerdict::Unclear;
+    }
+    waive(task, &run, &att.pre_existing, false);
+    let commands = vec![run.command.clone()];
+    if !task
+        .assumptions
+        .iter()
+        .any(|a| a.commands == commands && a.by == WAIVER_BY)
+    {
+        task.assumptions.push(Assumption {
+            question: format!("{} fails on the base too: waive it?", run.command),
+            answer: WAIVED.to_string(),
+            evidence: att.evidence,
+            by: WAIVER_BY.to_string(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: task.attempts.last().map(|a| a.n),
+            commands,
+            overturned: false,
+            owner_answer: None,
+        });
+    }
+    BaseVerdict::Waived
+}
+
+/// The typed cause on the task's last implement attempt.
+fn set_cause(task: &mut Task, cause: Option<Blame>) {
+    if let Some(attempt) = task
+        .attempts
+        .iter_mut()
+        .rev()
+        .find(|a| a.stage == Stage::Implement)
+    {
+        attempt.cause = cause;
+    }
+}
+
+/// The answer and author of the assumption a verified `inherited` verdict
+/// records; the pull request lists these.
+pub(super) const WAIVED: &str = "waived as pre-existing";
+pub(super) const WAIVER_BY: &str = "judge";
 
 /// `command` with `--no-fail-fast`, only for a plain `cargo test ...` it is
 /// safe to append to.
@@ -166,7 +275,9 @@ async fn judge_pair(
             waive(task, failed, &tests, false);
             return BaseVerdict::Waived;
         }
-        Compared::Unparsed => return BaseVerdict::Unclear,
+        Compared::Unparsed => {
+            return settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await
+        }
         Compared::New(_) => {}
     }
     // New failures: one re-run tells a flaky failure from the task's own. It
@@ -183,7 +294,7 @@ async fn judge_pair(
     )
     .await;
     let Some(again) = again.first().filter(|r| !is_interrupted(r)) else {
-        return BaseVerdict::NewFailures(failed.clone());
+        return BaseVerdict::NewFailures(Box::new(failed.clone()));
     };
     let tests = failed.failing.clone();
     if again.code == Some(0) {
@@ -195,7 +306,7 @@ async fn judge_pair(
             waive(task, failed, &tests, true);
             BaseVerdict::Waived
         }
-        _ => BaseVerdict::NewFailures(failed.clone()),
+        _ => BaseVerdict::NewFailures(Box::new(failed.clone())),
     }
 }
 
@@ -211,7 +322,6 @@ mod tests {
             tail: output.into(),
             failing: report.failing,
             passing: report.passing,
-            truncated: report.truncated,
             crashed: report.crashed,
             stopped_early: report.stopped_early,
             output_key: report.rest_key,
@@ -264,12 +374,39 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_list_is_not_comparable() {
-        let many: String = (0..600).map(|i| format!("not ok {i} - t{i}\n")).collect();
-        let base = run(1, &many);
-        let task = run(1, &format!("{many}not ok 900 - new\n"));
-        assert!(base.truncated);
-        assert_eq!(compare(&task, &base), Compared::Unparsed);
+    fn the_stored_outcome_has_counts_and_a_key_and_the_lists_come_back_from_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let passing: String = (0..600).map(|i| format!("ok {i} - t{i}\n")).collect();
+        let output = format!("{passing}not ok 600 - bad\n");
+        let mut base = run(1, &output);
+        base.tail.clear();
+        crate::test_failures::stash_lists(dir.path(), &mut base);
+        assert_eq!((base.failing_count, base.passing_count), (1, 600));
+        assert_eq!(base.tests_key.len(), 16);
+        let stored = serde_json::to_string(&base).unwrap();
+        assert!(!stored.contains("t599"), "{} bytes", stored.len());
+        assert!(stored.len() < 1000, "{} bytes", stored.len());
+        let mut loaded: VerifyOutcome = serde_json::from_str(&stored).unwrap();
+        let task = run(1, &output);
+        assert_eq!(compare(&task, &loaded), Compared::Unparsed);
+        crate::test_failures::hydrate_lists(dir.path(), &mut loaded);
+        assert_eq!(
+            compare(&task, &loaded),
+            Compared::Covered(vec!["bad".into()])
+        );
+    }
+
+    #[test]
+    fn a_suite_of_600_passing_tests_with_a_base_identical_failure_is_covered() {
+        let passing: String = (0..600).map(|i| format!("ok {i} - t{i}\n")).collect();
+        let output = format!("{passing}not ok 600 - bad\n");
+        let base = run(1, &output);
+        let task = run(1, &output);
+        assert_eq!(compare(&task, &base), Compared::Covered(vec!["bad".into()]));
+        let new = run(1, &format!("{output}not ok 601 - new\n"));
+        assert!(matches!(compare(&new, &base), Compared::New(_)));
+        let lost = run(1, "not ok 600 - bad\n");
+        assert_eq!(compare(&lost, &base), Compared::Unparsed);
     }
 
     #[test]
@@ -334,5 +471,19 @@ mod tests {
         let (base, task) = (run(1, a), run(1, b));
         assert_eq!(base.passing, ["src/a.test.ts"]);
         assert!(matches!(compare(&task, &base), Compared::Covered(_)));
+    }
+
+    #[test]
+    fn a_ci_gate_named_only_in_a_criterion_check_is_still_waived_on_equal_names() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        task.criteria = vec!["Checks pass -- check: npm run ci".into()];
+        // Not the task's target, so nothing keeps the gate from a waiver ...
+        assert!(!base_check::is_task_target(&task, "npm run ci", &[]));
+        // ... and every failing name is in the base run.
+        let base = run(1, BASE);
+        assert!(matches!(
+            compare(&run(1, BASE), &base),
+            Compared::Covered(_)
+        ));
     }
 }

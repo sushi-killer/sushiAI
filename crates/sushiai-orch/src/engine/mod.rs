@@ -35,6 +35,7 @@ mod messages;
 mod advisor;
 mod answer_policy;
 mod attempt_run;
+mod attribution;
 mod availability;
 mod backlog;
 mod base_check;
@@ -99,6 +100,7 @@ use advisor::*;
 pub(crate) use answer_policy::owner_only;
 use answer_policy::*;
 use attempt_run::*;
+use attribution::*;
 use availability::*;
 use backlog::*;
 pub(crate) use base_check::is_environment_result;
@@ -309,6 +311,8 @@ struct HookContext {
     repo: String,
     worktree: PathBuf,
     base_sha: String,
+    /// The agent's own work: the base without the planner's files.
+    own: OwnDiff,
     verify: Vec<String>,
     blocks: AtomicU32,
     /// Cancelled when the attempt's run ends, so a Stop-hook verify still
@@ -339,6 +343,7 @@ impl HookContext {
             repo: task.repo.clone(),
             worktree: worktree.to_path_buf(),
             base_sha: base_sha.to_string(),
+            own: task.own_diff(),
             verify: task.verify.clone(),
             blocks: AtomicU32::new(0),
             cancel: CancelToken::new(),
@@ -434,6 +439,9 @@ pub struct App {
     /// disk (`base-results.json`), so a restart does not run them again; an
     /// interrupted, cancelled or environment-failed run is never stored.
     base_runs: std::sync::Mutex<HashMap<(String, String), VerifyOutcome>>,
+    /// The attribution turn's verdict per (base sha, command, run key, base
+    /// run key); a failed turn is kept as `None`. Memory only.
+    attributions: StdMutex<HashMap<AttributionKey, Option<Attribution>>>,
     /// Exit-0 checks on exact worktree trees, in insertion order, memory only.
     gate_passes: StdMutex<PassedChecks>,
     /// Retry decisions from background base runs, keyed by (base sha, command).
@@ -712,6 +720,7 @@ impl App {
             autopilot_admission: StdMutex::new(()),
             verify_cache: std::sync::Mutex::new(HashMap::new()),
             base_runs: std::sync::Mutex::new(base_check::load_base_runs(&base_runs_dir)),
+            attributions: StdMutex::new(HashMap::new()),
             gate_passes: StdMutex::new(Default::default()),
             base_run_decisions: StdMutex::new(HashMap::new()),
             base_jobs: StdMutex::new(HashMap::new()),
@@ -784,6 +793,14 @@ impl App {
                 copy.question = None;
                 copy.queue.park = stored.queue.park;
                 copy.queue.stopped_explicitly = stored.queue.stopped_explicitly;
+                let (mine, theirs) = (&mut copy.loop_state, stored.loop_state);
+                mine.agent_restarted |= theirs.agent_restarted;
+                mine.non_owner_continues = mine.non_owner_continues.max(theirs.non_owner_continues);
+                for part in theirs.unreviewed_parts {
+                    if !mine.unreviewed_parts.contains(&part) {
+                        mine.unreviewed_parts.push(part);
+                    }
+                }
                 for line in stored.decisions {
                     if !copy.decisions.contains(&line) {
                         copy.decisions.push(line);

@@ -676,6 +676,7 @@ impl App {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -1889,12 +1890,14 @@ mod answer_caller_tests {
             run: "npm test".into(),
             baseline: None,
         }];
-        task.question = Some(Question::new(
+        let mut question = Question::new(
             "Criterion 0 cannot be met as written: x. Evidence: y",
             vec!["drop criterion".into(), "retry".into(), "stop".into()],
             QuestionKind::Impossible,
             AskedBy::Implement,
-        ));
+        );
+        question.criterion = Some(0);
+        task.question = Some(question);
         app.store.save_task(&task).unwrap();
         task.id
     }

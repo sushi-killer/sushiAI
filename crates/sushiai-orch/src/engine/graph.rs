@@ -1146,36 +1146,6 @@ pub(super) async fn land_on_parent(
         task.base_sha = chain_base;
         task.base_ref = Some(branch.clone());
         task.queue.relay_base = None;
-        if task.planner_tests.commit.is_some() {
-            let paths: Vec<String> = task
-                .planner_tests
-                .files
-                .iter()
-                .map(|t| t.path.clone())
-                .collect();
-            let (wt, id, title) = (worktree.to_path_buf(), task.id.clone(), task.title.clone());
-            let committed = tokio::task::spawn_blocking(move || {
-                git::commit_paths(
-                    &wt,
-                    &paths,
-                    &super::protected::planner_tests_title(&title),
-                    &id,
-                )
-            })
-            .await;
-            match committed {
-                Ok(Ok(sha)) => {
-                    task.planner_tests.protected = Some(protected_hashes(worktree, &sha, task));
-                    task.planner_tests.commit = Some(sha);
-                }
-                _ => {
-                    return failed(
-                        FailureKind::Error,
-                        "Could not anchor the relay's planner tests".into(),
-                    );
-                }
-            }
-        }
     }
 
     match carry_and_check(
@@ -1256,8 +1226,8 @@ pub(super) async fn carry_and_check(
     let carried = tokio::task::spawn_blocking(move || {
         // Commits the agent made itself go back to being uncommitted work,
         // so they are carried (and later committed) like the rest.
-        if git::head_sha(&wt)? != snapshot.work_base() {
-            git::uncommit_to(&wt, snapshot.work_base())?;
+        if git::head_sha(&wt)? != snapshot.base_sha {
+            git::uncommit_to(&wt, &snapshot.base_sha)?;
         }
         let carried = carry_with_planner_tests(&mut snapshot, &wt, &b)?;
         Ok((carried, snapshot.planner_tests))
@@ -1268,12 +1238,6 @@ pub(super) async fn carry_and_check(
         adopt_carried_tests(task, tests, &carried);
         carried
     });
-    if matches!(
-        carried,
-        Ok(git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. })
-    ) {
-        reformat_carried_tests(app, task, worktree, cancel).await;
-    }
     match carried {
         Ok(git::Rebase::Unchanged) => {}
         Ok(git::Rebase::Moved { new_sha, rewritten }) => {
@@ -1307,12 +1271,8 @@ pub(super) async fn carry_and_check(
             // judging another tree: verify and the review run again.
             if let Some(idx) = idx {
                 let files = carry_changed_reviewed(worktree, &task.attempts[idx], &new_sha).await;
-                let reruns = task
-                    .decisions
-                    .iter()
-                    .filter(|d| d.starts_with(REREVIEW_LINE))
-                    .count() as u32;
-                if !files.is_empty() && reruns < MAX_REREVIEWS {
+                if !files.is_empty() && task.loop_state.rereviews < MAX_REREVIEWS {
+                    task.loop_state.rereviews += 1;
                     task.decisions.push(format!(
                         "{REREVIEW_LINE} onto {branch} changed {} which the review saw; verify and the review run again on the carried tree",
                         files.join(", ")
@@ -1420,20 +1380,6 @@ pub(super) async fn carry_and_check(
             return failed(
                 FailureKind::Error,
                 format!("Could not carry the work onto {branch} ({e})."),
-            );
-        }
-    }
-    // Only a successful gate flattens the trusted tests into the final task
-    // commit. A failed carry or check keeps their refreshed anchor for retry.
-    if task.planner_tests.commit.is_some() {
-        let (wt, base) = (worktree.to_path_buf(), task.base_sha.clone());
-        if let Err(error) = tokio::task::spawn_blocking(move || git::uncommit_to(&wt, &base))
-            .await
-            .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
-        {
-            return failed(
-                FailureKind::Error,
-                format!("Could not prepare the task's single landing commit ({error})."),
             );
         }
     }
@@ -1691,10 +1637,7 @@ impl App {
     ) -> bool {
         let deps: Vec<&Task> = all.iter().filter(|t| ended.contains(&t.id)).collect();
         if deps.is_empty()
-            || task
-                .decisions
-                .iter()
-                .any(|d| d == ladder::DEPENDENCY_RESTART_LINE)
+            || task.loop_state.dependency_restarted
             || deps.iter().any(|d| {
                 d.status != TaskStatus::Failed
                     || !ladder::agent_may_restart(d)
@@ -1718,6 +1661,7 @@ impl App {
             return true;
         }
         if let Err(e) = self.update_task(&task.id, |t| {
+            t.loop_state.dependency_restarted = true;
             t.decisions
                 .push(ladder::DEPENDENCY_RESTART_LINE.to_string())
         }) {

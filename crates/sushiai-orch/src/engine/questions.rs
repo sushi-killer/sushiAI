@@ -53,7 +53,7 @@ pub(super) async fn wait_for_exhausted_answer(
         return Some(Answered { text });
     }
     let auto_answer = app.settings.read().unwrap().auto_answer;
-    if non_owner_continues(task) < MAX_ORCHESTRATOR_CONTINUES && auto_answer {
+    if (task.loop_state.non_owner_continues as usize) < MAX_ORCHESTRATOR_CONTINUES && auto_answer {
         let text = park_for_answer(app, task_id, task, pending_answer, cancel, permit).await?;
         app.take_agent_answer(task_id);
         return Some(Answered { text });
@@ -298,38 +298,6 @@ pub(super) fn waiting_prompt(app: &App, key: &str, task: &Task) -> String {
         "allowedAnswers": allowed,
     });
     format!("{prompt}\n\nThe waiting question: {typed}")
-}
-
-/// Counts chat, overseer and lead extensions of the attempt budget,
-/// including legacy orchestrator lines.
-pub(super) fn non_owner_continues(task: &Task) -> usize {
-    let orchestrator = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-        .count();
-    let like = task
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.starts_with(LIKE_PREFIX) && d.contains(&format!(" -- {EXHAUSTED_QUESTION} -> "))
-        })
-        .count();
-    let legacy_lead = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with("Lead: Attempts keep failing -> "))
-        .count();
-    let lead = task
-        .question_history
-        .iter()
-        .filter(|q| {
-            q.kind == QuestionKind::AttemptsFailing
-                && q.answered_by == AnsweredBy::Lead
-                && !is_option(&q.answer, "stop")
-        })
-        .count();
-    orchestrator + like + lead.max(legacy_lead)
 }
 
 /// Records a parked question's answer and its caller.
@@ -610,24 +578,11 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
     {
         return;
     }
-    // orchd opens the pull request itself while `pr_pending`: one owner.
-    let prompt = overseer_prompt(done_prompt_key(task), task);
+    let prompt = overseer_prompt("overseer_done", task);
     // Marked either way: this is the one transition, not a retry loop.
     task.overseer_woken = true;
     app.save_task_logged(task);
     chat::wake_overseer(app, &task.repo, prompt, false, "done", Some(&task.id));
-}
-
-/// The wake prompt of a finished task: the one that tells the overseer to
-/// open the pull request, unless orchd owns that (`pr_pending`).
-fn done_prompt_key(task: &Task) -> &'static str {
-    if task.unreviewed && task.pr_pending {
-        "overseer_done_unreviewed"
-    } else if task.pr_pending {
-        "overseer_done_pr_owned"
-    } else {
-        "overseer_done"
-    }
 }
 
 /// A server-built overseer prompt (`prompts/orchestrator.yaml`) naming the task.
@@ -1177,13 +1132,9 @@ mod done_prompt_tests {
     use super::*;
 
     #[test]
-    fn the_overseer_is_not_told_to_open_a_pull_request_orchd_opens_itself() {
-        let mut task = super::super::test_support::task_with_status(TaskStatus::Done);
-        assert_eq!(done_prompt_key(&task), "overseer_done");
-        assert!(overseer_prompt("overseer_done", &task).contains("task_pr"));
-        task.pr_pending = true;
-        let prompt = overseer_prompt(done_prompt_key(&task), &task);
-        assert!(prompt.contains("do not call task_pr"), "{prompt}");
-        assert!(!prompt.contains("open one with task_pr"), "{prompt}");
+    fn the_overseer_reports_a_done_task_and_never_opens_its_pull_request() {
+        let task = super::super::test_support::task_with_status(TaskStatus::Done);
+        let prompt = overseer_prompt("overseer_done", &task);
+        assert!(!prompt.contains("task_pr"), "{prompt}");
     }
 }

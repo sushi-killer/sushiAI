@@ -1,6 +1,7 @@
 //! `task.pr`: pushes a finished task's branch to `origin` and opens a GitHub
 //! pull request against the repo's default branch. The owner starts it from the
-//! app; the orchestrator agent may call it as the `task_pr` MCP tool. It pushes
+//! app; an agent may call it as the `task_pr` MCP tool only where automatic pull
+//! requests are on (`may_open_pr_on_done`). It pushes
 //! the task's own branch only, never the default branch, and never merges.
 
 use super::*;
@@ -52,34 +53,32 @@ pub(super) async fn run_cmd(
 pub(super) const UNREVIEWED_LINE: &str = "Unreviewed: no review route gave a verdict";
 
 /// The PR body: goal, criteria as a checklist, then the report summary.
-/// The decision a parent records for a subtask that landed unreviewed; the
-/// pull request names it.
-pub(super) fn unreviewed_part_line(child: &Task) -> String {
-    format!(
-        "{UNREVIEWED_PART} \"{}\" ({}) landed unreviewed: no review route gave a verdict",
-        child.title, child.id
-    )
+/// What the pull request and the decision say of a subtask that landed
+/// unreviewed.
+fn unreviewed_part_text(id: &str, title: &str) -> String {
+    format!("subtask \"{title}\" ({id}) landed unreviewed: no review route gave a verdict")
 }
 
-const UNREVIEWED_PART: &str = "Orchestrator: subtask";
+/// The decision a parent records for a subtask that landed unreviewed.
+pub(super) fn unreviewed_part_line(child: &Task) -> String {
+    format!(
+        "Orchestrator: {}",
+        unreviewed_part_text(&child.id, &child.title)
+    )
+}
 
 pub(super) fn pr_body(task: &Task) -> String {
     let mark = if task.unreviewed { " " } else { "x" };
     let mut body = String::new();
     if task.unreviewed {
         body.push_str(&format!("{UNREVIEWED_LINE}\n\n"));
-        for d in task
-            .decisions
-            .iter()
-            .filter(|d| d.starts_with(UNREVIEWED_PART))
-        {
-            body.push_str(&format!("- {d}\n"));
+        for part in &task.loop_state.unreviewed_parts {
+            body.push_str(&format!(
+                "- Orchestrator: {}\n",
+                unreviewed_part_text(&part.id, &part.title)
+            ));
         }
-        if task
-            .decisions
-            .iter()
-            .any(|d| d.starts_with(UNREVIEWED_PART))
-        {
+        if !task.loop_state.unreviewed_parts.is_empty() {
             body.push('\n');
         }
     }
@@ -94,6 +93,18 @@ pub(super) fn pr_body(task: &Task) -> String {
         body.push_str("\n## Report\n\n");
         body.push_str(report.trim());
         body.push('\n');
+    }
+    let waived: Vec<&Assumption> = task
+        .assumptions
+        .iter()
+        .filter(|a| a.by == WAIVER_BY && a.answer == WAIVED && !a.overturned)
+        .collect();
+    if !waived.is_empty() {
+        body.push_str("\n## Waived base failures\n\n");
+        for a in waived {
+            let command = a.commands.join(", ");
+            body.push_str(&format!("- {command}: {}\n", a.evidence.trim()));
+        }
     }
     body
 }
@@ -253,6 +264,20 @@ impl App {
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
+        // The owner's own calls (the app, or the owner's chat) always open one;
+        // an agent opens one only where automatic pull requests are on.
+        let by_owner = matches!(p.source.as_deref(), None | Some("") | Some("chat"));
+        let automatic = self
+            .settings
+            .read()
+            .unwrap()
+            .may_open_pr_on_done(&task.repo);
+        if !by_owner && !automatic {
+            return Err(
+                "automatic pull requests are off for this repo: the owner opens the pull request"
+                    .to_string(),
+            );
+        }
         if task.parent.is_some() {
             return Err("only a top-level task can open a pull request".to_string());
         }
@@ -530,9 +555,33 @@ mod unreviewed_tests {
         let mut parent = task_with_status(TaskStatus::Done);
         parent.goal = "Whole".into();
         parent.unreviewed = true;
-        parent.decisions.push(unreviewed_part_line(&child));
+        parent.loop_state.unreviewed_parts.push(UnreviewedPart {
+            id: child.id.clone(),
+            title: child.title.clone(),
+        });
         let body = pr_body(&parent);
         assert!(body.starts_with(UNREVIEWED_LINE), "{body}");
         assert!(body.contains("subtask \"Part\""), "{body}");
+    }
+
+    #[test]
+    fn a_waived_base_failure_is_listed_until_the_owner_overturns_it() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.assumptions.push(Assumption {
+            question: "q".into(),
+            answer: WAIVED.into(),
+            evidence: "alpha fails on the base".into(),
+            by: WAIVER_BY.into(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: Some(1),
+            commands: vec!["check".into()],
+            overturned: false,
+            owner_answer: None,
+        });
+        let body = pr_body(&task);
+        assert!(body.contains("## Waived base failures"), "{body}");
+        assert!(body.contains("- check: alpha fails on the base"), "{body}");
+        task.assumptions[0].overturned = true;
+        assert!(!pr_body(&task).contains("Waived"));
     }
 }

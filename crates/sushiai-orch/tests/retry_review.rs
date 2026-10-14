@@ -23,7 +23,7 @@ case "$brief" in
   echo review >> "$LOG_DIR/reviews.log"
   case "$brief" in
   *"## Settled criteria"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Beta is done\",\"met\":true,\"evidence\":\"now fine\"}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":1,\"met\":true,\"evidence\":\"now fine\"}]}\n```"}' ;;
   *"## Previous review"*)
     if [ "$FULL_VERDICT" = FAIL ]; then
       json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: other.txt:1 - broken\"]}\n```"}'
@@ -31,7 +31,7 @@ case "$brief" in
       json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}'
     fi ;;
   *)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.txt:1 - fix it\"],\"criteria\":[{\"criterion\":\"Alpha is done\",\"met\":true,\"evidence\":\"seen\"},{\"criterion\":\"Beta is done\",\"met\":false,\"evidence\":\"missing\"}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.txt:1 - fix it\"],\"criteria\":[{\"criterion\":0,\"met\":true,\"evidence\":\"seen\"},{\"criterion\":1,\"met\":false,\"evidence\":\"missing\"}]}\n```"}' ;;
   esac
   printf '%s\n' "$json" ;;
 *)
@@ -149,7 +149,10 @@ fn a_retry_review_sees_only_the_open_findings_and_the_tasks_own_changes() {
 
     let narrow = run.brief(2, 1).unwrap();
     assert!(narrow.contains("P1: a.txt:1 - fix it"), "{narrow}");
-    assert!(narrow.contains("Unmet criterion: Beta is done"), "{narrow}");
+    assert!(
+        narrow.contains("F-1 (open): P1: a.txt:1 - fix it"),
+        "{narrow}"
+    );
     let settled_at = narrow.find("## Settled criteria").expect(&narrow);
     assert!(narrow[settled_at..].contains(ALPHA), "{narrow}");
     let open_at = narrow.find("## Criteria to rule on now").expect(&narrow);

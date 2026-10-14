@@ -13,15 +13,9 @@ pub(super) struct FindingJudgement {
     pub why: String,
 }
 
-/// How a finding is compared and remembered: lowercase, digits and paths
-/// stripped, whitespace collapsed.
-pub(super) fn finding_key(text: &str) -> String {
-    normalize_signature_line(&text.to_lowercase())
-}
-
 /// The repeated findings the implementer disputed, each with its dispute. A
-/// pair matches when the keys are equal or one contains the other, or when
-/// there is exactly one repeated finding and exactly one dispute.
+/// pair matches when the dispute names the finding's id, or when there is
+/// exactly one repeated finding and exactly one dispute.
 pub(super) fn pair_disputes<'a>(
     repeated: &[String],
     disputes: &'a [Dispute],
@@ -32,13 +26,8 @@ pub(super) fn pair_disputes<'a>(
     repeated
         .iter()
         .filter_map(|finding| {
-            let key = finding_key(finding);
-            let dispute = disputes.iter().find(|d| {
-                let other = finding_key(&d.finding);
-                !key.is_empty()
-                    && !other.is_empty()
-                    && (key == other || key.contains(&other) || other.contains(&key))
-            })?;
+            let id = id_of(finding)?;
+            let dispute = disputes.iter().find(|d| names_id(&d.finding, &id))?;
             Some((finding.clone(), dispute))
         })
         .collect()
@@ -109,25 +98,6 @@ pub(super) fn parse_finding_judgement(text: &str) -> Option<FindingJudgement> {
     })
 }
 
-/// The criteria whose text the finding quotes, else all of them.
-pub(super) fn criterion_for(task: &Task, finding: &str) -> Vec<String> {
-    let key = finding_key(finding);
-    let quoted: Vec<String> = task
-        .criteria
-        .iter()
-        .filter(|c| {
-            let c = finding_key(c);
-            !c.is_empty() && key.contains(&c)
-        })
-        .cloned()
-        .collect();
-    if quoted.is_empty() {
-        task.criteria.clone()
-    } else {
-        quoted
-    }
-}
-
 /// The image a piece of dispute evidence names, when it exists under the
 /// worktree's `artifacts/`.
 fn artifact_image(worktree: &Path, entry: &str) -> Option<PathBuf> {
@@ -160,7 +130,8 @@ fn split_evidence(worktree: &Path, evidence: &[String]) -> (Vec<String>, Vec<Pat
 }
 
 fn judge_brief(task: &Task, finding: &str, dispute: &Dispute, evidence: &[String]) -> String {
-    let criteria = criterion_for(task, finding)
+    let criteria = task
+        .criteria
         .iter()
         .map(|c| format!("- {c}"))
         .collect::<Vec<_>>()
@@ -269,7 +240,7 @@ pub(super) async fn judge_finding(
 
 /// Judges each repeated finding of a FAIL that the attempt disputed and no
 /// judge ruled on before; returns the (finding, why) pairs ruled invalid.
-/// Each finding's key is saved in `task.judged_findings` before its judge
+/// Each finding's id is saved in `task.judged_findings` before its judge
 /// runs, so it is judged at most once, even across a restart. Every outcome
 /// leaves a decision line; a finding not dropped goes on to the existing
 /// escalation. None of this reads `settings.answerPolicy`.
@@ -313,7 +284,7 @@ pub(super) async fn judge_disputed_findings(
     let mut refusal_logged = false;
     for (finding, dispute) in pairs {
         let dispute = &dispute;
-        let key = finding_key(&finding);
+        let key = id_of(&finding).unwrap_or_else(|| finding.clone());
         if task.judged_findings.contains(&key) {
             continue;
         }
@@ -396,32 +367,28 @@ mod tests {
     }
 
     #[test]
-    fn equal_or_containing_texts_pair() {
+    fn a_dispute_pairs_by_the_id_it_names() {
         let found = pairs(
             &[
-                "P1 Src/A.rs:12: the loop skips the last item",
-                "other thing",
+                "P1: the loop skips the last item [F-1]",
+                "P1: other thing [F-12]",
             ],
-            &["the loop skips the last item", "unrelated words"],
+            &["F-12: wrong, it is fine", "unrelated words"],
         );
         assert_eq!(
             found,
             [(
-                "P1 Src/A.rs:12: the loop skips the last item".to_string(),
-                "the loop skips the last item".to_string()
+                "P1: other thing [F-12]".to_string(),
+                "F-12: wrong, it is fine".to_string()
             )]
-        );
-        assert_eq!(
-            pairs(&["short", "z"], &["A SHORT finding, quoted", "y"]).len(),
-            1
         );
     }
 
     #[test]
     fn a_lone_pair_matches_and_unrelated_ones_do_not() {
         assert_eq!(pairs(&["alpha"], &["beta"]).len(), 1);
-        assert!(pairs(&["alpha", "gamma"], &["beta"]).is_empty());
-        assert!(pairs(&["alpha"], &["beta", "delta"]).is_empty());
+        assert!(pairs(&["alpha [F-1]", "gamma [F-2]"], &["beta"]).is_empty());
+        assert!(pairs(&["alpha [F-1]"], &["beta", "delta"]).is_empty());
     }
 
     fn route(id: &str, harness: Harness) -> Route {
@@ -630,17 +597,6 @@ mod tests {
             "w ".repeat(400)
         );
         assert!(parse_finding_judgement(&long).unwrap().why.chars().count() <= MAX_WHY_CHARS + 1);
-    }
-
-    #[test]
-    fn a_finding_quoting_a_criterion_selects_it() {
-        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
-        task.criteria = s(&["Docs are updated", "The parser rejects empty input"]);
-        assert_eq!(
-            criterion_for(&task, "criterion fails: the parser rejects empty input"),
-            s(&["The parser rejects empty input"])
-        );
-        assert_eq!(criterion_for(&task, "something else"), task.criteria);
     }
 
     #[test]

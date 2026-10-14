@@ -183,7 +183,7 @@ fn settle() {
 
 #[test]
 fn a_done_task_refused_on_the_default_branch_opens_the_drafted_pull_request() {
-    let reply = "```json\n{\"branch\":\"feature/drafted-pr\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}\n```";
+    let reply = "{\"branch\":\"feature/drafted-pr\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}";
     let s = setup(reply, true);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);

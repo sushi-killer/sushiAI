@@ -256,7 +256,7 @@ pub(super) async fn scope_to_diff(
     }
 }
 
-/// Path policy first, then package/test checks for subtasks gated at their parent.
+/// Path policy first, then the planner's check for subtasks gated at their parent.
 pub(super) async fn scope_task_checks(
     app: &Arc<App>,
     task: &Task,
@@ -269,19 +269,8 @@ pub(super) async fn scope_task_checks(
     if !enabled {
         return (path_commands, lines);
     }
-    let (wt, b, remaining) = (
-        worktree.to_path_buf(),
-        base.to_string(),
-        path_commands.clone(),
-    );
-    let narrowed = tokio::task::spawn_blocking(move || {
-        git::changed_files(&wt, &b)
-            .map(|changed| subtask_checks::scope(&wt, &changed, &remaining, true))
-    })
-    .await;
-    let Ok(Ok(mut narrowed)) = narrowed else {
-        return (commands.to_vec(), Vec::new());
-    };
+    let mut narrowed =
+        subtask_checks::scope(worktree, &path_commands, task.brief_check.check.as_deref());
     // Path-scoped shared checks also remain the parent's responsibility.
     narrowed.deferred.extend(
         commands
@@ -1765,6 +1754,10 @@ mod scoped_task_tests {
             repo: dir.path().to_string_lossy().into_owned(),
             base_sha: base.clone(),
             parent: Some(parent.id.clone()),
+            brief_check: crate::model::BriefCheck {
+                check: Some("cargo test -p package-a".into()),
+                ..Default::default()
+            },
             ..task_with_status(TaskStatus::Running)
         };
         let commands = vec!["cargo test --workspace".into(), "repo-check".into()];
@@ -1794,6 +1787,61 @@ mod scoped_task_tests {
                 .0,
             ["cargo test --workspace"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_subtask_runs_its_planner_check_in_place_of_the_ci_entry() {
+        let (app, _app_dir) = test_app();
+        let (dir, base) = repo();
+        std::fs::write(dir.path().join("a/src/lib.rs"), "// changed\n").unwrap();
+        let parent = task_with_status(TaskStatus::Running);
+        app.store.save_task(&parent).unwrap();
+        let child = Task {
+            repo: dir.path().to_string_lossy().into_owned(),
+            base_sha: base.clone(),
+            parent: Some(parent.id.clone()),
+            brief_check: crate::model::BriefCheck {
+                check: Some("go test ./pkg/x".into()),
+                ..Default::default()
+            },
+            ..task_with_status(TaskStatus::Running)
+        };
+        let commands = vec!["npm run ci".into()];
+        let (run, lines) = scope_task_checks(&app, &child, dir.path(), &base, &commands).await;
+        assert_eq!(run, ["go test ./pkg/x"]);
+        assert!(lines.contains(&"Orchestrator: subtask ran go test ./pkg/x instead of npm run ci; the parent runs npm run ci on the combined tree".into()));
+        let saved = app.store.load_task(&parent.id).unwrap().unwrap();
+        assert_eq!(saved.final_verify, ["npm run ci"]);
+    }
+
+    #[tokio::test]
+    async fn a_subtask_never_runs_a_test_matched_only_by_a_file_stem() {
+        let (app, _app_dir) = test_app();
+        let (dir, base) = repo();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests/index.test.cjs"), "").unwrap();
+        std::fs::write(dir.path().join("a/src/index.js"), "// changed\n").unwrap();
+        git_in(dir.path(), &["add", "-A"]);
+        let parent = task_with_status(TaskStatus::Running);
+        app.store.save_task(&parent).unwrap();
+        let child = Task {
+            repo: dir.path().to_string_lossy().into_owned(),
+            base_sha: base.clone(),
+            parent: Some(parent.id.clone()),
+            ..task_with_status(TaskStatus::Running)
+        };
+        let commands = vec!["npm run ci".into()];
+        let (run, _) = scope_task_checks(&app, &child, dir.path(), &base, &commands).await;
+        assert_eq!(run, ["npm run ci"]);
+        let planned = Task {
+            brief_check: crate::model::BriefCheck {
+                check: Some("node --test tests/parser.test.cjs".into()),
+                ..Default::default()
+            },
+            ..child
+        };
+        let (run, _) = scope_task_checks(&app, &planned, dir.path(), &base, &commands).await;
+        assert_eq!(run, ["node --test tests/parser.test.cjs"]);
     }
 
     #[test]

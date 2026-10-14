@@ -254,6 +254,13 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     }
     out.push('\n');
 
+    if let Some(check) = &task.brief_check.check {
+        out.push_str("## Targeted check\n\nThe planner named this check for this part alone. The full CI runs once on the combined result at the parent.\n\n");
+        out.push_str("- `");
+        out.push_str(check);
+        out.push_str("`\n\n");
+    }
+
     let gated: Vec<&Check> = task
         .checks
         .iter()
@@ -2742,6 +2749,16 @@ mod tests {
         assert!(!top.contains(sentence));
         assert!(top.contains("run once on the combined result"));
         assert!(top.contains("run at its parent"));
+    }
+
+    #[test]
+    fn a_subtask_brief_names_its_targeted_check() {
+        let mut task = sample_task();
+        assert!(!build_brief(&task, "", "").contains("## Targeted check"));
+        task.brief_check.check = Some("go test ./pkg/x".into());
+        let brief = build_brief(&task, "", "");
+        assert!(brief.contains("## Targeted check"));
+        assert!(brief.contains("- `go test ./pkg/x`"));
     }
 
     #[test]

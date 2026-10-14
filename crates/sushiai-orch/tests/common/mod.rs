@@ -769,6 +769,7 @@ pub fn cheap_route_on_claude(daemon: &Daemon) {
 pub const FAKE_FAILING_REVIEW_SCRIPT: &str = r###"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  '## Route the review'*) exit 0 ;;
   "## Review"*)
     printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"needs work\"]}\n```"}' ;;
   *'"accept": true'*)

@@ -323,7 +323,7 @@ fn a_graceful_stop_during_review_resumes_into_the_review() {
     // The implementer reports at once. The first review hangs; the second
     // passes. The brief of a review opens with "## Review".
     let body = format!(
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*)\nif [ ! -f {m} ]; then touch {m}; sleep {s}; fi\n\
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n'## Route the review'*) exit 0 ;;\n\"## Review\"*)\nif [ ! -f {m} ]; then touch {m}; sleep {s}; fi\n\
          printf '%s\n' '{{\"type\":\"result\",\"total_cost_usd\":0.01,\"result\":\"```sushi-review\\n{{\\\"verdict\\\":\\\"PASS\\\",\\\"findings\\\":[]}}\\n```\"}}' ;;\n\
          *) echo changed > CHANGED_MARKER.txt\nprintf '%s\n' '{INIT}'\n\
          printf '%s\n' '{{\"type\":\"result\",\"total_cost_usd\":0.02,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":\"```sushi-report\\n{{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}}\\n```\"}}' ;;\nesac\n",

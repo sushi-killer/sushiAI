@@ -1963,6 +1963,113 @@ const REVIEW_SCOPE_RULE: &str = "Report only correctness bugs and requirement ga
 
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
+/// The review areas a change can break, as a route turn chose them. A full
+/// review is briefed with these areas only; a narrow re-review never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub struct Lenses {
+    pub seams: bool,
+    pub code: bool,
+    pub tests: bool,
+    pub errors: bool,
+    pub docs: bool,
+}
+
+impl Lenses {
+    /// Every area: the review when the route turn gave no usable answer.
+    pub const ALL: Lenses = Lenses {
+        seams: true,
+        code: true,
+        tests: true,
+        errors: true,
+        docs: true,
+    };
+
+    /// The names of the chosen areas, in review order.
+    pub fn chosen(&self) -> Vec<&'static str> {
+        [
+            (self.seams, "seams"),
+            (self.code, "code"),
+            (self.tests, "tests"),
+            (self.errors, "errors"),
+            (self.docs, "docs"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name)
+        .collect()
+    }
+}
+
+/// The route turn's reply: the areas and one sentence of why.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct LensRouting {
+    pub lenses: Lenses,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A route reply with every area named. An area missing from the reply
+/// refuses the whole reply.
+pub fn parse_lens_routing(text: &str) -> Option<LensRouting> {
+    serde_json::from_str(&tagged_json(text, "sushi-route")?).ok()
+}
+
+const LENS_SEAMS: &str = "Seams: the change touches callers, consumers or contracts outside its own diff. Check what depends on the code it changed, including callers the diff does not touch.";
+const LENS_CODE: &str = "Code: read the changed logic for correctness against the criteria.";
+const LENS_TESTS: &str = "Tests: check that the checks the task relies on prove the criteria, and that they would fail on the old behaviour.";
+const LENS_ERRORS: &str =
+    "Errors: check the failure, timeout and empty-input paths the change adds or alters.";
+const LENS_DOCS: &str = "Docs: check the documentation and user-facing text the change touches against what it now does.";
+
+/// The review's section naming the chosen areas. Criteria and the scope rule
+/// apply to every review; a defect outside the areas is still reported.
+pub fn review_lens_block(lenses: &Lenses) -> String {
+    let mut out = String::from(
+        "\n## Review areas\n\nThe orchestrator routed this review to the areas below. Spend the review on them and on the criteria. A clear defect elsewhere is still reported.\n\n",
+    );
+    let areas = [
+        (lenses.seams, LENS_SEAMS),
+        (lenses.code, LENS_CODE),
+        (lenses.tests, LENS_TESTS),
+        (lenses.errors, LENS_ERRORS),
+        (lenses.docs, LENS_DOCS),
+    ];
+    let chosen: Vec<&str> = areas
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, text)| *text)
+        .collect();
+    if chosen.is_empty() {
+        out.push_str("- None beyond the acceptance criteria.\n");
+    }
+    for text in chosen {
+        out.push_str(&format!("- {text}\n"));
+    }
+    out
+}
+
+const ROUTE_INSTRUCTIONS: &str = "Decide which review areas this change can break. Depth follows what a change can break, not its size: a large mechanical rename inside one module can break little, while a one-line change to a shared contract can break a great deal. Set an area true only when this change can break something in it.\n\n- seams: callers, consumers or contracts outside the diff that the change touches.\n- code: the logic it changes, against the criteria.\n- tests: whether the checks prove the criteria.\n- errors: failure, timeout and empty-input paths.\n- docs: documentation and user-facing text.\n\nYou may read files in the working directory but change nothing. Read the repository where the file list is not enough.";
+
+const ROUTE_REPORT_FORMAT: &str = "## Report format\n\nReply with:\n\n```sushi-route\n{\"lenses\":{\"seams\":true|false,\"code\":true|false,\"tests\":true|false,\"errors\":true|false,\"docs\":true|false},\"reason\":\"<one sentence>\"}\n```\n";
+
+/// The route turn's brief: the goal, the criteria and the changed files.
+pub fn build_route_brief(task: &Task, changed: &[String]) -> String {
+    let criteria = task
+        .criteria
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{i}. {c}\n"))
+        .collect::<String>();
+    let files = changed
+        .iter()
+        .map(|f| format!("- {f}\n"))
+        .collect::<String>();
+    format!(
+        "## Route the review\n\n{}\n\n## Acceptance criteria\n\n{criteria}\n## Changed files\n\n{files}\n{ROUTE_INSTRUCTIONS}\n\n{ROUTE_REPORT_FORMAT}",
+        task.goal
+    )
+}
+
 /// The review session's brief. Pure: `screenshots` are paths relative to the
 /// worktree, each with the attempt that produced it, `agent_decisions` the
 /// attempt's own `Agent: ...` lines, `declines` the attempt's declined findings.
@@ -1976,6 +2083,7 @@ pub fn build_review_brief(
     evidence_from: Option<u32>,
     diff: &str,
     declines: &[Decline],
+    lenses: &Lenses,
 ) -> String {
     review_brief(
         task,
@@ -1984,7 +2092,7 @@ pub fn build_review_brief(
         verify_results,
         screenshots,
         evidence_from,
-        ReviewBody::Full(diff),
+        ReviewBody::Full { diff, lenses },
         declines,
     )
 }
@@ -2000,7 +2108,7 @@ pub struct NarrowReview<'a> {
 }
 
 enum ReviewBody<'a> {
-    Full(&'a str),
+    Full { diff: &'a str, lenses: &'a Lenses },
     Narrow(&'a NarrowReview<'a>),
 }
 
@@ -2075,7 +2183,7 @@ fn review_brief(
     out.push_str("## Review\n\n");
     out.push_str(&task.goal);
     match &body {
-        ReviewBody::Full(_) => {
+        ReviewBody::Full { .. } => {
             out.push_str("\n\n## Acceptance criteria\n\nEach criterion has a number; rule on it by that number.\n\n");
             for (i, c) in task.criteria.iter().enumerate() {
                 out.push_str(&format!("{i}. {c}\n"));
@@ -2116,6 +2224,9 @@ fn review_brief(
     out.push_str("\n\nCriteria marked \"Checked by review\" have no command behind them: check them from the diff and the repository yourself.\n\nThe repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.\n\n");
     out.push_str(REVIEW_VERDICT_RULE);
     out.push_str(REVIEW_SCOPE_RULE);
+    if let ReviewBody::Full { lenses, .. } = &body {
+        out.push_str(&review_lens_block(lenses));
+    }
     let evidence = variant.review_evidence;
     out.push_str("\n## Verify results\n\n");
     for v in verify_results.iter().filter(|v| !is_held_out(v)) {
@@ -2159,7 +2270,7 @@ fn review_brief(
     }
     out.push_str(&declines_block(declines));
     match &body {
-        ReviewBody::Full(diff) => {
+        ReviewBody::Full { diff, .. } => {
             out.push_str("\n## Diff\n\n```diff\n");
             out.push_str(diff);
         }
@@ -2975,7 +3086,7 @@ mod tests {
     fn the_review_brief_numbers_the_criteria_and_carries_the_findings_registry() {
         let mut task = sample_task();
         task.criteria = vec!["Alpha".into(), "Alpha and beta".into()];
-        let one = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[]);
+        let one = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
         assert!(!one.contains("## Previous review"), "{one}");
         assert!(one.contains("\n0. Alpha\n1. Alpha and beta\n"), "{one}");
         assert!(one.contains("\"causedByDiff\":true"), "{one}");
@@ -3002,7 +3113,7 @@ mod tests {
                 handled: false,
             },
         ];
-        let two = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[]);
+        let two = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
         assert!(two.contains("## Previous review"), "{two}");
         assert!(
             two.contains(
@@ -3831,6 +3942,7 @@ mod tests {
             None,
             "diff body",
             &[],
+            &Lenses::ALL,
         );
         assert!(text.starts_with("## Review"));
         assert!(text.contains("FAIL only for an unmet acceptance criterion or a P0/P1 finding"));
@@ -4021,11 +4133,31 @@ mod tests {
             ms: 1,
             ..Default::default()
         };
-        let failed = build_review_brief(&task, "note", &[], &[ran(Some(1))], &[], None, "", &[]);
+        let failed = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[ran(Some(1))],
+            &[],
+            None,
+            "",
+            &[],
+            &Lenses::ALL,
+        );
         assert!(failed.contains("`vacuous-cmd` already passed on the base, so it is not grounded"));
         assert!(failed.contains("Held-out check for criterion 1 (Click saves settings): failed."));
         assert!(!failed.contains("SECRET-held-out-cmd"));
-        let passed = build_review_brief(&task, "note", &[], &[ran(Some(0))], &[], None, "", &[]);
+        let passed = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[ran(Some(0))],
+            &[],
+            None,
+            "",
+            &[],
+            &Lenses::ALL,
+        );
         assert!(passed.contains("Held-out check for criterion 1 (Click saves settings): passed."));
         // The held-out outcome is not also listed as a verify result.
         assert!(!passed.contains("-> exit"));
@@ -4043,7 +4175,8 @@ mod tests {
                 ms: 1,
                 ..Default::default()
             };
-            let text = build_review_brief(&task, "note", &[], &[ran], &[], None, "", &[]);
+            let text =
+                build_review_brief(&task, "note", &[], &[ran], &[], None, "", &[], &Lenses::ALL);
             let result =
                 format!("Held-out check for criterion 1 (Click saves settings): {outcome}.");
             assert_eq!(text.matches(&result).count(), 1, "{text}");
@@ -4458,6 +4591,75 @@ mod tests {
     }
 
     #[test]
+    fn a_route_reply_chooses_the_areas_the_full_review_is_briefed_with() {
+        let reply = "```sushi-route\n{\"lenses\":{\"seams\":false,\"code\":true,\"tests\":true,\"errors\":false,\"docs\":false},\"reason\":\"logic only\"}\n```";
+        let routing = parse_lens_routing(reply).unwrap();
+        assert_eq!(routing.lenses.chosen(), ["code", "tests"]);
+        assert_eq!(routing.reason, "logic only");
+        let text = build_review_brief(
+            &sample_task(),
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &[],
+            &routing.lenses,
+        );
+        assert!(text.contains("## Review areas"));
+        assert!(text.contains(LENS_CODE) && text.contains(LENS_TESTS));
+        assert!(
+            !text.contains(LENS_SEAMS) && !text.contains(LENS_ERRORS) && !text.contains(LENS_DOCS)
+        );
+    }
+
+    #[test]
+    fn a_route_reply_missing_an_area_is_refused_and_every_area_is_reviewed() {
+        let partial = "```sushi-route\n{\"lenses\":{\"seams\":true,\"code\":true,\"tests\":true,\"errors\":true},\"reason\":\"x\"}\n```";
+        assert!(parse_lens_routing(partial).is_none());
+        assert!(parse_lens_routing("no route here").is_none());
+        let text = build_review_brief(
+            &sample_task(),
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &[],
+            &Lenses::ALL,
+        );
+        assert!(text.contains(LENS_SEAMS) && text.contains(LENS_DOCS));
+    }
+
+    #[test]
+    fn a_narrow_re_review_is_briefed_with_the_delta_and_the_prior_report_only() {
+        let mut task = sample_task();
+        task.findings.push(crate::model::FindingRecord {
+            id: "F-1".into(),
+            text: "P1: a.rs:1 - null check missing".into(),
+            status: FindingStatus::Open,
+            attempt: 1,
+            round: 1,
+            repeats: 0,
+            scenarios: Vec::new(),
+            handled: false,
+        });
+        let narrow = NarrowReview {
+            open_criteria: &[],
+            settled_criteria: &[],
+            delta: "+let checked = true;",
+        };
+        let text = build_narrow_review_brief(&task, "note", &[], &[], &[], None, &narrow, &[]);
+        assert!(text.contains("+let checked = true;"));
+        assert!(text.contains("## Previous review"));
+        assert!(text.contains("P1: a.rs:1 - null check missing"));
+        assert!(!text.contains("## Diff"));
+        assert!(!text.contains("## Review areas"));
+    }
+
+    #[test]
     fn declined_findings_get_a_review_section_the_reviewer_rules_on() {
         let task = sample_task();
         let declines = [Decline {
@@ -4465,11 +4667,21 @@ mod tests {
             reason: DeclineReason::Wrong,
             evidence: vec!["a.rs:4 keeps the row".into()],
         }];
-        let text = build_review_brief(&task, "note", &[], &[], &[], None, "d", &declines);
+        let text = build_review_brief(
+            &task,
+            "note",
+            &[],
+            &[],
+            &[],
+            None,
+            "d",
+            &declines,
+            &Lenses::ALL,
+        );
         assert!(text.contains("## Declined findings"));
         assert!(text.contains("F-1 (wrong): a.rs:4 keeps the row"));
         assert!(text.contains("\"declineRulings\""));
-        let none = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[]);
+        let none = build_review_brief(&task, "note", &[], &[], &[], None, "d", &[], &Lenses::ALL);
         assert!(!none.contains("## Declined findings"));
     }
 }

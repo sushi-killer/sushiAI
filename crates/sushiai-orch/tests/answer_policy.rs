@@ -23,6 +23,7 @@ emit() {
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":${COST:-0.01},\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
+if head -c 19 "$LOG_DIR/brief.$$" | grep -q 'Route the review'; then exit 0; fi
 if head -c 9 "$LOG_DIR/brief.$$" | grep -q '## Review'; then
   r=$(ls "$LOG_DIR"/review.* 2>/dev/null | wc -l | tr -d ' ')
   touch "$LOG_DIR/review.$r"

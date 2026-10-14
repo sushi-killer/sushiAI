@@ -550,6 +550,36 @@ mod tests {
     }
 
     #[test]
+    fn a_decline_pairs_only_by_the_id_it_names() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut first = review(&[
+            "P1: the parser drops the last row",
+            "P1: the cache is stale",
+        ]);
+        register_findings(&mut task, 1, 1, &mut first);
+        let (f1, f2) = (task.findings[0].id.clone(), task.findings[1].id.clone());
+        // F-1 is the open finding; the decline names no registered id, so
+        // it is never paired with F-1 by position or by wording.
+        let mut next = review(&[
+            "P1: the parser drops the last row",
+            "P1: the cache is stale",
+        ]);
+        named(&mut next, &[Some(f1.as_str()), Some(f2.as_str())]);
+        apply_declines(
+            &mut task,
+            2,
+            &mut next,
+            &[decline("F-99")],
+            &[ruling("F-99", true)],
+        );
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
+        assert_eq!(task.findings[1].status, FindingStatus::Open);
+        assert_eq!(next.findings.len(), 2, "{:?}", next.findings);
+        assert_eq!(next.verdict, Verdict::Fail);
+        assert!(task.assumptions.is_empty());
+    }
+
+    #[test]
     fn a_decline_with_no_ruling_is_blocking_too() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
         let mut first = review(&["P1: the parser drops the last row"]);

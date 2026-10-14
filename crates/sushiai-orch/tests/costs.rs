@@ -11,6 +11,7 @@ use common::*;
 const FAKE_FULL_TASK_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.05,"usage":{"input_tokens":4,"cache_read_input_tokens":6,"output_tokens":2},"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *"An implement attempt at this task failed"*)
@@ -75,16 +76,29 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
         .collect();
     runs.sort_by(|a, b| a.0.cmp(&b.0));
     let stages: Vec<&str> = runs.iter().map(|r| r.0.as_str()).collect();
+    // The review's route turn is its own run: it leaves a record under the
+    // review phase, so the review phase has two records.
     assert_eq!(
         stages,
-        ["advisor", "implement", "implement", "plan", "review"],
+        [
+            "advisor",
+            "implement",
+            "implement",
+            "plan",
+            "review",
+            "review"
+        ],
         "{all:?}"
     );
     let cost = |stage: &str| runs.iter().find(|r| r.0 == stage).unwrap().1;
     assert!((cost("plan") - 0.02).abs() < 1e-9);
     assert!((cost("advisor") - 0.03).abs() < 1e-9);
-    assert!((cost("review") - 0.05).abs() < 1e-9);
-    let review = all.iter().find(|r| r["stage"] == "review").unwrap();
+    let review_cost: f64 = runs.iter().filter(|r| r.0 == "review").map(|r| r.1).sum();
+    assert!((review_cost - 0.05).abs() < 1e-9);
+    let review = all
+        .iter()
+        .find(|r| r["stage"] == "review" && r["inputTokens"] == 4)
+        .unwrap();
     assert_eq!(review["inputTokens"], 4);
     assert_eq!(review["cachedTokens"], 6);
     assert_eq!(review["outputTokens"], 2);
@@ -97,7 +111,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     );
     let total = summary["totals"]["costUsd"].as_f64().unwrap();
     assert!((total - settled["costUsd"].as_f64().unwrap()).abs() < 1e-9);
-    assert_eq!(summary["totals"]["runs"], 5);
+    assert_eq!(summary["totals"]["runs"], 6);
     assert_eq!(summary["rows"].as_array().unwrap().len(), 4);
     let detail = daemon.request("task.get", serde_json::json!({"id": task_id}));
     let by_stage = detail["costByStage"].as_array().unwrap();
@@ -111,7 +125,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
         .output()
         .unwrap();
     let cli: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(cli["totals"]["runs"], 5);
+    assert_eq!(cli["totals"]["runs"], 6);
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();

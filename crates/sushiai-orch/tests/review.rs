@@ -17,6 +17,7 @@ fn review_by_claude(daemon: &Daemon) {
 const FAKE_OVERLAP_REVIEW: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.04,"result":"Review in progress"}'
   echo "$ORCHD_TASK" > "$LOG_DIR/review-start"
@@ -113,6 +114,7 @@ case "$brief" in
 *"You judge whether a check command"*)
   while [ ! -f "$LOG_DIR/fast-checked" ]; do sleep 0.02; done
   printf '%s\n' '{"type":"result","result":"{\"verdict\":\"unrelated\",\"reason\":\"broken on the base\"}"}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo reviewed >> "$LOG_DIR/review-runs"
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
@@ -236,7 +238,7 @@ fn a_review_without_a_verdict_is_committed_marked_unreviewed_and_nobody_is_asked
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n'## Route the review'*) exit 0 ;;\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let final_runs = scripts_dir.path().join("final-runs");
@@ -400,6 +402,7 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
 const FAKE_CONTRACT_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   case "$brief" in
   *"Rule on every acceptance criterion"*)
@@ -689,6 +692,7 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
 const FAKE_SCREENSHOT_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *)
@@ -778,6 +782,7 @@ const FAKE_RETRY_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 d=$(dirname "$0")
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo x >> "$d/review.count"
   if [ "$(wc -l < "$d/review.count" | tr -d ' ')" = 1 ]; then
@@ -976,6 +981,7 @@ case "$brief" in
 *"An implement attempt at this task failed"*)
   echo advisor >> "$LOG_DIR/advisor.log"
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s' "$brief" > "$LOG_DIR/review.$$"
   case "$brief" in
@@ -1090,6 +1096,7 @@ brief=$(cat)
 case "$brief" in
 *"An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   case "$brief" in
   *"## Declined findings"*)
@@ -1202,13 +1209,70 @@ fn a_declined_finding_the_review_does_not_uphold_stays_blocking() {
         .unwrap_or(true));
 }
 
+/// The route turn answers with the areas a change can break; the full review
+/// is briefed with those areas and no others.
+const FAKE_ROUTE_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Route the review"*)
+  printf '%s\n' '{"type":"result","result":"```sushi-route\n{\"lenses\":{\"seams\":false,\"code\":true,\"tests\":false,\"errors\":false,\"docs\":false},\"reason\":\"one function\"}\n```"}' ;;
+"## Review"*)
+  printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*)
+  echo changed >> CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+#[test]
+fn the_route_turn_chooses_the_areas_the_full_review_is_briefed_with() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-route.sh", FAKE_ROUTE_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Route",
+            "goal": "Change one function",
+            "criteria": [],
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id);
+    assert_eq!(settled["status"], "done", "{settled}");
+    let brief = std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(&task_id)
+            .join("helpers/review-1/brief.md"),
+    )
+    .unwrap();
+    assert!(brief.contains("## Review areas"), "{brief}");
+    assert!(brief.contains("Code: read the changed logic"), "{brief}");
+    assert!(!brief.contains("Docs: check the documentation"), "{brief}");
+    assert!(
+        decision_lines(&settled)
+            .iter()
+            .any(|d| d == "Orchestrator: attempt 1 review areas: code (one function)"),
+        "{settled}"
+    );
+    daemon.shutdown_and_wait();
+}
+
 #[test]
 fn an_unreviewed_subtask_lands_on_its_parent_and_the_parent_completes_unreviewed() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n'## Route the review'*) exit 0 ;;\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     review_by_claude(&daemon);

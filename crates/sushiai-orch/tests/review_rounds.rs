@@ -19,6 +19,7 @@ brief=$(cat)
 case "$brief" in
 "An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix it."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   n=$(( $(ls "$LOG_DIR"/review.brief.* 2>/dev/null | wc -l) + 1 ))
   printf '%s' "$brief" > "$LOG_DIR/review.brief.$n"

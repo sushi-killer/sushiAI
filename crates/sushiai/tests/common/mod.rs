@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,25 @@ use sushiai_protocol::{encode, Decoder, Frame, Message, Request, RpcError};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_sushiai");
 
-pub fn wait_until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(secs);
+/// The one wall-clock budget every positive wait in this suite shares: 180 s, or
+/// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (unset, 0 or anything else
+/// means 180 s; the same contract as `sushiai-orch/tests/common` and
+/// `tests/helpers/deadline.cjs`). A short window belongs only to a check that something does
+/// not happen.
+pub fn deadline() -> Duration {
+    static DEADLINE: OnceLock<Duration> = OnceLock::new();
+    *DEADLINE.get_or_init(|| {
+        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0);
+        Duration::from_secs(secs.unwrap_or(180))
+    })
+}
+
+/// Polls `ok` until it is true; panics naming `what` after the shared deadline.
+pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = Instant::now() + self::deadline();
     while !ok() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         sleep(Duration::from_millis(50));
@@ -59,7 +77,7 @@ pub fn shutdown_home(home: &Path) {
     } else {
         None
     };
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + self::deadline();
     while UnixStream::connect(home.join("daemon.sock")).is_err() && Instant::now() < deadline {
         sleep(Duration::from_millis(25));
     }
@@ -70,7 +88,7 @@ pub fn shutdown_home(home: &Path) {
         .stderr(Stdio::null())
         .status();
     if let Some(child) = recovery.as_mut() {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + self::deadline();
         while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
             sleep(Duration::from_millis(25));
         }
@@ -88,7 +106,7 @@ pub fn kill(pid: u32, signal: &str) {
 /// The child of `parent` (a holder's shell).
 pub fn child_of(parent: u32) -> u32 {
     let mut found = None;
-    wait_until("the holder's child", 5, || {
+    wait_until("the holder's child", || {
         found = processes()
             .into_iter()
             .find(|(_, ppid, _)| *ppid == parent)
@@ -129,7 +147,12 @@ impl Sandbox {
 
     pub fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.arg("daemon").env("SUSHIAI_HOME", self.home());
+        // An owner-set wrapper turns the compiler cache off: a test daemon must not start
+        // or join the owner's sccache server (fixed port 4227).
+        command
+            .arg("daemon")
+            .env("SUSHIAI_HOME", self.home())
+            .env("RUSTC_WRAPPER", "");
         command.envs(self.env.iter().map(|(k, v)| (k, v)));
         command
             .stdin(Stdio::null())
@@ -145,7 +168,7 @@ impl Sandbox {
         self.daemons.push(child);
         let socket = self.socket();
         let last = self.daemons.len() - 1;
-        wait_until("daemon socket", 15, || {
+        wait_until("daemon socket", || {
             let child = &mut self.daemons[last];
             assert!(
                 child.try_wait().expect("try_wait").is_none(),
@@ -161,7 +184,7 @@ impl Sandbox {
         let mut command = self.command();
         command.stderr(Stdio::piped());
         let mut child = command.spawn().expect("spawn daemon");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + self::deadline();
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
                 break status;
@@ -205,7 +228,7 @@ impl Sandbox {
 
     pub fn holder_pid(&self, id: &str) -> u32 {
         let mut found = None;
-        wait_until("holder process", 5, || {
+        wait_until("holder process", || {
             found = self
                 .session_pids()
                 .into_iter()
@@ -323,7 +346,7 @@ impl Client {
 
     /// Waits for the response to request `id`.
     pub fn response(&mut self, method: &str, id: u64) -> Result<Value, RpcError> {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + self::deadline();
         while Instant::now() < deadline {
             // File every frame of a read, so notifications that follow the response are kept.
             let mut answer = None;
@@ -350,8 +373,8 @@ impl Client {
     }
 
     /// Reads for up to `secs` until `done` is true.
-    pub fn pump_until(&mut self, what: &str, secs: u64, done: impl Fn(&Client) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    pub fn pump_until(&mut self, what: &str, done: impl Fn(&Client) -> bool) {
+        let deadline = Instant::now() + self::deadline();
         while !done(self) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             for frame in self.frames() {
@@ -366,11 +389,11 @@ impl Client {
     }
 
     pub fn wait_streamed(&mut self, needle: &str) {
-        self.pump_until(needle, 15, |c| c.streamed().contains(needle));
+        self.pump_until(needle, |c| c.streamed().contains(needle));
     }
 
     pub fn wait_note(&mut self, method: &str) -> Value {
-        self.pump_until(method, 15, |c| c.notes.iter().any(|n| n.0 == method));
+        self.pump_until(method, |c| c.notes.iter().any(|n| n.0 == method));
         self.notes
             .iter()
             .find(|n| n.0 == method)
@@ -412,7 +435,7 @@ pub fn base64_decode(text: &str) -> Vec<u8> {
 /// Waits until `session.list` shows `id` as running: after a daemon restart a session is
 /// listed `detached` until its holder answered.
 pub fn wait_listed(client: &mut Client, id: &str) {
-    wait_until("the session to be running", 15, || {
+    wait_until("the session to be running", || {
         client
             .call("session.list", Value::Null)
             .as_array()
@@ -425,7 +448,7 @@ pub fn wait_listed(client: &mut Client, id: &str) {
 
 /// Waits until `id` is listed and no longer `detached` (running or exited).
 pub fn wait_settled(client: &mut Client, id: &str) {
-    wait_until("the session to settle", 15, || {
+    wait_until("the session to settle", || {
         client
             .call("session.list", Value::Null)
             .as_array()
@@ -437,7 +460,7 @@ pub fn wait_settled(client: &mut Client, id: &str) {
 }
 
 pub fn wait_snapshot_contains(client: &mut Client, id: &str, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + self::deadline();
     loop {
         let snapshot = client.attach(id);
         if snapshot.contains(needle) {

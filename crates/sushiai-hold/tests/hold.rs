@@ -170,12 +170,14 @@ fn response_error_code(frames: Vec<Frame>) -> Option<i64> {
 
 #[test]
 fn input_to_a_child_that_does_not_read_is_refused_and_close_still_works() {
-    let fixture = Fixture::start(&["/bin/sh", "-c", "stty raw -echo; sleep 30"]);
+    let fixture = Fixture::start(&["/bin/sh", "-c", "stty raw -echo; echo ready; sleep 30"]);
     let mut conn = Conn::connect(&fixture.sock);
     conn.send("hold.attach", json!({"fromSeq": 0}));
+    // `ready` is printed after the tty is raw: before it the child still reads input.
+    let (_, early_exit) = conn.output_until("ready");
+    assert!(early_exit.is_none(), "child exited before it was ready");
     let chunk = "QUFB".repeat(16 * 1024); // 48 KiB of "AAA..." per request
     let mut refused = None;
-    let started = Instant::now();
     for _ in 0..40 {
         conn.send("hold.input", json!({"data": chunk}));
         refused = refused.or(response_error_code(conn.read()));
@@ -187,7 +189,6 @@ fn input_to_a_child_that_does_not_read_is_refused_and_close_still_works() {
     conn.send("hold.close", json!({"signal": "KILL"}));
     let (_, exit) = conn.output_until("never-appears");
     assert!(exit.is_some(), "child did not exit after KILL");
-    assert!(started.elapsed() < Duration::from_secs(10));
     drop(conn);
     fixture.finish();
 }

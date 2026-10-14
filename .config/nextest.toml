@@ -1,4 +1,15 @@
+# Setup scripts are still experimental in nextest (0.9.148): turn them on for this repo.
+experimental = ["setup-scripts"]
 # The tests mostly wait on daemons and child processes, not the CPU: run more
 # of them at once than the runner has cores.
 [profile.default]
 test-threads = 12
+
+# The tests that start the daemon share one binary, built once before the first of them
+# runs (see the script) instead of each building or relinking it.
+[scripts.setup.sushiai-bin]
+command = 'node scripts/nextest-sushiai-bin.mjs'
+
+[[profile.default.scripts]]
+filter = 'package(=sushiai) | package(=sushiai-orch)'
+setup = 'sushiai-bin'

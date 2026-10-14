@@ -2520,20 +2520,25 @@ pub async fn handle_action_decline(
 
 /// Test support: points the Claude harness at a fake that records each
 /// prompt it is given in `.overseer-calls` in its cwd (the repo) and replies
-/// "Overseer note." Set once per process and never changed.
+/// "Overseer note." Set once per process and never changed (the harness path is read from
+/// the process environment by the engine).
 #[cfg(test)]
 pub(crate) fn fake_overseer_harness() -> &'static Path {
     static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
     let (_, path) = SCRIPT.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fake-claude.sh");
-        std::fs::write(
-            &path,
-            "#!/bin/sh\n[ -f .overseer-no-stdin ] && exec sleep 2\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Written by a child `sh`, never through a descriptor of this process: a test thread
+        // that forks while the file is open for writing makes the next exec of it fail with
+        // ETXTBSY on Linux.
+        let body = "#!/bin/sh\n[ -f .overseer-no-stdin ] && exec sleep 2\ncat >> .overseer-calls\nprintf '\\n=====\\n' >> .overseer-calls\n[ -f .overseer-slow ] && sleep 30\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"Overseer note.\"}'\n";
+        let status = std::process::Command::new("sh")
+            .args(["-c", r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+            .arg(body)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
         std::env::set_var("ORCHD_CLAUDE_BIN", &path);
         (dir, path)
     });

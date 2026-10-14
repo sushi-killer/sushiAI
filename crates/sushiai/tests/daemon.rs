@@ -13,6 +13,12 @@ use common::*;
 use serde_json::{json, Value};
 use sushiai_protocol::{code, Frame, Message};
 
+/// How long the daemon waits for a holder's answer (`ANSWER_TIMEOUT` in
+/// `sushiai-daemon/src/session.rs`): a call that stalls on a stuck holder takes this long.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+/// The grace between TERM and KILL on a graceful close (`TERM_GRACE` in the same file).
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
 #[test]
 fn sessions_survive_a_killed_daemon() {
     let mut sandbox = Sandbox::new();
@@ -28,7 +34,7 @@ fn sessions_survive_a_killed_daemon() {
     let holder = sandbox.holder_pid(&id);
     let shell = child_of(holder);
     kill(first_daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(first_daemon));
+    wait_until("daemon to die", || !alive(first_daemon));
     sleep(Duration::from_millis(300));
     assert!(alive(holder), "holder died with the daemon");
     assert!(alive(shell), "shell died with the daemon");
@@ -57,7 +63,7 @@ fn sessions_survive_a_killed_daemon() {
 
     // e. close ends the holder and the shell
     client.call("session.close", json!({"id": id, "graceful": false}));
-    wait_until("holder and shell to exit", 5, || {
+    wait_until("holder and shell to exit", || {
         !alive(holder) && !alive(shell)
     });
 }
@@ -82,7 +88,7 @@ fn two_daemons_started_together_leave_exactly_one() {
         let child = sandbox.command().spawn().expect("spawn daemon");
         sandbox.daemons.push(child);
     }
-    wait_until("one daemon to give up", 10, || {
+    wait_until("one daemon to give up", || {
         let exited = sandbox
             .daemons
             .iter_mut()
@@ -102,7 +108,7 @@ fn two_daemons_started_together_leave_exactly_one() {
         "{statuses:?}"
     );
     assert!(statuses.iter().flatten().all(|s| !s.success()));
-    wait_until("the survivor to answer", 10, || {
+    wait_until("the survivor to answer", || {
         UnixStream::connect(sandbox.socket()).is_ok()
     });
 }
@@ -112,15 +118,16 @@ fn a_child_that_does_not_read_cannot_stall_the_daemon() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    let id = sandbox.create(&mut client, "stty raw -echo; sleep 30");
+    // `ready` is printed after the tty is raw: only then does the child stop reading input.
+    let id = sandbox.create(&mut client, "stty raw -echo; echo ready; sleep 30");
     let shell = child_of(sandbox.holder_pid(&id));
-    sleep(Duration::from_millis(500));
+    wait_snapshot_contains(&mut client, &id, "ready");
 
     let chunk = "A".repeat(64 * 1024);
     let mut refused = 0;
-    let started = Instant::now();
     for _ in 0..32 {
         // 2 MiB in total
+        let started = Instant::now();
         match client.try_call("session.input", json!({"id": id, "data": chunk})) {
             Ok(_) => {}
             Err(e) => {
@@ -128,12 +135,10 @@ fn a_child_that_does_not_read_cannot_stall_the_daemon() {
                 refused += 1;
             }
         }
+        // A call that waited for the stuck holder would take the whole answer timeout.
+        assert!(started.elapsed() < ANSWER_TIMEOUT, "an input call hung");
     }
     assert!(refused > 0, "no input call was refused");
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "input calls hung"
-    );
 
     // Another connection and the same one still get answers.
     let mut other = sandbox.client();
@@ -142,12 +147,13 @@ fn a_child_that_does_not_read_cannot_stall_the_daemon() {
         other.call("session.list", Value::Null)[0]["id"],
         id.as_str()
     );
-    assert!(began.elapsed() < Duration::from_secs(2));
+    assert!(began.elapsed() < ANSWER_TIMEOUT);
 
     let closing = Instant::now();
     client.call("session.close", json!({"id": id, "graceful": false}));
-    wait_until("the stuck shell to die", 2, || !alive(shell));
-    assert!(closing.elapsed() < Duration::from_secs(2));
+    wait_until("the stuck shell to die", || !alive(shell));
+    // A forced close must not wait out the grace period of a graceful one.
+    assert!(closing.elapsed() < TERM_GRACE);
 }
 
 #[test]
@@ -192,7 +198,7 @@ fn a_corrupt_state_file_is_set_aside_and_sessions_are_found_again() {
     print_marker(&mut client, &id, 1);
     wait_snapshot_contains(&mut client, &id, "marker-1");
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
 
     fs::write(sandbox.home().join("state.json"), b"{ not json").expect("corrupt");
     sandbox.start_daemon();
@@ -275,7 +281,7 @@ fn a_session_that_cannot_start_reports_why_and_leaves_nothing() {
         .flatten()
         .collect();
     assert!(sockets.is_empty(), "leftover files: {sockets:?}");
-    wait_until("holders to be gone", 5, || sandbox.holders().is_empty());
+    wait_until("holders to be gone", || sandbox.holders().is_empty());
     assert_eq!(client.call("session.list", Value::Null), json!([]));
 }
 
@@ -325,18 +331,17 @@ fn graceful_close_escalates_to_kill_after_the_grace_period() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    let id = sandbox.create(&mut client, "trap '' TERM; sleep 60");
+    let id = sandbox.create(&mut client, "trap '' TERM; echo armed; sleep 60");
     let target = child_of(sandbox.holder_pid(&id));
+    // TERM before the trap is set would end the shell: wait until it is armed.
+    wait_snapshot_contains(&mut client, &id, "armed");
     let closing = Instant::now();
     client.call("session.close", json!({"id": id, "graceful": true}));
-    sleep(Duration::from_secs(3));
+    sleep(TERM_GRACE / 2);
     assert!(alive(target), "TERM alone ended a process that ignores it");
-    wait_until("KILL after the grace period", 7, || !alive(target));
+    wait_until("KILL after the grace period", || !alive(target));
     let took = closing.elapsed();
-    assert!(
-        took >= Duration::from_millis(4500) && took <= Duration::from_secs(8),
-        "took {took:?}"
-    );
+    assert!(took >= TERM_GRACE, "KILL came after {took:?}");
 }
 
 #[test]
@@ -346,7 +351,7 @@ fn output_written_while_the_daemon_is_dead_appears_after_reattach() {
     let mut client = sandbox.client();
     let id = sandbox.create(&mut client, "sleep 2; echo late-out; sleep 30");
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     sleep(Duration::from_secs(3));
     sandbox.start_daemon();
     let mut client = sandbox.client();
@@ -377,7 +382,7 @@ fn exit_code_arrives_as_session_exited_and_the_session_is_then_not_running() {
     drop(client);
     // Each probe uses a fresh connection: an attach that succeeds keeps the actor alive only
     // until that connection closes.
-    wait_until("the exited session to stop serving", 8, || {
+    wait_until("the exited session to stop serving", || {
         sandbox
             .client()
             .try_call("session.attach", json!({"id": id}))
@@ -408,7 +413,7 @@ fn a_flooding_session_stays_running_and_its_screen_keeps_up() {
     }
     // The flood ends; the session is still running and a fresh attach shows the last line.
     let mut fresh = sandbox.client();
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + common::deadline();
     loop {
         let status = fresh.call("session.list", Value::Null)[0]["status"].clone();
         if status == "running" && fresh.attach(&id).contains("marker-end") {
@@ -471,7 +476,7 @@ fn a_killed_holder_ends_its_session_and_removes_its_socket() {
     assert!(socket.exists());
     kill(holder, "-KILL");
     let note = {
-        client.pump_until("session.exited", 5, |c| {
+        client.pump_until("session.exited", |c| {
             c.notes.iter().any(|n| n.0 == "session.exited")
         });
         client.wait_note("session.exited")

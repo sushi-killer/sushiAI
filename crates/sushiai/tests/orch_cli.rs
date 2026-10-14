@@ -244,12 +244,16 @@ fn hook_command(sandbox: &Sandbox, event: &str, token: Option<&str>) -> Command 
 
 fn run_hook(mut command: Command, input: &str) -> (i32, String) {
     let mut child = command.spawn().expect("spawn hook");
-    child
+    // A hook that needs nothing from its input (no token, no daemon) may exit before it
+    // reads it: a broken pipe is a valid outcome, the exit code and output still count.
+    if let Err(e) = child
         .stdin
         .take()
         .expect("stdin")
         .write_all(input.as_bytes())
-        .expect("write");
+    {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     let out = child.wait_with_output().expect("wait");
     (
         out.status.code().expect("code"),

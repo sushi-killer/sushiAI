@@ -307,13 +307,13 @@ impl<'a> Ctx<'a> {
     }
 
     fn owner_questions(&mut self) {
-        for d in self
+        for q in self
             .task
-            .decisions
+            .question_history
             .iter()
-            .filter(|d| d.starts_with("Owner:"))
+            .filter(|q| q.answered_by == AnsweredBy::Owner)
         {
-            self.push(SignalKind::OwnerQuestion, 0, d.clone(), 0, None);
+            self.push(SignalKind::OwnerQuestion, 0, q.answer.clone(), 0, None);
         }
     }
 
@@ -776,11 +776,11 @@ mod tests {
     #[test]
     fn evolution_owner_question_one_per_owner_decision() {
         let mut t = task("t", 10);
-        t.decisions = vec![
-            "Owner: which db? -> sqlite".into(),
-            "Planner: tier hard".into(),
-            "Owner: dependency answered".into(),
+        t.question_history = vec![
+            super::super::owner_answer("which db?", "sqlite"),
+            super::super::owner_answer("dependency?", "answered"),
         ];
+        t.decisions = vec!["Planner: tier hard".into()];
         let s = run(&t, &[], &[]);
         let o = of_kind(&s, SignalKind::OwnerQuestion);
         assert_eq!(o.len(), 2);
@@ -1094,11 +1094,9 @@ mod answer_caller_tests {
     #[test]
     fn evolution_counts_owner_questions_without_lead_answers() {
         let mut task = task_with_status(TaskStatus::Done);
-        task.decisions = vec![
-            "Owner: B".into(),
-            "Lead: q -> a (answered by a lead session)".into(),
-            "Lead: stop".into(),
-        ];
+        let mut lead = super::super::owner_answer("q", "a");
+        lead.answered_by = AnsweredBy::Lead;
+        task.question_history = vec![super::super::owner_answer("A", "B"), lead];
         let signals = detect(
             &task,
             std::slice::from_ref(&task),

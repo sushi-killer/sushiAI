@@ -113,8 +113,7 @@ fn kind_name(kind: SignalKind) -> String {
 /// "drop"): the kind of decision, so a pattern of answers can add up where
 /// the free text after it never repeats.
 fn owner_answer_kind(detail: &str) -> String {
-    let answer = detail.strip_prefix("Owner:").unwrap_or(detail);
-    answer
+    detail
         .split_whitespace()
         .next()
         .unwrap_or("")
@@ -820,13 +819,10 @@ mod tests {
     #[test]
     fn evolution_owner_answers_cluster_by_their_first_word() {
         let answers = [
-            (
-                "a",
-                "Owner: continue: attempt 7 failed only because of a restart",
-            ),
-            ("b", "Owner: Continue once more, with a new brief"),
-            ("c", "Owner: continue - change no code"),
-            ("d", "Owner: drop this check (the parent runs it)"),
+            ("a", "continue: attempt 7 failed only because of a restart"),
+            ("b", "Continue once more, with a new brief"),
+            ("c", "continue - change no code"),
+            ("d", "drop this check (the parent runs it)"),
         ];
         let signals: Vec<Stored> = answers
             .iter()

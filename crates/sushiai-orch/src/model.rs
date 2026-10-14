@@ -2261,7 +2261,7 @@ pub struct Task {
 
 /// The `LoopState::state_version` a task written today carries; a task with a
 /// lower one is migrated once, when the store loads it (`store.rs`).
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 /// The base-check answer that waits for the base branch to move.
 pub const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
@@ -2297,6 +2297,7 @@ impl Default for LoopState {
             base_answers: Vec::new(),
             waited_out_bases: Vec::new(),
             answered_permissions: Vec::new(),
+            final_check_failures: Vec::new(),
         }
     }
 }
@@ -2372,6 +2373,9 @@ pub struct LoopState {
     /// Names of the permission subjects the owner already answered.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub answered_permissions: Vec<String>,
+    /// Commands a parent's final check failed on after every subtask landed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub final_check_failures: Vec<String>,
 }
 
 /// What `pr_pending` opens: the remote branch, the title (empty: the task's

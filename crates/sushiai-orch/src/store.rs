@@ -31,6 +31,7 @@ fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
     let mut task: Task = serde_json::from_str(text)?;
     migrate_loop_state(&mut task);
     migrate_base_and_permission_state(&mut task);
+    migrate_final_check_failures(&mut task);
     Ok(task)
 }
 
@@ -154,7 +155,7 @@ fn migrate_loop_state(task: &mut Task) {
 /// out bases and answered permissions that version 1 kept in decision lines
 /// and assumption texts. Like version 1, the only reader of those formats.
 fn migrate_base_and_permission_state(task: &mut Task) {
-    if task.loop_state.state_version >= STATE_VERSION {
+    if task.loop_state.state_version >= 2 {
         return;
     }
     let mut kept_checks: Vec<String> = Vec::new();
@@ -242,11 +243,33 @@ fn migrate_base_and_permission_state(task: &mut Task) {
         }
     }
     let state = &mut task.loop_state;
-    state.state_version = STATE_VERSION;
+    state.state_version = 2;
     state.kept_checks = kept_checks;
     state.base_answers = base_answers;
     state.waited_out_bases = waited_out_bases;
     state.answered_permissions = answered_permissions;
+}
+
+/// Version 3 of the loop state: the commands a parent's final check failed
+/// on, which version 2 kept only in a decision line.
+fn migrate_final_check_failures(task: &mut Task) {
+    if task.loop_state.state_version >= STATE_VERSION {
+        return;
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for d in &task.decisions {
+        let command = d
+            .strip_prefix("Orchestrator: every subtask landed, but `")
+            .and_then(|r| r.split_once("` exited"))
+            .map(|(command, _)| command);
+        if let Some(command) = command {
+            if !failures.iter().any(|c| c == command) {
+                failures.push(command.to_string());
+            }
+        }
+    }
+    task.loop_state.final_check_failures = failures;
+    task.loop_state.state_version = STATE_VERSION;
 }
 
 /// The criterion number in the text of an impossible question.
@@ -1099,6 +1122,26 @@ mod tests {
                 answer("npm ci", "89abcde", "policy", true),
             ]
         );
+    }
+
+    #[test]
+    fn a_version_two_task_gets_its_final_check_failures_from_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut task = sample_task("v2", TaskStatus::Failed, AttemptStatus::Passed);
+        task.decisions = vec![
+            "Orchestrator: every subtask landed, but `npm run ci` exited 2 on b: x".into(),
+            "Orchestrator: every subtask landed, but `npm run ci` exited 2 on b: y".into(),
+        ];
+        store.save_task(&task).unwrap();
+        let path = store.task_path("v2");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["stateVersion"] = 2.into();
+        fs::write(&path, value.to_string()).unwrap();
+        let state = store.load_task("v2").unwrap().unwrap().loop_state;
+        assert_eq!(state.state_version, STATE_VERSION);
+        assert_eq!(state.final_check_failures, ["npm run ci"]);
     }
 
     #[test]

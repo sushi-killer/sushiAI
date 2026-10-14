@@ -883,6 +883,15 @@ pub(super) async fn run_parent(
                 .code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "null".to_string());
+            if !task
+                .loop_state
+                .final_check_failures
+                .contains(&failed.command)
+            {
+                task.loop_state
+                    .final_check_failures
+                    .push(failed.command.clone());
+            }
             task.decisions.push(format!(
                 "Orchestrator: every subtask landed, but `{}` exited {code} on {}: {}",
                 failed.command,

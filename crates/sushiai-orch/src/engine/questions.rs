@@ -586,11 +586,22 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
     {
         return;
     }
-    let prompt = overseer_prompt("overseer_done", task);
+    // orchd opens the pull request itself while `pr_pending`: one owner.
+    let prompt = overseer_prompt(done_prompt_key(task), task);
     // Marked either way: this is the one transition, not a retry loop.
     task.overseer_woken = true;
     app.save_task_logged(task);
     chat::wake_overseer(app, &task.repo, prompt, false, "done", Some(&task.id));
+}
+
+/// The wake prompt of a finished task: the one that tells the overseer to
+/// open the pull request, unless orchd owns that (`pr_pending`).
+fn done_prompt_key(task: &Task) -> &'static str {
+    if task.pr_pending {
+        "overseer_done_pr_owned"
+    } else {
+        "overseer_done"
+    }
 }
 
 /// A server-built overseer prompt (`prompts/orchestrator.yaml`) naming the task.
@@ -1416,5 +1427,21 @@ mod timeout_tests {
             .await
         );
         assert_helper_timeout(&task, "accept-check");
+    }
+}
+
+#[cfg(test)]
+mod done_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn the_overseer_is_not_told_to_open_a_pull_request_orchd_opens_itself() {
+        let mut task = super::super::test_support::task_with_status(TaskStatus::Done);
+        assert_eq!(done_prompt_key(&task), "overseer_done");
+        assert!(overseer_prompt("overseer_done", &task).contains("task_pr"));
+        task.pr_pending = true;
+        let prompt = overseer_prompt(done_prompt_key(&task), &task);
+        assert!(prompt.contains("do not call task_pr"), "{prompt}");
+        assert!(!prompt.contains("open one with task_pr"), "{prompt}");
     }
 }

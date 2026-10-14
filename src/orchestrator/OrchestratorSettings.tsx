@@ -830,13 +830,14 @@ function OrchestratorSettingsBody({
       <div className="os-block">
         <div className="os-row-head">
           <span className="os-row-title">
-            Repos where a finished task opens a pull request
+            Repos with a different pull request setting
           </span>
         </div>
         <span className="os-row-desc">
-          When landing on the default branch is refused, a helper drafts the
-          pull request by the repo's own rules and orchd opens it. Use the full
-          repo path.
+          A finished task whose work did not land gets a pull request by
+          default: a helper drafts it by the repo's own rules and orchd opens
+          it. A repo listed here opens one even when it is turned off in the
+          settings file. Use the full repo path.
         </span>
         <ChipList
           values={landRepos(settings.prOnDoneRepos)}

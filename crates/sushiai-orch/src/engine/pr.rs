@@ -9,10 +9,10 @@ use tokio::process::Command;
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
-const GH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const GH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The `gh` binary; `ORCHD_GH_BIN` lets a test point it at a fake script.
-fn gh_bin() -> String {
+pub(super) fn gh_bin() -> String {
     std::env::var("ORCHD_GH_BIN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -154,6 +154,31 @@ fn ls_remote_sha(out: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The base a pull request targets: the branch the task started from when
+/// origin has it, else the repo's default branch.
+pub(super) async fn pr_base(
+    task: &Task,
+    repo: &Path,
+    default: Option<String>,
+) -> Result<String, String> {
+    if let Some(b) = task.base_ref.as_deref().filter(|b| !b.is_empty()) {
+        if check_branch_syntax(b).is_ok() {
+            let on_origin = run_cmd(
+                "git",
+                &["ls-remote", "--heads", "origin", &format!("refs/heads/{b}")],
+                repo,
+                GIT_TIMEOUT,
+            )
+            .await?;
+            if ls_remote_sha(&on_origin).is_some() {
+                return Ok(b.to_string());
+            }
+        }
+    }
+    default
+        .ok_or_else(|| "the repo has no default branch to open a pull request against".to_string())
+}
+
 impl App {
     pub(super) async fn handle_task_pr(
         &self,
@@ -188,6 +213,12 @@ impl App {
         }
         if task.status != TaskStatus::Done {
             return Err("only a done task can open a pull request".to_string());
+        }
+        if task.pr_pending && p.source.as_deref() == Some("overseer") {
+            return Err(
+                "orchd opens this task's pull request itself; do not call task_pr while prPending is set"
+                    .to_string(),
+            );
         }
         if task.archived {
             return Err("task is archived; unarchive it first".to_string());
@@ -246,32 +277,13 @@ impl App {
         .await
         .map_err(|_| format!("the task branch {} no longer exists", task.branch))?;
 
-        // The base: the branch the task started from when origin has it,
-        // else the repo's default branch.
         let default = {
             let repo = repo.clone();
             tokio::task::spawn_blocking(move || git::default_branch(&repo))
                 .await
                 .map_err(|e| e.to_string())?
         };
-        let mut base = None;
-        if let Some(b) = task.base_ref.as_deref().filter(|b| !b.is_empty()) {
-            if check_branch_syntax(b).is_ok() {
-                let on_origin = run_cmd(
-                    "git",
-                    &["ls-remote", "--heads", "origin", &format!("refs/heads/{b}")],
-                    &repo,
-                    GIT_TIMEOUT,
-                )
-                .await?;
-                if ls_remote_sha(&on_origin).is_some() {
-                    base = Some(b.to_string());
-                }
-            }
-        }
-        let base = base.or(default.clone()).ok_or_else(|| {
-            "the repo has no default branch to open a pull request against".to_string()
-        })?;
+        let base = pr_base(&task, &repo, default.clone()).await?;
         if [
             Some(base.as_str()),
             default.as_deref(),

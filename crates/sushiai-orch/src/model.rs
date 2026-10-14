@@ -233,12 +233,13 @@ pub struct Settings {
     /// allowed. `land_on_default` decides for repos not in the map.
     #[serde(default)]
     pub land_on_default_repos: std::collections::BTreeMap<String, bool>,
-    /// A finished top-level task that could not land on the default branch
-    /// gets a pull request: a read-only helper drafts it by the repo's own
-    /// rules and orchd opens it. Off by default.
+    /// Turns off the pull request orchd opens by itself for a finished
+    /// top-level task whose work did not land on its base: a read-only helper
+    /// drafts it by the repo's own rules and orchd opens it. On by default.
     #[serde(default)]
-    pub pr_on_done: bool,
-    /// Per repo path: overrides `pr_on_done`.
+    pub pr_on_done_off: bool,
+    /// Per repo path: overrides `pr_on_done_off` (`false` turns it off for
+    /// that repo, `true` on).
     #[serde(default)]
     pub pr_on_done_repos: std::collections::BTreeMap<String, bool>,
     /// Route that drafts the pull request. Empty: the `mechanical` tier's
@@ -739,15 +740,14 @@ impl Settings {
             .unwrap_or(self.land_on_default)
     }
 
-    /// Whether a done task that could not land on `repo`'s default branch
-    /// gets a pull request: the per-repo entry when there is one, else the
-    /// global switch.
+    /// Whether a done task whose work did not land gets a pull request: the
+    /// per-repo entry when there is one, else on unless switched off.
     pub fn may_open_pr_on_done(&self, repo: &str) -> bool {
         self.pr_on_done_repos
             .iter()
             .find(|(k, _)| same_repo_path(k, repo))
             .map(|(_, on)| *on)
-            .unwrap_or(self.pr_on_done)
+            .unwrap_or(!self.pr_on_done_off)
     }
 
     /// The route that drafts a pull request: `pr_route`, else the
@@ -855,7 +855,7 @@ impl Default for Settings {
             worktree_root: String::new(),
             land_on_default: false,
             land_on_default_repos: Default::default(),
-            pr_on_done: false,
+            pr_on_done_off: false,
             pr_on_done_repos: Default::default(),
             pr_route: String::new(),
             gate_at: Default::default(),
@@ -2071,6 +2071,11 @@ pub struct Task {
     /// resumes it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pr_pending: bool,
+    /// The branch, title and body chosen for the pending pull request, saved
+    /// before the first push so a restart reuses them instead of drafting
+    /// again. Cleared when the flow ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_plan: Option<PrPlan>,
     /// The overseer was already woken when this task finished: a restart,
     /// an unarchive or a rebroadcast never wakes it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2079,12 +2084,25 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// What `pr_pending` opens: the remote branch, the title (empty: the task's
+/// own) and the body, already redacted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrPlan {
+    pub branch: String,
+    pub title: String,
+    pub body: String,
+}
+
 /// A task's place in the file queue (`engine/leases.rs`, `engine/graph.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct QueueState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub park: Option<ParkRecord>,
+    /// When landing first found the base branch's checkout dirty (ms); the
+    /// landing gives up and leaves the work on the task branch after an hour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty_since: Option<i64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stopped_explicitly: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -2825,13 +2843,12 @@ mod tests {
     #[test]
     fn pr_on_done_follows_the_repo_entry_then_the_global_switch() {
         let mut s = Settings::default();
-        assert!(!s.may_open_pr_on_done("/r/a"));
-        s.pr_on_done = true;
         assert!(s.may_open_pr_on_done("/r/a"));
         s.pr_on_done_repos.insert("/r/a".into(), false);
         assert!(!s.may_open_pr_on_done("/r/a"));
         assert!(s.may_open_pr_on_done("/r/b"));
-        s.pr_on_done = false;
+        s.pr_on_done_off = true;
+        assert!(!s.may_open_pr_on_done("/r/b"));
         s.pr_on_done_repos.insert("/r/b/".into(), true);
         assert!(s.may_open_pr_on_done("/r/b"));
     }
@@ -3081,6 +3098,7 @@ mod tests {
             pr_url: None,
             pr_branch: None,
             pr_pending: false,
+            pr_plan: None,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3346,6 +3364,7 @@ mod tests {
             pr_url: None,
             pr_branch: None,
             pr_pending: false,
+            pr_plan: None,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3417,6 +3436,7 @@ mod tests {
             pr_url: None,
             pr_branch: None,
             pr_pending: false,
+            pr_plan: None,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -3518,6 +3538,7 @@ mod tests {
             pr_url: None,
             pr_branch: None,
             pr_pending: false,
+            pr_plan: None,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,

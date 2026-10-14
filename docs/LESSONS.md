@@ -33,6 +33,11 @@ Root cause: JS tests on a base without the step 5 isolation changed the real hom
 Rule: merge the isolation fix into every lane base before JS tests run.
 Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
 
+## 2026-10-14 — a done task on an old main failed against the current main
+
+Root cause: a branch built alone, but GitHub saw main's newer `ci.yml` as the task's workflow edit and refused the push; the same stale base also breaks on changed signatures.
+Rule: carry a PR branch onto the newest base and recheck it before the push; a "refusing to allow" rejection is permanent. `a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push`.
+
 ## Promoted
 
 - 2026-10-13 An agent host's own git identity reached PR commits and main → PR commits need a noreply author. `check-conventions.mjs`.
@@ -52,8 +57,3 @@ Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries 
 - 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
 - 2026-10-02 Fixtures invented `gh` output → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.
-- 2026-10-02 Git identity loading split worktree rows → wait for first-host identities before drawing.
-- 2026-10-01 Prepare lost SSH recovery between callers → preserve structured failures; reuse recovery UI. `GitRecovery` and `project-git-ssh.test.cjs`.
-- 2026-10-01 contextBridge discards Error fields → transport tagged values; reconstruct before App restores state. `tests/bridge.test.cjs`.
-- 2026-10-01 "0 unexplained diffs" hid defects → a fresh critic compares PNGs; revert each fix once to see its test fail. `design-critic`.
-- 2026-09-30 orchd defaults leaked repo specifics to every repo → defaults stay empty. `scoped_checks_and_chat_tools_default_to_none`.

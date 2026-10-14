@@ -69,7 +69,9 @@ impl App {
                     | TaskStatus::Drafting
                     | TaskStatus::Landing
             ) {
-                if settle_interrupted_advisor(&mut t, &self.store, &prices) {
+                // A restart starts the dirty-checkout hour over.
+                let was_dirty = t.queue.dirty_since.take().is_some();
+                if settle_interrupted_advisor(&mut t, &self.store, &prices) || was_dirty {
                     t.updated_at = now_ms();
                     self.save_task_logged(&t);
                     self.broadcast_task(&t);

@@ -1,7 +1,10 @@
-//! A done top-level task that could not land on the default branch gets a pull
-//! request. One read-only helper drafts the branch name, title and body by the
-//! repo's own rules; orchd then opens it through `task.pr`. The run holds no
-//! slot, never blocks the task loop and never changes the task's status.
+//! A done top-level task whose work did not land on its base gets a pull
+//! request, with no help from the overseer. One read-only helper drafts the
+//! branch name, title and body by the repo's own rules; orchd then opens it
+//! through `task.pr`. A transient failure (network, `gh`) is retried with a
+//! growing delay; an auth or permanent failure sends the owner one notice. The
+//! run holds no slot, never blocks the task loop and never changes the task's
+//! status: it stays done, and `task.pr` can open the pull request later.
 
 use super::*;
 
@@ -27,12 +30,113 @@ fn parse_draft(text: &str) -> Option<Draft> {
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-/// Marks a task that is about to be saved `done` as owing a pull request,
-/// when it is a top-level task and its repo opted in. Saved with `done`, so
-/// a restart can resume the flow.
+/// Pauses between the tries to open a pull request: five tries over about
+/// half an hour. `ORCHD_PR_RETRY_MS` (comma separated) replaces them in tests.
+fn retry_delays() -> Vec<Duration> {
+    if let Ok(v) = std::env::var("ORCHD_PR_RETRY_MS") {
+        return v
+            .split(',')
+            .filter_map(|ms| ms.trim().parse().ok())
+            .map(Duration::from_millis)
+            .collect();
+    }
+    [60, 240, 600, 900]
+        .into_iter()
+        .map(Duration::from_secs)
+        .collect()
+}
+
+/// Whether a failed attempt can only repeat (auth, a missing remote, a
+/// protected branch, a refused name) or may pass on its own (network, a busy
+/// service, a rate limit, a timeout). A transient marker wins: a 403 that says
+/// "rate limit" is not a refusal.
+fn is_permanent(error: &str) -> bool {
+    const TRANSIENT: [&str; 14] = [
+        "rate limit",
+        "secondary rate",
+        "timed out",
+        "temporarily",
+        "try again",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "connection reset",
+        "connection refused",
+        "could not resolve",
+        "network is unreachable",
+        "early eof",
+    ];
+    const PERMANENT: [&str; 25] = [
+        "not logged in",
+        "gh auth login",
+        "authentication failed",
+        "bad credentials",
+        "permission denied",
+        "permission to",
+        "resource not accessible",
+        "protected branch",
+        "gh006",
+        "gh013",
+        "does not appear to be a git repository",
+        "no such remote",
+        "no such file or directory",
+        "command not found",
+        "no default branch",
+        "no commits beyond",
+        "already open",
+        "not a valid branch name",
+        "no longer exists",
+        "not part of this task",
+        "is a base branch",
+        "already landed",
+        "is archived",
+        "repository not found",
+        "refusing to allow",
+    ];
+    let e = error.to_lowercase();
+    if TRANSIENT.iter().any(|t| e.contains(t)) {
+        return false;
+    }
+    PERMANENT.iter().any(|p| e.contains(p)) || e.contains("http 401") || e.contains("http 404")
+}
+
+/// What the owner does about a push GitHub refused for the token's scope.
+fn scope_hint(error: &str) -> &'static str {
+    if error.to_lowercase().contains("refusing to allow") {
+        " The token needs the `workflow` scope, or the owner pushes the branch."
+    } else {
+        ""
+    }
+}
+
+/// `gh` found no GitHub host among the repo's remotes (GitLab, a bare path).
+fn is_no_github_host(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("known github host") || e.contains("no github host")
+}
+
+/// Tells the owner in the repo's chat, off the caller's path: the chat can be
+/// busy with a live turn, so a refused post is tried again a few times.
+pub(super) fn notify_owner(app: &Arc<App>, repo: &str, text: String) {
+    let (app, repo) = (app.clone(), repo.to_string());
+    tokio::spawn(async move {
+        for _ in 0..20 {
+            if chat::post_note(&app, &repo, &text) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+}
+
+/// Marks a task that is about to be saved `done` as owing a pull request:
+/// a top-level task whose work did not land on its base, unless the setting
+/// is off for its repo. Saved with `done`, so a restart can resume the flow.
 pub(super) fn mark_pr_pending(app: &App, task: &mut Task) {
     task.pr_pending = task.parent.is_none()
         && task.pr_url.is_none()
+        && task.landed_sha.is_none()
         && !task.archived
         && app.settings.read().unwrap().may_open_pr_on_done(&task.repo);
 }
@@ -64,6 +168,7 @@ fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: bool) {
         task.cost_usd += cost;
         if ends {
             task.pr_pending = false;
+            task.pr_plan = None;
         }
     });
 }
@@ -90,69 +195,311 @@ fn redact_pr_text(
     out
 }
 
-pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
-    let Ok(Some(task)) = app.store.load_task(id) else {
-        return;
+/// The task, while it still owes the automatic pull request: done, pending,
+/// not landed, none open, not archived. Landing, a pull request opened by
+/// someone else or an archive ends the flow without a word.
+fn owed(app: &App, id: &str) -> Option<Task> {
+    let task = app.store.load_task(id).ok().flatten()?;
+    (task.status == TaskStatus::Done
+        && task.pr_pending
+        && task.landed_sha.is_none()
+        && task.pr_url.is_none()
+        && !task.archived)
+        .then_some(task)
+}
+
+/// Carries the done task's work onto the newest `origin/<base>` before it is
+/// pushed, with the task's checks run again when the base moved, as landing
+/// does. A branch on an old base would show newer base files (a workflow, a
+/// signature) as the task's own change. The branch moves only when the carry
+/// and the checks pass; the decisions are saved either way.
+async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
+    let repo = PathBuf::from(&task.repo);
+    let default = {
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || git::default_branch(&repo))
+            .await
+            .map_err(|e| e.to_string())?
     };
-    let mut cost = 0.0;
-    let (mut lines, draft) = match draft_pr(app, &task, &mut cost).await {
-        Ok((route, draft)) => (vec![format!("PR: drafted by {route}")], draft),
-        Err(reason) => (
-            vec![format!(
-                "PR: draft failed ({reason}); opened with the task's own title and branch"
-            )],
-            Draft::default(),
-        ),
-    };
-    // The overseer may have opened the pull request while the draft ran.
-    if let Ok(Some(now)) = app.store.load_task(id) {
-        if let Some(url) = now.pr_url {
-            lines.push(format!("PR: already open {url}, draft not used"));
-            record(app, id, lines, cost, true);
-            return;
-        }
-    }
-    let mut branch = task.branch.clone();
-    let drafted = draft.branch.trim();
-    if !drafted.is_empty() && drafted != task.branch {
-        match pr::check_draft_branch(&task, drafted).await {
-            Ok(()) => branch = drafted.to_string(),
-            Err(why) => lines.push(format!(
-                "PR: drafted branch {drafted} refused ({why}); using {}",
-                task.branch
-            )),
-        }
-    }
-    record(app, id, lines, cost, false);
-    let secrets = match run_secrets(app, id) {
-        Ok(secrets) => secrets.redaction,
-        Err(e) => {
-            record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
-            return;
-        }
-    };
-    let home = std::env::var("HOME").ok();
-    let title = redact_pr_text(&draft.title, &secrets, home.as_deref());
-    // The task's own body when the draft has none: it is published too.
-    let source = if draft.body.trim().is_empty() {
-        super::pr::pr_body(&task)
-    } else {
-        draft.body.clone()
-    };
-    let body = truncate_chars(
-        &redact_pr_text(&source, &secrets, home.as_deref()),
-        MAX_BODY_CHARS,
+    let base = pr::pr_base(task, &repo, default).await?;
+    pr::run_cmd("git", &["fetch", "origin", &base], &repo, pr::GIT_TIMEOUT).await?;
+    let (upstream, local) = (
+        format!("origin/{base}"),
+        format!("refs/heads/{}", task.branch),
     );
-    let result = app
-        .handle_task_pr(serde_json::json!({
-            "id": id, "branch": branch, "title": title, "body": body,
-        }))
-        .await;
-    let end = match result {
-        Ok(_) => Vec::new(),
-        Err(e) => vec![format!("PR: not opened: {e}")],
+    let contains = pr::run_cmd(
+        "git",
+        &["merge-base", "--is-ancestor", &upstream, &local],
+        &repo,
+        pr::GIT_TIMEOUT,
+    )
+    .await
+    .is_ok();
+    if contains {
+        return Ok(());
+    }
+    let old = pr::run_cmd("git", &["rev-parse", &local], &repo, pr::GIT_TIMEOUT).await?;
+    let path = git::worktree_path(&repo, &app.home, "", &format!("pr-carry-{}", task.id));
+    let (r, p, rev) = (repo.clone(), path.clone(), old.clone());
+    let temp = tokio::task::spawn_blocking(move || {
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
+        }
+        git::remove_worktree(&r, &p);
+        git::add_detached_worktree(&r, &p, &rev)?;
+        Ok::<_, git::GitError>(TempWorktree { repo: r, path: p })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("could not check out {}: {e}", task.branch))?;
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "pr-carry", None)
+        .map_err(|e| e.to_string())?;
+    let finals = {
+        let settings = app.settings.read().unwrap();
+        split_deferred(app, &settings, task).0
     };
-    record(app, id, end, 0.0, true);
+    let mut work = task.clone();
+    let before = work.decisions.len();
+    let outcome = carry_and_check(
+        app,
+        &mut work,
+        None,
+        &temp.path,
+        &run_dir,
+        &upstream,
+        "Another task",
+        &finals,
+        &CancelToken::new(),
+    )
+    .await;
+    let committed = match outcome {
+        Ok(false) => {
+            let (wt, title, tid, n) = (
+                temp.path.clone(),
+                task.title.clone(),
+                task.id.clone(),
+                task.attempts.len().max(1) as u32,
+            );
+            tokio::task::spawn_blocking(move || {
+                git::commit(&wt, &title, &tid, n)?;
+                git::head_sha(&wt)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("could not commit the carried work: {e}"))
+        }
+        Ok(true) => Err(format!("{upstream} already contains this work")),
+        Err(Landing::Failed { detail, .. }) => Err(detail),
+        Err(_) => Err("the carry was interrupted".to_string()),
+    };
+    let moved = match &committed {
+        Ok(sha) => {
+            pr::run_cmd(
+                "git",
+                &["update-ref", &local, sha, &old],
+                &repo,
+                pr::GIT_TIMEOUT,
+            )
+            .await
+        }
+        Err(e) => Err(e.clone()),
+    };
+    drop(temp);
+    let (lines, ok) = (work.decisions[before..].to_vec(), moved.is_ok());
+    let _ = app.update_task(&task.id, move |t| {
+        t.decisions.extend(lines);
+        if ok {
+            t.base_sha = work.base_sha;
+            t.planner_tests = work.planner_tests;
+        }
+    });
+    moved.map(|_| ())
+}
+
+pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
+    let Some(mut task) = owed(app, id) else {
+        return record(app, id, Vec::new(), 0.0, true);
+    };
+    let repo = PathBuf::from(&task.repo);
+    if pr::run_cmd(
+        "git",
+        &["remote", "get-url", "origin"],
+        &repo,
+        pr::GIT_TIMEOUT,
+    )
+    .await
+    .is_err()
+    {
+        // Nothing to push to: no draft, no spend, no notice.
+        let line = "PR: not opened: the repo has no origin remote".to_string();
+        return record(app, id, vec![line], 0.0, true);
+    }
+    // A remote `gh` does not know (GitLab, a bare path): no draft, no push.
+    if let Err(e) = pr::run_cmd(
+        &pr::gh_bin(),
+        &["repo", "view", "--json", "url"],
+        &repo,
+        pr::GH_TIMEOUT,
+    )
+    .await
+    {
+        if is_no_github_host(&e) {
+            return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
+        }
+    }
+    // Never push from a stale base: carry onto the newest one first.
+    if let Err(e) = carry_for_pr(app, &task).await {
+        record(
+            app,
+            id,
+            vec![format!(
+                "PR: not opened: the work could not be carried onto the newest base ({e}); nothing was pushed"
+            )],
+            0.0,
+            true,
+        );
+        notify_owner(
+            app,
+            &task.repo,
+            format!(
+                "Task \"{}\" is done but its pull request was not opened: the work could not be carried onto the newest base ({e}). Nothing was pushed; the work is on branch {}. Carry it by hand, then open it with task_pr.",
+                task.title, task.branch
+            ),
+        );
+        return;
+    }
+    let Some(fresh) = owed(app, id) else {
+        return record(app, id, Vec::new(), 0.0, true);
+    };
+    task = fresh;
+    // A restart reuses what the first run chose and drafts nothing again.
+    let plan = match task.pr_plan.clone() {
+        Some(plan) => plan,
+        None => {
+            let mut cost = 0.0;
+            let (mut lines, draft) = match draft_pr(app, &task, &mut cost).await {
+                Ok((route, draft)) => (vec![format!("PR: drafted by {route}")], draft),
+                Err(reason) => (
+                    vec![format!(
+                        "PR: draft failed ({reason}); opened with the task's own title and branch"
+                    )],
+                    Draft::default(),
+                ),
+            };
+            // Landed, or opened by the overseer or the owner, while the draft ran.
+            let Some(task) = owed(app, id) else {
+                if let Ok(Some(now)) = app.store.load_task(id) {
+                    if let Some(url) = now.pr_url {
+                        lines.push(format!("PR: already open {url}, draft not used"));
+                    }
+                }
+                return record(app, id, lines, cost, true);
+            };
+            let mut branch = task.branch.clone();
+            let drafted = draft.branch.trim();
+            if !drafted.is_empty() && drafted != task.branch {
+                match pr::check_draft_branch(&task, drafted).await {
+                    Ok(()) => branch = drafted.to_string(),
+                    Err(why) => lines.push(format!(
+                        "PR: drafted branch {drafted} refused ({why}); using {}",
+                        task.branch
+                    )),
+                }
+            }
+            let secrets = match run_secrets(app, id) {
+                Ok(secrets) => secrets.redaction,
+                Err(e) => {
+                    let line = format!("PR: not opened: {e}");
+                    lines.push(line);
+                    return record(app, id, lines, cost, true);
+                }
+            };
+            let home = std::env::var("HOME").ok();
+            let title = redact_pr_text(&draft.title, &secrets, home.as_deref());
+            // The task's own body when the draft has none: it is published too.
+            let source = if draft.body.trim().is_empty() {
+                super::pr::pr_body(&task)
+            } else {
+                draft.body.clone()
+            };
+            let body = truncate_chars(
+                &redact_pr_text(&source, &secrets, home.as_deref()),
+                MAX_BODY_CHARS,
+            );
+            let plan = PrPlan {
+                branch,
+                title,
+                body,
+            };
+            let saved = plan.clone();
+            let _ = app.update_task(id, move |t| {
+                t.decisions.extend(lines);
+                t.cost_usd += cost;
+                t.pr_plan = Some(saved);
+            });
+            plan
+        }
+    };
+    let (mut tries, delays) = (0, retry_delays());
+    loop {
+        if owed(app, id).is_none() {
+            return record(app, id, Vec::new(), 0.0, true);
+        }
+        let result = app
+            .handle_task_pr(serde_json::json!({
+                "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
+            }))
+            .await;
+        let Err(e) = result else {
+            return record(app, id, Vec::new(), 0.0, true);
+        };
+        // Opened or landed meanwhile: nothing to report.
+        if owed(app, id).is_none() {
+            return record(app, id, Vec::new(), 0.0, true);
+        }
+        if is_no_github_host(&e) {
+            return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
+        }
+        let permanent = is_permanent(&e);
+        if permanent || tries >= delays.len() {
+            let tried = if permanent {
+                String::new()
+            } else {
+                format!(" after {} tries", tries + 1)
+            };
+            let hint = scope_hint(&e);
+            record(
+                app,
+                id,
+                vec![format!("PR: not opened{tried}: {e}.{hint}")],
+                0.0,
+                true,
+            );
+            notify_owner(
+                app,
+                &task.repo,
+                format!(
+                    "Task \"{}\" is done but its pull request was not opened{tried}: {e}.{hint} The work is on branch {}. Fix that, then open it with task_pr.",
+                    task.title, task.branch
+                ),
+            );
+            return;
+        }
+        let wait = delays[tries];
+        tries += 1;
+        let line = format!(
+            "PR: try {tries} failed ({e}); trying again in {}s",
+            wait.as_secs()
+        );
+        record(app, id, vec![line], 0.0, false);
+        tokio::time::sleep(wait).await;
+        // A shutdown keeps `pr_pending`: the next start resumes the flow.
+        if app.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+    }
 }
 
 /// A temporary detached worktree of a branch, removed when dropped.
@@ -328,6 +675,30 @@ mod tests {
         assert_eq!(out, "key ${API_KEY} and ${SHORT} at ~/proj/a.rs");
         assert_eq!(redact_pr_text("/x", &secrets, Some("/")), "/x");
         assert_eq!(redact_pr_text("plain", &secrets, None), "plain");
+    }
+
+    #[test]
+    fn a_rate_limit_or_a_timeout_is_transient_even_with_a_403() {
+        for e in [
+            "gh pr: HTTP 403: API rate limit exceeded",
+            "gh pr failed: HTTP 403: You have exceeded a secondary rate limit",
+            "git ls-remote timed out after 60s",
+            "gh pr failed: HTTP 502: Bad Gateway, try again later",
+            "git push failed: Could not resolve host: example.invalid",
+        ] {
+            assert!(!is_permanent(e), "{e}");
+        }
+        for e in [
+            "gh pr failed: To get started, please run:  gh auth login",
+            "git push failed: Permission denied (publickey)",
+            "git push failed: remote: error: GH006: Protected branch update failed",
+            "gh pr failed: HTTP 401: Bad credentials",
+            "remote: error: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
+            "remote: refusing to allow an OAuth App to create or update workflow `ci.yml` without `workflow` scope",
+            "git fetch failed: fatal: 'origin' does not appear to be a git repository",
+        ] {
+            assert!(is_permanent(e), "{e}");
+        }
     }
 
     #[test]

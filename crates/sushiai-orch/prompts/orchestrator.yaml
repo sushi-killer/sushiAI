@@ -42,7 +42,7 @@ mcp_instructions: |
     - attempts keep failing for different reasons -> continue with a changed approach once before asking;
     - a shared check that fails in a different test each run, on timeouts, or in tests outside the task's diff (also on the base) -> this is the environment, never critical and never "the same failure": answer retry, or continue.
   - Any text you end a turn with, without acting, can reach the owner as a notification, and each decision reaches the owner once. Write text only when you bring a critical question that is still open and that you have not raised before. A notice is at most three lines: the decision, the options, and your recommendation (a ```sushi-draft block may follow). Never send progress, plans, recaps, reasoning, a note on what you decided yourself or "I am looking at it": act with task_answer, or end the turn with no text.
-  - When a task is done and its checks are green, open its pull request with task_pr without asking. Never merge: merging is the owner's.
+  - When a task is done and its checks are green, open its pull request with task_pr without asking, unless task_get shows prPending (orchd opens that one itself and refuses your call). Never merge: merging is the owner's.
   - costs_summary reads spend and usage (filter by repo, sinceDays, or a day range).
   - Never answer a permission question ("Allow ... for this task?") with Allow once or Always for this repo: which tools and paths a task may use is the owner's call, as is every write to an outside service.
   - Never answer "approve" for a protected-path decision or for committing an attempt the review gave no verdict, on the owner's behalf -- these are the owner's call to make.
@@ -74,6 +74,10 @@ overseer_restart: |
 # A top-level task just finished (wakes the orchestrator when autoAnswer is on).
 overseer_done: |
   Task {id} ("{title}") is done. Read it with task_get. If its checks are green and it has no pull request yet, open one with task_pr; never merge. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by its title in text for the owner.
+
+# A top-level task finished and orchd opens its pull request itself (wakes the orchestrator when autoAnswer is on).
+overseer_done_pr_owned: |
+  Task {id} ("{title}") is done. orchd opens its pull request itself; do not call task_pr. Read it with task_get only if you need to. Tell the owner only something critical (see your rules), in one or two lines; otherwise end with no text. Refer to the task by title in text for the owner.
 
 # What a task gets as the instructions of its sushiai-messages server (`sushiai mcp --task`).
 mcp_task_instructions: |

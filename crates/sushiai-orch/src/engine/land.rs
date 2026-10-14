@@ -6,6 +6,17 @@ const AFTER_LAND_TIMEOUT: Duration = Duration::from_secs(600);
 /// How many times a landing carries its work onto a branch that moved under
 /// it before the attempt fails.
 const MAX_RECARRIES: u32 = 3;
+/// How long a landing waits for a dirty base checkout before it gives up and
+/// leaves the work on the task branch (a pull request follows).
+const DIRTY_LIMIT: Duration = Duration::from_secs(3600);
+
+/// [`DIRTY_LIMIT`] in ms; `ORCHD_LANDING_DIRTY_LIMIT_MS` shortens it for tests.
+fn dirty_limit_ms() -> i64 {
+    std::env::var("ORCHD_LANDING_DIRTY_LIMIT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DIRTY_LIMIT.as_millis() as i64)
+}
 
 pub(super) struct LandingRedirect {
     pub(super) branch: String,
@@ -82,7 +93,9 @@ async fn mark_redirected_landed(
 /// branch's current head, squashed to one commit, checked again on exactly
 /// that tree when the head had moved, and the branch moves to the commit.
 /// `Landing::NoParent` and `Landing::DefaultBranchRefused` mean landing was
-/// refused: the task commits on its own branch instead.
+/// refused: the task commits on its own branch instead (and, being top level,
+/// gets a pull request). A base checkout that stays dirty for an hour ends
+/// the same way.
 pub(super) async fn land_on_base(
     app: &Arc<App>,
     task: &mut Task,
@@ -113,6 +126,10 @@ pub(super) async fn land_on_base(
     };
     let branch = redirect.branch.clone();
     task.decisions.extend(redirect.decisions.clone());
+    // A fresh landing (not the 2-minute retry) starts the dirty hour over.
+    if task.status != TaskStatus::Landing {
+        task.queue.dirty_since = None;
+    }
     let repo = PathBuf::from(&task.repo);
     if !land_on_default {
         let r = repo.clone();
@@ -218,6 +235,9 @@ pub(super) async fn land_on_base(
         })
         .await
         .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+        if !matches!(moved, Ok((_, git::BranchMove::Dirty { .. }))) {
+            task.queue.dirty_since = None;
+        }
         match moved {
             Ok((sha, git::BranchMove::Done { checkout })) => {
                 task.landed_sha = Some(sha.clone());
@@ -230,6 +250,31 @@ pub(super) async fn land_on_base(
                 return Landing::Landed;
             }
             Ok((_, git::BranchMove::Dirty { checkout })) => {
+                let since = *task.queue.dirty_since.get_or_insert_with(now_ms);
+                if now_ms() - since >= dirty_limit_ms() {
+                    task.queue.dirty_since = None;
+                    let line = format!(
+                        "Land: gave up, {} still has uncommitted changes; the work stays on {}",
+                        checkout.display(),
+                        task.branch
+                    );
+                    task.decisions.push(line.clone());
+                    let pr = app.settings.read().unwrap().may_open_pr_on_done(&task.repo);
+                    let next = if pr {
+                        "A pull request is opened from the task branch instead."
+                    } else {
+                        "Land it or open a pull request from the task branch."
+                    };
+                    super::pr_draft::notify_owner(
+                        app,
+                        &task.repo,
+                        format!(
+                            "Task \"{}\" could not land on {branch}: {line}. {next}",
+                            task.title
+                        ),
+                    );
+                    return Landing::NoParent;
+                }
                 if task.status != TaskStatus::Landing {
                     task.decisions.push(format!(
                         "Land: waiting, {} has uncommitted changes; retrying every 2 minutes and on task.start",

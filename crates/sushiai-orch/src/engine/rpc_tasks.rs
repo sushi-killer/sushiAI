@@ -664,6 +664,7 @@ impl App {
             pr_url: None,
             pr_branch: None,
             pr_pending: false,
+            pr_plan: None,
             overseer_woken: false,
             planned_tier: None,
             planned_by_parent: false,
@@ -840,6 +841,15 @@ impl App {
             task.variant = Some(variant);
             task.status = TaskStatus::Landing;
             task.unlanded = None;
+            // The owner chose landing: the automatic pull request is off. One
+            // that is open stays open.
+            task.pr_pending = false;
+            task.pr_plan = None;
+            if let Some(url) = &task.pr_url {
+                task.decisions.push(format!(
+                    "Land: requested while pull request {url} is open; it stays open"
+                ));
+            }
             task.decisions
                 .push(format!("Land: requested, landing on {branch}"));
         })?;

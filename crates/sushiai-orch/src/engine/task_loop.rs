@@ -549,8 +549,7 @@ pub(super) async fn run_task_loop(
             }
         }
         let wt = PathBuf::from(&task.worktree);
-        recover_format_aside(&mut task, &wt).await;
-        repair_protection(&app, &mut task, &wt, &cancel).await;
+        repair_protection(&mut task, &wt).await;
         if task.parent.is_some() {
             let _ = app.sync_graph_base(&task.id, false).await;
             app.carry_part_onto_parent(&mut task, &cancel).await;
@@ -666,7 +665,7 @@ pub(super) async fn run_task_loop(
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty())
                     .map(|token| {
-                        let ctx = HookContext::new(&task, a.n, &worktree, task.work_base());
+                        let ctx = HookContext::new(&task, a.n, &worktree, &task.base_sha);
                         app.register_hook(&token, &ctx, &run_dir);
                         (token, ctx)
                     });
@@ -1317,12 +1316,11 @@ pub(super) async fn run_task_loop(
                 FailureKind::Stall
             };
             let detail = outcome.error.clone().unwrap_or_default();
-            let (wt, base) = (worktree.clone(), task.work_base().to_string());
-            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
-                git::changed_files(&wt, &base).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let (wt, own) = (worktree.clone(), task.own_diff());
+            task.attempts[idx].changed_files =
+                tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())
+                    .await
+                    .unwrap_or_default();
             record_diff_stat(&mut task, idx, &worktree).await;
             match fail_and_continue(
                 &app,
@@ -1351,12 +1349,11 @@ pub(super) async fn run_task_loop(
         }
 
         if let Some(detail) = outcome.looped.clone() {
-            let (wt, base) = (worktree.clone(), task.work_base().to_string());
-            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
-                git::changed_files(&wt, &base).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let (wt, own) = (worktree.clone(), task.own_diff());
+            task.attempts[idx].changed_files =
+                tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())
+                    .await
+                    .unwrap_or_default();
             record_diff_stat(&mut task, idx, &worktree).await;
             match fail_and_continue(
                 &app,
@@ -1394,12 +1391,11 @@ pub(super) async fn run_task_loop(
             .collect();
         let refused = permissions::unhandled_denials(&handled, &worktree, &outcome, &protected_now);
         if !refused.is_empty() {
-            let (wt, base) = (worktree.clone(), task.work_base().to_string());
-            task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
-                git::changed_files(&wt, &base).unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let (wt, own) = (worktree.clone(), task.own_diff());
+            task.attempts[idx].changed_files =
+                tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())
+                    .await
+                    .unwrap_or_default();
             record_diff_stat(&mut task, idx, &worktree).await;
             match permissions::stop_for_denials(
                 &app,
@@ -1482,13 +1478,11 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        let wt3 = worktree.clone();
-        let base3 = task.work_base().to_string();
-        let mut changed = tokio::task::spawn_blocking(move || {
-            git::changed_files(&wt3, &base3).unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default();
+        let (wt3, own3) = (worktree.clone(), task.own_diff());
+        let mut changed =
+            tokio::task::spawn_blocking(move || own3.changed_files(&wt3).unwrap_or_default())
+                .await
+                .unwrap_or_default();
         task.attempts[idx].changed_files = changed.clone();
         record_diff_stat(&mut task, idx, &worktree).await;
 
@@ -1507,11 +1501,6 @@ pub(super) async fn run_task_loop(
             task.attempts[idx].changed_files = changed.clone();
         }
         let mut restored = restored;
-        if !restored.is_empty() {
-            // An agent that edits a planner file is usually formatting it: the
-            // next attempt starts with the formatter run over the tests again.
-            task.planner_tests.format_checked = false;
-        }
         restored.extend(best_of_discarded);
         restored.sort();
         restored.dedup();
@@ -1763,12 +1752,6 @@ pub(super) async fn run_task_loop(
                 adopt_carried_tests(&mut task, tests, &carried);
                 carried
             });
-            if matches!(
-                carried,
-                Ok(git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. })
-            ) {
-                reformat_carried_tests(&app, &mut task, &worktree, &cancel).await;
-            }
             match carried {
                 Ok(git::Rebase::Unchanged) => {}
                 Ok(git::Rebase::Moved { new_sha, rewritten }) => {
@@ -1785,9 +1768,9 @@ pub(super) async fn run_task_loop(
                     });
                     task.base_sha = new_sha.clone();
                     base_sha = new_sha;
-                    let (wt, b) = (worktree.clone(), task.work_base().to_string());
+                    let (wt, own) = (worktree.clone(), task.own_diff());
                     changed = tokio::task::spawn_blocking(move || {
-                        git::changed_files(&wt, &b).unwrap_or_default()
+                        own.changed_files(&wt).unwrap_or_default()
                     })
                     .await
                     .unwrap_or_default();
@@ -2942,10 +2925,10 @@ async fn unnamed_changes_since_full_review(
     .unwrap_or_default()
 }
 
-/// Records the worktree's diff against the task's work base on the attempt and the task.
+/// Records the size of the agent's own work on the attempt and the task.
 async fn record_diff_stat(task: &mut Task, idx: usize, worktree: &Path) {
-    let (wt, base) = (worktree.to_path_buf(), task.work_base().to_string());
-    let stat = tokio::task::spawn_blocking(move || git::worktree_diff_stat(&wt, &base).ok())
+    let (wt, own) = (worktree.to_path_buf(), task.own_diff());
+    let stat = tokio::task::spawn_blocking(move || own.stat(&wt).ok())
         .await
         .unwrap_or(None);
     if stat.is_some() {
@@ -2982,13 +2965,13 @@ pub(super) enum BaseCarry {
     Failed(String),
 }
 
-/// Carries committed and uncommitted task work (and its trusted planner test
-/// commit) onto the current base head.
+/// Carries committed and uncommitted task work onto the current base head;
+/// the planner's test files are written again after.
 pub(super) async fn carry_onto_newest_base(
-    app: &App,
+    _app: &App,
     task: &mut Task,
     worktree: &Path,
-    cancel: &CancelToken,
+    _cancel: &CancelToken,
 ) -> BaseCarry {
     let Some(base_ref) = task.base_ref.clone() else {
         let reason = "Rebase: cannot carry the work without a base branch".to_string();
@@ -3015,16 +2998,9 @@ pub(super) async fn carry_onto_newest_base(
                 snapshot.planner_tests,
             ));
         }
-        // Work committed by an attempt goes back to uncommitted, down to the
-        // trusted planner test commit when there is one.
-        let keep = snapshot
-            .planner_tests
-            .commit
-            .clone()
-            .filter(|c| *c != from && git::is_ancestor(&wt, c, "HEAD") == Some(true));
-        let target = keep.unwrap_or_else(|| from.clone());
-        if git::head_sha(&wt)? != target {
-            git::uncommit_to(&wt, &target)?;
+        // Work committed by an attempt goes back to uncommitted.
+        if git::head_sha(&wt)? != from {
+            git::uncommit_to(&wt, &from)?;
         }
         let carried = fresh_base::carry_work(&mut snapshot, &wt, &r)?;
         Ok((carried, false, snapshot.planner_tests))
@@ -3042,7 +3018,6 @@ pub(super) async fn carry_onto_newest_base(
                     rewritten,
                 },
             );
-            reformat_carried_tests(app, task, worktree, cancel).await;
             task.decisions.push(if already_contained {
                 format!(
                     "Rebase: the task branch already contains {base_ref} at {}; moved base_sha to that head",
@@ -3072,7 +3047,6 @@ pub(super) async fn carry_onto_newest_base(
             tests,
         )) => {
             task.planner_tests = tests;
-            reformat_carried_tests(app, task, worktree, cancel).await;
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
             let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);

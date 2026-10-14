@@ -114,7 +114,7 @@ pub(super) fn prepare_run(
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
         let _ = store::write_json_private(&settings_path, &claude_settings);
-        let ctx = HookContext::new(task, attempt_n, worktree, task.work_base());
+        let ctx = HookContext::new(task, attempt_n, worktree, &task.base_sha);
         app.register_hook(&token, &ctx, run_dir);
         registered = Some((token.clone(), ctx));
     }
@@ -200,17 +200,17 @@ async fn evaluate(
     task: &Task,
     worktree: &Path,
     base_sha: &str,
-    own_base: &str,
+    own: &OwnDiff,
     dir: &Path,
     finished: bool,
     sandbox: Option<&TaskSandbox>,
     scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
-    let (wt, base) = (worktree.to_path_buf(), own_base.to_string());
+    let (wt, own) = (worktree.to_path_buf(), own.clone());
     let changed = tokio::task::spawn_blocking(move || {
         let _ = git::stage_all(&wt);
-        git::changed_files(&wt, &base).unwrap_or_default()
+        own.changed_files(&wt).unwrap_or_default()
     })
     .await
     .unwrap_or_default();
@@ -327,30 +327,24 @@ where
     F: std::future::Future<Output = Result<harness::RunOutcome, RunError>>,
 {
     let mut extra = BestOfExtra::default();
-    // The implementer's own work is measured from the tests commit when the
-    // task has one; `base_sha` stays what checks and the pick see as base.
-    let own_base = task.work_base().to_string();
+    // The implementer's own work leaves out the planner's files, which both
+    // candidate worktrees get from the task.
+    let own = task.own_diff();
     let repo = PathBuf::from(&task.repo);
     let wt_b = PathBuf::from(format!("{}-b", task.worktree));
     let branch_b = format!("{}-b", task.branch);
     let run_dir_b = run_dir.join("b");
     let made = {
-        let (r, p, b, s) = (
+        let (r, p, b, s, files) = (
             repo.clone(),
             wt_b.clone(),
             branch_b.clone(),
-            own_base.clone(),
+            task.base_sha.clone(),
+            task.planner_tests.files.clone(),
         );
-        tokio::task::spawn_blocking(move || {
-            git::create_worktree(&r, &b, &p, &s)?;
-            if let Err(e) = git::bootstrap_worktree(&r, &p) {
-                git::discard_worktree(&r, &p, &b);
-                return Err(git::GitError(e.to_string()));
-            }
-            Ok(())
-        })
-        .await
-        .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+        tokio::task::spawn_blocking(move || create_sibling(&r, &b, &p, &s, &files))
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
     };
     let made = match made {
         Ok(()) => {
@@ -476,7 +470,7 @@ where
             task,
             worktree,
             base_sha,
-            &own_base,
+            &own,
             run_dir,
             run_finished(&a_res),
             sandbox_a.as_ref(),
@@ -488,7 +482,7 @@ where
             task,
             &wt_b,
             base_sha,
-            &own_base,
+            &own,
             &run_dir_b,
             run_finished(&b_res),
             sandbox_b.as_ref(),
@@ -521,7 +515,7 @@ where
                 b_route,
                 worktree,
                 &wt_b,
-                &own_base,
+                &own,
                 &mut extra.decisions,
                 &eval_a,
                 &eval_b,
@@ -595,7 +589,7 @@ where
     if pick_b {
         // Carry the winner into the task's worktree; if that fails the task
         // worktree still holds candidate a, put back as it was.
-        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), own_base.clone());
+        let (wa, wb, base) = (worktree.to_path_buf(), wt_b.clone(), task.base_sha.clone());
         let carried = tokio::task::spawn_blocking(move || {
             let mine = git::patch_since(&wa, &base)?;
             let theirs = git::patch_since(&wb, &base)?;
@@ -654,7 +648,7 @@ async fn run_pick(
     b_route: &Route,
     worktree: &Path,
     wt_b: &Path,
-    base_sha: &str,
+    own: &OwnDiff,
     decisions: &mut Vec<String>,
     eval_a: &Eval,
     eval_b: &Eval,
@@ -673,15 +667,11 @@ async fn run_pick(
     .filter(|r| r.harness != a_route.harness)
     .unwrap_or(b_route)
     .clone();
-    let (wa, wb, base) = (
-        worktree.to_path_buf(),
-        wt_b.to_path_buf(),
-        base_sha.to_string(),
-    );
+    let (wa, wb, own) = (worktree.to_path_buf(), wt_b.to_path_buf(), own.clone());
     let (diff_a, diff_b) = tokio::task::spawn_blocking(move || {
         (
-            git::diff_full(&wa, &base, 30_000).unwrap_or_default(),
-            git::diff_full(&wb, &base, 30_000).unwrap_or_default(),
+            own.diff(&wa, 30_000).unwrap_or_default(),
+            own.diff(&wb, 30_000).unwrap_or_default(),
         )
     })
     .await
@@ -751,6 +741,26 @@ async fn run_pick(
     }
 }
 
+/// The second candidate's worktree: the task's base with the planner's test
+/// files written over it, as the task's own worktree has them.
+fn create_sibling(
+    repo: &Path,
+    branch: &str,
+    path: &Path,
+    base_sha: &str,
+    files: &[PlannedTest],
+) -> Result<(), git::GitError> {
+    git::create_worktree(repo, branch, path, base_sha)?;
+    if let Err(e) = git::bootstrap_worktree(repo, path)
+        .map_err(|e| e.to_string())
+        .and_then(|()| super::protected::write_files(path, files).map(|_| ()))
+    {
+        git::discard_worktree(repo, path, branch);
+        return Err(git::GitError(e));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::*;
@@ -779,7 +789,7 @@ mod route_tests {
             &route,
             &worktree,
             &worktree,
-            &task.base_sha,
+            &task.own_diff(),
             &mut decisions,
             &eval,
             &eval,
@@ -865,5 +875,34 @@ mod disqualify_tests {
         assert!(!touched.passed && touched.failing >= 1);
         assert_eq!(decisions.len(), 1);
         assert!(decisions[0].contains("candidate b") && decisions[0].contains("tests/t.test"));
+    }
+
+    #[test]
+    fn both_candidate_worktrees_get_the_planner_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let base = git::head_sha(&repo).unwrap();
+        let files = vec![PlannedTest {
+            path: "tests/planner.txt".into(),
+            content: "expect\n".into(),
+        }];
+        let b = dir.path().join("task-b");
+        create_sibling(&repo, "task/b", &b, &base, &files).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(b.join("tests/planner.txt")).unwrap(),
+            "expect\n"
+        );
+        assert_eq!(
+            git::head_sha(&b).unwrap(),
+            base,
+            "the tests are not a commit"
+        );
+        let mut task = task_with_status(TaskStatus::Running);
+        task.base_sha = base;
+        task.planner_tests.files = files;
+        std::fs::write(b.join("impl.txt"), "work\n").unwrap();
+        assert_eq!(task.own_diff().changed_files(&b).unwrap(), vec!["impl.txt"]);
     }
 }

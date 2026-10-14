@@ -224,9 +224,9 @@ async fn still_fails_on_base(
     result
 }
 
-/// Rewrites `path` through the planner and rebuilds the planner tests commit
-/// with it; the decision line says what changed and why. `scratch` is a
-/// checkout of the tests commit, not the agent's worktree.
+/// Rewrites `path` through the planner and stores the new file with the task
+/// and in the worktree; the decision line says what changed and why. `scratch`
+/// is a checkout of the base with the tests, not the agent's worktree.
 #[allow(clippy::too_many_arguments)]
 async fn rewrite_test(
     app: &Arc<App>,
@@ -270,16 +270,12 @@ async fn rewrite_test(
     let mut files = task.planner_tests.files.clone();
     files[idx].content = new.clone();
     still_fails_on_base(app, task, &files, cancel).await?;
-    let (wt, base, rebuilt) = (worktree.to_path_buf(), task.base_sha.clone(), files.clone());
-    let (id, title) = (task.id.clone(), task.title.clone());
-    let sha = tokio::task::spawn_blocking(move || {
-        rebuild_tests_commit(&wt, &base, &rebuilt, &title, &id)
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()))?;
+    let (wt, written) = (worktree.to_path_buf(), files.clone());
+    tokio::task::spawn_blocking(move || write_files(&wt, &written))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))?;
     task.planner_tests.files = files;
-    task.planner_tests.commit = Some(sha.clone());
-    task.planner_tests.protected = Some(protected_hashes(worktree, &sha, task));
+    task.planner_tests.protected = Some(protected_hashes(worktree, &task.base_sha, task));
     task.decisions.push(format!(
         "Orchestrator: the planner rewrote protected test {path} ({} -> {} lines) after the agent's claim ({}); judge: {why}",
         old.lines().count(),
@@ -303,7 +299,7 @@ pub(super) async fn rule_on_claims(
 ) {
     let attempt_n = task.attempts[idx].n;
     let task_id = task.id.clone();
-    // The judge and the planner read a checkout of the tests commit, never
+    // The judge and the planner read a checkout of the base with the planner tests, never
     // the agent's worktree: what the agent wrote there is not an instruction.
     let scratch = scratch_path(task, "claim-tests");
     let mut scratch_made = false;
@@ -330,14 +326,16 @@ pub(super) async fn rule_on_claims(
         task.updated_at = now_ms();
         app.save_task_logged(task);
         if !scratch_made {
-            let (r, p, sha) = (
+            let (r, p, sha, files) = (
                 PathBuf::from(&task.repo),
                 scratch.clone(),
-                task.work_base().to_string(),
+                task.base_sha.clone(),
+                task.planner_tests.files.clone(),
             );
             let made = tokio::task::spawn_blocking(move || {
                 git::remove_worktree(&r, &p);
-                git::add_detached_worktree(&r, &p, &sha)
+                git::add_detached_worktree(&r, &p, &sha).map_err(|e| e.to_string())?;
+                write_files(&p, &files).map(|_| ())
             })
             .await;
             if !matches!(made, Ok(Ok(()))) {
@@ -459,86 +457,5 @@ mod tests {
         let old = "a\nb\nc\nd\n";
         assert!(weakens(old, "a\n"));
         assert!(!weakens(old, "a\nb\nx\n"));
-    }
-
-    #[test]
-    fn the_rebuilt_tests_commit_sits_on_the_base_without_the_agents_commits_and_still_carries() {
-        let (_app, dir) = test_app();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_git_repo(&repo);
-        std::fs::write(repo.join("check.sh"), "real\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "check"]);
-        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/rewrite", &wt, "HEAD").unwrap();
-        let base = created.base_sha;
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = base.clone();
-        task.base_ref = Some(base_ref.clone());
-        let old = vec![PlannedTest {
-            path: "t/a.test".into(),
-            content: "old\nline\n".into(),
-        }];
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "old\nline\n").unwrap();
-        let tests =
-            git::commit_paths(&wt, &["t/a.test".to_string()], "test: planner", "id").unwrap();
-        task.planner_tests.files = old;
-        task.planner_tests.commit = Some(tests);
-        // The agent commits a weakened check file and some work of its own.
-        std::fs::write(wt.join("check.sh"), "weakened\n").unwrap();
-        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
-        git::commit_paths(
-            &wt,
-            &["check.sh".to_string(), "work.txt".to_string()],
-            "agent",
-            "id",
-        )
-        .unwrap();
-        // The guard has put the original check file back in the tree.
-        std::fs::write(wt.join("check.sh"), "real\n").unwrap();
-
-        let files = vec![PlannedTest {
-            path: "t/a.test".into(),
-            content: "new\nline\n".into(),
-        }];
-        let sha = rebuild_tests_commit(&wt, &base, &files, "Planned", "id").unwrap();
-        assert_eq!(git::head_sha(&wt).unwrap(), sha);
-        assert_eq!(git_in(&wt, &["rev-parse", &format!("{sha}^")]), base);
-        assert_eq!(
-            git_in(&wt, &["show", "--name-only", "--format=", &sha]),
-            "t/a.test"
-        );
-        assert_eq!(
-            git_in(&wt, &["rev-list", "--count", &format!("{base}..HEAD")]),
-            "1"
-        );
-        // The agent's work is still in the tree, uncommitted; its weakened
-        // check file is not part of the tests.
-        assert_eq!(
-            std::fs::read_to_string(wt.join("work.txt")).unwrap(),
-            "work\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("check.sh")).unwrap(),
-            "real\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("t/a.test")).unwrap(),
-            "new\nline\n"
-        );
-
-        // The base moves: the carry accepts the rebuilt commit.
-        std::fs::write(repo.join("moved.txt"), "moved\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "base moved"]);
-        task.planner_tests.files = files;
-        task.planner_tests.commit = Some(sha);
-        let carried = carry_with_planner_tests(&mut task, &wt, &base_ref).unwrap();
-        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
     }
 }

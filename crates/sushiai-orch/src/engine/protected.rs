@@ -1,6 +1,7 @@
-//! The planner's test files and the files the checks name: committed before
-//! the first attempt, hashed, denied to the implementer and restored when an
-//! attempt changes them anyway.
+//! The planner's test files and the files the checks name: kept with the task
+//! (content and hash), written into the worktree before the first attempt,
+//! denied to the implementer and written again whenever an attempt changes
+//! them. They are committed only in the final landing or pull request commit.
 
 use super::*;
 use sha2::{Digest, Sha256};
@@ -236,7 +237,8 @@ pub(super) fn protected_paths(task: &Task) -> Vec<String> {
     paths
 }
 
-/// [`protected_paths`] with their sha256 at `rev`.
+/// [`protected_paths`] with their sha256: the planner's files as stored, every
+/// other one as it is at `rev`.
 pub(super) fn protected_hashes(
     worktree: &Path,
     rev: &str,
@@ -245,232 +247,78 @@ pub(super) fn protected_hashes(
     protected_paths(task)
         .into_iter()
         .filter_map(|p| {
-            git::blob_at(worktree, rev, &p).map(|bytes| {
-                let hash = sha256_hex(&bytes);
-                (p, hash)
-            })
+            let bytes = match task.planner_tests.files.iter().find(|t| t.path == p) {
+                Some(t) => Some(t.content.clone().into_bytes()),
+                None => git::blob_at(worktree, rev, &p),
+            };
+            bytes.map(|bytes| (p, sha256_hex(&bytes)))
         })
         .collect()
 }
 
-/// The single planner tests commit on `base_sha`, rebuilt with `files`: the
-/// agent's own commits are undone first (their changes stay in the tree, as
-/// uncommitted work), and only the planner's paths go into the new commit, so
-/// it keeps the shape the carry onto a moved base requires.
-pub(super) fn rebuild_tests_commit(
-    wt: &Path,
-    base_sha: &str,
-    files: &[PlannedTest],
-    title: &str,
-    task_id: &str,
-) -> Result<String, String> {
-    for f in files {
-        let target = wt.join(&f.path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&target, &f.content).map_err(|e| e.to_string())?;
-    }
-    git::uncommit_to(wt, base_sha).map_err(|e| e.to_string())?;
-    let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
-    git::commit_paths(wt, &paths, &planner_tests_title(title), task_id).map_err(|e| e.to_string())
-}
-
-/// The recorded tests commit is not in the branch any more (something else
-/// rebased or rewrote it): find the commit that carries the planner's files
-/// now, and record it and its parent as the tests commit and the base.
-/// `Some((commit, base))` when the record was changed.
-pub(super) fn reanchor_tests_commit(
-    task: &mut Task,
-    worktree: &Path,
-) -> Result<Option<(String, String)>, String> {
-    let Some(recorded) = task.planner_tests.commit.clone() else {
-        return Ok(None);
-    };
-    if task.planner_tests.files.is_empty()
-        || git::is_ancestor(worktree, &recorded, "HEAD") == Some(true)
+/// A task an older build prepared holds its planner tests in a commit on its
+/// branch. The commit is undone once: the files stay in the tree, the stored
+/// content is written over them and the record is cleared. A branch that is
+/// final (done, landed, with a pull request) is left as it is. The decision
+/// line when the record was cleared.
+fn undo_tests_commit(task: &mut Task, worktree: &Path) -> Result<Option<String>, String> {
+    if task.planner_tests.commit.is_none()
+        || task.status == TaskStatus::Done
+        || task.pr_url.is_some()
+        || task.landed_sha.is_some()
     {
         return Ok(None);
     }
-    let holds_the_files = |c: &str| {
-        task.planner_tests
-            .files
-            .iter()
-            .all(|f| git::blob_at(worktree, c, &f.path).is_some_and(|b| b == f.content.as_bytes()))
-    };
-    // Only orchd's own shape counts, not a commit the agent could have made:
-    // one parent that the task's base branch contains, a diff that touches
-    // the planner's files and nothing else, and exactly their content.
-    let base_ref = task.base_ref.clone().ok_or("the task has no base branch")?;
-    let in_base = |parent: &str| {
-        [base_ref.clone(), format!("origin/{base_ref}")]
-            .iter()
-            .any(|b| git::is_ancestor(worktree, parent, b) == Some(true))
-    };
-    let only_planner_paths = |parent: &str, c: &str| {
-        git::numstat(worktree, parent, c).is_ok_and(|entries| {
-            !entries.is_empty()
-                && entries
-                    .iter()
-                    .all(|(p, _, _)| task.planner_tests.files.iter().any(|f| f.path == *p))
-        })
-    };
-    let found = git::commits_with_task_id(worktree, &task.id)
-        .into_iter()
-        .find(|c| {
-            git::resolve_commit(worktree, &format!("{c}^2")).is_err()
-                && holds_the_files(c)
-                && git::resolve_commit(worktree, &format!("{c}^"))
-                    .is_ok_and(|parent| in_base(&parent) && only_planner_paths(&parent, c))
-        })
-        .ok_or_else(|| {
-            format!(
-                "the recorded tests commit {} is not in the branch and no commit there holds the planner tests",
-                short_sha(&recorded)
-            )
-        })?;
-    let base = git::resolve_commit(worktree, &format!("{found}^")).map_err(|e| e.to_string())?;
-    // The planner's files take their hashes from the new commit; every other
-    // protected file keeps the hash it was stored with.
+    if git::is_ancestor(worktree, &task.base_sha, "HEAD") == Some(true) {
+        git::uncommit_to(worktree, &task.base_sha).map_err(|e| e.to_string())?;
+    }
     let stored = task.planner_tests.protected.clone().unwrap_or_default();
-    let mut hashes = protected_hashes(worktree, &found, task);
-    for (path, hash) in &mut hashes {
-        let planned = task.planner_tests.files.iter().any(|f| f.path == *path);
-        if let (false, Some(kept)) = (planned, stored.get(path)) {
-            *hash = kept.clone();
-        }
-    }
-    task.planner_tests.protected = Some(hashes);
-    task.planner_tests.commit = Some(found.clone());
-    task.base_sha = base.clone();
-    Ok(Some((found, base)))
-}
-
-/// A tests commit that is not the single commit on `base_sha` (the branch
-/// holds more commits, or `base_sha` moved by a merge the branch already
-/// contains) is rebuilt on `base_sha`, so the carry accepts it again. The new
-/// commit, or `None` when the state is right or cannot be repaired.
-pub(super) fn normalise_tests_commit(
-    task: &mut Task,
-    worktree: &Path,
-) -> Result<Option<String>, String> {
-    let Some(commit) = task
+    let differing: Vec<String> = task
         .planner_tests
-        .commit
-        .clone()
-        .filter(|c| *c != task.base_sha)
-    else {
-        return Ok(None);
-    };
-    let head = git::head_sha(worktree).map_err(|e| e.to_string())?;
-    let parent = git::resolve_commit(worktree, &format!("{commit}^")).ok();
-    if head == commit && parent.as_deref() == Some(task.base_sha.as_str()) {
-        return Ok(None);
-    }
-    if git::is_ancestor(worktree, &task.base_sha, "HEAD") != Some(true) {
-        return Err(format!(
-            "the base {} is not in the branch history",
-            short_sha(&task.base_sha)
-        ));
-    }
-    let sha = rebuild_tests_commit(
-        worktree,
-        &task.base_sha,
-        &task.planner_tests.files,
-        &task.title,
-        &task.id,
-    )?;
-    task.planner_tests.protected = Some(protected_hashes(worktree, &sha, task));
-    task.planner_tests.commit = Some(sha.clone());
-    Ok(Some(sha))
+        .files
+        .iter()
+        .filter(|f| {
+            let current = std::fs::read(worktree.join(&f.path)).ok();
+            stored
+                .get(&f.path)
+                .is_some_and(|h| current.is_none_or(|b| sha256_hex(&b) != *h))
+        })
+        .map(|f| f.path.clone())
+        .collect();
+    write_files(worktree, &task.planner_tests.files)?;
+    task.planner_tests.commit = None;
+    Ok(Some(if differing.is_empty() {
+        "Orchestrator: the planner tests are no longer a commit of the branch; they are stored with the task".to_string()
+    } else {
+        format!(
+            "Orchestrator: the planner tests are no longer a commit of the branch; {} did not match its stored hash and was written again",
+            differing.join(", ")
+        )
+    }))
 }
 
-/// Before every attempt, for a task an older build prepared: the tests commit
-/// is brought into the shape the carry needs, the planner files are run through
-/// the repo's formatter once (a test the repo's own format check rejects would
-/// fail forever, as the agent may not touch it), and files that are no longer
-/// protected are dropped from the stored set.
-pub(super) async fn repair_protection(
-    app: &App,
-    task: &mut Task,
-    worktree: &Path,
-    cancel: &CancelToken,
-) {
-    // Repairing the tests commit never changes the other protected files, so
-    // whatever hash they were stored with stays.
-    let before = task.planner_tests.protected.clone().unwrap_or_default();
-    let note = |task: &mut Task, line: String| {
-        if !task.decisions.contains(&line) {
+/// Before every attempt: a tests commit of an older build is undone
+/// ([`undo_tests_commit`]), and files that are no longer protected are
+/// dropped from the stored set.
+pub(super) async fn repair_protection(task: &mut Task, worktree: &Path) {
+    let (wt, mut snapshot) = (worktree.to_path_buf(), task.clone());
+    let undone = tokio::task::spawn_blocking(move || {
+        let line = undo_tests_commit(&mut snapshot, &wt);
+        (line, snapshot.planner_tests)
+    })
+    .await;
+    match undone {
+        Ok((Ok(Some(line)), tests)) => {
+            task.planner_tests = tests;
             task.decisions.push(line);
         }
-    };
-    if task.planner_tests.commit.is_some() && !task.planner_tests.files.is_empty() {
-        let (wt, mut snapshot) = (worktree.to_path_buf(), task.clone());
-        let repaired = tokio::task::spawn_blocking(move || {
-            let anchored = reanchor_tests_commit(&mut snapshot, &wt);
-            let rebuilt = if anchored.is_ok() {
-                normalise_tests_commit(&mut snapshot, &wt)
-            } else {
-                Ok(None)
-            };
-            (anchored, rebuilt, snapshot)
-        })
-        .await;
-        if let Ok((anchored, rebuilt, snapshot)) = repaired {
-            match &anchored {
-                Ok(Some((commit, base))) => {
-                    task.planner_tests = snapshot.planner_tests.clone();
-                    task.base_sha = snapshot.base_sha.clone();
-                    task.decisions.push(format!(
-                        "Orchestrator: the branch was rebased outside orchd; the planner tests are now commit {} on base {}",
-                        short_sha(commit),
-                        short_sha(base)
-                    ));
-                }
-                Err(e) => note(
-                    task,
-                    format!("Orchestrator: the planner tests commit was not repaired: {e}"),
-                ),
-                Ok(None) => {}
-            }
-            match rebuilt {
-                Ok(Some(sha)) => {
-                    task.planner_tests = snapshot.planner_tests;
-                    task.decisions.push(format!(
-                        "Orchestrator: rebuilt the planner tests commit on the task's base, now at {}",
-                        short_sha(&sha)
-                    ));
-                }
-                Err(e) => note(
-                    task,
-                    format!("Orchestrator: the planner tests commit was not rebuilt: {e}"),
-                ),
-                Ok(None) => {}
+        Ok((Err(e), _)) => {
+            let line = format!("Orchestrator: the planner tests commit was not undone: {e}");
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
             }
         }
-        if !task.planner_tests.format_checked && !cancel.is_cancelled() {
-            let (wt, commit) = (worktree.to_path_buf(), task.planner_tests.commit.clone());
-            let at_tests = tokio::task::spawn_blocking(move || git::head_sha(&wt).ok() == commit)
-                .await
-                .unwrap_or(false);
-            if at_tests {
-                reformat_carried_tests(app, task, worktree, cancel).await;
-                task.planner_tests.format_checked = !cancel.is_cancelled();
-            } else {
-                note(
-                    task,
-                    "Orchestrator: the planner tests were not formatted: the branch is not at the tests commit".to_string(),
-                );
-            }
-        }
-    }
-    if let Some(map) = task.planner_tests.protected.as_mut() {
-        for (path, hash) in &before {
-            let planned = task.planner_tests.files.iter().any(|f| f.path == *path);
-            if let (false, Some(slot)) = (planned, map.get_mut(path)) {
-                *slot = hash.clone();
-            }
-        }
+        _ => {}
     }
     if let Some(stored) = task.planner_tests.protected.clone() {
         let keep = protected_paths(task);
@@ -493,51 +341,34 @@ pub(super) async fn repair_protection(
     }
 }
 
-/// Carries the task's work and its trusted test commit together, refreshing
-/// the test anchor after the carry while keeping implementation uncommitted.
+/// Carries the agent's work onto the moved base. The planner's files are not
+/// part of that work: they are taken out of the tree first, so a path the base
+/// added since the task began cannot conflict, and written again after the
+/// carry whatever it did.
 pub(super) fn carry_with_planner_tests(
     task: &mut Task,
     worktree: &Path,
     base_ref: &str,
 ) -> Result<git::Rebase, git::GitError> {
-    let _ = normalise_tests_commit(task, worktree);
-    let Some(commit) = task
-        .planner_tests
-        .commit
-        .as_deref()
-        .filter(|commit| *commit != task.base_sha)
-    else {
-        let carried = git::carry_onto_moved_base(worktree, base_ref, &task.base_sha, &task.id)?;
-        refresh_protected(task, worktree, &carried);
-        return Ok(carried);
-    };
+    let _ = undo_tests_commit(task, worktree);
     let paths: Vec<String> = task
         .planner_tests
         .files
         .iter()
         .map(|t| t.path.clone())
         .collect();
-    let (carried, new_commit) = git::carry_onto_moved_base_with_commit(
-        worktree,
-        base_ref,
-        &task.base_sha,
-        &task.id,
-        commit,
-        &paths,
-    )?;
-    if matches!(
-        carried,
-        git::Rebase::Moved { .. } | git::Rebase::Conflicts { .. }
-    ) {
-        task.planner_tests.protected = Some(protected_hashes(worktree, &new_commit, task));
-        task.planner_tests.commit = Some(new_commit);
-    }
+    git::drop_paths(worktree, &task.base_sha, &paths)?;
+    let carried = git::carry_onto_moved_base(worktree, base_ref, &task.base_sha, &task.id);
+    let written = write_files(worktree, &task.planner_tests.files).map_err(git::GitError);
+    let carried = carried?;
+    written?;
+    refresh_protected(task, worktree, &carried);
     Ok(carried)
 }
 
-/// After a carry without planner tests: the hashes of the files the checks
-/// name are those of the new head, so a file the new base changed is not
-/// mistaken for the agent's edit and put back to the old content.
+/// After a carry: the hashes of the files the checks name are those of the new
+/// head, so a file the new base changed is not mistaken for the agent's edit
+/// and put back to the old content.
 fn refresh_protected(task: &mut Task, worktree: &Path, carried: &git::Rebase) {
     if let git::Rebase::Moved { new_sha, .. } | git::Rebase::Conflicts { new_sha, .. } = carried {
         if task.planner_tests.protected.is_some() {
@@ -563,34 +394,19 @@ pub(super) fn adopt_carried_tests(task: &mut Task, tests: PlannerTests, carried:
     task.planner_tests = tests;
 }
 
-/// Before the first attempt something is left to do: the tests are not
-/// committed, a check has no baseline, or the hashes are not stored.
+/// Before the first attempt something is left to do: a check has no baseline,
+/// or the planner's files are not formatted and hashed yet.
 pub(super) fn needs_prepare(task: &Task) -> bool {
     let t = &task.planner_tests;
-    (!t.files.is_empty() && t.commit.is_none())
-        || needs_baseline(task)
+    needs_baseline(task)
         || (t.protected.is_none() && (!t.files.is_empty() || !task.checks.is_empty()))
 }
 
-/// The planner-tests commit title: `test: planner tests for <subject>`, the
-/// task title without its own conventional-commit type.
-pub(super) fn planner_tests_title(title: &str) -> String {
-    let subject = title
-        .split_once(": ")
-        .filter(|(kind, _)| {
-            let kind = kind.trim_end_matches('!');
-            let kind = kind.split_once('(').map_or(kind, |(k, _)| k);
-            !kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase())
-        })
-        .map_or(title, |(_, rest)| rest);
-    format!("test: planner tests for {}", subject.trim())
-}
-
 /// Writes the planner's files into `worktree`; their repo-relative paths.
-fn write_files(worktree: &Path, task: &Task) -> Result<Vec<String>, String> {
+pub(super) fn write_files(worktree: &Path, files: &[PlannedTest]) -> Result<Vec<String>, String> {
     let root = worktree.canonicalize().map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
-    for t in &task.planner_tests.files {
+    for t in files {
         let target = root.join(&t.path);
         let parent = target.parent().unwrap_or(&root);
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -676,164 +492,16 @@ async fn format_planner_tests(
     })
 }
 
-/// Work a crash left set aside while the planner tests were formatted comes
-/// back before anything else touches the tree.
-pub(super) async fn recover_format_aside(task: &mut Task, worktree: &Path) {
-    let (wt, id) = (worktree.to_path_buf(), task.id.clone());
-    match tokio::task::spawn_blocking(move || git::recover_format_aside(&wt, &id))
-        .await
-        .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
-    {
-        Ok(true) => task.decisions.push(
-            "Orchestrator: put back the work that an interrupted format run had set aside"
-                .to_string(),
-        ),
-        Ok(false) => {}
-        Err(e) => task.decisions.push(format!(
-            "Orchestrator: could not put back the work set aside for formatting ({e})"
-        )),
-    }
-}
-
-/// After a carry onto a new base the planner commit is a new commit, and the
-/// base may have a new formatter or toolchain. The agent's uncommitted work is
-/// set aside first, so the format command sees only the new base and the
-/// planner commit; it then runs over the planner files and the result is
-/// folded into that commit, the stored commit and hashes are refreshed and
-/// the work comes back. Nothing changes when the repo has no format command,
-/// the files are already clean or the run is cancelled.
-pub(super) async fn reformat_carried_tests(
-    app: &App,
-    task: &mut Task,
-    worktree: &Path,
-    cancel: &CancelToken,
-) {
-    let Some(commit) = task.planner_tests.commit.clone() else {
-        return;
-    };
-    if task.planner_tests.files.is_empty() || cancel.is_cancelled() {
-        return;
-    }
-    if !matches!(
-        crate::worktree_env::format_command_at(Path::new(&task.repo), &commit),
-        Ok(Some(_))
-    ) {
-        return;
-    }
-    let (wt, id, head) = (worktree.to_path_buf(), task.id.clone(), commit.clone());
-    let aside = tokio::task::spawn_blocking(move || {
-        if git::head_sha(&wt)? != head {
-            return Ok(None);
-        }
-        git::set_work_aside(&wt, &id).map(Some)
-    })
-    .await
-    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-    let aside = match aside {
-        Ok(Some(aside)) => aside,
-        Ok(None) => return,
-        Err(e) => {
-            task.decisions.push(format!(
-                "Orchestrator: could not set the work aside to format the planner tests ({e})"
-            ));
-            return;
-        }
-    };
-    let paths: Vec<String> = task
-        .planner_tests
-        .files
-        .iter()
-        .map(|t| t.path.clone())
-        .collect();
-    let line = format_planner_tests(app, task, worktree, &paths, &commit, cancel).await;
-    let (wt, p, skip) = (worktree.to_path_buf(), paths, cancel.is_cancelled());
-    let amended = tokio::task::spawn_blocking(move || {
-        if skip {
-            git::discard_paths(&wt, &p)?;
-            Ok(None)
-        } else {
-            git::amend_paths(&wt, &p)
-        }
-    })
-    .await
-    .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-    let (wt, id) = (worktree.to_path_buf(), task.id.clone());
-    let back = match aside {
-        Some(aside) => tokio::task::spawn_blocking(move || git::bring_work_back(&wt, &id, &aside))
-            .await
-            .unwrap_or_else(|e| Err(git::GitError(e.to_string()))),
-        None => Ok(()),
-    };
-    if let Err(e) = back {
-        task.decisions.push(format!(
-            "Orchestrator: could not put the work back after formatting the planner tests ({e}); it is kept at {}",
-            git::format_aside_ref(&task.id)
-        ));
-    }
-    match amended {
-        Ok(Some(new_commit)) => {
-            let (wt, snapshot, rev) = (worktree.to_path_buf(), task.clone(), new_commit.clone());
-            task.planner_tests.protected =
-                tokio::task::spawn_blocking(move || protected_hashes(&wt, &rev, &snapshot))
-                    .await
-                    .ok();
-            task.planner_tests.commit = Some(new_commit.clone());
-            task.decisions.push(format!(
-                "Orchestrator: formatted the planner tests again after the carry, now at {}",
-                short_sha(&new_commit)
-            ));
-        }
-        Ok(None) => {}
-        Err(e) => task.decisions.push(format!(
-            "Orchestrator: could not fold the formatted planner tests into their commit ({e})"
-        )),
-    }
-    if let Some(line) = line.filter(|l| l.contains("failed") && !cancel.is_cancelled()) {
-        task.decisions.push(line);
-    }
-}
-
 fn format_failed(reason: &str) -> String {
     let first = reason.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let short: String = first.chars().take(120).collect();
-    format!("Orchestrator: format command failed on planner tests ({short}), committed as written")
+    format!("Orchestrator: format command failed on planner tests ({short}), stored as written")
 }
 
-/// Writes the planner's files, formats them when the repo declares a format
-/// command and commits just those paths; the new HEAD and the decision lines.
-/// Running it again on the result changes nothing.
-async fn write_format_commit(
-    app: &App,
-    task: &mut Task,
-    worktree: &Path,
-    cancel: &CancelToken,
-) -> Result<(String, Vec<String>), String> {
-    let (wt, snapshot) = (worktree.to_path_buf(), task.clone());
-    let paths = tokio::task::spawn_blocking(move || write_files(&wt, &snapshot))
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()))?;
-    let rev = task.base_sha.clone();
-    let mut lines: Vec<String> = format_planner_tests(app, task, worktree, &paths, &rev, cancel)
-        .await
-        .into_iter()
-        .collect();
-    let (wt, title, id) = (worktree.to_path_buf(), task.title.clone(), task.id.clone());
-    let sha = tokio::task::spawn_blocking(move || {
-        git::commit_paths(&wt, &paths, &planner_tests_title(&title), &id).map_err(|e| e.to_string())
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()))?;
-    lines.push(format!(
-        "Orchestrator: committed {} planner test file(s) at {}",
-        task.planner_tests.files.len(),
-        short_sha(&sha)
-    ));
-    Ok((sha, lines))
-}
-
-/// The steps before attempt 1, each idempotent: write and commit the
-/// planner's tests, store the commit, baseline the checks on it, store a
-/// sha256 per protected file. `false` when cancelled.
+/// The steps before attempt 1, each idempotent: write the planner's tests,
+/// format them with the repo's format command and store what it left, baseline
+/// the checks with the tests in place, store a sha256 per protected file.
+/// `false` when cancelled.
 pub(super) async fn prepare_tests(
     app: &Arc<App>,
     task_id: &str,
@@ -841,16 +509,27 @@ pub(super) async fn prepare_tests(
     worktree: &Path,
     cancel: &CancelToken,
 ) -> bool {
-    if !task.planner_tests.files.is_empty() && task.planner_tests.commit.is_none() {
-        match write_format_commit(app, task, worktree, cancel).await {
-            Ok((sha, lines)) => {
-                task.decisions.extend(lines);
-                task.planner_tests.commit = Some(sha);
-                task.planner_tests.format_checked = true;
+    if !task.planner_tests.files.is_empty() && task.planner_tests.protected.is_none() {
+        let (wt, files) = (worktree.to_path_buf(), task.planner_tests.files.clone());
+        let written = tokio::task::spawn_blocking(move || write_files(&wt, &files))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        match written {
+            Ok(paths) => {
+                let rev = task.base_sha.clone();
+                if let Some(line) =
+                    format_planner_tests(app, task, worktree, &paths, &rev, cancel).await
+                {
+                    task.decisions.push(line);
+                }
+                task.decisions.push(format!(
+                    "Orchestrator: wrote {} planner test file(s); they are kept with the task and put back before every check",
+                    paths.len()
+                ));
             }
             Err(e) => {
                 task.decisions.push(format!(
-                    "Orchestrator: planner tests not committed, dropped: {e}"
+                    "Orchestrator: planner tests not written, dropped: {e}"
                 ));
                 task.planner_tests.files.clear();
             }
@@ -865,7 +544,7 @@ pub(super) async fn prepare_tests(
     if task.planner_tests.protected.is_none()
         && (!task.planner_tests.files.is_empty() || !task.checks.is_empty())
     {
-        let rev = task.work_base().to_string();
+        let rev = task.base_sha.clone();
         let (wt, snapshot) = (worktree.to_path_buf(), task.clone());
         let hashes = tokio::task::spawn_blocking(move || protected_hashes(&wt, &rev, &snapshot))
             .await
@@ -878,57 +557,11 @@ pub(super) async fn prepare_tests(
     true
 }
 
-/// Files where whitespace carries meaning: a reformat there is a change.
-const WHITESPACE_SIGNIFICANT: [&str; 7] = ["py", "yaml", "yml", "mk", "haml", "pug", "coffee"];
-
-/// Whether `current` is the protected version of `path` at `rev` with only
-/// whitespace outside string literals changed: a formatter's work (a newer
-/// rustfmt or prettier), not a change to what the test checks.
-fn reformatted_only(worktree: &Path, rev: &str, path: &str, current: Option<&[u8]>) -> bool {
-    let name = Path::new(path);
-    let ext = name.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let file = name.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    if WHITESPACE_SIGNIFICANT.contains(&ext) || file == "Makefile" {
-        return false;
-    }
-    let (Some(current), Some(original)) = (current, git::blob_at(worktree, rev, path)) else {
-        return false;
-    };
-    match (std::str::from_utf8(current), std::str::from_utf8(&original)) {
-        (Ok(a), Ok(b)) => a != b && without_layout(a) == without_layout(b),
-        _ => false,
-    }
-}
-
-/// `text` without whitespace outside quotes (`"`, `'`, `` ` ``); inside them
-/// every character counts, so a reformat may not change what a test asserts.
-/// A Rust lifetime opens a quote too, which only makes the check stricter.
-fn without_layout(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let (mut quote, mut escaped) = (None, false);
-    for c in text.chars() {
-        if let Some(open) = quote {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == open {
-                quote = None;
-            }
-        } else if matches!(c, '"' | '\'' | '`') {
-            quote = Some(c);
-            out.push(c);
-        } else if !c.is_whitespace() {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// After an attempt: the protected files that changed since the tests
-/// commit or no longer match their stored hash, put back from that commit.
-/// Returns the files it restored; `None` when nothing protected was touched.
+/// After an attempt (and after a carry, before the checks and the landing
+/// commit): the protected files that changed or no longer match their stored
+/// hash are put back. The planner's files are written from the store, the
+/// others restored from the base. Returns the files it restored; `None` when
+/// nothing protected was touched.
 pub(super) async fn guard_protected(
     task: &Task,
     worktree: &Path,
@@ -939,19 +572,19 @@ pub(super) async fn guard_protected(
         .protected
         .clone()
         .filter(|m| !m.is_empty())?;
-    let (wt, rev, changed) = (
+    let (wt, base, changed, planned) = (
         worktree.to_path_buf(),
-        task.work_base().to_string(),
+        task.base_sha.clone(),
         changed.to_vec(),
+        task.planner_tests.files.clone(),
     );
     tokio::task::spawn_blocking(move || {
         let mut bad: Vec<String> = hashes
             .iter()
             .filter(|(path, hash)| {
                 let current = std::fs::read(wt.join(path)).ok();
-                let touched = changed.iter().any(|c| c == *path)
-                    || current.as_ref().is_none_or(|b| sha256_hex(b) != **hash);
-                touched && !reformatted_only(&wt, &rev, path, current.as_deref())
+                changed.iter().any(|c| c == *path)
+                    || current.as_ref().is_none_or(|b| sha256_hex(b) != **hash)
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -959,7 +592,18 @@ pub(super) async fn guard_protected(
             return None;
         }
         bad.sort();
-        let _ = git::restore_paths(&wt, &rev, &bad);
+        let (mine, others): (Vec<String>, Vec<String>) = bad
+            .iter()
+            .cloned()
+            .partition(|p| planned.iter().any(|t| t.path == *p));
+        if !others.is_empty() {
+            let _ = git::restore_paths(&wt, &base, &others);
+        }
+        let files: Vec<PlannedTest> = planned
+            .into_iter()
+            .filter(|t| mine.contains(&t.path))
+            .collect();
+        let _ = write_files(&wt, &files);
         Some(bad)
     })
     .await
@@ -1018,7 +662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_landing_check_keeps_the_carried_test_anchor_for_retry() {
+    async fn a_failed_landing_check_keeps_the_planner_files_and_hashes_for_retry() {
         let (app, dir) = test_app();
         app.settings.write().unwrap().sandbox = SandboxMode::Host;
         let repo = dir.path().join("repo");
@@ -1036,12 +680,12 @@ mod tests {
         let id = task.id.clone();
         let cancel = CancelToken::new();
         assert!(prepare_tests(&app, &id, &mut task, &wt, &cancel).await);
-        let old_tests = task.work_base().to_string();
         let old_hashes = task.planner_tests.protected.clone();
         std::fs::write(wt.join("implementation.txt"), "implementation\n").unwrap();
         std::fs::write(repo.join("FIXED.txt"), "fixed\n").unwrap();
-        let new_base =
-            git::commit_paths(&repo, &["FIXED.txt".to_string()], "fix: base", "base").unwrap();
+        git_in(&repo, &["add", "FIXED.txt"]);
+        git_in(&repo, &["commit", "-q", "-m", "fix: base"]);
+        let new_base = git::head_sha(&repo).unwrap();
         task.verify = vec!["false".to_string()];
         let run_dir = dir.path().join("runs");
         let result = carry_and_check(
@@ -1064,16 +708,16 @@ mod tests {
             })
         ));
         assert_eq!(task.base_sha, new_base);
-        assert_ne!(task.work_base(), old_tests);
-        assert_eq!(git::head_sha(&wt).unwrap(), task.work_base());
-        assert_eq!(
-            git_in(&wt, &["rev-parse", &format!("{}^", task.work_base())]),
-            new_base
-        );
+        assert_eq!(git::head_sha(&wt).unwrap(), new_base, "no commit of ours");
         assert_eq!(task.planner_tests.protected, old_hashes);
-        let changed = git::changed_files(&wt, task.work_base()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("tests/planner.sh")).unwrap(),
+            "true\n"
+        );
+        let changed = task.own_diff().changed_files(&wt).unwrap();
+        assert_eq!(changed, vec!["implementation.txt"]);
         assert!(guard_protected(&task, &wt, &changed).await.is_none());
-        assert!(wt.join("FIXED.txt").exists() && wt.join("implementation.txt").exists());
+        assert!(wt.join("FIXED.txt").exists());
 
         task.verify.clear();
         assert!(matches!(
@@ -1193,7 +837,6 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Running);
         task.planner_tests.files = vec![test("t/a.test", "one\n"), test("t/b.test", "two\n")];
         task.planner_tests.protected = Some(protected_hashes(&repo, "HEAD", &task));
-        task.planner_tests.commit = Some(git::head_sha(&repo).unwrap());
         std::fs::write(repo.join("t/a.test"), "edited\n").unwrap();
         std::fs::remove_file(repo.join("t/b.test")).unwrap();
         let restored = guard_protected(&task, &repo, &[]).await.unwrap();
@@ -1255,7 +898,7 @@ mod tests {
         if let git::Rebase::Moved { new_sha, .. } = carried {
             task.base_sha = new_sha;
         }
-        let changed = git::changed_files(&wt, task.work_base()).unwrap();
+        let changed = task.own_diff().changed_files(&wt).unwrap();
         assert!(guard_protected(&task, &wt, &changed).await.is_none());
         assert_eq!(
             std::fs::read_to_string(wt.join("check.sh")).unwrap(),
@@ -1327,7 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_older_tasks_stale_protected_entries_are_dropped_before_an_attempt() {
-        let (app, dir) = test_app();
+        let (_app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
@@ -1341,7 +984,7 @@ mod tests {
             ]
             .into(),
         );
-        repair_protection(&app, &mut task, &repo, &CancelToken::new()).await;
+        repair_protection(&mut task, &repo).await;
         let kept: Vec<String> = task
             .planner_tests
             .protected
@@ -1354,334 +997,6 @@ mod tests {
             .decisions
             .iter()
             .any(|d| d.contains("no longer protecting prompts/orchestrator.yaml")));
-    }
-
-    #[tokio::test]
-    async fn an_unformatted_planner_file_from_an_older_task_is_formatted_and_recommitted_once() {
-        let (app, dir) = test_app();
-        app.settings.write().unwrap().sandbox = SandboxMode::Host;
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
-        init_git_repo(&repo);
-        let json = r#"{"format": "for f; do sed 's/ *$//' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"}"#;
-        std::fs::write(repo.join(".sushiai/setup.json"), json).unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "setup"]);
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/old", &wt, "HEAD").unwrap();
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = created.base_sha.clone();
-        // What an older build committed: the planner file as written.
-        task.planner_tests.files = vec![test("tests/planner.txt", "a  \nb \n")];
-        std::fs::create_dir_all(wt.join("tests")).unwrap();
-        std::fs::write(wt.join("tests/planner.txt"), "a  \nb \n").unwrap();
-        let old = git::commit_paths(
-            &wt,
-            &["tests/planner.txt".to_string()],
-            "test: planner",
-            "id",
-        )
-        .unwrap();
-        task.planner_tests.commit = Some(old.clone());
-        task.planner_tests.protected = Some(protected_hashes(&wt, &old, &task));
-        std::fs::write(wt.join("impl.txt"), "work\n").unwrap();
-
-        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
-        let sha = task.planner_tests.commit.clone().unwrap();
-        assert_ne!(sha, old);
-        assert_eq!(
-            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
-            b"a\nb\n"
-        );
-        assert_eq!(
-            task.planner_tests.protected.as_ref().unwrap()["tests/planner.txt"],
-            sha256_hex(b"a\nb\n")
-        );
-        assert!(task.planner_tests.format_checked);
-        assert_eq!(
-            std::fs::read_to_string(wt.join("impl.txt")).unwrap(),
-            "work\n"
-        );
-        // A second attempt formats nothing again.
-        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
-        assert_eq!(task.planner_tests.commit.as_deref(), Some(sha.as_str()));
-    }
-
-    #[test]
-    fn a_tests_commit_left_beyond_a_moved_base_is_rebuilt_so_the_carry_works() {
-        let (_app, dir) = test_app();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_git_repo(&repo);
-        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/merged", &wt, "HEAD").unwrap();
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = created.base_sha.clone();
-        task.base_ref = Some(base_ref.clone());
-        task.planner_tests.files = vec![test("t/a.test", "one\n")];
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "one\n").unwrap();
-        let tests =
-            git::commit_paths(&wt, &["t/a.test".to_string()], "test: planner", "id").unwrap();
-        task.planner_tests.commit = Some(tests.clone());
-        // The base moves and the branch merges it itself; the recorded base
-        // follows (the "already contains" carry), the tests commit does not.
-        std::fs::write(repo.join("moved.txt"), "moved\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "base moved"]);
-        git_in(&wt, &["merge", "-q", "--no-edit", &base_ref]);
-        std::fs::write(wt.join("impl.txt"), "work\n").unwrap();
-        task.base_sha = git::resolve_commit(&repo, &base_ref).unwrap();
-
-        let carried = carry_with_planner_tests(&mut task, &wt, &base_ref).unwrap();
-        assert!(matches!(carried, git::Rebase::Unchanged), "{carried:?}");
-        let rebuilt = task.planner_tests.commit.clone().unwrap();
-        assert_ne!(rebuilt, tests);
-        assert_eq!(git::head_sha(&wt).unwrap(), rebuilt);
-        assert_eq!(
-            git_in(&wt, &["rev-parse", &format!("{rebuilt}^")]),
-            task.base_sha
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("impl.txt")).unwrap(),
-            "work\n"
-        );
-        // The base moves on again: now the carry runs.
-        std::fs::write(repo.join("moved2.txt"), "moved\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "base moved again"]);
-        let carried = carry_with_planner_tests(&mut task, &wt, &base_ref).unwrap();
-        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
-    }
-
-    #[tokio::test]
-    async fn a_branch_rebased_outside_orchd_gets_its_tests_commit_and_base_re_anchored_and_formatted(
-    ) {
-        let (app, dir) = test_app();
-        app.settings.write().unwrap().sandbox = SandboxMode::Host;
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
-        init_git_repo(&repo);
-        let json = r#"{"format": "for f; do sed 's/ *$//' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"}"#;
-        std::fs::write(repo.join("fixture.txt"), "fx\n").unwrap();
-        std::fs::write(repo.join(".sushiai/setup.json"), json).unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "setup"]);
-        let main = git::branch_of(&repo, "HEAD").unwrap();
-        // The recorded base sits on a side line; main has an older commit.
-        git_in(&repo, &["branch", "side"]);
-        std::fs::write(repo.join("older.txt"), "o\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "older main"]);
-        let older_main = git::head_sha(&repo).unwrap();
-        git_in(&repo, &["checkout", "-q", "side"]);
-        std::fs::write(repo.join("side.txt"), "s\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "side base"]);
-        let side = git::head_sha(&repo).unwrap();
-        git_in(&repo, &["checkout", "-q", &main]);
-
-        let wt = dir.path().join("task");
-        git::create_worktree(&repo, "task/rebased", &wt, &side).unwrap();
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = side.clone();
-        task.base_ref = Some(main.clone());
-        task.checks = vec![check("diff - fixture.txt")];
-        task.planner_tests.files = vec![test("tests/planner.txt", "a  \nb \n")];
-        std::fs::create_dir_all(wt.join("tests")).unwrap();
-        std::fs::write(wt.join("tests/planner.txt"), "a  \nb \n").unwrap();
-        let recorded = git::commit_paths(
-            &wt,
-            &["tests/planner.txt".to_string()],
-            "test: planner tests for x",
-            &task.id,
-        )
-        .unwrap();
-        task.planner_tests.commit = Some(recorded.clone());
-        task.planner_tests.protected = Some(protected_hashes(&wt, &recorded, &task));
-        // Something else rebases the branch onto main's older commit.
-        git_in(&wt, &["rebase", "-q", "--onto", &older_main, &side]);
-        let now = git::head_sha(&wt).unwrap();
-        assert_ne!(now, recorded);
-        std::fs::write(wt.join("impl.txt"), "work\n").unwrap();
-        task.planner_tests
-            .protected
-            .as_mut()
-            .unwrap()
-            .insert("fixture.txt".into(), "stored-hash".into());
-
-        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
-        assert_eq!(
-            task.planner_tests.protected.as_ref().unwrap()["fixture.txt"],
-            "stored-hash"
-        );
-        let sha = task.planner_tests.commit.clone().unwrap();
-        assert_eq!(task.base_sha, older_main, "{:?}", task.decisions);
-        assert_eq!(git::head_sha(&wt).unwrap(), sha);
-        assert_eq!(git_in(&wt, &["rev-parse", &format!("{sha}^")]), older_main);
-        assert_eq!(
-            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
-            b"a\nb\n"
-        );
-        assert_eq!(
-            task.planner_tests.protected.as_ref().unwrap()["tests/planner.txt"],
-            sha256_hex(b"a\nb\n")
-        );
-        assert!(task.planner_tests.format_checked);
-        assert_eq!(
-            std::fs::read_to_string(wt.join("impl.txt")).unwrap(),
-            "work\n"
-        );
-        assert!(task
-            .decisions
-            .iter()
-            .any(|d| d.contains("rebased outside orchd")));
-        // The carry onto main no longer skips.
-        let mut snapshot = task.clone();
-        let carried = carry_with_planner_tests(&mut snapshot, &wt, &main).unwrap();
-        assert!(
-            matches!(carried, git::Rebase::Moved { .. } | git::Rebase::Unchanged),
-            "{carried:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_agent_made_commit_with_the_task_trailer_that_also_weakens_a_check_file_is_not_adopted(
-    ) {
-        let (app, dir) = test_app();
-        app.settings.write().unwrap().sandbox = SandboxMode::Host;
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_git_repo(&repo);
-        std::fs::write(repo.join("check.sh"), "real\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "check"]);
-        let main = git::branch_of(&repo, "HEAD").unwrap();
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/agent", &wt, "HEAD").unwrap();
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = created.base_sha.clone();
-        task.base_ref = Some(main);
-        task.planner_tests.files = vec![test("t/a.test", "one\n")];
-        // The recorded tests commit is gone from the branch.
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "one\n").unwrap();
-        let recorded =
-            git::commit_paths(&wt, &["t/a.test".to_string()], "test: planner", &task.id).unwrap();
-        task.planner_tests.commit = Some(recorded.clone());
-        git_in(&wt, &["reset", "-q", "--hard", &created.base_sha]);
-        // The agent's own commit has the trailer and the same test file, and
-        // it also weakens a check file.
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "one\n").unwrap();
-        std::fs::write(wt.join("check.sh"), "weakened\n").unwrap();
-        git::commit_paths(
-            &wt,
-            &["t/a.test".to_string(), "check.sh".to_string()],
-            "test: planner tests for x",
-            &task.id,
-        )
-        .unwrap();
-        let base_before = task.base_sha.clone();
-
-        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
-        assert_eq!(
-            task.planner_tests.commit.as_deref(),
-            Some(recorded.as_str())
-        );
-        assert_eq!(task.base_sha, base_before);
-        assert!(task
-            .decisions
-            .iter()
-            .any(|d| d.contains("planner tests commit was not repaired")));
-    }
-
-    #[tokio::test]
-    async fn an_agent_made_commit_on_a_parent_outside_the_base_branch_is_not_adopted() {
-        let (app, dir) = test_app();
-        app.settings.write().unwrap().sandbox = SandboxMode::Host;
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_git_repo(&repo);
-        git_in(&repo, &["branch", "elsewhere"]);
-        std::fs::write(repo.join("own.txt"), "agent's own base\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(
-            &repo,
-            &[
-                "commit",
-                "-q",
-                "-m",
-                "a commit the base branch does not have",
-            ],
-        );
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/own-base", &wt, "HEAD").unwrap();
-        let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = created.base_sha.clone();
-        task.base_ref = Some("elsewhere".into());
-        task.planner_tests.files = vec![test("t/a.test", "one\n")];
-        task.planner_tests.commit = Some("0".repeat(40));
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "one\n").unwrap();
-        // Same file, trailer, planner path only: but its parent is not on the
-        // task's base branch.
-        git::commit_paths(
-            &wt,
-            &["t/a.test".to_string()],
-            "test: planner tests for x",
-            &task.id,
-        )
-        .unwrap();
-
-        repair_protection(&app, &mut task, &wt, &CancelToken::new()).await;
-        assert_eq!(
-            task.planner_tests.commit.as_deref(),
-            Some("0".repeat(40).as_str())
-        );
-        assert_eq!(task.base_sha, created.base_sha);
-    }
-
-    #[test]
-    fn a_whitespace_only_reformat_of_a_protected_test_is_no_change() {
-        let wt = tempfile::tempdir().unwrap();
-        let wt = wt.path();
-        init_git_repo(wt);
-        let original = "fn t() { assert_eq!(f(1), \"a b\"); }\n";
-        std::fs::write(wt.join("check.rs"), original).unwrap();
-        std::fs::write(wt.join("check.py"), original).unwrap();
-        git_in(wt, &["add", "."]);
-        git_in(wt, &["commit", "-q", "-m", "tests"]);
-        let rev = git::resolve_commit(wt, "HEAD").unwrap();
-        let check =
-            |path: &str, text: &str| reformatted_only(wt, &rev, path, Some(text.as_bytes()));
-        let reformatted = "fn t() {\n    assert_eq!(f(1), \"a b\");\n}\n";
-        assert!(check("check.rs", reformatted));
-        assert!(
-            !check("check.rs", original),
-            "an unchanged file is no reformat"
-        );
-        assert!(!check("check.rs", "fn t() { assert_eq!(f(1), \"ab\"); }\n"));
-        assert!(!check(
-            "check.rs",
-            "fn t() { assert_eq!(f(2), \"a b\"); }\n"
-        ));
-        assert!(
-            !check("check.py", reformatted),
-            "whitespace counts in Python"
-        );
-        assert!(!check("missing.rs", reformatted));
     }
 
     async fn prepared_with_format(
@@ -1712,13 +1027,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_tests_are_formatted_by_the_repo_command_before_the_commit() {
+    async fn planner_tests_are_formatted_by_the_repo_command_once_at_prepare() {
         let json = r#"{"format": "for f; do sed 's/ *$//' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"}"#;
         let (task, wt, _dir) = prepared_with_format(Some(json), "a  \nb \n").await;
         assert_eq!(task.planner_tests.files[0].content, "a\nb\n");
-        let sha = task.planner_tests.commit.clone().unwrap();
-        let committed = git::blob_at(&wt, &sha, "tests/planner.txt").unwrap();
-        assert_eq!(committed, b"a\nb\n");
+        assert!(task.planner_tests.commit.is_none());
+        assert_eq!(
+            std::fs::read(wt.join("tests/planner.txt")).unwrap(),
+            b"a\nb\n"
+        );
         let hashes = task.planner_tests.protected.clone().unwrap();
         assert_eq!(hashes["tests/planner.txt"], sha256_hex(b"a\nb\n"));
         assert!(task
@@ -1728,59 +1045,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_format_command_commits_the_planner_tests_as_written() {
+    async fn a_failing_format_command_stores_the_planner_tests_as_written() {
         let json = r#"{"format": ["sh", "-c", "echo mangled > \"$1\"; echo no formatter >&2; exit 2", "sh"]}"#;
         let (task, wt, _dir) = prepared_with_format(Some(json), "a  \n").await;
         assert_eq!(task.planner_tests.files[0].content, "a  \n");
-        let sha = task.planner_tests.commit.clone().unwrap();
         assert_eq!(
-            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
+            std::fs::read(wt.join("tests/planner.txt")).unwrap(),
             b"a  \n"
         );
         assert!(task
             .decisions
             .iter()
             .any(|d| d.contains("format command failed on planner tests")
-                && d.contains("committed as written")));
+                && d.contains("stored as written")));
     }
 
     #[tokio::test]
     async fn without_a_format_command_the_planner_tests_stay_as_written() {
         let (task, wt, _dir) = prepared_with_format(None, "a  \n").await;
         assert_eq!(task.planner_tests.files[0].content, "a  \n");
-        let sha = task.planner_tests.commit.clone().unwrap();
         assert_eq!(
-            git::blob_at(&wt, &sha, "tests/planner.txt").unwrap(),
+            std::fs::read(wt.join("tests/planner.txt")).unwrap(),
             b"a  \n"
         );
         assert!(!task.decisions.iter().any(|d| d.contains("format")));
     }
 
-    #[test]
-    fn the_planner_tests_commit_names_the_task_subject_once() {
-        assert_eq!(
-            planner_tests_title("fix: stats cover every host"),
-            "test: planner tests for stats cover every host"
-        );
-        assert_eq!(
-            planner_tests_title("feat(orch)!: copy settings"),
-            "test: planner tests for copy settings"
-        );
-        assert_eq!(
-            planner_tests_title("Settings: copy between hosts"),
-            "test: planner tests for Settings: copy between hosts"
-        );
-    }
-    /// A format command that rewrites `(a, b)` to `(a, b,)` (not a whitespace
-    /// change) once the file `fmt-on` exists in the worktree.
-    fn gated_format_json(rule: &str) -> String {
-        let script = format!(
-            "[ -e implementation.txt ] && echo seen >> ../saw.log; [ -e fmt-on ] || exit 0; [ -e touched.txt ] && echo fmt >> touched.txt; for f; do sed '{rule}' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done"
-        );
-        serde_json::json!({ "format": script }).to_string()
-    }
-
-    struct Carry {
+    struct Work {
         app: Arc<App>,
         task: Task,
         wt: std::path::PathBuf,
@@ -1789,30 +1080,24 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    async fn prepared_for_carry(setup_json: &str, content: &str) -> Carry {
+    async fn prepared_work(files: Vec<PlannedTest>) -> Work {
         let (app, dir) = test_app();
         app.settings.write().unwrap().sandbox = SandboxMode::Host;
         let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
-        std::fs::write(repo.join(".sushiai/setup.json"), setup_json).unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "setup"]);
-        std::fs::write(repo.join("touched.txt"), "orig\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "tracked"]);
         let base_ref = git::branch_of(&repo, "HEAD").unwrap();
         let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/carry", &wt, "HEAD").unwrap();
+        let created = git::create_worktree(&repo, "task/work", &wt, "HEAD").unwrap();
         let mut task = task_with_status(TaskStatus::Running);
         task.repo = repo.to_string_lossy().to_string();
         task.worktree = wt.to_string_lossy().to_string();
         task.base_sha = created.base_sha;
         task.base_ref = Some(base_ref.clone());
-        task.planner_tests.files = vec![test("tests/planner.txt", content)];
+        task.planner_tests.files = files;
         let id = task.id.clone();
         assert!(prepare_tests(&app, &id, &mut task, &wt, &CancelToken::new()).await);
-        Carry {
+        Work {
             app,
             task,
             wt,
@@ -1822,171 +1107,166 @@ mod tests {
         }
     }
 
-    async fn land_on_moved_base(c: &mut Carry) {
-        c.task.verify = vec!["false".to_string()];
-        let run_dir = c._dir.path().join("runs");
-        let _ = carry_and_check(
-            &c.app,
-            &mut c.task,
-            None,
-            &c.wt,
-            &run_dir,
-            &c.base_ref,
-            "Another task",
-            &[],
-            &CancelToken::new(),
-        )
-        .await;
-    }
-
-    fn assert_planner_commit_holds(c: &Carry, content: &str, parent: &str) {
-        let commit = c.task.planner_tests.commit.clone().unwrap();
-        assert_eq!(
-            git::blob_at(&c.wt, &commit, "tests/planner.txt").unwrap(),
-            content.as_bytes()
-        );
-        assert_eq!(c.task.planner_tests.files[0].content, content);
-        assert_eq!(
-            c.task.planner_tests.protected.clone().unwrap()["tests/planner.txt"],
-            sha256_hex(content.as_bytes())
-        );
-        assert_eq!(git_in(&c.wt, &["rev-parse", &format!("{commit}^")]), parent);
-        assert_eq!(git::head_sha(&c.wt).unwrap(), commit);
+    fn commit_in(dir: &Path, file: &str, text: &str) -> String {
+        std::fs::write(dir.join(file), text).unwrap();
+        git_in(dir, &["add", "."]);
+        git_in(dir, &["commit", "-q", "-m", "change"]);
+        git::head_sha(dir).unwrap()
     }
 
     #[tokio::test]
-    async fn the_planner_commit_made_again_by_a_carry_is_formatted() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        assert_eq!(c.task.planner_tests.files[0].content, "call(a, b)\n");
-        std::fs::write(c.wt.join("implementation.txt"), "work\n").unwrap();
-        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
-        let new_base =
-            git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base")
-                .unwrap();
-        land_on_moved_base(&mut c).await;
-        assert_planner_commit_holds(&c, "call(a, b,)\n", &new_base);
+    async fn the_planner_tests_are_files_in_the_tree_never_a_commit() {
+        let w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        assert!(w.task.planner_tests.commit.is_none());
+        assert_eq!(git::head_sha(&w.wt).unwrap(), w.task.base_sha);
         assert_eq!(
-            std::fs::read_to_string(c.wt.join("implementation.txt")).unwrap(),
-            "work\n",
-            "the agent's work comes back"
+            std::fs::read_to_string(w.wt.join("tests/planner.txt")).unwrap(),
+            "expect\n"
         );
+        assert_eq!(
+            w.task.planner_tests.protected.clone().unwrap()["tests/planner.txt"],
+            sha256_hex(b"expect\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_implementer_commit_that_sweeps_the_planner_files_is_not_its_own_work() {
+        let w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        std::fs::write(w.wt.join("impl.txt"), "work\n").unwrap();
+        git_in(&w.wt, &["add", "-A"]);
+        git_in(&w.wt, &["commit", "-q", "-m", "agent commit"]);
+        let own = w.task.own_diff().changed_files(&w.wt).unwrap();
+        assert_eq!(
+            own,
+            vec!["impl.txt"],
+            "planner files are in the commit but not in the diff"
+        );
+        let stat = w.task.own_diff().stat(&w.wt).unwrap();
+        assert_eq!(stat.files, 1);
+        let diff = w.task.own_diff().diff(&w.wt, 10_000).unwrap();
         assert!(
-            !c._dir.path().join("saw.log").exists(),
-            "the format command saw only the planner commit, not the agent's work"
+            diff.contains("impl.txt") && !diff.contains("planner.txt"),
+            "{diff}"
         );
+        // The guard writes the files over whatever the agent did to them.
+        std::fs::write(w.wt.join("tests/planner.txt"), "weakened\n").unwrap();
+        let restored = guard_protected(&w.task, &w.wt, &own).await.unwrap();
+        assert_eq!(restored, vec!["tests/planner.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(w.wt.join("tests/planner.txt")).unwrap(),
+            "expect\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carry_onto_a_moved_base_works_with_the_planner_tests_present() {
+        let mut w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        std::fs::write(w.wt.join("impl.txt"), "work\n").unwrap();
+        let new_base = commit_in(&w.repo, "OTHER.txt", "other\n");
+        let carried = carry_with_planner_tests(&mut w.task, &w.wt, &w.base_ref).unwrap();
         assert!(
-            git::changed_files(&c.wt, c.task.planner_tests.commit.as_deref().unwrap())
-                .unwrap()
-                .contains(&"implementation.txt".to_string())
+            matches!(&carried, git::Rebase::Moved { new_sha, .. } if *new_sha == new_base),
+            "{carried:?}"
         );
-        assert!(c
+        assert_eq!(git::head_sha(&w.wt).unwrap(), new_base);
+        let read = |f: &str| std::fs::read_to_string(w.wt.join(f)).unwrap();
+        assert_eq!(read("tests/planner.txt"), "expect\n");
+        assert_eq!(read("impl.txt"), "work\n");
+        assert_eq!(read("OTHER.txt"), "other\n");
+    }
+
+    #[tokio::test]
+    async fn a_planner_path_the_base_added_since_the_task_began_does_not_block_the_carry() {
+        let mut w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        std::fs::write(w.wt.join("impl.txt"), "work\n").unwrap();
+        std::fs::create_dir_all(w.repo.join("tests")).unwrap();
+        let new_base = commit_in(&w.repo, "tests/planner.txt", "the base wrote this\n");
+        let carried = carry_with_planner_tests(&mut w.task, &w.wt, &w.base_ref).unwrap();
+        assert!(
+            matches!(&carried, git::Rebase::Moved { new_sha, .. } if *new_sha == new_base),
+            "{carried:?}"
+        );
+        // The protected file is the planner's, not the base's.
+        assert_eq!(
+            std::fs::read_to_string(w.wt.join("tests/planner.txt")).unwrap(),
+            "expect\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(w.wt.join("impl.txt")).unwrap(),
+            "work\n"
+        );
+        let changed = w.task.own_diff().changed_files(&w.wt).unwrap();
+        assert!(guard_protected(&w.task, &w.wt, &changed).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_task_with_an_old_tests_commit_is_migrated_and_then_carries() {
+        let mut w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        // What an older build left: the planner files and the agent's work as commits.
+        git_in(&w.wt, &["add", "tests/planner.txt"]);
+        git_in(&w.wt, &["commit", "-q", "-m", "test: planner tests"]);
+        w.task.planner_tests.commit = Some(git::head_sha(&w.wt).unwrap());
+        std::fs::write(w.wt.join("impl.txt"), "work\n").unwrap();
+        let new_base = commit_in(&w.repo, "OTHER.txt", "other\n");
+
+        repair_protection(&mut w.task, &w.wt).await;
+        assert!(w.task.planner_tests.commit.is_none());
+        assert_eq!(git::head_sha(&w.wt).unwrap(), w.task.base_sha);
+        assert!(w
             .task
             .decisions
             .iter()
-            .any(|d| d.contains("formatted the planner tests again")));
-    }
+            .any(|d| d.contains("no longer a commit of the branch")));
 
-    #[tokio::test]
-    async fn a_formatter_changed_on_the_new_base_reformats_the_protected_tests() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        std::fs::write(c.wt.join("fmt-on"), "").unwrap();
-        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
-        let _ = git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base");
-        land_on_moved_base(&mut c).await;
-        let newer = gated_format_json("s/(a, b,)/(a, b, c,)/");
-        std::fs::write(c.repo.join(".sushiai/setup.json"), newer).unwrap();
-        let new_base = git::commit_paths(
-            &c.repo,
-            &[".sushiai/setup.json".to_string()],
-            "chore: newer formatter",
-            "base",
-        )
-        .unwrap();
-        land_on_moved_base(&mut c).await;
-        assert_planner_commit_holds(&c, "call(a, b, c,)\n", &new_base);
-    }
-
-    #[tokio::test]
-    async fn a_carry_leaves_clean_planner_tests_and_their_commit_alone() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        std::fs::write(c.repo.join("OTHER.txt"), "x\n").unwrap();
-        let new_base =
-            git::commit_paths(&c.repo, &["OTHER.txt".to_string()], "chore: other", "base").unwrap();
-        land_on_moved_base(&mut c).await;
-        assert_planner_commit_holds(&c, "call(a, b)\n", &new_base);
-        assert!(!c.task.decisions.iter().any(|d| d.contains("again")));
-    }
-
-    #[tokio::test]
-    async fn an_attempts_edit_of_a_protected_test_is_not_folded_into_the_planner_commit() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        let planned = c.task.planner_tests.commit.clone().unwrap();
-        std::fs::write(c.wt.join("tests/planner.txt"), "call(x, y)\n").unwrap();
-        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
-        let _ = git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base");
-        land_on_moved_base(&mut c).await;
-        let commit = c.task.planner_tests.commit.clone().unwrap();
-        assert_eq!(commit, planned, "the carry is skipped, the commit stays");
+        let carried = carry_with_planner_tests(&mut w.task, &w.wt, &w.base_ref).unwrap();
+        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
+        assert_eq!(git::head_sha(&w.wt).unwrap(), new_base);
         assert_eq!(
-            git::blob_at(&c.wt, &commit, "tests/planner.txt").unwrap(),
-            b"call(a, b)\n"
+            std::fs::read_to_string(w.wt.join("tests/planner.txt")).unwrap(),
+            "expect\n"
         );
-        assert!(!c.task.decisions.iter().any(|d| d.contains("again")));
+        assert_eq!(
+            std::fs::read_to_string(w.wt.join("impl.txt")).unwrap(),
+            "work\n"
+        );
     }
 
     #[tokio::test]
-    async fn a_formatter_editing_other_tracked_files_does_not_cost_the_agent_its_work() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        std::fs::write(c.wt.join("touched.txt"), "agent\n").unwrap();
-        std::fs::write(c.wt.join("new.txt"), "new\n").unwrap();
-        std::fs::write(c.repo.join("fmt-on"), "").unwrap();
-        let new_base =
-            git::commit_paths(&c.repo, &["fmt-on".to_string()], "chore: formatter", "base")
-                .unwrap();
-        land_on_moved_base(&mut c).await;
-        assert_planner_commit_holds(&c, "call(a, b,)\n", &new_base);
-        let read = |f: &str| std::fs::read_to_string(c.wt.join(f)).unwrap();
-        assert_eq!(read("touched.txt"), "agent\n");
-        assert_eq!(read("new.txt"), "new\n");
-        assert!(git::format_aside_commit(&c.wt, &c.task.id).is_none());
+    async fn a_carry_with_an_old_tests_commit_migrates_first() {
+        let mut w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        git_in(&w.wt, &["add", "tests/planner.txt"]);
+        git_in(&w.wt, &["commit", "-q", "-m", "test: planner tests"]);
+        w.task.planner_tests.commit = Some(git::head_sha(&w.wt).unwrap());
+        commit_in(&w.repo, "OTHER.txt", "other\n");
+        let carried = carry_with_planner_tests(&mut w.task, &w.wt, &w.base_ref).unwrap();
+        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
+        assert!(w.task.planner_tests.commit.is_none());
     }
 
     #[tokio::test]
-    async fn work_left_aside_by_a_crash_is_put_back_and_never_overwritten() {
-        let json = gated_format_json("s/(a, b)/(a, b,)/");
-        let mut c = prepared_for_carry(&json, "call(a, b)\n").await;
-        std::fs::write(c.wt.join("touched.txt"), "agent\n").unwrap();
-        let aside = git::set_work_aside(&c.wt, &c.task.id).unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(c.wt.join("touched.txt")).unwrap(),
-            "orig\n"
-        );
-        // A second set-aside while the first is pending is refused.
-        std::fs::write(c.wt.join("touched.txt"), "other\n").unwrap();
-        assert!(git::set_work_aside(&c.wt, &c.task.id).is_err());
-        assert_eq!(
-            git::format_aside_commit(&c.wt, &c.task.id).as_deref(),
-            Some(aside.as_str())
-        );
-        // The next loop start puts the work back.
-        std::fs::write(c.wt.join("touched.txt"), "orig\n").unwrap();
-        recover_format_aside(&mut c.task, &c.wt).await;
-        assert_eq!(
-            std::fs::read_to_string(c.wt.join("touched.txt")).unwrap(),
-            "agent\n"
-        );
-        assert!(git::format_aside_commit(&c.wt, &c.task.id).is_none());
-        assert!(c
-            .task
-            .decisions
-            .iter()
-            .any(|d| d.contains("interrupted format run")));
-        // Nothing left: a second recovery is a no-op.
-        recover_format_aside(&mut c.task, &c.wt).await;
+    async fn a_finished_task_keeps_its_branch_when_loaded() {
+        let mut w = prepared_work(vec![test("tests/planner.txt", "expect\n")]).await;
+        git_in(&w.wt, &["add", "tests/planner.txt"]);
+        git_in(&w.wt, &["commit", "-q", "-m", "test: planner tests"]);
+        let tests = git::head_sha(&w.wt).unwrap();
+        w.task.planner_tests.commit = Some(tests.clone());
+        w.task.pr_url = Some("https://example.invalid/pr/1".into());
+        repair_protection(&mut w.task, &w.wt).await;
+        assert_eq!(w.task.planner_tests.commit.as_deref(), Some(tests.as_str()));
+        assert_eq!(git::head_sha(&w.wt).unwrap(), tests);
+        let _ = &w.app;
+    }
+
+    #[test]
+    fn the_base_with_the_planner_tests_is_a_commit_no_branch_holds() {
+        let (_dir, repo) = repo_with(&[("a.txt", "a\n")]);
+        let base = git::head_sha(&repo).unwrap();
+        let files = vec![("t/new.txt".to_string(), b"new\n".to_vec())];
+        let over = git::commit_over(&repo, &base, &files).unwrap();
+        assert_ne!(over, base);
+        assert_eq!(git::blob_at(&repo, &over, "t/new.txt").unwrap(), b"new\n");
+        assert_eq!(git::blob_at(&repo, &over, "a.txt").unwrap(), b"a\n");
+        assert_eq!(git::commit_over(&repo, &base, &files).unwrap(), over);
+        assert_eq!(git::head_sha(&repo).unwrap(), base);
     }
 }

@@ -700,74 +700,6 @@ pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(run(worktree, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
-/// Carries a recorded, single commit together with the uncommitted work,
-/// keeping `paths` in their own commit on the new base. A conflict in those
-/// paths restores the old worktree instead of committing conflict markers.
-pub fn carry_onto_moved_base_with_commit(
-    worktree: &Path,
-    base_ref: &str,
-    base_sha: &str,
-    task_id: &str,
-    commit: &str,
-    paths: &[String],
-) -> Result<(Rebase, String), GitError> {
-    let skipped = |reason: &str| {
-        Ok((
-            Rebase::Skipped {
-                reason: reason.to_string(),
-            },
-            commit.to_string(),
-        ))
-    };
-    if head_sha(worktree)? != commit
-        || run(worktree, &["rev-parse", &format!("{commit}^")])?.trim() != base_sha
-    {
-        return skipped("the task branch has commits beyond its recorded tests");
-    }
-    if resolve_commit(worktree, base_ref)? == base_sha {
-        return Ok((Rebase::Unchanged, commit.to_string()));
-    }
-    let mut changed = vec!["diff", "--quiet", commit, "--"];
-    changed.extend(paths.iter().map(String::as_str));
-    if run(worktree, &changed).is_err() {
-        return skipped("the recorded test files were changed");
-    }
-    let title = run(worktree, &["log", "-1", "--format=%s", commit])?;
-    uncommit_to(worktree, base_sha)?;
-    let carried = match carry_onto_moved_base(worktree, base_ref, base_sha, task_id) {
-        Ok(carried) => carried,
-        Err(error) => {
-            uncommit_to(worktree, commit)?;
-            return Err(error);
-        }
-    };
-    let restore = || -> Result<(), GitError> {
-        run(worktree, &["reset", "-q", "--hard", &wip_ref(task_id)])?;
-        uncommit_to(worktree, commit)
-    };
-    match &carried {
-        Rebase::Moved { .. } | Rebase::Conflicts { .. } => {
-            if let Rebase::Conflicts { files, .. } = &carried {
-                if files.iter().any(|f| paths.contains(f)) {
-                    restore()?;
-                    return skipped("the new base conflicts with the recorded test files");
-                }
-            }
-            match commit_paths(worktree, paths, title.trim(), task_id) {
-                Ok(new_commit) => Ok((carried, new_commit)),
-                Err(error) => {
-                    restore()?;
-                    Err(error)
-                }
-            }
-        }
-        Rebase::Unchanged | Rebase::Skipped { .. } => {
-            uncommit_to(worktree, commit)?;
-            Ok((carried, commit.to_string()))
-        }
-    }
-}
-
 /// Turns every commit on the worktree's branch since `base_sha` back into
 /// uncommitted work on `base_sha` (`git reset <base_sha>`); the files stay
 /// as they are.
@@ -891,7 +823,6 @@ pub fn move_branch(repo: &Path, branch: &str, sha: &str) -> Result<BranchMove, G
 /// Drops the saved work of a task that no longer needs it.
 pub fn delete_wip_ref(worktree: &Path, task_id: &str) {
     let _ = run(worktree, &["update-ref", "-d", &wip_ref(task_id)]);
-    let _ = run(worktree, &["update-ref", "-d", &format_aside_ref(task_id)]);
 }
 
 /// Removes a worktree and its branch that nothing has used yet (best
@@ -1282,6 +1213,22 @@ pub fn diff_trees(
     Ok(truncate_diff(out, max_chars))
 }
 
+/// [`diff_full`] without `exclude` (paths).
+pub fn diff_full_without(
+    cwd: &Path,
+    base: &str,
+    exclude: &[String],
+    max_chars: usize,
+) -> Result<String, GitError> {
+    let specs: Vec<String> = exclude
+        .iter()
+        .map(|p| format!(":(exclude,literal){p}"))
+        .collect();
+    let mut args = vec!["diff", base, "--", "."];
+    args.extend(specs.iter().map(String::as_str));
+    Ok(truncate_diff(run(cwd, &args)?, max_chars))
+}
+
 fn truncate_diff(out: String, max_chars: usize) -> String {
     if out.len() <= max_chars {
         return out;
@@ -1340,182 +1287,104 @@ pub fn commit(cwd: &Path, title: &str, task_id: &str, attempt_n: u32) -> Result<
     Ok(())
 }
 
-/// Commits exactly `paths` (already written in `cwd`) with a `Task-Id`
-/// trailer and returns HEAD. Nothing else in the index or the tree goes into
-/// the commit; when no listed path differs from HEAD there is no commit and
-/// HEAD is returned as it is. Same hook rule as [`commit`].
-pub fn commit_paths(
-    cwd: &Path,
-    paths: &[String],
-    title: &str,
-    task_id: &str,
-) -> Result<String, GitError> {
-    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
-    add.extend(paths.iter().map(String::as_str));
-    run(cwd, &add)?;
-    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
-    diff.extend(paths.iter().map(String::as_str));
-    if run(cwd, &diff).is_err() {
-        let trailer = format!("Task-Id: {task_id}");
-        let mut commit = vec![
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "user.name=orchd",
-            "-c",
-            "user.email=orchd@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "--no-verify",
-            "-m",
-            title,
-            "--trailer",
-            &trailer,
-            "--",
-        ];
-        commit.extend(paths.iter().map(String::as_str));
-        run(cwd, &commit)?;
+/// Takes `paths` out of the tree and the index so only the work of the
+/// agent is left: a path that exists at `rev` is put back as it is there, any
+/// other one is deleted.
+pub fn drop_paths(cwd: &Path, rev: &str, paths: &[String]) -> Result<(), GitError> {
+    let (tracked, new): (Vec<String>, Vec<String>) = paths
+        .iter()
+        .cloned()
+        .partition(|p| blob_at(cwd, rev, p).is_some());
+    if !tracked.is_empty() {
+        restore_paths(cwd, rev, &tracked)?;
     }
-    head_sha(cwd)
-}
-
-/// The ref that keeps the work set aside by [`set_work_aside`].
-pub fn format_aside_ref(task_id: &str) -> String {
-    format!("refs/orchd/format-aside/{task_id}")
-}
-
-/// Commits all uncommitted work (also untracked, not ignored files) on a side
-/// ref and resets the tree to HEAD, so a tool sees only the committed tree.
-/// `None` when there was nothing to set aside.
-pub fn set_work_aside(worktree: &Path, task_id: &str) -> Result<Option<String>, GitError> {
-    let head = head_sha(worktree)?;
-    if run(worktree, &["status", "--porcelain"])?.trim().is_empty() {
-        return Ok(None);
+    if !new.is_empty() {
+        let mut rm = vec!["rm", "-q", "--cached", "--ignore-unmatch", "--"];
+        rm.extend(new.iter().map(String::as_str));
+        run(cwd, &rm)?;
+        for p in &new {
+            let _ = std::fs::remove_file(cwd.join(p));
+        }
     }
-    if format_aside_commit(worktree, task_id).is_some() {
-        return Err(GitError(
-            "earlier work is still set aside; it is put back first".into(),
-        ));
-    }
-    let quiet = [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "user.name=orchd",
-        "-c",
-        "user.email=orchd@localhost",
-        "-c",
-        "commit.gpgsign=false",
-    ];
-    run(worktree, &[&quiet[..], &["add", "-A"]].concat())?;
-    run(
-        worktree,
-        &[
-            &quiet[..],
-            &["commit", "-q", "--no-verify", "-m", "orchd format aside"],
-        ]
-        .concat(),
-    )?;
-    let aside = head_sha(worktree)?;
-    run(
-        worktree,
-        &["update-ref", &format_aside_ref(task_id), &aside],
-    )?;
-    run(worktree, &["reset", "-q", "--hard", &head])?;
-    Ok(Some(aside))
-}
-
-/// Puts `paths` back as they are at HEAD, in the tree and the index.
-pub fn discard_paths(worktree: &Path, paths: &[String]) -> Result<(), GitError> {
-    restore_paths(worktree, "HEAD", paths)
-}
-
-/// The commit that keeps the work set aside for the task, if any.
-pub fn format_aside_commit(worktree: &Path, task_id: &str) -> Option<String> {
-    run(
-        worktree,
-        &["rev-parse", "--verify", "-q", &format_aside_ref(task_id)],
-    )
-    .ok()
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty())
-}
-
-/// Applies the work set aside at `aside` on top of the current HEAD,
-/// uncommitted, and drops the side ref. The tree is first made exactly HEAD
-/// (a tool may have left edits or new files behind; ignored files stay), so
-/// the apply cannot be refused. If it still fails, the work is restored from
-/// the side commit as it is, with HEAD kept; the ref goes only afterwards.
-pub fn bring_work_back(worktree: &Path, task_id: &str, aside: &str) -> Result<(), GitError> {
-    let head = head_sha(worktree)?;
-    run(worktree, &["reset", "-q", "--hard", "HEAD"])?;
-    run(worktree, &["clean", "-fdq"])?;
-    let picked = run(
-        worktree,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "user.name=orchd",
-            "-c",
-            "user.email=orchd@localhost",
-            "cherry-pick",
-            "--no-commit",
-            aside,
-        ],
-    );
-    let _ = run(worktree, &["cherry-pick", "--quit"]);
-    if picked.is_err() {
-        run(worktree, &["reset", "-q", "--hard", aside])?;
-        run(worktree, &["reset", "-q", "--soft", &head])?;
-    }
-    run(worktree, &["reset", "-q"])?;
-    run(worktree, &["update-ref", "-d", &format_aside_ref(task_id)])?;
     Ok(())
 }
 
-/// Puts back work a crash left set aside. `true` when there was some.
-pub fn recover_format_aside(worktree: &Path, task_id: &str) -> Result<bool, GitError> {
-    match format_aside_commit(worktree, task_id) {
-        Some(aside) => bring_work_back(worktree, task_id, &aside).map(|()| true),
-        None => Ok(false),
-    }
-}
+/// A commit that no branch holds: `rev` with `files` (path, content) added.
+/// Its date is fixed, so the same input gives the same sha. For a checkout of
+/// the base with the planner's tests that must not be a commit of the task.
+pub fn commit_over(
+    repo: &Path,
+    rev: &str,
+    files: &[(String, Vec<u8>)],
+) -> Result<String, GitError> {
+    use std::io::Write;
+    use std::process::Stdio;
 
-/// Folds the current content of `paths` into the HEAD commit (`commit
-/// --amend`, same message and trailer, orchd as committer) and returns the new
-/// HEAD. `None` when no listed path differs from HEAD. Other uncommitted work
-/// stays uncommitted.
-pub fn amend_paths(cwd: &Path, paths: &[String]) -> Result<Option<String>, GitError> {
-    let mut add = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
-    add.extend(paths.iter().map(String::as_str));
-    run(cwd, &add)?;
-    let mut diff = vec!["diff", "--cached", "--quiet", "HEAD", "--"];
-    diff.extend(paths.iter().map(String::as_str));
-    if run(cwd, &diff).is_ok() {
-        return Ok(None);
-    }
-    let mut amend = vec![
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "user.name=orchd",
-        "-c",
-        "user.email=orchd@localhost",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-q",
-        "--amend",
-        "--no-edit",
-        "--no-verify",
-        "--",
-    ];
-    amend.extend(paths.iter().map(String::as_str));
-    run(cwd, &amend)?;
-    head_sha(cwd).map(Some)
+    static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "orchd-over-{}-{}",
+        std::process::id(),
+        INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
+            let mut child = Command::new("git")
+                .args(["-c", "user.name=orchd", "-c", "user.email=orchd@localhost"])
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_INDEX_FILE", &tmp)
+                .env("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z")
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            if let Some(input) = input {
+                child
+                    .stdin
+                    .take()
+                    .expect("piped stdin")
+                    .write_all(input)
+                    .map_err(|e| GitError(format!("git {} stdin: {e}", args.join(" "))))?;
+            }
+            let out = child
+                .wait_with_output()
+                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
+            if !out.status.success() {
+                return Err(GitError(format!(
+                    "git {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        git(&["read-tree", rev], None)?;
+        for (path, content) in files {
+            let blob = git(&["hash-object", "-w", "--stdin"], Some(content))?;
+            git(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},{path}"),
+                ],
+                None,
+            )?;
+        }
+        let tree = git(&["write-tree"], None)?;
+        git(
+            &["commit-tree", &tree, "-p", rev, "-m", "orchd planner tests"],
+            None,
+        )
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 /// The content of `path` at `rev` when it is a file there.
@@ -1567,13 +1436,6 @@ pub fn fold_numstat(entries: &[NumstatEntry]) -> crate::model::DiffStat {
 /// The stat of `git diff --numstat <from> <to>`.
 pub fn range_stat(repo: &Path, from: &str, to: &str) -> Result<crate::model::DiffStat, GitError> {
     Ok(fold_numstat(&numstat(repo, from, to)?))
-}
-
-/// The worktree's tracked plus untracked, non-ignored content against
-/// `base`: the same tree `worktree_tree` snapshots, diffed with numstat.
-pub fn worktree_diff_stat(worktree: &Path, base: &str) -> Result<crate::model::DiffStat, GitError> {
-    let tree = worktree_tree(worktree)?;
-    range_stat(worktree, base, &tree)
 }
 
 /// `<short sha> <subject>` of each commit in `from..to`, newest first.
@@ -1811,7 +1673,6 @@ pub fn linked_worktrees(repo_root: &Path) -> Vec<PathBuf> {
 /// Removes a task's branch and saved work (best effort).
 pub fn delete_branch(repo_root: &Path, branch: &str, task_id: &str) {
     let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
-    let _ = run(repo_root, &["update-ref", "-d", &format_aside_ref(task_id)]);
     let _ = run(repo_root, &["branch", "-D", branch]);
 }
 
@@ -1840,7 +1701,6 @@ pub fn delete_merged_branches(
         }
         if run(repo_root, &["update-ref", "-d", &full, sha]).is_ok() {
             let _ = run(repo_root, &["update-ref", "-d", &wip_ref(task_id)]);
-            let _ = run(repo_root, &["update-ref", "-d", &format_aside_ref(task_id)]);
             removed.push(branch.clone());
         }
     }
@@ -2351,59 +2211,6 @@ mod tests {
             .unwrap()
             .contains("<<<<<<<"));
         assert!(!git(&wt, &["rev-parse", "refs/orchd/wip/t1"]).is_empty());
-    }
-
-    #[test]
-    fn carrying_a_recorded_commit_restores_work_when_its_paths_conflict() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        let base_ref = branch_of(&repo, "HEAD").unwrap();
-        let wt = tmp.path().join("task");
-        let created = create_worktree(&repo, "task/tests", &wt, "HEAD").unwrap();
-        let paths = vec!["README.md".to_string()];
-        std::fs::write(wt.join("README.md"), "planner test\n").unwrap();
-        let tests = commit_paths(&wt, &paths, "test: planner", "t1").unwrap();
-        std::fs::write(wt.join("implementation.txt"), "implementation\n").unwrap();
-        std::fs::write(repo.join("README.md"), "fixed base test\n").unwrap();
-        commit_paths(&repo, &paths, "test: base fix", "base").unwrap();
-        let new_base = head_sha(&repo).unwrap();
-
-        let (result, retained) = carry_onto_moved_base_with_commit(
-            &wt,
-            &base_ref,
-            &created.base_sha,
-            "t1",
-            &tests,
-            &paths,
-        )
-        .unwrap();
-        assert_eq!(
-            result,
-            Rebase::Skipped {
-                reason: "the new base conflicts with the recorded test files".to_string(),
-            }
-        );
-        assert_eq!(retained, tests);
-        assert_eq!(head_sha(&wt).unwrap(), tests);
-        assert_eq!(head_sha(&repo).unwrap(), new_base);
-        assert_eq!(
-            std::fs::read_to_string(wt.join("README.md")).unwrap(),
-            "planner test\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("implementation.txt")).unwrap(),
-            "implementation\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.join("README.md")).unwrap(),
-            "fixed base test\n"
-        );
-        assert_eq!(diff_name_only(&wt, &tests).unwrap(), Vec::<String>::new());
-        assert!(run(&wt, &["status", "--porcelain"])
-            .unwrap()
-            .contains("?? implementation.txt"));
     }
 
     #[test]

@@ -309,6 +309,8 @@ struct HookContext {
     repo: String,
     worktree: PathBuf,
     base_sha: String,
+    /// The agent's own work: the base without the planner's files.
+    own: OwnDiff,
     verify: Vec<String>,
     blocks: AtomicU32,
     /// Cancelled when the attempt's run ends, so a Stop-hook verify still
@@ -339,6 +341,7 @@ impl HookContext {
             repo: task.repo.clone(),
             worktree: worktree.to_path_buf(),
             base_sha: base_sha.to_string(),
+            own: task.own_diff(),
             verify: task.verify.clone(),
             blocks: AtomicU32::new(0),
             cancel: CancelToken::new(),

@@ -1577,12 +1577,12 @@ pub struct PlannerTests {
     /// Files kept from the plan, written and committed before attempt 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<PlannedTest>,
-    /// The commit that holds them (`tests_sha`); the implementer's own work
-    /// is measured from it.
+    /// The commit an older build made of them. Only read to undo it once
+    /// (`protected::migrate_tests_commit`); the files live in `files`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// path -> sha256 of every protected file at that commit; `None` until
-    /// computed.
+    /// path -> sha256 of every protected file (the planner's files as stored,
+    /// the others as on the base); `None` until computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<std::collections::BTreeMap<String, String>>,
     /// Protected files the last attempt changed and orchd restored; the next
@@ -1593,20 +1593,60 @@ pub struct PlannerTests {
     /// on; a claim is judged once per file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled: Vec<String>,
-    /// The planner files were run through the repo's formatter and the tests
-    /// commit rebuilt when they were not clean (once per task).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub format_checked: bool,
+}
+
+/// The implementer's own work: the diff from the task's base without the
+/// planner's test files, which orchd writes into the worktree itself.
+#[derive(Debug, Clone)]
+pub struct OwnDiff {
+    base: String,
+    exclude: Vec<String>,
+}
+
+impl OwnDiff {
+    /// The changed files (committed, staged, unstaged, untracked), without the
+    /// planner's paths.
+    pub fn changed_files(
+        &self,
+        worktree: &std::path::Path,
+    ) -> Result<Vec<String>, crate::git::GitError> {
+        let mut files = crate::git::changed_files(worktree, &self.base)?;
+        files.retain(|f| !self.exclude.contains(f));
+        Ok(files)
+    }
+
+    /// `git diff` against the base, without the planner's paths, truncated to
+    /// `max_chars`.
+    pub fn diff(
+        &self,
+        worktree: &std::path::Path,
+        max_chars: usize,
+    ) -> Result<String, crate::git::GitError> {
+        crate::git::diff_full_without(worktree, &self.base, &self.exclude, max_chars)
+    }
+
+    /// The size of the worktree's content against the base, without the
+    /// planner's paths.
+    pub fn stat(&self, worktree: &std::path::Path) -> Result<DiffStat, crate::git::GitError> {
+        let tree = crate::git::worktree_tree(worktree)?;
+        let mut entries = crate::git::numstat(worktree, &self.base, &tree)?;
+        entries.retain(|(path, _, _)| !self.exclude.contains(path));
+        Ok(crate::git::fold_numstat(&entries))
+    }
 }
 
 impl Task {
-    /// Where the implementer's own work is measured from: the commit that
-    /// holds the planner's tests when there is one, else the base.
-    pub fn work_base(&self) -> &str {
-        self.planner_tests
-            .commit
-            .as_deref()
-            .unwrap_or(&self.base_sha)
+    /// The implementer's own work, measured from the base.
+    pub fn own_diff(&self) -> OwnDiff {
+        OwnDiff {
+            base: self.base_sha.clone(),
+            exclude: self
+                .planner_tests
+                .files
+                .iter()
+                .map(|t| t.path.clone())
+                .collect(),
+        }
     }
 }
 

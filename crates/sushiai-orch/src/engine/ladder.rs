@@ -251,6 +251,29 @@ pub(super) fn dependency_restart_delay() -> Duration {
 /// Decision line of the one restart of a failed task an agent may make.
 pub(super) const AGENT_RESTART_LINE: &str = "Orchestrator: restarted a failed task";
 
+/// An agent may restart a failed task once; the owner any time.
+pub(super) fn agent_may_restart(task: &Task) -> bool {
+    task.status != TaskStatus::Failed || !task.decisions.iter().any(|d| d == AGENT_RESTART_LINE)
+}
+
+/// A parent is unreviewed while any landed, unarchived subtask is: derived
+/// each time it is read, never cleared, so the parent's own attempt cannot
+/// land that work on the default branch.
+pub(super) fn inherit_unreviewed(app: &App, task: &mut Task) {
+    for child in app.repo_tasks(&task.repo) {
+        if child.parent.as_deref() == Some(task.id.as_str())
+            && child.unreviewed
+            && child.status == TaskStatus::Done
+            && !child.archived
+        {
+            task.unreviewed = true;
+            if !task.decisions.iter().any(|d| d.contains(&child.id)) {
+                task.decisions.push(super::pr::unreviewed_part_line(&child));
+            }
+        }
+    }
+}
+
 pub(super) const DEPENDENCY_RESTART_LINE: &str =
     "Orchestrator: restarted a dependency that failed on the environment";
 
@@ -276,6 +299,34 @@ pub(super) fn pending_unreviewed(task: &Task) -> Option<usize> {
 }
 
 impl App {
+    /// The shared once-only gate for an agent restart of the failed tasks
+    /// `ids`: refuses when one was already restarted by an agent, else
+    /// records the restart on each.
+    pub(super) fn agent_restart_gate(&self, ids: &[String]) -> Result<(), String> {
+        let failed: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                self.store
+                    .load_task(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| t.status == TaskStatus::Failed)
+            })
+            .cloned()
+            .collect();
+        for id in &failed {
+            if let Ok(Some(t)) = self.store.load_task(id) {
+                if !agent_may_restart(&t) {
+                    return Err("this failed task was already restarted once by an agent: only the owner restarts it again".to_string());
+                }
+            }
+        }
+        for id in &failed {
+            self.update_task(id, |t| t.decisions.push(AGENT_RESTART_LINE.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// One-time migration of questions the failure ladder no longer asks.
     /// An open "attempts keep failing" question ends the ladder (the task
     /// fails with its report); an open "no verdict" question becomes the
@@ -569,6 +620,72 @@ mod tests {
         let mut dep = task_with_status(TaskStatus::Failed);
         dep.attempts = (1..=3).map(broken_untouched_test).collect();
         assert!(!failed_on_environment(&dep, &|_| None));
+    }
+
+    #[tokio::test]
+    async fn a_second_agent_retry_through_the_dependency_question_is_refused() {
+        let (app, _dir) = test_app();
+        let mut dep = task_with_status(TaskStatus::Failed);
+        dep.id = "dep".into();
+        dep.decisions.push(AGENT_RESTART_LINE.to_string());
+        let mut waiting = task_with_status(TaskStatus::Waiting);
+        waiting.id = "waiting".into();
+        waiting.depends_on = vec!["dep".into()];
+        waiting.question = Some(Question::new(
+            format!("{DEPENDENCY_QUESTION} dep"),
+            vec!["retry the dependency".into(), "stop".into()],
+            QuestionKind::DependencyEnded,
+            AskedBy::Verify,
+        ));
+        app.store.save_task(&dep).unwrap();
+        app.store.save_task(&waiting).unwrap();
+        let err = app
+            .answer_dependency_question(
+                waiting.clone(),
+                "retry the dependency",
+                Some(AnsweredBy::Overseer),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("only the owner"), "{err}");
+        assert!(!agent_may_restart(&dep));
+        assert!(!app.restart_environment_dependency(
+            &waiting,
+            &app.repo_tasks(&waiting.repo),
+            &["dep".to_string()]
+        ));
+    }
+
+    #[test]
+    fn a_parent_stays_unreviewed_while_a_landed_subtask_is() {
+        let (app, _dir) = test_app();
+        let mut parent = task_with_status(TaskStatus::Running);
+        parent.id = "parent".into();
+        let mut child = task_with_status(TaskStatus::Done);
+        child.id = "child".into();
+        child.parent = Some("parent".into());
+        child.unreviewed = true;
+        app.store.save_task(&child).unwrap();
+        // The parent's own attempt resets the flag, then derives it again.
+        parent.unreviewed = false;
+        inherit_unreviewed(&app, &mut parent);
+        inherit_unreviewed(&app, &mut parent);
+        assert!(parent.unreviewed);
+        assert_eq!(
+            parent
+                .decisions
+                .iter()
+                .filter(|d| d.contains("child"))
+                .count(),
+            1
+        );
+        child.archived = true;
+        app.store.save_task(&child).unwrap();
+        let mut other = task_with_status(TaskStatus::Running);
+        other.id = "other".into();
+        inherit_unreviewed(&app, &mut other);
+        assert!(!other.unreviewed);
     }
 
     #[tokio::test]

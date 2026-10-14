@@ -730,20 +730,7 @@ impl App {
         // An agent restarts a failed task once; the second time is the
         // owner's, or the ladder would loop through the overseer.
         if p.source.is_some() {
-            if let Ok(Some(task)) = self.store.load_task(&p.id) {
-                if task.status == TaskStatus::Failed {
-                    if task
-                        .decisions
-                        .iter()
-                        .any(|d| d == ladder::AGENT_RESTART_LINE)
-                    {
-                        return Err("this failed task was already restarted once by an agent: only the owner restarts it again".to_string());
-                    }
-                    self.update_task(&p.id, |t| {
-                        t.decisions.push(ladder::AGENT_RESTART_LINE.to_string())
-                    })?;
-                }
-            }
+            self.agent_restart_gate(std::slice::from_ref(&p.id))?;
         }
         let already_running = self
             .controls

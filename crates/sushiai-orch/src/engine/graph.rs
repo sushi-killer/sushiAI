@@ -505,16 +505,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     let mut landed = false;
     // A subtask no review read already landed on this branch: the parent
     // is unreviewed too, is not landed by itself, and the owner gets a PR.
-    for child in app.repo_tasks(&task.repo) {
-        if child.parent.as_deref() == Some(task_id.as_str())
-            && child.unreviewed
-            && !child.archived
-            && !task.decisions.iter().any(|d| d.contains(&child.id))
-        {
-            task.unreviewed = true;
-            task.decisions.push(super::pr::unreviewed_part_line(&child));
-        }
-    }
+    ladder::inherit_unreviewed(app, task);
     if !task.unreviewed && task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
@@ -1706,6 +1697,7 @@ impl App {
                 .any(|d| d == ladder::DEPENDENCY_RESTART_LINE)
             || deps.iter().any(|d| {
                 d.status != TaskStatus::Failed
+                    || !ladder::agent_may_restart(d)
                     || d.queue.stopped_explicitly
                     || !ladder::failed_on_environment(d, &ladder::base_tails(self, &d.base_sha))
             })
@@ -1800,6 +1792,10 @@ impl App {
         if choice.starts_with("retry") {
             if !by_owner && ended.iter().any(|t| t.queue.stopped_explicitly) {
                 return Err("an explicitly stopped dependency needs the owner's restart".into());
+            }
+            if !by_owner {
+                let ids: Vec<String> = ended.iter().map(|t| t.id.clone()).collect();
+                self.agent_restart_gate(&ids)?;
             }
             for dep in ended.iter().filter(|t| !t.archived) {
                 let mut cancellations = self.cancellations.lock().unwrap();

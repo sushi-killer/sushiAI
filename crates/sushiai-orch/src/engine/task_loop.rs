@@ -2393,6 +2393,7 @@ pub(super) async fn run_task_loop(
         }
         let mut review_result: Option<ReviewResult> = None;
         task.unreviewed = false;
+        ladder::inherit_unreviewed(&app, &mut task);
         let mut final_task = None;
         let review_id = task.variant().review_route_id(&settings).to_string();
         if !review_id.is_empty() {
@@ -3887,6 +3888,7 @@ pub(super) async fn finish_attempt(
     // its branch and a pull request marked unreviewed goes to the owner. A
     // subtask lands on its parent's branch, which is not the default branch;
     // the parent then carries the flag.
+    ladder::inherit_unreviewed(app, task);
     let landing = if task.unreviewed && task.parent.is_none() {
         None
     } else if let Some(parent_id) = task.parent.clone() {

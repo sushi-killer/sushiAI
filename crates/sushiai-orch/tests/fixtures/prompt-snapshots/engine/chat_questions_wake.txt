@@ -1,0 +1,9 @@
+Overseer state for this repo, kept by orchd between wakes. Your earlier turns are not resumed; this file is what you remember.
+
+## State
+- decided: retry
+---
+
+Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt. Your final message is sent back to each task you did not answer that way.
+
+Task "Add a Save button" asks: retry or stop?

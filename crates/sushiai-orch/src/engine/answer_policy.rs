@@ -4,8 +4,6 @@ use super::*;
 /// question of that kind and cause goes on to the overseer and the owner.
 pub(super) const MAX_POLICY_ANSWERS: usize = 3;
 
-const JUDGE_PROMPT: &str = "A coding agent claims that an acceptance criterion cannot be met, and gives evidence. You may read files in the working directory but change nothing. Check the evidence yourself. Answer verified true only when you confirmed the evidence is true and that it really makes the criterion impossible; otherwise false. Reply with only JSON: {\"verified\": true|false, \"reason\": \"<one sentence>\"}";
-
 const MAX_REASON_CHARS: usize = 300;
 
 pub(super) fn policy_on(app: &App) -> bool {
@@ -736,6 +734,14 @@ fn parse_judgement(text: &str) -> Option<Judgement> {
     }
 }
 
+pub(super) fn impossible_brief(criterion: &str, evidence: &str) -> String {
+    format!(
+        "{}\n\n{}\n",
+        engine_text("answer_policy_judge"),
+        json!({"criterion": criterion, "evidence": evidence})
+    )
+}
+
 /// `drop criterion` only when the judge verified the evidence, else `retry`;
 /// `None` when the judge is off or gave no usable reply (the owner decides).
 async fn judge_impossible(
@@ -773,10 +779,7 @@ async fn judge_impossible(
             &settings_path,
         );
     }
-    let brief_text = format!(
-        "{JUDGE_PROMPT}\n\n{}\n",
-        json!({"criterion": criterion, "evidence": evidence})
-    );
+    let brief_text = impossible_brief(&criterion, &evidence);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {

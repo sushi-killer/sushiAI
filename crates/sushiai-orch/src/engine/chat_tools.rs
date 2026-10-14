@@ -536,11 +536,17 @@ pub struct TurnTools {
     pub listed: Vec<(String, Vec<String>, Vec<String>)>,
 }
 
+/// What the one-call turn that sends an approved write tool is told.
+pub(super) fn send_prompt(tool: &str, args: &serde_json::Value) -> String {
+    fill(
+        engine_text("chat_tools_send"),
+        &[("tool", tool), ("args", &args.to_string())],
+    )
+}
+
 /// The `sushi-action` instructions and the tools each server offers.
-fn tools_prompt(listed: &[(String, Vec<String>, Vec<String>)]) -> String {
-    let mut text = String::from(
-        "\n\nConnected tools: the owner connected these services. Their read tools are available to you; use them to look things up before you answer.",
-    );
+pub(super) fn tools_prompt(listed: &[(String, Vec<String>, Vec<String>)]) -> String {
+    let mut text = format!("\n\n{}", engine_text("chat_tools_intro"));
     for (id, reads, writes) in listed {
         text.push_str(&format!(
             "\n- {id}: read tools {}; write tools (you cannot call them) {}.",
@@ -556,7 +562,7 @@ fn tools_prompt(listed: &[(String, Vec<String>, Vec<String>)]) -> String {
             },
         ));
     }
-    text.push_str("\nYou can never call a write tool. When the owner asks for one, say in one line what it will do and end your reply with one ```sushi-action block holding JSON: {\"server\": \"the service's id\", \"tool\": \"the write tool's name\", \"args\": {...}, \"summary\": \"what it does, in a few words\", \"target\": \"where: the channel, sheet or project\"}. The app shows the owner an OK card; nothing happens until the owner sends it. If the owner declines, do not propose the same call again. The services' ids, as they appear above: ");
+    text.push_str(&format!("\n{} ", engine_text("chat_tools_actions")));
     text.push_str(
         &listed
             .iter()
@@ -831,9 +837,7 @@ pub async fn execute(
     store::write_json_atomic(&config, &json!({"mcpServers": {key.clone(): server}}))
         .map_err(|e| e.to_string())?;
     let argv = send_argv(&config, &claude_tool_name(&key, tool));
-    let prompt = format!(
-        "Call the tool {tool} exactly once with exactly these JSON arguments and change nothing in them:\n{args}\nThen reply with the tool's result in one or two lines. If it fails, reply with the error."
-    );
+    let prompt = send_prompt(tool, args);
     let mut cmd = tokio::process::Command::new(resolve_binary(Harness::Claude));
     cmd.args(&argv)
         .env("PATH", augmented_path())

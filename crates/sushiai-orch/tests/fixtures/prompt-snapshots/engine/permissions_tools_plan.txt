@@ -1,0 +1,8 @@
+## Tools for this task
+
+Besides the file and shell tools, the task agent has these MCP servers:
+- github: read tools list_issues; write tools create_issue (each write asks the owner before it runs)
+- asana (Asana): connected but off for this repo
+
+Criteria may only ask for what these tools can do. A step that needs a service with no tool here belongs to the owner: say so in the criterion instead of asking the agent to do it.
+

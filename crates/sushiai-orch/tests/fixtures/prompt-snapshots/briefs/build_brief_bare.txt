@@ -1,0 +1,51 @@
+## Task
+
+Add a Save button
+
+Add a Save button to the settings dialog that writes the settings file.
+
+## Acceptance criteria
+
+(none specified)
+
+## Verification commands
+
+(none specified)
+
+## A criterion that cannot be met
+
+When a criterion cannot be met as written (its premise is wrong, or it contradicts another criterion), do not work around it: end your final message with a fenced block naming it by its `[N]` index and the evidence, and stop.
+
+```sushi-impossible
+{"criterion": <index>, "evidence": "..."}
+```
+
+## Rules
+
+- Work only in this directory; do not touch other checkouts.
+- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.
+- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.
+- Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
+- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).
+
+## Current state
+
+`git status --short`:
+```
+
+```
+
+`git diff --stat` (against base):
+```
+
+```
+
+## Report format
+
+End your final message with:
+
+```sushi-report
+{"outcome":"complete|partial|blocked","summary":"...","handoff":"...","decisions":[],"question":"","risk":[]}
+```
+
+`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.

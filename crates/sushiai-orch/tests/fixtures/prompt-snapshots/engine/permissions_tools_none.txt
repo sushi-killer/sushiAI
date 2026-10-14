@@ -1,0 +1,7 @@
+## Tools for this task
+
+Besides the file and shell tools, the task agent has these MCP servers:
+- none
+
+A call the run may not make (a write to an outside service, a path Claude Code protects) waits for the owner's answer and then goes on or is denied: do not retry it or work around it. If a criterion needs a tool that is not listed here, do not improvise: end with outcome `blocked` and start the report's `question` with `No tool: ` and the capability you lack.
+

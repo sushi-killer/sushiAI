@@ -1,0 +1,55 @@
+## Review
+
+Add a Save button to the settings dialog that writes the settings file.
+
+## Acceptance criteria
+
+Each criterion has a number; rule on it by that number.
+
+0. The settings dialog shows a Save button -- check: `npm test -- settings`
+1. Clicking Save writes settings.json -- check: `npm test -- save`
+
+## Implementer
+
+Outcome complete: wired the Save button.
+A deliberate, explained deviation is judged on its merits.
+
+Criteria marked "Checked by review" have no command behind them: check them from the diff and the repository yourself.
+
+The repository's process rules about commits, pull requests, release notes and lesson or changelog files belong to the orchestrator, not this task: judge the change against the task and its criteria, and do not fail it for those.
+
+Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).
+Report only correctness bugs and requirement gaps (an acceptance criterion the diff does not meet). Set `kind` on each finding: `correctness` or `requirement`; style, naming and nits are `style` or `nit` and never block. Where you can, give a `scenario`: the shell command or test (`run`) that fails because of the finding and the failure it shows (`fails`). A finding that comes back after it was fixed is kept only with a new failing scenario. Set `causedByDiff` on each finding: true when the diff introduces the problem or breaks something that depended on the code it changed (a caller the diff did not touch counts), false when the problem was already there and the diff does not affect it.
+
+## Review areas
+
+The orchestrator routed this review to the areas below. Spend the review on them and on the criteria. A clear defect elsewhere is still reported.
+
+- Seams: the change touches callers, consumers or contracts outside its own diff. Check what depends on the code it changed, including callers the diff does not touch.
+- Code: read the changed logic for correctness against the criteria.
+- Tests: check that the checks the task relies on prove the criteria, and that they would fail on the old behaviour.
+- Errors: check the failure, timeout and empty-input paths the change adds or alters.
+- Docs: check the documentation and user-facing text the change touches against what it now does.
+
+## Verify results
+
+
+## Diff
+
+```diff
+--- a/src/settings.ts
++++ b/src/settings.ts
+@@ -1 +1 @@
+-old
++new
+```
+
+## Report format
+
+Reply with:
+
+```sushi-review
+{"verdict":"PASS|FAIL","findings":[{"finding":"P2: path:line - issue","id":"<registered id or null>","causedByDiff":true,"kind":"correctness|requirement|style|nit","scenario":{"run":"<shell command or test>","fails":"<the failure it shows>"}}],"criteria":[{"criterion":0,"met":true,"evidence":"..."}]}
+```
+
+Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{"criterion":<number>,"met":true|false|null,"evidence":"..."}` per criterion, where `criterion` is the number the criterion has in the list above (a number, not its text), with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.

@@ -1,0 +1,6 @@
+Answer the open questions.
+
+Owner precedents for matching questions. When one covers the question and no hard limit applies, answer with task_answer {like} naming it. Never write a repo note yourself.
+
+Task "Add a Save button":
+- the owner answered "retry" on 2026-01-02 (x2): the base was flaky

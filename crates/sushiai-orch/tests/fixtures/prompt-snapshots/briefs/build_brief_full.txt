@@ -1,0 +1,123 @@
+## Task
+
+Add a Save button
+
+Add a Save button to the settings dialog that writes the settings file.
+
+## Acceptance criteria
+
+- [0] The settings dialog shows a Save button -- check: `npm test -- settings`
+- [1] Clicking Save writes settings.json -- check: `npm test -- save`
+
+## Verification commands
+
+- `npm test -- settings`
+- `npm run lint`
+
+## Targeted check
+
+The planner named this check for this part alone. The full CI runs once on the combined result at the parent.
+
+- `npm test -- settings`
+
+## Checks
+
+These commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.
+
+- criterion [0]: `npm test -- settings`
+
+## Protected files
+
+These files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: orchd discards any change to them and the checks run on the originals. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.
+
+- `tests/save.test.ts`
+- `tests/settings.test.ts`
+
+## Your edits to protected files were discarded
+
+Your edits to tests/save.test.ts (acceptance tests / files the checks run) were discarded; checks run on the originals. If a test is wrong, say so in your report (`"testClaims":[{"path":"<file>","reason":"<why it is wrong>"}]`) with the reason instead of editing it.
+
+## A criterion that cannot be met
+
+When a criterion cannot be met as written (its premise is wrong, or it contradicts another criterion), do not work around it: end your final message with a fenced block naming it by its `[N]` index and the evidence, and stop.
+
+```sushi-impossible
+{"criterion": <index>, "evidence": "..."}
+```
+
+## Checklist
+
+Orchd runs each item's check after every attempt, before the full verify. Work through the items in order.
+
+- [x] Add the button -- check: `npm test -- button`
+- [ ] Wire the handler
+
+## Plan notes
+
+The plan gate raised these about the plan; keep them in mind, they do not change the criteria.
+
+- MEDIUM (scope): The dialog also has a Cancel button.
+
+## Final checks
+
+The orchestrator runs these alongside review, after the fast gates pass. They are slow: do not run them yourself.
+
+- `npm run ci`
+
+## Rules
+
+- Work only in this directory; do not touch other checkouts.
+- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.
+- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.
+- Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
+- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).
+
+## Decisions and owner answers
+
+- Owner: use the primary button style
+- Agent: kept the existing settings schema
+
+## Assumptions
+
+The planner decided these instead of asking the owner; an owner answer replaces the assumption.
+
+- Which file holds the settings? -> settings.json (src/settings.ts:3 reads it)
+- Should Save close the dialog? -> owner answered: yes, close it (overturns the planner's no)
+
+## Previous attempts
+
+- Attempt 2 (claude-opus): failed
+  - handoff: Added the button; the save handler is still a stub.
+  - failure: stopped as a loop. The same edit to src/settings.ts was repeated 5 times.
+- Attempt 3 (claude-opus): failed
+  - failure: `npm test -- save` exited 1.
+expected settings.json to exist
+- Attempt 4 (claude-opus): failed
+  - handoff: Save writes the file; review disagreed about the button label.
+  - failure: Review failed: P1: src/settings.ts:40 - Save ignores write errors
+
+## Current state
+
+`git status --short`:
+```
+ M src/settings.ts
+?? tests/save.test.ts
+```
+
+`git diff --stat` (against base):
+```
+ src/settings.ts | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+```
+
+## Report format
+
+End your final message with:
+
+```sushi-report
+{"outcome":"complete|partial|blocked","summary":"...","handoff":"...","decisions":[],"question":"","risk":[]}
+```
+
+`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.
+
+The last attempt failed review. If a review finding is wrong, already satisfied, or its smaller fix would change behaviour, decline it with evidence instead of working around it: add a `declines` array to the report, `"declines":[{"id":"<the finding's id, such as F-1>","reason":"wrong|already_satisfied|changes_behaviour","evidence":["<file:line, command output or an artifacts/ path>"]}]`. The review of this attempt rules on each decline by its id. A decline it does not uphold leaves the finding blocking, and a decline without evidence is ignored.

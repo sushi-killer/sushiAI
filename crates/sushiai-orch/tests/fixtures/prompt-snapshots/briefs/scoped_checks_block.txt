@@ -1,0 +1,6 @@
+## Scoped checks
+
+Orchd skips these commands when the diff touches none of their paths:
+- `cargo test -p sushiai-orch`: only when a changed file matches crates/sushiai-orch/**, Cargo.lock
+When the task's `paths` fall outside a command's globs, do not put that command in `verify` or `finalVerify`.
+

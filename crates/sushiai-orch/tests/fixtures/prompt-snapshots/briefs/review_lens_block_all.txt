@@ -1,0 +1,10 @@
+
+## Review areas
+
+The orchestrator routed this review to the areas below. Spend the review on them and on the criteria. A clear defect elsewhere is still reported.
+
+- Seams: the change touches callers, consumers or contracts outside its own diff. Check what depends on the code it changed, including callers the diff does not touch.
+- Code: read the changed logic for correctness against the criteria.
+- Tests: check that the checks the task relies on prove the criteria, and that they would fail on the old behaviour.
+- Errors: check the failure, timeout and empty-input paths the change adds or alters.
+- Docs: check the documentation and user-facing text the change touches against what it now does.

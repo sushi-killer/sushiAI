@@ -1,6 +1,11 @@
 //! The orchestrator's prompts: defaults ship in `prompts/orchestrator.yaml`,
 //! and `<data dir>/prompts.yaml` overrides any key. The override is read on
 //! every use, so an edit applies to the next turn without a restart.
+//!
+//! The task agents' brief texts ship in `prompts/brief.yaml`: compiled in,
+//! parsed once and never overridden (see [`brief_text`]). The engine's and the
+//! chat agent's turn texts do the same from `prompts/engine.yaml` (see
+//! [`engine_text`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,6 +13,8 @@ use std::sync::OnceLock;
 
 const DEFAULTS: &str = include_str!("../prompts/orchestrator.yaml");
 const ATTRIBUTION: &str = include_str!("../prompts/attribution.yaml");
+const BRIEF: &str = include_str!("../prompts/brief.yaml");
+const ENGINE: &str = include_str!("../prompts/engine.yaml");
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -49,6 +56,58 @@ pub fn default(key: &str) -> String {
                 .remove(key)
         })
         .unwrap_or_else(|| panic!("prompts/orchestrator.yaml has no {key}"))
+}
+
+/// The brief text for `key` from `prompts/brief.yaml`. Never read at run
+/// time and never overridden by `<data dir>/prompts.yaml`: the briefs are
+/// part of every run's `promptHash`. A missing key panics.
+pub fn brief_text(key: &str) -> &'static str {
+    static TEXTS: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    TEXTS
+        .get_or_init(|| parse(BRIEF).expect("prompts/brief.yaml parses"))
+        .get(key)
+        .unwrap_or_else(|| panic!("prompts/brief.yaml has no {key}"))
+}
+
+/// The engine and chat agent-turn text for `key` from `prompts/engine.yaml`:
+/// compiled in, parsed once, never overridden. A missing key panics.
+pub fn engine_text(key: &str) -> &'static str {
+    static TEXTS: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    TEXTS
+        .get_or_init(|| parse(ENGINE).expect("prompts/engine.yaml parses"))
+        .get(key)
+        .unwrap_or_else(|| panic!("prompts/engine.yaml has no {key}"))
+}
+
+/// `text` with every `{name}` that `values` names replaced by its value, in
+/// one pass: an inserted value is never scanned again, and a brace that names
+/// no value (JSON in a report format) stays as written.
+pub fn fill(text: &str, values: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after.find('}').and_then(|close| {
+            let name = &after[..close];
+            values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (close, *value))
+        });
+        match value {
+            Some((close, value)) => {
+                out.push_str(value);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// ponytail: only the YAML this file needs -- top-level `key: |` block
@@ -97,6 +156,64 @@ fn parse(text: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
+/// `actual` against `tests/fixtures/prompt-snapshots/engine/<kind>.txt`, byte
+/// for byte. A missing golden fails; `UPDATE_PROMPT_SNAPSHOTS=1` writes it.
+///
+/// The goldens hold JSON objects in insertion order, as the shipped binary
+/// renders them: `sushiai-agents` turns on serde_json's `preserve_order`, so
+/// it is on in every workspace build. A build of this crate alone sorts the
+/// keys instead, and there the golden's compact JSON lines are sorted too
+/// before the comparison.
+#[cfg(test)]
+pub(crate) fn assert_engine_snapshot(kind: &str, actual: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/prompt-snapshots/engine")
+        .join(format!("{kind}.txt"));
+    if std::env::var_os("UPDATE_PROMPT_SNAPSHOTS").is_some() {
+        assert!(
+            preserves_json_order(),
+            "write the goldens from a workspace build: cargo test --workspace --lib prompt_snapshot_"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let mut golden = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("missing golden {}", path.display()));
+    if !preserves_json_order() {
+        golden = sort_json_lines(&golden);
+    }
+    assert!(
+        actual == golden,
+        "{kind} differs from its golden:\n{actual}"
+    );
+}
+
+#[cfg(test)]
+fn preserves_json_order() -> bool {
+    let map = serde_json::json!({"b": 0, "a": 0});
+    map.as_object().unwrap().keys().next().unwrap() == "b"
+}
+
+/// Each line that is a whole compact JSON object, re-serialized with sorted
+/// keys; every other line as it is.
+#[cfg(test)]
+fn sort_json_lines(text: &str) -> String {
+    text.split('\n')
+        .map(
+            |line| match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(value @ serde_json::Value::Object(_))
+                    if value.to_string().len() == line.len() =>
+                {
+                    value.to_string()
+                }
+                _ => line.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +238,61 @@ mod tests {
         let prompt = default("attribution");
         assert!(prompt.contains("sushi-attribution"));
         assert!(!prompt.ends_with('\n'));
+    }
+
+    #[test]
+    fn every_brief_text_parses_and_ends_without_a_newline() {
+        let all = parse(BRIEF).unwrap();
+        assert!(all.len() > 50, "{}", all.len());
+        for (key, text) in &all {
+            assert!(!text.trim().is_empty(), "{key}");
+            assert!(!text.ends_with('\n'), "{key}");
+            assert_eq!(brief_text(key), text, "{key}");
+        }
+    }
+
+    #[test]
+    fn no_brief_text_shares_a_key_with_the_overridable_prompts() {
+        // `get` and its `<data dir>/prompts.yaml` override serve the
+        // orchestrator's keys; `brief_text` reads only the compiled-in file.
+        let orchestrator = parse(DEFAULTS).unwrap();
+        let shared: Vec<String> = parse(BRIEF)
+            .unwrap()
+            .into_keys()
+            .filter(|key| orchestrator.contains_key(key))
+            .collect();
+        assert!(shared.is_empty(), "{shared:?}");
+    }
+
+    #[test]
+    fn every_engine_text_parses_and_shares_no_key_with_the_other_files() {
+        let all = parse(ENGINE).unwrap();
+        let others: Vec<_> = parse(DEFAULTS)
+            .unwrap()
+            .into_keys()
+            .chain(parse(BRIEF).unwrap().into_keys())
+            .collect();
+        for (key, text) in &all {
+            assert!(!text.trim().is_empty(), "{key}");
+            assert!(!text.ends_with('\n'), "{key}");
+            assert_eq!(engine_text(key), text, "{key}");
+            assert!(!others.contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn fill_inserts_each_value_verbatim_in_one_pass() {
+        let text = "{a} then {b}, {\"json\": 1} and {unknown}";
+        assert_eq!(
+            fill(text, &[("a", "x {b} {a}"), ("b", "{other}")]),
+            "x {b} {a} then {other}, {\"json\": 1} and {unknown}"
+        );
+        assert_eq!(
+            fill("{other}{name}", &[("name", "{other}"), ("other", "Y")]),
+            "Y{other}"
+        );
+        assert_eq!(fill("{a", &[("a", "x")]), "{a");
+        assert_eq!(fill("}{}{a}", &[("a", "x")]), "}{}x");
     }
 
     #[test]

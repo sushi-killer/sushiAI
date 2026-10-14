@@ -1,0 +1,3 @@
+Call the tool create_issue exactly once with exactly these JSON arguments and change nothing in them:
+{"title":"Crash on save","labels":["bug"]}
+Then reply with the tool's result in one or two lines. If it fails, reply with the error.

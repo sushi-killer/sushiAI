@@ -1,0 +1,7 @@
+Overseer state for this repo, kept by orchd between wakes. Your earlier turns are not resumed; this file is what you remember.
+
+## State
+- decided: retry
+
+---
+

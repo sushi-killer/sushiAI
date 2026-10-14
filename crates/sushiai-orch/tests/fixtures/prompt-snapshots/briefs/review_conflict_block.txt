@@ -1,0 +1,4 @@
+## Brief conflict
+
+A check of this brief found two requirements that contradict each other: criterion [0] wants it hidden, criterion [1] clicked
+Do not fail the change for leaving one of them unmet. Fail it if it silently sacrificed one to the other with no report of the conflict.

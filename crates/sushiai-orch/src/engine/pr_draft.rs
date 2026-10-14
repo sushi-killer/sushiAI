@@ -17,10 +17,16 @@ const MAX_BODY_CHARS: usize = 20_000;
 
 /// The reply shape the drafter must match, enforced by the harness
 /// (`--json-schema` / `--output-schema`).
-const DRAFT_SCHEMA: &str = r#"{"type":"object","properties":{"branch":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"}},"required":["branch","title","body"],"additionalProperties":false}"#;
+/// A JSON schema, not prompt text: it stays in code, byte for byte, because
+/// the claude argv carries it and the argv is part of every run's `promptHash`.
+fn draft_schema() -> &'static str {
+    r#"{"type":"object","properties":{"branch":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"}},"required":["branch","title","body"],"additionalProperties":false}"#
+}
 
 /// The reply shape of the body check, enforced the same way.
-const BODY_CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"ok":{"type":"boolean"},"corrections":{"type":"array","items":{"type":"string"}},"body":{"type":["string","null"]}},"required":["ok","corrections","body"],"additionalProperties":false}"#;
+fn body_check_schema() -> &'static str {
+    r#"{"type":"object","properties":{"ok":{"type":"boolean"},"corrections":{"type":"array","items":{"type":"string"}},"body":{"type":["string","null"]}},"required":["ok","corrections","body"],"additionalProperties":false}"#
+}
 
 /// What the drafter replied: the branch, title and body of the pull request.
 /// An empty field falls back to the task's own.
@@ -932,7 +938,7 @@ async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String
         app,
         task,
         "pr-draft",
-        DRAFT_SCHEMA,
+        draft_schema(),
         |diff| brief::build_pr_draft_brief(task, diff),
         cost,
     )
@@ -953,7 +959,7 @@ async fn check_body(
         app,
         task,
         "pr-truth",
-        BODY_CHECK_SCHEMA,
+        body_check_schema(),
         |diff| brief::build_pr_truth_brief(task, body, diff),
         cost,
     )
@@ -1150,7 +1156,7 @@ mod tests {
         let wt = Path::new("/worktree");
         let schema_path = Path::new("/run/schema.json");
         let schema = harness::OutputSchema {
-            json: DRAFT_SCHEMA,
+            json: draft_schema(),
             path: schema_path,
         };
         let req = |harness| harness::RunRequest {
@@ -1172,7 +1178,7 @@ mod tests {
         };
         let claude = harness::build_argv_with_schema(&req(Harness::Claude), Some(&schema));
         let flag = claude.iter().position(|a| a == "--json-schema").unwrap();
-        assert_eq!(claude[flag + 1], DRAFT_SCHEMA);
+        assert_eq!(claude[flag + 1], draft_schema());
         let codex = harness::build_argv_with_schema(&req(Harness::Codex), Some(&schema));
         let flag = codex.iter().position(|a| a == "--output-schema").unwrap();
         assert_eq!(codex[flag + 1], "/run/schema.json");

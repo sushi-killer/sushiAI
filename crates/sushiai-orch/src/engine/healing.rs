@@ -84,8 +84,6 @@ pub(super) fn amend_criterion_for_test(
     amend_criterion(settings, task, i, text)
 }
 
-const FEASIBILITY_PROMPT: &str = "You judge whether a check command of a coding task can work in this repository. The command was run on the repository as it is before any work and exited non-zero. You may read files in the working directory but change nothing.\n\nAnswer with one verdict:\n- `feasible`: it fails as it should, because the task is meant to make it pass (for example a test for the new behaviour).\n- `rewrite`: the repository cannot run this kind of check (the test runner, harness, script or tool it needs does not exist here). Give `command`, the nearest check this repository can really run and that exits 0 only when the criterion holds, and `criterionText` when the criterion's own `-- check:` wording must change with it.\n- `unrelated`: it fails for a reason that has nothing to do with the task (a broken environment, a flaky or already broken test, a missing credential).\n\nReply with only JSON: {\"verdict\": \"feasible|rewrite|unrelated\", \"command\": \"\", \"criterion\": <index or null>, \"criterionText\": \"\", \"reason\": \"<one sentence>\"}";
-
 #[derive(Clone)]
 pub(super) enum Feasibility {
     /// Fails as it should.
@@ -108,7 +106,8 @@ pub(super) fn feasibility_prompt(task: &Task, failed: &VerifyOutcome) -> String 
         .map(|(i, c)| format!("{i}: {c}"))
         .collect();
     format!(
-        "{FEASIBILITY_PROMPT}\n\n{}\n",
+        "{}\n\n{}\n",
+        engine_text("healing_feasibility"),
         json!({
             "goal": task.goal,
             "criteria": criteria,
@@ -617,8 +616,6 @@ fn apply_base_preflight(app: &Arc<App>, task: &mut Task, result: &BasePreflight)
 // 2. The same criterion unmet twice
 // ---------------------------------------------------------------------------
 
-const RULING_PROMPT: &str = "You judge why a coding task keeps failing review on the same acceptance criterion: was the criterion not implemented (`code gap`), or can it not be met or proven as written in this repository (`infeasible as written`, for example it asks for a kind of test the repository has no harness for, or for something the reviewer cannot observe)? You may read files in the working directory but change nothing. Two review rejections of the criterion are given.\n\nWhen it is infeasible, give `criterion`: the same requirement in the nearest form this repository can really check, keeping its `-- check:` part feasible. Reply with only JSON: {\"verdict\": \"code gap|infeasible as written\", \"criterion\": \"\", \"reason\": \"<one sentence>\"}";
-
 pub(super) enum Ruling {
     CodeGap,
     Infeasible { criterion: String, reason: String },
@@ -672,7 +669,8 @@ pub(super) fn repeated_unmet(
 
 pub(super) fn ruling_prompt(task: &Task, rep: &Repeated) -> String {
     format!(
-        "{RULING_PROMPT}\n\n{}\n",
+        "{}\n\n{}\n",
+        engine_text("healing_ruling"),
         json!({
             "goal": task.goal,
             "criterion": task.criteria[rep.criterion],
@@ -1004,8 +1002,6 @@ pub(super) fn add_follow_ups(task: &mut Task, findings: Vec<String>) {
 // 5. Owner answers against the criteria
 // ---------------------------------------------------------------------------
 
-const ANSWER_PROMPT: &str = "You judge whether the owner's answers to a coding task's questions contradict any of its acceptance criteria. An answer contradicts a criterion when following the answer makes the criterion, as written, wrong or unmeetable. An answer that only adds detail, or that a criterion already agrees with, does not. Reply with only JSON: {\"amend\": [{\"criterion\": <index>, \"text\": \"<the criterion rewritten to agree with the answer, keeping its -- check: part>\"}], \"reason\": \"<one sentence>\"}. Use an empty list when nothing contradicts.";
-
 /// The decisions after the first `seen` that record an owner, lead or policy answer.
 pub(super) fn new_answers(task: &Task) -> Vec<String> {
     task.decisions
@@ -1030,7 +1026,8 @@ pub(super) fn answer_prompt(task: &Task, answers: &[String]) -> String {
         .map(|(i, c)| format!("{i}: {c}"))
         .collect();
     format!(
-        "{ANSWER_PROMPT}\n\n{}\n",
+        "{}\n\n{}\n",
+        engine_text("healing_answer"),
         json!({"goal": task.goal, "criteria": criteria, "answers": answers})
     )
 }

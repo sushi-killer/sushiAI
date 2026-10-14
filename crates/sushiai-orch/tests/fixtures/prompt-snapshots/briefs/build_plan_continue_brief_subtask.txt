@@ -1,0 +1,11 @@
+Your previous run was cut off before it returned the plan. Continue from where you stopped; do not start over. Reply with the full plan.
+
+## Report format
+
+End your final message with:
+
+```sushi-plan
+{"title":"...","goal":"...","tier":"mechanical|standard|hard","criteria":[],"coverage":[{"requirement":"...","criteria":[0]}],"verify":[],"checks":[{"criterion":0,"run":"..."}],"heldOut":{"criterion":0,"run":"..."},"tests":[{"path":"...","content":"..."}],"screenshot":"","finalVerify":[],"paths":["src/..."],"questions":[{"text":"...","options":["...","..."],"risk":[],"defaultOption":null,"recommended":"...","evidence":"...","blocking":false}]}
+```
+
+`risk` names what a question commits the owner to, from scope (a change against the request), money, destructive, security, public-api (a public API or contract change), push or deploy (empty when none).

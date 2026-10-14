@@ -1,0 +1,7 @@
+## Previous reply
+
+Your previous reply had no parseable verdict. Reply again with exactly one fenced block holding one complete JSON object, `criteria` inside it:
+
+```sushi-review
+{"verdict":"PASS|FAIL","findings":[{"finding":"P2: path:line - issue","id":"<registered id or null>","causedByDiff":true,"kind":"correctness|requirement|style|nit","scenario":{"run":"<shell command or test>","fails":"<the failure it shows>"}}],"criteria":[{"criterion":0,"met":true,"evidence":"..."}]}
+```

@@ -1,0 +1,5 @@
+You judge why a coding task keeps failing review on the same acceptance criterion: was the criterion not implemented (`code gap`), or can it not be met or proven as written in this repository (`infeasible as written`, for example it asks for a kind of test the repository has no harness for, or for something the reviewer cannot observe)? You may read files in the working directory but change nothing. Two review rejections of the criterion are given.
+
+When it is infeasible, give `criterion`: the same requirement in the nearest form this repository can really check, keeping its `-- check:` part feasible. Reply with only JSON: {"verdict": "code gap|infeasible as written", "criterion": "", "reason": "<one sentence>"}
+
+{"goal":"Add a Save button to the settings dialog that writes the settings file.","criterion":"Clicking Save writes settings.json -- check: `npm test -- save`","reviews":[{"attempt":1,"reason":"Clicking Save writes nothing yet."},{"attempt":2,"reason":"No test proves the write."}]}

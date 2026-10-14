@@ -1,0 +1,6 @@
+## Brief conflict
+
+A check of this brief found two requirements that contradict each other: criterion [0] wants it hidden, criterion [1] clicked
+
+Do not satisfy one requirement at the other's expense. If the conflict cannot be resolved, end your final message with a `sushi-impossible` block (`{"criterion": <index>, "evidence": "..."}`) naming one of the conflicting criteria by its `[N]` index instead of satisfying one at the other's expense, and also mention it in your handoff and decisions.
+

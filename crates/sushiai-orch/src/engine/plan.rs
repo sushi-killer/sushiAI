@@ -1283,30 +1283,56 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        // Unconditional on an empty `verify` (review item P2e): ask
-        // outright rather than skipping the question.
+        // Unconditional on an empty `verify` (review item P2e): the first
+        // command the repo offers becomes an assumption; the question is
+        // asked only when the repo offers none.
         if task.verify.is_empty() {
-            let options = verify_options(&worktree);
-            match ask_plan_question(
-                app,
-                task_id,
-                "No verification command was found. Which command proves this task?",
-                options,
-                pending_answer,
-                cancel,
-                permit,
-            )
-            .await
-            {
-                Some(answer) => {
-                    if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-                        t.verify = vec![answer];
-                        t.updated_at = now_ms();
-                        app.save_task_logged(&t);
-                        app.broadcast_task(&t);
+            let mut options = verify_options(&worktree);
+            if options.is_empty() {
+                match ask_plan_question(
+                    app,
+                    task_id,
+                    "No verification command was found. Which command proves this task?",
+                    options,
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
+                {
+                    Some(answer) => {
+                        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                            t.verify = vec![answer];
+                            t.updated_at = now_ms();
+                            app.save_task_logged(&t);
+                            app.broadcast_task(&t);
+                        }
                     }
+                    None => return end_plan_stage(app, task_id, Some(idx)).await,
                 }
-                None => return end_plan_stage(app, task_id, Some(idx)).await,
+            } else if let Ok(Some(mut t)) = app.store.load_task(task_id) {
+                let command = options.swap_remove(0);
+                let question = "Which command proves this task?".to_string();
+                app.broadcast_log(
+                    task_id,
+                    attempt_n,
+                    format!("Planner assumed: {question} -> {command}"),
+                );
+                t.assumptions.push(Assumption {
+                    question,
+                    answer: command.clone(),
+                    evidence: "the first verification command found in the repo".into(),
+                    by: "planner".to_string(),
+                    kind: None,
+                    attempt: None,
+                    commands: Vec::new(),
+                    overturned: false,
+                    owner_answer: None,
+                });
+                t.verify = vec![command];
+                t.updated_at = now_ms();
+                app.save_task_logged(&t);
+                app.broadcast_task(&t);
             }
         }
 

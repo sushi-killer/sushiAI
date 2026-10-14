@@ -941,9 +941,10 @@ pub struct Variant {
     /// The planner marks each question with a recommended option and whether
     /// it is blocking (irreversible or consequential). Non-blocking ones are
     /// not asked: each becomes an assumption on the task and the task goes
-    /// on; blocking ones go to triage and the owner as one question. Left
-    /// out of the JSON while off.
-    #[serde(skip_serializing_if = "is_false")]
+    /// on; blocking ones go to triage and the owner as one question. On
+    /// unless explicitly disabled, including on tasks saved before this
+    /// switch was on by default.
+    #[serde(skip_serializing_if = "is_true")]
     pub batch_questions: bool,
     /// 2 = on, 0/1 = off. On the hard tier the first implement attempt runs
     /// twice at once (the task's worktree and a sibling `-b` one, on the
@@ -989,7 +990,7 @@ impl Default for Variant {
             tier_routes: BTreeMap::new(),
             max_cost_usd: 0.0,
             max_attempt_cost_usd: 0.0,
-            batch_questions: false,
+            batch_questions: true,
             best_of: 0,
             best_of_route: None,
             land: false,

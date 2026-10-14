@@ -3795,7 +3795,10 @@ mod tests {
 
     #[test]
     fn default_plan_briefs_keep_the_plain_contract_and_split_boundary() {
-        let variant = Variant::default();
+        let variant = Variant {
+            batch_questions: false,
+            ..Variant::default()
+        };
         let plan = build_plan_brief("Fix it", &variant, "");
         let subtask = build_subtask_plan_brief("Fix it", &variant, "");
         for brief in [&plan, &subtask] {
@@ -3815,8 +3818,17 @@ mod tests {
     }
 
     #[test]
+    fn the_default_plan_brief_asks_for_a_recommended_option() {
+        let brief = build_plan_brief("Fix it", &Variant::default(), "");
+        assert!(brief.contains("\"recommended\""));
+    }
+
+    #[test]
     fn every_plan_brief_asks_for_checks_held_out_and_tests() {
-        let variant = Variant::default();
+        let variant = Variant {
+            batch_questions: false,
+            ..Variant::default()
+        };
         for brief in [
             build_plan_brief("Fix it", &variant, ""),
             build_subtask_plan_brief("Fix it", &variant, ""),

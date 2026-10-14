@@ -126,6 +126,63 @@ fn without_the_flag_every_question_is_still_asked() {
 }
 
 #[test]
+fn a_task_created_without_a_variant_assumes_a_non_blocking_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = setup(
+        plan(json!([
+            {"text": "Which default theme?", "options": ["light", "dark"], "recommended": "dark", "evidence": "e", "blocking": false},
+        ])),
+        dir.path(),
+    );
+    let daemon = spawn(&script, false);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "request": "add dark mode to the settings screen",
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    let stopped = poll_until(&daemon, &id, finished);
+    assert_eq!(stopped["status"], "stopped", "{stopped}");
+    assert_eq!(stopped["assumptions"][0]["answer"], "dark", "{stopped}");
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
+fn a_plan_without_a_verify_command_takes_the_first_one_the_repo_offers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut empty = plan(json!([]));
+    empty["verify"] = json!([]);
+    let script = setup(empty, dir.path());
+    let daemon = spawn(&script, false);
+    let repo = init_git_repo();
+    std::fs::write(repo.path().join("Makefile"), "test:\n\ttrue\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-qm", "makefile"]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let task = create(&daemon, repo.path(), true, false);
+    let id = task["id"].as_str().unwrap().to_string();
+    let stopped = poll_until(&daemon, &id, finished);
+    assert_eq!(stopped["status"], "stopped", "{stopped}");
+    assert_eq!(stopped["verify"], json!(["make test"]), "{stopped}");
+    assert_eq!(
+        stopped["assumptions"][0]["answer"], "make test",
+        "{stopped}"
+    );
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
 fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(

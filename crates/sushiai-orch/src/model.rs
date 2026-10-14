@@ -2424,10 +2424,37 @@ pub struct LoopState {
 /// What `pr_pending` opens: the remote branch, the title (empty: the task's
 /// own) and the body, already redacted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrPlan {
     pub branch: String,
     pub title: String,
     pub body: String,
+    /// Who chose `branch`; a plan stored before this field existed is `Task`.
+    #[serde(default)]
+    pub branch_from: BranchFrom,
+}
+
+/// Where a pull request plan's branch name came from. Only `Owner` and
+/// `Drafted` names were chosen by someone and are reused on a retry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BranchFrom {
+    Owner,
+    Drafted,
+    /// The task's own branch: the fallback, never a choice.
+    #[default]
+    Task,
+}
+
+impl PrPlan {
+    /// Whether a retry opens the pull request as stored, without a new draft.
+    pub fn is_reusable(&self) -> bool {
+        match self.branch_from {
+            BranchFrom::Owner => true,
+            BranchFrom::Drafted => !self.title.trim().is_empty() && !self.body.trim().is_empty(),
+            BranchFrom::Task => false,
+        }
+    }
 }
 
 impl Task {

@@ -627,7 +627,8 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
     };
     task = fresh;
     // A restart reuses what the first run chose and drafts nothing again.
-    let plan = match task.pr_plan.clone() {
+    // A branch nobody chose (the task's own) is drafted again.
+    let plan = match task.pr_plan.clone().filter(PrPlan::is_reusable) {
         Some(plan) => plan,
         None => {
             let mut cost = 0.0;
@@ -644,8 +645,8 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                     )
                 }
             };
-            let branch = match choose_branch(&task, &draft.branch).await {
-                Ok(name) => name,
+            let (branch, branch_from) = match choose_branch(&task, &draft.branch).await {
+                Ok(name) => (name, BranchFrom::Drafted),
                 Err(why) => {
                     if drafted_ok {
                         lines.push(format!(
@@ -653,7 +654,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                             task.branch
                         ));
                     }
-                    task.branch.clone()
+                    (task.branch.clone(), BranchFrom::Task)
                 }
             };
             // Landed, or opened by the overseer or the owner, while the draft ran.
@@ -704,6 +705,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                 branch,
                 title,
                 body,
+                branch_from,
             };
             let saved = plan.clone();
             let _ = app.update_task(id, move |t| {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Every stage a record can name. `brief_check` and `eval_check` are for
 /// runs that use a model; today those checks run shell commands only.
-pub const STAGES: [&str; 16] = [
+pub const STAGES: [&str; 17] = [
     "plan",
     "implement",
     "review",
@@ -29,6 +29,7 @@ pub const STAGES: [&str; 16] = [
     "audit",
     "evolution",
     "chat",
+    "other",
 ];
 
 const DAY_MS: i64 = 86_400_000;
@@ -71,8 +72,11 @@ pub fn costs_path(data: &Path) -> PathBuf {
 /// Appends one line. Best effort: a run's cost record must never fail the
 /// run.
 pub fn append(data: &Path, record: &CostRecord) {
-    debug_assert!(STAGES.contains(&record.stage.as_str()), "{}", record.stage);
-    let mut line = match serde_json::to_string(record) {
+    let mut record = record.clone();
+    if !STAGES.contains(&record.stage.as_str()) {
+        record.stage = "other".into();
+    }
+    let mut line = match serde_json::to_string(&record) {
         Ok(line) => line,
         Err(e) => {
             eprintln!("orch: serializing cost record failed: {e}");
@@ -750,6 +754,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orchd-costs-{name}-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_unknown_stage_is_recorded_under_other() {
+        let dir = temp_dir("unknown-stage");
+        append(&dir, &rec("brand_new_stage", "sonnet", 1.0, 1));
+        let records = read_all(&dir);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stage, "other");
     }
 
     #[test]

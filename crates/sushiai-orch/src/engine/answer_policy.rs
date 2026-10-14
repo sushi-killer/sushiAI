@@ -197,74 +197,36 @@ pub(super) fn runs_ci_entry(command: &str) -> bool {
         .any(|segment| segment_runs_ci(segment))
 }
 
-/// A plain file name: no glob, and an extension after a non-empty name.
-fn is_plain_file(target: &str) -> bool {
-    !target.contains(['*', '?', '['])
-        && target
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.rsplit_once('.'))
-            .is_some_and(|(name, ext)| {
-                !name.is_empty()
-                    && !name.ends_with('.')
-                    && ext.chars().any(|c| c.is_ascii_alphabetic())
-                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            })
+/// Whether `command` is named in the owner's request.
+pub(super) fn named_in_request(request: Option<&str>, command: &str) -> bool {
+    let command = flat_command(command);
+    !command.is_empty() && request.is_some_and(|r| flat_command(r).contains(&command))
 }
 
 /// Whether only the owner may drop `command`. An agent may drop a check only
-/// when the planner wrote it into the plan, no setting or request of the
-/// owner names it, it runs no CI entry, and every part of it names a planner
-/// test file or a plain file that does not exist on the base, with no other
-/// word, `$(…)` or backtick in it. Every other
-/// check is the repo's or the owner's.
+/// when its recorded source is the planner, no setting names it and it runs
+/// no CI entry. A check
+/// of the repo or of the owner, and a command nobody recorded, is shared.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
     let command = flat_command(command);
     if command.is_empty() {
         return false;
     }
-    let named_by_owner = scoped_checks_for(settings, task).iter().any(|e| {
+    let named_by_setting = scoped_checks_for(settings, task).iter().any(|e| {
         e.repo
             .as_deref()
             .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
             && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
     }) || settings.after_land.iter().any(|a| {
         crate::model::same_repo_path(&a.repo, &task.repo) && flat_command(&a.run) == command
-    }) || task
-        .request
-        .as_deref()
-        .is_some_and(|r| flat_command(r).contains(&command));
-    let from_planner = task
+    });
+    let source = task
         .planner_tests
-        .commands
+        .sources
         .iter()
-        .any(|c| flat_command(c) == command);
-    if named_by_owner || !from_planner || runs_ci_entry(&command) {
-        return true;
-    }
-    let absent = base_check::targets_absent_on_base(&task.repo, &task.base_sha, &command);
-    let planner_made = |target: &String| {
-        let target = target.strip_prefix("./").unwrap_or(target);
-        task.planner_tests.files.iter().any(|f| f.path == target)
-            || (is_plain_file(target) && absent.iter().any(|a| a == target))
-    };
-    let segments = command_segments(&command);
-    segments.is_empty()
-        || segments.iter().any(|segment| {
-            if segment.contains("$(") || segment.contains('`') {
-                return true;
-            }
-            let targets = base_check::check_targets(segment);
-            // Every word after the runner must be a flag or one of the
-            // targets: a bare word may name a directory or a path of the base.
-            let words = segment
-                .split_whitespace()
-                .skip_while(|word| is_assignment(word))
-                .skip(1)
-                .filter(|word| !word.starts_with('-'))
-                .count();
-            targets.is_empty() || words != targets.len() || !targets.iter().all(planner_made)
-        })
+        .find(|s| flat_command(&s.command) == command)
+        .map_or(CheckSource::Repo, |s| s.source);
+    named_by_setting || source != CheckSource::Planner || runs_ci_entry(&command)
 }
 
 /// The refusal for a non-owner who tries to drop `command`, a shared check.
@@ -858,14 +820,12 @@ mod tests {
         );
         for command in [
             "pytest",
-            "go test ./...",
             "cargo nextest run",
             "just ci",
             "./gradlew test",
             "npx vitest run",
             "npm run test:daemon",
             "pytest tests/test_other.py",
-            "node --test tests/a.test.cjs README.md",
             "",
         ] {
             assert_eq!(
@@ -874,6 +834,8 @@ mod tests {
                 "{command}"
             );
         }
+        // Planner-made checks (also for a directory-wide runner) are not shared.
+        assert!(!is_shared_check(&settings, &task, "go test ./..."));
         assert!(!is_shared_check(
             &settings,
             &task,
@@ -891,13 +853,13 @@ mod tests {
             &task,
             "pytest tests/test_new.py"
         ));
-        task.request = Some("run pytest tests/test_new.py before you finish".into());
+        task.planner_tests.sources[0].source = CheckSource::Owner;
         assert!(is_shared_check(
             &settings,
             &task,
             "pytest tests/test_new.py"
         ));
-        task.request = None;
+        task.planner_tests.sources[0].source = CheckSource::Planner;
         settings.after_land.push(AfterLand {
             repo: task.repo.clone(),
             run: "pytest tests/test_new.py".into(),
@@ -909,47 +871,60 @@ mod tests {
         ));
     }
 
+    fn sourced(task: &mut Task, command: &str, source: CheckSource) {
+        task.planner_tests.sources.push(SourcedCheck {
+            command: command.into(),
+            source,
+        });
+    }
+
     #[test]
-    fn a_target_absent_on_the_base_makes_a_planner_command_droppable() {
-        let repo = tempfile::tempdir().unwrap();
-        init_git_repo(repo.path());
-        let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo.path().to_string_lossy().into_owned();
-        task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
-        assert!(!task.base_sha.is_empty());
+    fn a_planner_check_that_cannot_pass_on_a_moved_base_is_droppable() {
         let settings = Settings::default();
-        let droppable = [
-            "pytest new/test_x.py",
-            "test -f new/a.txt && test -f new/b.txt",
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec![
+            "The version is 9 -- check: grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet".into(),
         ];
-        let owners = [
-            "pytest README.md",
-            "go test ./...",
-            "go test ./... -run X",
-            "pytest new",
-            "pytest new/*.py",
-            "npm run ci && node --test tests/new.test.cjs",
-            "npm test -- tests/new.test.cjs",
-            "cargo test --workspace 2>&1 | tee logs/ci.log",
-            "echo start && pytest new/test_x.py",
-            "pytest new/test_x.py; true",
-            "pytest tests new/test_x.py",
-            "node --test tests new/x.test.cjs",
-            "pytest $(git ls-files tests) new/test_x.py",
-            "pytest new/$(x)/a.py",
-            "pytest new/`x`/a.py",
-        ];
-        task.planner_tests.commands = droppable
-            .iter()
-            .chain(&owners)
-            .map(|c| c.to_string())
-            .collect();
-        for command in droppable {
-            assert!(!is_shared_check(&settings, &task, command), "{command}");
-        }
-        for command in owners {
+        let command = "grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet";
+        sourced(&mut task, command, CheckSource::Planner);
+        assert!(!is_shared_check(&settings, &task, command));
+        assert_eq!(
+            removal_refusal(&settings, &task, &[command.into()], Origin::Other),
+            None
+        );
+    }
+
+    #[test]
+    fn a_repo_or_owner_check_stays_shared_for_a_non_owner() {
+        let mut settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        sourced(&mut task, "npm test", CheckSource::Repo);
+        sourced(&mut task, "cargo test --workspace", CheckSource::Repo);
+        sourced(&mut task, "grep -q x a.txt", CheckSource::Owner);
+        for command in [
+            "npm test",
+            "cargo test --workspace",
+            "grep -q x a.txt",
+            "make unknown",
+        ] {
             assert!(is_shared_check(&settings, &task, command), "{command}");
+            assert!(
+                removal_refusal(&settings, &task, &[command.into()], Origin::Other).is_some(),
+                "{command}"
+            );
+            assert_eq!(
+                removal_refusal(&settings, &task, &[command.into()], Origin::Owner),
+                None
+            );
         }
+        // A setting that names a planner-recorded command keeps it shared.
+        sourced(&mut task, "pytest tests/x.py", CheckSource::Planner);
+        assert!(!is_shared_check(&settings, &task, "pytest tests/x.py"));
+        settings.after_land.push(AfterLand {
+            repo: task.repo.clone(),
+            run: "pytest tests/x.py".into(),
+        });
+        assert!(is_shared_check(&settings, &task, "pytest tests/x.py"));
     }
 
     #[test]

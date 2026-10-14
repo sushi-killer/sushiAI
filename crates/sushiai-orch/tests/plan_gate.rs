@@ -49,6 +49,8 @@ const CLEAN_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark 
 const HANDOFF_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files -- check: pytest tests/test_handoff.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
 /// The report-only criterion has no check of its own, so a non-owner may drop it.
+const HANDOFF_CI_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files -- check: npm run ci\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+
 const HANDOFF_NO_CHECK_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
 const REPORT_LISTS_DRAFT: &str = r#"{\"title\":\"Report failures\",\"goal\":\"List the failing tests\",\"tier\":\"hard\",\"criteria\":[\"The report lists every failing test by name -- check: pytest tests/test_report.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
@@ -173,10 +175,19 @@ fn a_typed_report_only_finding_removes_its_criterion_without_a_replan() {
 }
 
 #[test]
-fn a_report_only_finding_keeps_a_criterion_whose_check_is_shared() {
-    // The check is not a planner test, so only the owner may drop it.
+fn a_report_only_finding_drops_a_criterion_whose_check_the_planner_wrote() {
     let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
     let r = run(HANDOFF_DRAFT, HANDOFF_DRAFT, "claude-sonnet", review);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    assert_eq!(criteria(&r.task).len(), 1, "{}", r.task);
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_report_only_finding_keeps_a_criterion_whose_check_is_shared() {
+    // The check is a CI entry of the repo, so only the owner may drop it.
+    let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
+    let r = run(HANDOFF_CI_DRAFT, HANDOFF_CI_DRAFT, "claude-sonnet", review);
     assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
     let stored = criteria(&r.task);
     assert_eq!(stored.len(), 2, "criteria: {stored:?}");

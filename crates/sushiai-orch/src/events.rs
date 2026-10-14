@@ -76,6 +76,7 @@ mod tests {
             branch: "task/t".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,

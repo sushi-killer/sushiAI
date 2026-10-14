@@ -22,6 +22,7 @@ pub(super) async fn run_task_loop(
     // the parent has an attempt) the parent never goes back to `run_parent`.
     let mut parent_failure: Option<String> = None;
     let mut parent_conflict_only = false;
+    let mut base_refreshed = false;
 
     'attempts: loop {
         if cancel.is_cancelled() {
@@ -258,6 +259,13 @@ pub(super) async fn run_task_loop(
             }
         };
 
+        // A named base is fetched again as the task starts, so it plans or
+        // implements on the branch as its remote has it now.
+        if !base_refreshed {
+            base_refreshed = true;
+            fresh_base::refresh_at_start(&app, &mut task).await;
+        }
+
         // A task that passed everything and waited to land: only the landing
         // is tried again.
         if task.status == TaskStatus::Landing && !task.attempts.is_empty() {
@@ -333,24 +341,7 @@ pub(super) async fn run_task_loop(
             // is now, when nothing has touched its worktree yet.
             // A subtask keeps the parent-head move done before attempt 1.
             if task.attempts.is_empty() && task.parent.is_none() {
-                if let Some(base_ref) = task.base_ref.clone() {
-                    let (wt, from, r) = (
-                        PathBuf::from(&task.worktree),
-                        task.base_sha.clone(),
-                        base_ref.clone(),
-                    );
-                    let moved = tokio::task::spawn_blocking(move || {
-                        git::reset_untouched_to_base(&wt, &r, &from)
-                    })
-                    .await;
-                    if let Ok(Ok(Some(new_sha))) = moved {
-                        task.decisions.push(format!(
-                            "Rebase: planning from {base_ref} at {}",
-                            short_sha(&new_sha)
-                        ));
-                        task.base_sha = new_sha;
-                    }
-                }
+                fresh_base::plan_on_newest_base(&mut task).await;
             }
             if task.status == TaskStatus::Queued {
                 task.status = TaskStatus::Drafting;
@@ -1707,7 +1698,7 @@ pub(super) async fn run_task_loop(
         if let Some(base_ref) = task.base_ref.clone() {
             let (wt, mut snapshot, r) = (worktree.clone(), task.clone(), base_ref.clone());
             let carried = tokio::task::spawn_blocking(move || {
-                let carried = carry_with_planner_tests(&mut snapshot, &wt, &r)?;
+                let carried = fresh_base::carry_work(&mut snapshot, &wt, &r)?;
                 Ok((carried, snapshot.planner_tests))
             })
             .await
@@ -2983,7 +2974,8 @@ pub(super) async fn carry_onto_newest_base(
     let (wt, mut snapshot, r) = (worktree.to_path_buf(), task.clone(), base_ref.clone());
     let carried = tokio::task::spawn_blocking(move || {
         let from = snapshot.base_sha.clone();
-        let new_sha = git::resolve_commit(&wt, &r)?;
+        let tip = snapshot.fresh_base.as_ref().and_then(|f| f.tip.clone());
+        let new_sha = git::resolve_commit(&wt, &fresh_base::carry_rev(&wt, &r, tip.as_deref()))?;
         if new_sha == from {
             return Ok((git::Rebase::Unchanged, false, snapshot.planner_tests));
         }
@@ -3010,7 +3002,7 @@ pub(super) async fn carry_onto_newest_base(
         if git::head_sha(&wt)? != target {
             git::uncommit_to(&wt, &target)?;
         }
-        let carried = carry_with_planner_tests(&mut snapshot, &wt, &r)?;
+        let carried = fresh_base::carry_work(&mut snapshot, &wt, &r)?;
         Ok((carried, false, snapshot.planner_tests))
     })
     .await

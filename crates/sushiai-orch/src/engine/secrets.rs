@@ -37,6 +37,28 @@ pub(super) fn project_for_repo(
     Ok(exact.or_else(containing).map(|(_, id)| id.clone()))
 }
 
+/// The default branch of the project whose folder is `repo` (or holds it,
+/// the deepest such folder).
+pub(super) fn branch_for_repo(secrets: &Secrets, repo: &str) -> Option<String> {
+    let repo_path = std::fs::canonicalize(repo).unwrap_or_else(|_| PathBuf::from(repo));
+    let exact = secrets
+        .project_branches
+        .iter()
+        .find(|(folder, _)| same_repo_path(folder, repo));
+    let containing = || {
+        secrets
+            .project_branches
+            .iter()
+            .filter(|(folder, _)| {
+                repo_path.starts_with(
+                    std::fs::canonicalize(folder).unwrap_or_else(|_| PathBuf::from(folder)),
+                )
+            })
+            .max_by_key(|(folder, _)| (Path::new(folder).components().count(), *folder))
+    };
+    exact.or_else(containing).map(|(_, branch)| branch.clone())
+}
+
 pub(super) fn redact_old_run_mcp(data_dir: &Path, secrets: &Secrets) {
     let marker = data_dir.join("run-mcp-redacted");
     if marker.exists() {

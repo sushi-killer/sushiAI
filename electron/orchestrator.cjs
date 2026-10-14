@@ -665,6 +665,11 @@ class OrchestratorService {
               .then((map) => map ?? {})
               .catch(() => ({}))
           : {},
+        projectBranches: projects
+          ? await Promise.resolve(projects.repoBranches?.(target))
+              .then((map) => map ?? {})
+              .catch(() => ({}))
+          : {},
       },
       5000,
     );

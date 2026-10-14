@@ -479,7 +479,13 @@ class Projects {
     const nextNames = new Set(project.env.map((entry) => entry.name));
     const removed = [...previousNames].filter((name) => !nextNames.has(name));
     this.#save({ ...projects, [id]: project }, secretsOf(id, removed));
-    if (removed.length) this.#changed();
+    // The daemons branch new tasks from the default branch: an edit reaches
+    // them like any other change they hold.
+    const branchEdited =
+      existing &&
+      (existing.git?.defaultBranch || "").trim() !==
+        project.git.defaultBranch.trim();
+    if (removed.length || branchEdited) this.#changed();
     return this.#withHints(project, this.#secrets());
   }
 
@@ -1104,6 +1110,21 @@ class Projects {
     for (const project of Object.values(projects))
       for (const folder of project.folders || [])
         if (folder.endpoint === host) output[folder.cwd] = project.id;
+    return output;
+  }
+
+  /** Folder path -> its project's default branch on a host, for the folders
+   * whose project names one: what a task made there with no base branches
+   * from. */
+  async repoBranches(host = "local") {
+    const projects = this.#load();
+    const output = {};
+    for (const project of Object.values(projects)) {
+      const branch = String(project.git?.defaultBranch || "").trim();
+      if (!branch) continue;
+      for (const folder of project.folders || [])
+        if (folder.endpoint === host) output[folder.cwd] = branch;
+    }
     return output;
   }
 

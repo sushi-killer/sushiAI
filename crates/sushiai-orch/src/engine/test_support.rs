@@ -75,6 +75,7 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         branch: "task/do-thing".into(),
         base_sha: "deadbeef".into(),
         base_ref: None,
+        fresh_base: None,
         depends_on: vec![],
         paths: vec![],
         parent: None,

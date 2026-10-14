@@ -348,6 +348,7 @@ mod tests {
             branch: "b".into(),
             base_sha: "s".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,

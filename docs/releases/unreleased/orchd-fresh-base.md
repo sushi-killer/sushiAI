@@ -1,0 +1,6 @@
+## orchd branches every task from a freshly fetched base
+
+- When a task's base is named (a `base` on `task.create`, or the project's default branch), orchd fetches that branch from its remote when the task is created and again when it starts, and branches from the newest tip. The remote is the branch's upstream, or `origin` when it has none; a repository with no remote is not fetched.
+- A task created with no base now starts from the project's default branch (set in the project's git settings) instead of whatever the checkout has checked out. A project with no default branch keeps using `HEAD`, with no fetch. A default branch that exists neither locally nor on the remote falls back to `HEAD` with a warning.
+- A clean local checkout of the base branch that is behind is fast-forwarded. One that is ahead keeps its commits. One with uncommitted changes or commits the remote does not have is never touched: the task branches from the fetched tip, stays on it through planning and retries, and records a warning.
+- The fetch never waits for you: it does not prompt for credentials and gives up after 20 seconds. When it fails (offline, no access), the task goes on from the local branch and its decisions show a `Warning:` line naming the branch and the commit it started from.

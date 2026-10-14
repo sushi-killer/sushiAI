@@ -1874,6 +1874,17 @@ pub struct Unlanded {
     pub base: String,
 }
 
+/// A named base branch as its remote had it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreshBase {
+    /// The remote tip last fetched. When the local branch does not contain it
+    /// (a dirty or diverged checkout left as it was), the task's work is
+    /// carried onto this commit instead of the stale local branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -1957,6 +1968,11 @@ pub struct Task {
     /// never rebases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Set when the task's base was named (`base`, or the project's default
+    /// branch): it is fetched again when the task starts. `None` for a task
+    /// that took the checkout's HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_base: Option<FreshBase>,
     /// Ids of tasks that must be `done` before this one starts implementing
     /// (it may still draft its plan meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3062,6 +3078,7 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,
@@ -3327,6 +3344,7 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,
@@ -3400,6 +3418,7 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,
@@ -3499,6 +3518,7 @@ mod tests {
             branch: "task/x".into(),
             base_sha: "abc".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,

@@ -2560,6 +2560,7 @@ mod tests {
             branch: "task/add-a-button".into(),
             base_sha: "abc123".into(),
             base_ref: None,
+            fresh_base: None,
             depends_on: vec![],
             paths: vec![],
             parent: None,

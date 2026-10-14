@@ -78,7 +78,8 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     runs.sort_by(|a, b| a.0.cmp(&b.0));
     let stages: Vec<&str> = runs.iter().map(|r| r.0.as_str()).collect();
     // The review's route turn is its own run: it leaves a record under the
-    // review phase, so the review phase has two records.
+    // review phase, so the review phase has two records. The plan review is
+    // its own run too, under the plan phase.
     assert_eq!(
         stages,
         [
@@ -86,13 +87,15 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
             "implement",
             "implement",
             "plan",
+            "plan",
             "review",
             "review"
         ],
         "{all:?}"
     );
     let cost = |stage: &str| runs.iter().find(|r| r.0 == stage).unwrap().1;
-    assert!((cost("plan") - 0.02).abs() < 1e-9);
+    let plan_cost: f64 = runs.iter().filter(|r| r.0 == "plan").map(|r| r.1).sum();
+    assert!((plan_cost - 0.02).abs() < 1e-9);
     assert!((cost("advisor") - 0.03).abs() < 1e-9);
     let review_cost: f64 = runs.iter().filter(|r| r.0 == "review").map(|r| r.1).sum();
     assert!((review_cost - 0.05).abs() < 1e-9);
@@ -112,7 +115,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
     );
     let total = summary["totals"]["costUsd"].as_f64().unwrap();
     assert!((total - settled["costUsd"].as_f64().unwrap()).abs() < 1e-9);
-    assert_eq!(summary["totals"]["runs"], 6);
+    assert_eq!(summary["totals"]["runs"], 7);
     assert_eq!(summary["rows"].as_array().unwrap().len(), 4);
     let detail = daemon.request("task.get", serde_json::json!({"id": task_id}));
     let by_stage = detail["costByStage"].as_array().unwrap();
@@ -126,7 +129,7 @@ fn a_full_task_leaves_one_cost_record_per_run_and_summaries_add_up() {
         .output()
         .unwrap();
     let cli: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(cli["totals"]["runs"], 6);
+    assert_eq!(cli["totals"]["runs"], 7);
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();

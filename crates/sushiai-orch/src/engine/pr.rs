@@ -328,7 +328,22 @@ impl App {
                 "{branch} is a base branch; pick another remote branch name for the pull request"
             ));
         }
-        run_cmd("git", &["fetch", "origin", &base], &repo, GIT_TIMEOUT).await?;
+        // The same carry as the automatic pull request: never push a stale base.
+        match super::pr_draft::carry_for_pr(&self.arc(), &task).await? {
+            super::pr_draft::PrCarry::Ready => {}
+            super::pr_draft::PrCarry::Contained => {
+                return Err(format!(
+                    "origin/{base} already contains this work; nothing to open a pull request for"
+                ));
+            }
+            super::pr_draft::PrCarry::Resolving(files) => {
+                return Err(format!(
+                    "the work conflicts with origin/{base} in {}; one conflict-resolution attempt runs now and the pull request opens when it is done",
+                    files.join(", ")
+                ));
+            }
+            super::pr_draft::PrCarry::Failed(reason) => return Err(reason),
+        }
         let count = run_cmd(
             "git",
             &["rev-list", "--count", &format!("origin/{base}..{local}")],

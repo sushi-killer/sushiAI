@@ -1769,6 +1769,9 @@ pub enum Risk {
     Destructive,
     Security,
     Deploy,
+    Scope,
+    #[serde(rename = "public-api")]
+    PublicApi,
 }
 
 /// How long a question stays held for the overseer.

@@ -27,6 +27,10 @@ pub(crate) enum HardLimit {
     Destructive,
     /// A production deploy.
     ProductionDeploy,
+    /// A change of the task's scope against the request.
+    ScopeChange,
+    /// A public API or contract change.
+    PublicApi,
 }
 
 impl Risk {
@@ -38,6 +42,8 @@ impl Risk {
             Risk::Destructive => HardLimit::Destructive,
             Risk::Security => HardLimit::SandboxOrSecurity,
             Risk::Deploy => HardLimit::ProductionDeploy,
+            Risk::Scope => HardLimit::ScopeChange,
+            Risk::PublicApi => HardLimit::PublicApi,
         }
     }
 }
@@ -430,6 +436,20 @@ mod tests {
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
         )
+    }
+
+    #[test]
+    fn the_scope_and_public_api_tags_are_hard_limits() {
+        let mut q = free_q("Which way?", &["a", "b"]);
+        for (risk, limit) in [
+            (Risk::Scope, HardLimit::ScopeChange),
+            (Risk::PublicApi, HardLimit::PublicApi),
+        ] {
+            q.risk = vec![risk];
+            assert_eq!(hard_limit(&q, "a"), Some(limit));
+        }
+        let tagged: Vec<Risk> = serde_json::from_str(r#"["scope","public-api"]"#).unwrap();
+        assert_eq!(tagged, vec![Risk::Scope, Risk::PublicApi]);
     }
 
     fn exhausted_q() -> Question {

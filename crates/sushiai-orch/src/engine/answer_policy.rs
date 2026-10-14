@@ -790,8 +790,13 @@ pub(super) fn default_choice(app: &App, task: &Task, question: &Question) -> Opt
     if !policy_open(app, task, question) {
         return None;
     }
+    let under_limit = |option: &String| hard_limit(question, option).is_some();
     if let Some(index) = question.default_option {
-        return question.options.get(index).cloned();
+        return question
+            .options
+            .get(index)
+            .filter(|o| !under_limit(o))
+            .cloned();
     }
     if !matches!(
         question.kind,
@@ -799,7 +804,9 @@ pub(super) fn default_choice(app: &App, task: &Task, question: &Question) -> Opt
     ) {
         return None;
     }
-    cautious_option(&question.options).cloned()
+    cautious_option(&question.options)
+        .filter(|o| !under_limit(o))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -808,6 +815,34 @@ mod tests {
 
     fn opts(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_wait_default_never_takes_an_option_under_a_hard_limit() {
+        let (app, _dir) = crate::engine::test_support::test_app();
+        app.settings.write().unwrap().answer_policy = true;
+        let task = task_with_status(TaskStatus::Waiting);
+        let mut question = Question::new(
+            "Which layout?",
+            opts(&["wide", "narrow"]),
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        question.default_option = Some(1);
+        assert_eq!(
+            default_choice(&app, &task, &question).as_deref(),
+            Some("narrow")
+        );
+        question.text = "Clean up the old data?".into();
+        question.options = opts(&["delete the old data", "keep the old data"]);
+        assert_eq!(default_choice(&app, &task, &question), None);
+        question.default_option = Some(0);
+        assert_eq!(default_choice(&app, &task, &question), None);
+        // The agent's own tag limits an option the words do not.
+        question.options = opts(&["go ahead", "wait"]);
+        question.text = "How should it go?".into();
+        question.risk = vec![Risk::Destructive];
+        assert_eq!(default_choice(&app, &task, &question), None);
     }
 
     #[test]

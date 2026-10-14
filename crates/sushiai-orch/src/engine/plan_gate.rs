@@ -203,6 +203,37 @@ fn report_only_criteria(found: &[ReviewFinding]) -> Vec<usize> {
     out
 }
 
+/// The criteria the review may remove and the findings the plan keeps. A
+/// report-only criterion that carries a shared check is never removed here
+/// (only the owner drops one): its finding stays, never above `High`.
+fn split_review(
+    settings: &Settings,
+    task: &Task,
+    found: &[ReviewFinding],
+) -> (Vec<usize>, Vec<PlanFinding>) {
+    let (removals, shared): (Vec<usize>, Vec<usize>) =
+        report_only_criteria(found).into_iter().partition(|&i| {
+            let commands = answer_policy::criterion_commands(task, i);
+            answer_policy::removal_refusal(settings, task, &commands, answer_policy::Origin::Other)
+                .is_none()
+        });
+    let review = found
+        .iter()
+        .filter(|f| {
+            f.kind != ReviewKind::ReportOnly || f.criterion.is_some_and(|i| shared.contains(&i))
+        })
+        .enumerate()
+        .map(|(n, f)| {
+            let mut finding = plan_finding(n, f);
+            if f.kind == ReviewKind::ReportOnly && finding.severity == Severity::Critical {
+                finding.severity = Severity::High;
+            }
+            finding
+        })
+        .collect();
+    (removals, review)
+}
+
 fn build_review_prompt(task: &Task, request: &str, subtasks: &[brief::PlanSubtask]) -> String {
     let parts: Vec<serde_json::Value> = subtasks
         .iter()
@@ -380,13 +411,7 @@ pub(super) async fn run(
                                     route.id,
                                     found.len()
                                 ));
-                                removals = report_only_criteria(&found);
-                                review = found
-                                    .iter()
-                                    .filter(|f| f.kind != ReviewKind::ReportOnly)
-                                    .enumerate()
-                                    .map(|(n, f)| plan_finding(n, f))
-                                    .collect();
+                                (removals, review) = split_review(&settings, &task, &found);
                             }
                             Err(why) => lines.push(format!(
                                 "Plan gate: plan review gave no usable answer ({}); continuing",
@@ -664,6 +689,34 @@ mod tests {
         .unwrap();
         assert_eq!(report_only_criteria(&found), vec![2]);
         assert!(report_only_criteria(&parse_review("{\"findings\": []}", 3).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_report_only_criterion_with_a_shared_check_is_kept_as_a_finding() {
+        use crate::engine::test_support::{task_with_status, test_app};
+        let (app, _dir) = test_app();
+        let settings = app.settings.read().unwrap().clone();
+        let mut task = task_with_status(TaskStatus::Drafting);
+        task.criteria = vec![
+            "Shared -- check: npm run ci".into(),
+            "Own -- check: test -f made.txt".into(),
+        ];
+        task.request = Some("Run `npm run ci`".into());
+        task.planner_tests.commands = vec!["test -f made.txt".into()];
+        task.planner_tests.files = vec![crate::model::PlannedTest {
+            path: "made.txt".into(),
+            content: String::new(),
+        }];
+        let found = parse_review(
+            "{\"findings\":[{\"kind\":\"report-only\",\"criterion\":0,\"severity\":\"critical\",\"text\":\"a\"},{\"kind\":\"report-only\",\"criterion\":1,\"severity\":\"medium\",\"text\":\"b\"}]}",
+            2,
+        )
+        .unwrap();
+        let (removals, review) = split_review(&settings, &task, &found);
+        assert_eq!(removals, vec![1]);
+        assert_eq!(review.len(), 1);
+        assert_eq!(review[0].severity, Severity::High);
+        assert_eq!(review[0].kind, "report-only");
     }
 
     #[test]

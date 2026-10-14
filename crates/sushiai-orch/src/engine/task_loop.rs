@@ -2732,7 +2732,15 @@ pub(super) async fn run_task_loop(
             // work cost an attempt; the rest go to the report.
             if r.verdict == Verdict::Fail && implement_attempt_count(&task) >= 2 {
                 let was = r.findings.len();
-                let old_on_base = findings_old_on_base(&app, &task, r, &run_dir, &cancel).await;
+                let old_on_base = findings_old_on_base(
+                    &app,
+                    &task,
+                    r,
+                    Path::new(&task.worktree),
+                    &run_dir,
+                    &cancel,
+                )
+                .await;
                 let follow_ups = scope_review(r, &old_on_base);
                 if !follow_ups.is_empty() {
                     task.decisions.push(if r.verdict == Verdict::Pass {

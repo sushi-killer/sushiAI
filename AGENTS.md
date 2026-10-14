@@ -321,6 +321,8 @@ or `./node_modules/.bin/<tool>`, never `npx`. The owner merges.
 
 ## Read when relevant
 
+- `docs/orchd-approach.md` — before any change to `crates/sushiai-orch`:
+  judgement is an agent turn, code keeps gates, bookkeeping and fast paths.
 - `$sushiai-task` — the loop every nontrivial task runs; `$sushiai-testing`
   picks proof; `$ui-evidence` measures and photographs the built UI;
   `$deslop` then `$autoreview` clean and review a diff before commit.

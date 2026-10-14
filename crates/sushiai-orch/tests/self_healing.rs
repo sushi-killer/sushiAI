@@ -327,7 +327,7 @@ fn a_check_that_fails_on_the_base_as_it_should_stays_as_written() {
 #[test]
 fn the_same_unmet_criterion_twice_goes_to_the_judge_and_an_infeasible_one_is_amended() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Clicking opens the panel\",\"met\":false,\"evidence\":\"there is no DOM click test\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"there is no DOM click test\"}]}",
     );
     let pass = review_reply("{\"verdict\":\"PASS\",\"findings\":[]}");
     let ruling = js(
@@ -370,7 +370,7 @@ fn the_same_unmet_criterion_twice_goes_to_the_judge_and_an_infeasible_one_is_ame
 #[test]
 fn a_code_gap_ruling_leaves_the_criterion_and_the_retries_go_on() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Clicking opens the panel\",\"met\":false,\"evidence\":\"the handler is missing\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"the handler is missing\"}]}",
     );
     let ruling = js("{\"verdict\":\"code gap\",\"reason\":\"the handler is not written\"}");
     let s = setup(
@@ -548,7 +548,7 @@ fn after_the_first_attempt_p2_and_unrelated_findings_do_not_cost_an_attempt_and_
         "{\"verdict\":\"FAIL\",\"findings\":[\"P1: CHANGED_MARKER.txt:1 - wrong content\"]}",
     );
     let second = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",\"P1: legacy/other.rs:9 - an old bug\"]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",{\"finding\":\"P1: legacy/other.rs:9 - an old bug\",\"causedByDiff\":false}]}",
     );
     let s = setup(
         &[("REVIEW_0", &first), ("REVIEW_REST", &second)],
@@ -593,7 +593,7 @@ fn after_the_first_attempt_a_p1_about_the_tasks_own_work_still_blocks() {
 #[test]
 fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"The button is blue\",\"met\":false,\"evidence\":\"it is not blue\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"it is not blue\"}]}",
     );
     let pass = review_reply("{\"verdict\":\"PASS\",\"findings\":[]}");
     let answer_judge = js(

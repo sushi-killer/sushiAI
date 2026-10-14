@@ -13,28 +13,22 @@ pub(super) fn review_stopped_note(attempt_n: u32) -> String {
 /// Reviews of a finding after the first that make it a repeat to handle.
 const HANDLE_AT_REPEATS: u32 = 2;
 
-const ID_OPEN: &str = " [F-";
-
-/// `text` without the ` [F-xxxxxx]` mark `with_id` appended.
-fn strip_finding_id(text: &str) -> &str {
+/// `text` split into the part before the ` [F-id]` mark `with_id` appended
+/// and the id in the mark.
+fn split_id(text: &str) -> (&str, Option<&str>) {
     let t = text.trim_end();
-    if let Some(start) = t.rfind(ID_OPEN) {
-        let tail = &t[start + ID_OPEN.len()..];
-        if tail.len() == 7
-            && tail.ends_with(']')
-            && tail[..6].chars().all(|c| c.is_ascii_hexdigit())
-        {
-            return t[..start].trim_end();
+    if let Some(start) = t.rfind(" [F-") {
+        if let Some(id) = t[start + 2..].strip_suffix(']') {
+            if id.len() > 2 && id[2..].chars().all(|c| c.is_ascii_alphanumeric()) {
+                return (t[..start].trim_end(), Some(id));
+            }
         }
     }
-    t
+    (t, None)
 }
 
-/// The id a finding keeps for its whole life: `F-` and the first six hex
-/// characters of the FNV-1a hash of its key.
-pub(super) fn finding_id(text: &str) -> String {
-    let key = finding_key(strip_finding_id(text));
-    format!("F-{}", &crate::harness::short_hash(&[&key])[..6])
+fn strip_finding_id(text: &str) -> &str {
+    split_id(text).0
 }
 
 fn with_id(text: &str, id: &str) -> String {
@@ -42,10 +36,22 @@ fn with_id(text: &str, id: &str) -> String {
 }
 
 /// The id a finding text carries, when it carries one.
-fn id_of(text: &str) -> Option<String> {
-    let t = text.trim_end();
-    let stripped = strip_finding_id(text);
-    (stripped.len() != t.len()).then(|| format!("F-{}", &t[t.len() - 7..t.len() - 1]))
+pub(super) fn id_of(text: &str) -> Option<String> {
+    split_id(text).1.map(str::to_string)
+}
+
+/// Whether `text` names the finding `id` as a whole word.
+pub(super) fn names_id(text: &str, id: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric() && c != '-')
+        .any(|word| word == id)
+}
+
+/// The first `F-<n>` no registered finding has.
+fn new_finding_id(task: &Task) -> String {
+    (task.findings.len() + 1..)
+        .map(|n| format!("F-{n}"))
+        .find(|id| task.findings.iter().all(|f| f.id != *id))
+        .expect("an unused id")
 }
 
 /// Removes the findings at `drop` (indexes into `r.findings`) with their
@@ -101,23 +107,31 @@ pub(super) fn move_minor_findings(task: &mut Task, attempt_n: u32, r: &mut Revie
 }
 
 /// Puts the reviewer's own findings of one review into the task's registry
-/// and gives each its id in the review's text. A finding the registry holds
-/// as resolved and that comes back without a new failing scenario is dropped.
+/// and gives each its id: the registered finding it named, else a new one.
+/// The id is in the finding's `details` and marked in its text. A finding
+/// the registry holds as resolved and that comes back without a new failing
+/// scenario is dropped. A finding open since an earlier review run, or
+/// reopened, is a repeat.
 pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: &mut ReviewResult) {
     let own = r.severities.len().min(r.findings.len());
+    if r.details.len() < own {
+        r.details.resize(own, Default::default());
+    }
+    r.repeated.clear();
     let mut present: Vec<String> = Vec::new();
     let mut dropped: Vec<usize> = Vec::new();
-    let mut renamed: Vec<(String, String)> = Vec::new();
     for i in 0..own {
         let raw = strip_finding_id(&r.findings[i]).to_string();
-        let id = finding_id(&raw);
-        let run = r
-            .details
-            .get(i)
-            .and_then(|d| d.scenario.as_ref())
-            .map(|s| s.run.clone());
-        match task.findings.iter_mut().find(|f| f.id == id) {
-            Some(rec) if rec.status == FindingStatus::Resolved => {
+        let run = r.details[i].scenario.as_ref().map(|s| s.run.clone());
+        let named = r.details[i].id.as_deref().and_then(|id| {
+            let pos = task.findings.iter().position(|f| f.id == id)?;
+            (!present.contains(&task.findings[pos].id)).then_some(pos)
+        });
+        let mut repeat = false;
+        let id = match named {
+            Some(pos) if task.findings[pos].status == FindingStatus::Resolved => {
+                let rec = &mut task.findings[pos];
+                let id = rec.id.clone();
                 let new_run = run.as_ref().filter(|run| !rec.scenarios.contains(run));
                 let Some(new_run) = new_run else {
                     task.decisions.push(format!(
@@ -130,11 +144,15 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
                 rec.status = FindingStatus::Open;
                 rec.attempt = attempt_n;
                 rec.round = round;
+                repeat = true;
                 task.decisions.push(format!(
                     "Orchestrator: review finding {id} came back with a new failing scenario ({new_run}); kept"
                 ));
+                id
             }
-            Some(rec) => {
+            Some(pos) => {
+                let rec = &mut task.findings[pos];
+                repeat = rec.attempt < attempt_n || rec.round < round;
                 if rec.attempt < attempt_n {
                     rec.repeats += 1;
                 }
@@ -143,31 +161,33 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
                 if let Some(run) = run.filter(|run| !rec.scenarios.contains(run)) {
                     rec.scenarios.push(run);
                 }
+                rec.id.clone()
             }
-            None => task.findings.push(FindingRecord {
-                id: id.clone(),
-                text: raw.clone(),
-                status: FindingStatus::Open,
-                attempt: attempt_n,
-                round,
-                repeats: 0,
-                scenarios: run.into_iter().collect(),
-                handled: false,
-            }),
-        }
+            None => {
+                let id = new_finding_id(task);
+                task.findings.push(FindingRecord {
+                    id: id.clone(),
+                    text: raw.clone(),
+                    status: FindingStatus::Open,
+                    attempt: attempt_n,
+                    round,
+                    repeats: 0,
+                    scenarios: run.into_iter().collect(),
+                    handled: false,
+                });
+                id
+            }
+        };
+        r.details[i].id = Some(id.clone());
         present.push(id.clone());
-        renamed.push((r.findings[i].clone(), with_id(&raw, &id)));
+        r.findings[i] = with_id(&raw, &id);
+        if repeat {
+            r.repeated.push(r.findings[i].clone());
+        }
     }
     for rec in task.findings.iter_mut() {
         if rec.status == FindingStatus::Open && !present.contains(&rec.id) {
             rec.status = FindingStatus::Resolved;
-        }
-    }
-    for (old, new) in renamed {
-        for t in r.findings.iter_mut().chain(r.repeated.iter_mut()) {
-            if *t == old {
-                *t = new.clone();
-            }
         }
     }
     remove_findings(r, &dropped);
@@ -198,7 +218,9 @@ pub(super) async fn handle_repeated_findings(
     let mut made_checks = false;
     for i in 0..own {
         let finding = r.findings[i].clone();
-        let Some(id) = id_of(&finding) else { continue };
+        let Some(id) = r.details.get(i).and_then(|d| d.id.clone()) else {
+            continue;
+        };
         let Some(pos) = task.findings.iter().position(|f| f.id == id) else {
             continue;
         };
@@ -302,20 +324,32 @@ mod tests {
         }
     }
 
+    fn named(r: &mut ReviewResult, ids: &[Option<&str>]) {
+        r.details = ids
+            .iter()
+            .map(|id| FindingDetail {
+                id: id.map(str::to_string),
+                ..Default::default()
+            })
+            .collect();
+    }
+
     #[test]
-    fn an_id_is_stable_and_ignores_its_own_mark() {
-        let id = finding_id("P1: src/a.rs:10 - the parser drops the last row");
-        assert!(id.starts_with("F-") && id.len() == 8, "{id}");
+    fn a_mark_is_added_stripped_and_read_back() {
+        let marked = with_id("P1: the parser drops the last row", "F-7");
+        assert_eq!(marked, "P1: the parser drops the last row [F-7]");
+        assert_eq!(id_of(&marked).as_deref(), Some("F-7"));
         assert_eq!(
-            id,
-            finding_id("P1: src/a.rs:44 - the parser drops the last row")
+            strip_finding_id(&marked),
+            "P1: the parser drops the last row"
         );
-        let marked = with_id("P1: the parser drops the last row", &id);
-        assert_eq!(id_of(&marked).as_deref(), Some(id.as_str()));
         assert_eq!(
-            finding_id(&marked),
-            finding_id("P1: the parser drops the last row")
+            with_id(&marked, "F-8"),
+            "P1: the parser drops the last row [F-8]"
         );
+        assert_eq!(id_of("P1: a [not an id]"), None);
+        assert!(names_id("see F-1, not F-12", "F-1"));
+        assert!(!names_id("see F-12", "F-1"));
     }
 
     #[test]
@@ -330,5 +364,82 @@ mod tests {
         register_findings(&mut task, 2, 1, &mut next);
         assert_eq!(task.findings[0].status, FindingStatus::Resolved);
         assert_eq!(task.findings.len(), 2);
+    }
+
+    #[test]
+    fn a_new_p1_worded_like_a_resolved_one_with_no_id_is_kept() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut r = review(&["P1: the parser drops the last row"]);
+        register_findings(&mut task, 1, 1, &mut r);
+        let mut next = review(&["P2: something else"]);
+        register_findings(&mut task, 2, 1, &mut next);
+        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+
+        let mut again = review(&["P1: the parser drops the last row"]);
+        named(&mut again, &[None]);
+        register_findings(&mut task, 3, 1, &mut again);
+        assert_eq!(again.findings.len(), 1, "{:?}", again.findings);
+        assert_eq!(task.findings.len(), 3);
+        assert_eq!(again.details[0].id.as_deref(), Some("F-3"));
+        assert!(again.repeated.is_empty());
+    }
+
+    #[test]
+    fn a_named_resolved_finding_needs_a_new_scenario_to_come_back() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut r = review(&["P1: first"]);
+        register_findings(&mut task, 1, 1, &mut r);
+        let mut next = review(&["P1: second"]);
+        register_findings(&mut task, 2, 1, &mut next);
+        let mut back = review(&["P1: first, reworded"]);
+        named(&mut back, &[Some("F-1")]);
+        register_findings(&mut task, 3, 1, &mut back);
+        assert!(back.findings.is_empty());
+        assert_eq!(back.verdict, Verdict::Pass);
+        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+
+        let mut with_run = review(&["P1: first, reworded"]);
+        with_run.details = vec![FindingDetail {
+            id: Some("F-1".into()),
+            scenario: Some(FindingScenario {
+                run: "cargo test first".into(),
+                fails: "red".into(),
+            }),
+            ..Default::default()
+        }];
+        register_findings(&mut task, 4, 1, &mut with_run);
+        assert_eq!(with_run.findings, ["P1: first, reworded [F-1]"]);
+        assert_eq!(with_run.repeated, with_run.findings);
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
+    }
+
+    #[test]
+    fn a_named_open_finding_is_a_repeat_and_counts_once_per_attempt() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut r = review(&["P1: first"]);
+        register_findings(&mut task, 1, 1, &mut r);
+        assert!(r.repeated.is_empty());
+        for (attempt, round, repeats, repeated) in [
+            (1, 1, 0, false),
+            (1, 2, 0, true),
+            (2, 1, 1, true),
+            (2, 2, 1, true),
+        ] {
+            let mut again = review(&["P1: first, reworded"]);
+            named(&mut again, &[Some("F-1")]);
+            register_findings(&mut task, attempt, round, &mut again);
+            assert_eq!(task.findings.len(), 1);
+            assert_eq!(task.findings[0].repeats, repeats);
+            assert_eq!(again.repeated.len(), usize::from(repeated));
+        }
+    }
+
+    #[test]
+    fn a_p0_and_a_p3_with_the_same_wording_stay_distinct() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        let mut r = review(&["P0: the same words", "P3: the same words"]);
+        register_findings(&mut task, 1, 1, &mut r);
+        assert_eq!(task.findings.len(), 2);
+        assert_ne!(task.findings[0].id, task.findings[1].id);
     }
 }

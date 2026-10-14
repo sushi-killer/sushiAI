@@ -448,7 +448,7 @@ mod reviewed {
         // The reviewer reports the same finding on every run and the implementer
         // disputes it each time. No attempt may get a third review run, and the
         // owner is asked only when the attempt budget is spent.
-        let again = json!({"finding": "P1: a.rs:1 - null check missing", "repeat": true});
+        let again = json!({"finding": "P1: a.rs:1 - null check missing", "id": "F-1"});
         let rig = Rig::new(&[
             fail(json!(["P1: a.rs:1 - null check missing"])),
             fail(json!([again])),

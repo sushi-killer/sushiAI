@@ -2755,7 +2755,7 @@ pub(super) async fn run_task_loop(
             // work cost an attempt; the rest go to the report.
             if r.verdict == Verdict::Fail && implement_attempt_count(&task) >= 2 {
                 let was = r.findings.len();
-                let follow_ups = scope_review(&task, idx, &changed, r);
+                let follow_ups = scope_review(r);
                 if !follow_ups.is_empty() {
                     task.decisions.push(if r.verdict == Verdict::Pass {
                         format!(

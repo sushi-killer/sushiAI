@@ -4,13 +4,13 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult,
-    ScopedCheck, Stage, Task, TaskStatus, Tier, Variant, VerifyOutcome,
+    Attempt, AttemptStatus, Baseline, Check, Dispute, FindingStatus, Message, MessageKind,
+    ReviewResult, ScopedCheck, Stage, Task, TaskStatus, Tier, Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 9;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 10;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -61,7 +61,7 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
     }
 }
 
-const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding, quoted>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
+const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding's id, such as F-1>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
@@ -864,7 +864,7 @@ pub(crate) fn tagged_json(text: &str, tag: &str) -> Option<String> {
 /// (`{"severity","file","issue"}`, as Codex writes them) instead of a string.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_review(text: &str) -> Option<ReviewResult> {
-    parse_review_with_rule(text).map(|(result, _)| result)
+    parse_review_with_rule(text, &[]).map(|(result, _)| result)
 }
 
 /// A leading P0-P3 token (optionally bracketed) followed by a
@@ -883,21 +883,13 @@ pub fn severity_of(text: &str) -> Option<u8> {
     }
 }
 
-/// Lenient reading of a `repeat` mark: `true`, `"true"`, `"yes"` or a
-/// non-zero number; anything else, and an absent mark, is `false`.
-fn truthy(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::String(s) => {
-            matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "yes")
-        }
-        serde_json::Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
-        _ => false,
-    }
-}
-
 /// A criterion's `met` as a boolean: `true`/`false`, or the strings
 /// yes/no/true/false; anything else (`null`, absent) is unchecked.
+/// The criterion number a ruling gives: a JSON number.
+fn criterion_number(v: &serde_json::Value) -> Option<usize> {
+    v.as_u64().and_then(|n| usize::try_from(n).ok())
+}
+
 fn met_of(criterion: &serde_json::Value) -> Option<bool> {
     match criterion.get("met") {
         Some(serde_json::Value::Bool(b)) => Some(*b),
@@ -1055,10 +1047,10 @@ pub fn relay_block(task: &Task, all: &[Task]) -> String {
 
 /// The fields of a finding object that are marks about the finding, not
 /// part of its text.
-const FINDING_META_KEYS: [&str; 4] = ["repeat", "scenario", "kind", "id"];
+const FINDING_META_KEYS: [&str; 5] = ["repeat", "scenario", "kind", "id", "causedByDiff"];
 
-/// The `kind` (lowercased) and `scenario` of a finding object; a scenario
-/// without a `run` counts as none.
+/// The `id`, `causedByDiff`, `kind` (lowercased) and `scenario` of a finding
+/// object; a scenario without a `run` counts as none.
 fn finding_detail(o: &serde_json::Map<String, serde_json::Value>) -> crate::model::FindingDetail {
     let kind = o
         .get("kind")
@@ -1079,13 +1071,25 @@ fn finding_detail(o: &serde_json::Map<String, serde_json::Value>) -> crate::mode
             fails: field("fails"),
         })
     });
-    crate::model::FindingDetail { kind, scenario }
+    let id = o
+        .get("id")
+        .and_then(|i| i.as_str())
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty());
+    let caused_by_diff = o.get("causedByDiff").and_then(|c| c.as_bool());
+    crate::model::FindingDetail {
+        id,
+        caused_by_diff,
+        kind,
+        scenario,
+    }
 }
 
 /// [`parse_review`] plus whether the reviewer's FAIL was recorded as PASS:
 /// it gave findings of its own, every one labelled P2/P3, and no criterion
-/// is unmet. All findings are kept.
-pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
+/// is unmet. All findings are kept. A ruling names its criterion by its
+/// index in `criteria`; one that names none of them rules on no criterion.
+pub fn parse_review_with_rule(text: &str, criteria: &[String]) -> Option<(ReviewResult, bool)> {
     let v = review_candidates(text)
         .iter()
         .filter_map(|body| parse_json_object(body))
@@ -1095,7 +1099,6 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .and_then(|x| serde_json::from_value(x.clone()).ok())
         .unwrap_or(crate::model::Verdict::Pass);
     let mut severities: Vec<Option<u8>> = Vec::new();
-    let mut repeated: Vec<String> = Vec::new();
     let mut details: Vec<crate::model::FindingDetail> = Vec::new();
     let findings: Vec<String> = v
         .get("findings")
@@ -1135,9 +1138,6 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
                             })
                             .collect::<Vec<_>>()
                             .join(": ");
-                        if o.get("repeat").is_some_and(truthy) {
-                            repeated.push(text.clone());
-                        }
                         details.push(finding_detail(o));
                         text
                     }
@@ -1154,7 +1154,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     let mut result = ReviewResult {
         verdict,
         findings,
-        repeated,
+        repeated: Vec::new(),
         severities: severities.clone(),
         details: if details.iter().any(|d| *d != Default::default()) {
             details
@@ -1175,17 +1175,23 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
         .flatten()
     {
         let met = met_of(c);
-        let name = c
-            .get("criterion")
-            .and_then(|x| x.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| c.to_string());
+        let named = c.get("criterion");
+        let index = named
+            .and_then(criterion_number)
+            .filter(|i| *i < criteria.len());
+        let name = match (index, named) {
+            (Some(i), _) => criteria[i].clone(),
+            (None, Some(serde_json::Value::String(s))) => s.clone(),
+            (None, Some(other)) => format!("criterion {other}"),
+            (None, None) => c.to_string(),
+        };
         let evidence_text = c
             .get("evidence")
             .and_then(|x| x.as_str())
             .filter(|e| !e.trim().is_empty());
         result.criteria.push(crate::model::CriterionRuling {
             criterion: name.clone(),
+            index,
             met,
             evidence: evidence_text.map(str::to_string),
         });
@@ -1356,7 +1362,7 @@ const PLAN_SUBTASK_GATE: &str = "This request is one part of a larger task. Whol
 const PLAN_FINAL_VERIFY: &str = "Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs alongside review, after the fast gates pass and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.";
 
 /// Asks the reviewer for a ruling on every criterion.
-pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":\"...\",\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
+pub const REVIEW_CONTRACT: &str = "Rule on every acceptance criterion, using its `check:` where it has one and the verify results as evidence. Fill in the `criteria` array of the one JSON object in your reply, `{\"criterion\":<number>,\"met\":true|false|null,\"evidence\":\"...\"}` per criterion, where `criterion` is the number the criterion has in the list above (a number, not its text), with `null` for a criterion you cannot check read-only. The verdict is PASS only if no criterion is `false`; a claim in the task that the code contradicts is a finding.";
 
 /// Sent instead of [`build_plan_brief`] on the one retry after an
 /// unparseable draft -- a fresh read-only session (an unparseable reply has
@@ -1933,9 +1939,9 @@ pub fn agent_decision_lines(decisions: &[String]) -> Vec<String> {
         .collect()
 }
 
-const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"kind\":\"correctness|requirement|style|nit\",\"scenario\":{\"run\":\"<shell command or test>\",\"fails\":\"<the failure it shows>\"}}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}";
+const REVIEW_REPORT_EXAMPLE: &str = "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"id\":\"<registered id or null>\",\"causedByDiff\":true,\"kind\":\"correctness|requirement|style|nit\",\"scenario\":{\"run\":\"<shell command or test>\",\"fails\":\"<the failure it shows>\"}}],\"criteria\":[{\"criterion\":0,\"met\":true,\"evidence\":\"...\"}]}";
 
-const REVIEW_SCOPE_RULE: &str = "Report only correctness bugs and requirement gaps (an acceptance criterion the diff does not meet). Set `kind` on each finding: `correctness` or `requirement`; style, naming and nits are `style` or `nit` and never block. Where you can, give a `scenario`: the shell command or test (`run`) that fails because of the finding and the failure it shows (`fails`). A finding that comes back after it was fixed is kept only with a new failing scenario.\n";
+const REVIEW_SCOPE_RULE: &str = "Report only correctness bugs and requirement gaps (an acceptance criterion the diff does not meet). Set `kind` on each finding: `correctness` or `requirement`; style, naming and nits are `style` or `nit` and never block. Where you can, give a `scenario`: the shell command or test (`run`) that fails because of the finding and the failure it shows (`fails`). A finding that comes back after it was fixed is kept only with a new failing scenario. Set `causedByDiff` on each finding: true when the diff introduces the problem or breaks something that depended on the code it changed (a caller the diff did not touch counts), false when the problem was already there and the diff does not affect it.\n";
 
 const REVIEW_VERDICT_RULE: &str = "Verdict rule: FAIL only for an unmet acceptance criterion or a P0/P1 finding. P2/P3 findings are reported with a PASS verdict. Start each finding with its severity (P0-P3).\n";
 
@@ -1964,12 +1970,10 @@ pub fn build_review_brief(
 
 /// What a retry review is asked to look at instead of the whole change.
 pub struct NarrowReview<'a> {
-    /// The findings of the review before it that are still open.
-    pub open_findings: &'a [String],
-    /// Criteria that review did not rule met: ruled on now.
-    pub open_criteria: &'a [String],
-    /// Criteria that review ruled met: not checked again.
-    pub settled_criteria: &'a [String],
+    /// Criteria (index, text) that review did not rule met: ruled on now.
+    pub open_criteria: &'a [(usize, String)],
+    /// Criteria (index, text) that review ruled met: not checked again.
+    pub settled_criteria: &'a [(usize, String)],
     /// The task's own changes since the reviewed tree.
     pub delta: &'a str,
 }
@@ -2046,11 +2050,9 @@ fn review_brief(
     out.push_str(&task.goal);
     match &body {
         ReviewBody::Full(_) => {
-            out.push_str("\n\n## Acceptance criteria\n\n");
-            for c in &task.criteria {
-                out.push_str("- ");
-                out.push_str(c);
-                out.push('\n');
+            out.push_str("\n\n## Acceptance criteria\n\nEach criterion has a number; rule on it by that number.\n\n");
+            for (i, c) in task.criteria.iter().enumerate() {
+                out.push_str(&format!("{i}. {c}\n"));
             }
         }
         ReviewBody::Narrow(narrow) => {
@@ -2058,17 +2060,13 @@ fn review_brief(
             if narrow.open_criteria.is_empty() {
                 out.push_str("(none: the last review ruled every criterion met)\n");
             }
-            for c in narrow.open_criteria {
-                out.push_str("- ");
-                out.push_str(c);
-                out.push('\n');
+            for (i, c) in narrow.open_criteria {
+                out.push_str(&format!("{i}. {c}\n"));
             }
             if !narrow.settled_criteria.is_empty() {
                 out.push_str("\n## Settled criteria\n\nThe last review ruled these met. They are settled: do not check them again and do not rule on them.\n\n");
-                for c in narrow.settled_criteria {
-                    out.push_str("- ");
-                    out.push_str(c);
-                    out.push('\n');
+                for (i, c) in narrow.settled_criteria {
+                    out.push_str(&format!("{i}. {c}\n"));
                 }
             }
         }
@@ -2114,20 +2112,24 @@ fn review_brief(
             }
         }
     }
-    let previous = match &body {
-        ReviewBody::Full(_) => previous_review_findings(task),
-        ReviewBody::Narrow(narrow) => narrow.open_findings.to_vec(),
-    };
-    if !previous.is_empty() {
+    if !task.findings.is_empty() {
+        let registry: Vec<String> = task
+            .findings
+            .iter()
+            .map(|f| {
+                let status = match f.status {
+                    FindingStatus::Open => "open",
+                    FindingStatus::Resolved => "resolved",
+                };
+                format!("{} ({status}): {}", f.id, f.text)
+            })
+            .collect();
         out.push_str("\n## Previous review\n\n");
         out.push_str(&untrusted_block(
-            match &body {
-                ReviewBody::Full(_) => "The findings the previous attempt's review reported",
-                ReviewBody::Narrow(_) => "The open findings of the last review",
-            },
-            &previous.join("\n"),
+            "The findings earlier reviews reported",
+            &registry.join("\n"),
         ));
-        out.push_str("\nThe implementer has tried to fix them. Mark each finding you report now with `repeat`: true when it is the same problem still present, false when it is new.\n");
+        out.push_str("\nThe implementer has tried to fix the open ones. Set `id` on each finding you report now to the id of the registered finding it is about, or null when it is a new problem.\n");
     }
     match &body {
         ReviewBody::Full(diff) => {
@@ -2140,11 +2142,7 @@ fn review_brief(
         }
     }
     out.push_str("\n```\n\n## Report format\n\nReply with:\n\n```sushi-review\n");
-    out.push_str(if previous.is_empty() {
-        REVIEW_REPORT_EXAMPLE
-    } else {
-        "{\"verdict\":\"PASS|FAIL\",\"findings\":[{\"finding\":\"P2: path:line - issue\",\"repeat\":true,\"kind\":\"correctness|requirement|style|nit\",\"scenario\":{\"run\":\"<shell command or test>\",\"fails\":\"<the failure it shows>\"}}],\"criteria\":[{\"criterion\":\"...\",\"met\":true,\"evidence\":\"...\"}]}"
-    });
+    out.push_str(REVIEW_REPORT_EXAMPLE);
     out.push_str("\n```\n");
     out.push('\n');
     out.push_str(REVIEW_CONTRACT);
@@ -2158,21 +2156,6 @@ pub fn review_retry_note() -> String {
     format!(
         "## Previous reply\n\nYour previous reply had no parseable verdict. Reply again with exactly one fenced block holding one complete JSON object, `criteria` inside it:\n\n```sushi-review\n{REVIEW_REPORT_EXAMPLE}\n```\n"
     )
-}
-
-/// The findings the review of the implement attempt before the current one
-/// (the last) reported; empty for a first attempt or one that had none.
-fn previous_review_findings(task: &Task) -> Vec<String> {
-    let mut implements = task.attempts.iter().filter(|a| a.stage == Stage::Implement);
-    let count = implements.clone().count();
-    if count < 2 {
-        return Vec::new();
-    }
-    implements
-        .nth(count - 2)
-        .and_then(|a| a.review.as_ref())
-        .map(|r| r.findings.clone())
-        .unwrap_or_default()
 }
 
 pub fn is_held_out(v: &VerifyOutcome) -> bool {
@@ -2418,7 +2401,9 @@ pub(crate) fn last_fenced_block(text: &str, tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Failure, FailureKind, Harness, Stage, TaskStatus, Tier, Verdict};
+    use crate::model::{
+        Failure, FailureKind, FindingRecord, Harness, Stage, TaskStatus, Tier, Verdict,
+    };
 
     mod answer_caller_tests {
         use super::*;
@@ -2943,45 +2928,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_reads_repeat_marks_leniently() {
-        let text = "```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: plain string\",{\"finding\":\"P1: a\",\"repeat\":true},{\"finding\":\"P1: b\",\"repeat\":\"Yes\"},{\"finding\":\"P1: c\",\"repeat\":false},{\"finding\":\"P1: d\"},{\"finding\":\"P1: e\",\"repeat\":\"maybe\"}]}\n```";
+    fn a_repeat_mark_is_not_part_of_the_text_and_is_not_read() {
+        let text = "```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: plain string\",{\"finding\":\"P1: a\",\"repeat\":true}]}\n```";
         let r = parse_review(text).unwrap();
-        assert_eq!(r.findings.len(), 6);
-        assert_eq!(r.findings[1], "P1: a", "the mark is not part of the text");
-        assert_eq!(r.repeated, vec!["P1: a".to_string(), "P1: b".to_string()]);
-        let plain =
-            parse_review("```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: x\"]}\n```")
-                .unwrap();
-        assert!(plain.repeated.is_empty());
+        assert_eq!(r.findings, vec!["P1: plain string", "P1: a"]);
+        assert!(r.repeated.is_empty());
     }
 
     #[test]
-    fn the_review_brief_carries_the_previous_attempts_findings_and_asks_for_repeat_marks() {
+    fn the_review_brief_numbers_the_criteria_and_carries_the_findings_registry() {
         let mut task = sample_task();
-        let mut first = failed_implement_attempt(String::new());
-        first.review = Some(ReviewResult {
-            verdict: Verdict::Fail,
-            findings: vec!["P1: a.rs:1 - null check missing".into()],
-            repeated: Vec::new(),
-            severities: Vec::new(),
-            details: Vec::new(),
-            criteria: Vec::new(),
-        });
-        let mut second = first.clone();
-        second.n = 2;
-        second.review = None;
-        task.attempts = vec![first];
+        task.criteria = vec!["Alpha".into(), "Alpha and beta".into()];
         let one = build_review_brief(&task, "note", &[], &[], &[], None, "d");
         assert!(!one.contains("## Previous review"), "{one}");
+        assert!(one.contains("\n0. Alpha\n1. Alpha and beta\n"), "{one}");
+        assert!(one.contains("\"causedByDiff\":true"), "{one}");
         assert!(!one.contains("\"repeat\""), "{one}");
-        task.attempts.push(second);
+        task.findings = vec![
+            FindingRecord {
+                id: "F-1".into(),
+                text: "P1: a.rs:1 - null check missing".into(),
+                status: FindingStatus::Open,
+                attempt: 1,
+                round: 1,
+                repeats: 0,
+                scenarios: Vec::new(),
+                handled: false,
+            },
+            FindingRecord {
+                id: "F-2".into(),
+                text: "P2: b.rs:2 - old".into(),
+                status: FindingStatus::Resolved,
+                attempt: 1,
+                round: 1,
+                repeats: 0,
+                scenarios: Vec::new(),
+                handled: false,
+            },
+        ];
         let two = build_review_brief(&task, "note", &[], &[], &[], None, "d");
         assert!(two.contains("## Previous review"), "{two}");
         assert!(
-            two.contains("<untrusted-data>\nP1: a.rs:1 - null check missing"),
+            two.contains(
+                "F-1 (open): P1: a.rs:1 - null check missing\nF-2 (resolved): P2: b.rs:2 - old"
+            ),
             "{two}"
         );
-        assert!(two.contains("\"repeat\":true"), "{two}");
     }
 
     #[test]
@@ -2992,6 +2984,8 @@ mod tests {
             r.findings,
             vec!["P1: a".to_string(), "P1: plain".to_string()]
         );
+        assert_eq!(r.details[0].id.as_deref(), Some("F-123456"));
+        assert_eq!(r.details[0].caused_by_diff, None);
         assert_eq!(r.details[0].kind.as_deref(), Some("style"));
         assert_eq!(r.details[0].scenario.as_ref().unwrap().run, "cargo test a");
         assert_eq!(r.details[1], Default::default());
@@ -3000,22 +2994,25 @@ mod tests {
     #[test]
     fn parse_review_keeps_every_criterion_ruling_as_data() {
         let text = "```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"A works\",\"met\":true,\"evidence\":\"read a.rs\"},{\"criterion\":\"B works\",\"met\":false},{\"criterion\":\"C works\",\"met\":null,\"evidence\":\"  \"}]}\n```";
-        let (r, recorded_as_pass) = parse_review_with_rule(text).unwrap();
+        let (r, recorded_as_pass) = parse_review_with_rule(text, &[]).unwrap();
         assert_eq!(
             r.criteria,
             vec![
                 crate::model::CriterionRuling {
                     criterion: "A works".into(),
+                    index: None,
                     met: Some(true),
                     evidence: Some("read a.rs".into()),
                 },
                 crate::model::CriterionRuling {
                     criterion: "B works".into(),
+                    index: None,
                     met: Some(false),
                     evidence: None,
                 },
                 crate::model::CriterionRuling {
                     criterion: "C works".into(),
+                    index: None,
                     met: None,
                     evidence: None,
                 },
@@ -3037,6 +3034,49 @@ mod tests {
             .unwrap()
             .get("criteria")
             .is_none());
+    }
+
+    #[test]
+    fn a_ruling_names_its_criterion_by_index_and_a_prefix_stays_distinct() {
+        let criteria = vec![
+            "Beta".to_string(),
+            "Beta works -- check: read it".to_string(),
+        ];
+        let text = "```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":1,\"met\":true},{\"criterion\":0,\"met\":false,\"evidence\":\"missing\"}]}\n```";
+        let (r, _) = parse_review_with_rule(text, &criteria).unwrap();
+        let rulings: Vec<(Option<usize>, Option<bool>)> =
+            r.criteria.iter().map(|c| (c.index, c.met)).collect();
+        assert_eq!(rulings, [(Some(1), Some(true)), (Some(0), Some(false))]);
+        assert_eq!(r.criteria[0].criterion, "Beta works -- check: read it");
+        assert_eq!(r.findings, vec!["Unmet criterion: Beta (missing)"]);
+        assert_eq!(r.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_ruling_without_a_known_index_is_unmet_unknown_and_settles_nothing() {
+        let criteria = vec!["Alpha".to_string()];
+        for named in ["\"Alpha\"", "7", "null"] {
+            let text = format!("```sushi-review\n{{\"verdict\":\"PASS\",\"criteria\":[{{\"criterion\":{named},\"met\":false}}]}}\n```");
+            let (r, _) = parse_review_with_rule(&text, &criteria).unwrap();
+            assert_eq!(r.criteria[0].index, None, "{named}");
+            assert_eq!(r.verdict, Verdict::Fail, "{named}");
+            assert_eq!(r.findings.len(), 1, "{named}");
+        }
+        let met = "```sushi-review\n{\"verdict\":\"PASS\",\"criteria\":[{\"criterion\":\"Alpha\",\"met\":true}]}\n```";
+        let (r, _) = parse_review_with_rule(met, &criteria).unwrap();
+        assert_eq!(r.criteria[0].index, None);
+    }
+
+    #[test]
+    fn a_finding_object_carries_its_id_and_caused_by_diff() {
+        let text = "```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a\",\"id\":\"F-3\",\"causedByDiff\":false},{\"finding\":\"P1: b\",\"id\":null,\"causedByDiff\":true},\"P1: old format\"]}\n```";
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.findings, vec!["P1: a", "P1: b", "P1: old format"]);
+        assert_eq!(r.details[0].id.as_deref(), Some("F-3"));
+        assert_eq!(r.details[0].caused_by_diff, Some(false));
+        assert_eq!(r.details[1].id, None);
+        assert_eq!(r.details[1].caused_by_diff, Some(true));
+        assert_eq!(r.details[2], Default::default());
     }
 
     #[test]
@@ -3636,7 +3676,7 @@ mod tests {
 
     #[test]
     fn a_criteria_block_after_a_premature_close_is_spliced_into_the_verdict() {
-        let (r, flag) = parse_review_with_rule(PREMATURE_CLOSE).unwrap();
+        let (r, flag) = parse_review_with_rule(PREMATURE_CLOSE, &[]).unwrap();
         assert_eq!(r.verdict, Verdict::Fail);
         assert!(!flag);
         assert!(r.findings.iter().any(|f| f.starts_with(
@@ -3710,7 +3750,7 @@ mod tests {
             r#"["P2: a.rs:3 - naming","[P3] typo",{"severity":"P3","issue":"nit"}]"#,
             "",
         );
-        let (r, flag) = parse_review_with_rule(&text).unwrap();
+        let (r, flag) = parse_review_with_rule(&text, &[]).unwrap();
         assert_eq!(r.verdict, Verdict::Pass);
         assert!(flag);
         assert_eq!(r.findings.len(), 3);
@@ -3725,18 +3765,20 @@ mod tests {
             r#"["P2x: not a severity"]"#,
             "[]",
         ] {
-            let (r, flag) = parse_review_with_rule(&review_reply("FAIL", findings, "")).unwrap();
+            let (r, flag) =
+                parse_review_with_rule(&review_reply("FAIL", findings, ""), &[]).unwrap();
             assert_eq!(r.verdict, Verdict::Fail, "{findings}");
             assert!(!flag);
         }
         let unmet = r#","criteria":[{"criterion":"c","met":false}]"#;
         let (r, flag) =
-            parse_review_with_rule(&review_reply("FAIL", r#"["P2: nit"]"#, unmet)).unwrap();
+            parse_review_with_rule(&review_reply("FAIL", r#"["P2: nit"]"#, unmet), &[]).unwrap();
         assert_eq!(r.verdict, Verdict::Fail);
         assert!(!flag);
         // Findings parse_review adds itself are not the reviewer's own.
         let unchecked = r#","criteria":[{"criterion":"c","met":null}]"#;
-        let (r, flag) = parse_review_with_rule(&review_reply("FAIL", "[]", unchecked)).unwrap();
+        let (r, flag) =
+            parse_review_with_rule(&review_reply("FAIL", "[]", unchecked), &[]).unwrap();
         assert_eq!(r.verdict, Verdict::Fail);
         assert!(!flag);
     }

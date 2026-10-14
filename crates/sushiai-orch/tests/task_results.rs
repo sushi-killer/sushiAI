@@ -133,8 +133,8 @@ fn attempt(n: u32, stage: &str, status: &str) -> Value {
 
 #[test]
 fn criteria_results_follow_checks_and_review_rulings_and_diff_stats_are_exact() {
-    let rulings_first = r#"{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Alpha file exists\",\"met\":false,\"evidence\":\"not in the diff\"},{\"criterion\":\"Gamma is documented\",\"met\":true,\"evidence\":\"README\"},{\"criterion\":\"Delta is fast\",\"met\":null},{\"criterion\":\"Epsilon is safe\",\"met\":false}]}"#;
-    let rulings_next = r#"{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Alpha file exists\",\"met\":true},{\"criterion\":\"Gamma is documented\",\"met\":true},{\"criterion\":\"Delta is fast\",\"met\":null},{\"criterion\":\"Epsilon is safe\",\"met\":true}]}"#;
+    let rulings_first = r#"{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"not in the diff\"},{\"criterion\":2,\"met\":true,\"evidence\":\"README\"},{\"criterion\":3,\"met\":null},{\"criterion\":4,\"met\":false}]}"#;
+    let rulings_next = r#"{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":true},{\"criterion\":2,\"met\":true},{\"criterion\":3,\"met\":null},{\"criterion\":4,\"met\":true}]}"#;
     let s = setup(&fake(IMPLEMENT, rulings_first, rulings_next), true);
     let repo = init_git_repo();
     let task = s.daemon.request(

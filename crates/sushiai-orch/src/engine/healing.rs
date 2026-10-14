@@ -37,14 +37,6 @@ fn reason_of(v: &serde_json::Value) -> String {
     }
 }
 
-/// Lowercase alphanumerics only: findings quote criteria loosely.
-fn canon(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
-
 fn overturnable(task: &mut Task, question: String, answer: String, evidence: String) {
     task.assumptions.push(Assumption {
         question,
@@ -632,36 +624,6 @@ pub(super) enum Ruling {
     Infeasible { criterion: String, reason: String },
 }
 
-fn strip_evidence(finding: &str) -> &str {
-    finding
-        .strip_prefix("Unmet criterion:")
-        .unwrap_or(finding)
-        .trim()
-}
-
-/// The criterion an "Unmet criterion: ..." finding is about.
-fn criterion_of(task: &Task, finding: &str) -> Option<usize> {
-    criterion_index(task, finding.strip_prefix("Unmet criterion:")?)
-}
-
-/// The criterion a plain piece of text (a reviewer's ruling, the tail of an
-/// "Unmet criterion:" finding) names.
-pub(super) fn criterion_index(task: &Task, text: &str) -> Option<usize> {
-    let rest = canon(text);
-    if rest.is_empty() {
-        return None;
-    }
-    task.criteria.iter().position(|c| {
-        let head = canon(c.split("-- check:").next().unwrap_or(c));
-        let full = canon(c);
-        !head.is_empty()
-            && (rest.starts_with(&head)
-                || head.starts_with(&rest)
-                || rest.contains(&head)
-                || rest.contains(&full))
-    })
-}
-
 /// A criterion this review marks unmet that an earlier attempt's review
 /// marked unmet too and the judge has not ruled on yet: its index, the two
 /// attempts and both reasons.
@@ -677,8 +639,9 @@ pub(super) fn repeated_unmet(
     attempt_n: u32,
     review: &ReviewResult,
 ) -> Option<Repeated> {
-    for finding in &review.findings {
-        let Some(i) = criterion_of(task, finding) else {
+    let reason = |r: &CriterionRuling| r.evidence.clone().unwrap_or_else(|| r.criterion.clone());
+    for ruling in review.criteria.iter().filter(|r| r.met == Some(false)) {
+        let Some(i) = ruling.index.filter(|i| *i < task.criteria.len()) else {
             continue;
         };
         if task.brief_check.judged.contains(&task.criteria[i]) {
@@ -691,11 +654,15 @@ pub(super) fn repeated_unmet(
             let Some(r) = earlier.review.as_ref() else {
                 continue;
             };
-            if let Some(f) = r.findings.iter().find(|f| criterion_of(task, f) == Some(i)) {
+            if let Some(before) = r
+                .criteria
+                .iter()
+                .find(|r| r.met == Some(false) && r.index == Some(i))
+            {
                 return Some(Repeated {
                     criterion: i,
-                    earlier: (earlier.n, strip_evidence(f).to_string()),
-                    current: (attempt_n, strip_evidence(finding).to_string()),
+                    earlier: (earlier.n, reason(before)),
+                    current: (attempt_n, reason(ruling)),
                 });
             }
         }
@@ -915,68 +882,18 @@ pub(super) async fn capture_screenshots(
 // 4. Review scope after the first attempt
 // ---------------------------------------------------------------------------
 
-fn is_path_like(token: &str) -> bool {
-    let t = token.trim_matches(|c: char| {
-        !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
-    });
-    let t = t.trim_end_matches('.');
-    let t = match t.rsplit_once(':') {
-        Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head,
-        _ => t,
-    };
-    if t.contains('/') {
-        return true;
-    }
-    match t.rsplit_once('.') {
-        Some((name, ext)) => {
-            name.len() >= 2
-                && (2..=5).contains(&ext.len())
-                && ext.chars().all(char::is_alphanumeric)
-        }
-        None => false,
-    }
-}
-
-/// The files a finding names, and whether one of them is among `changed`.
-fn names_changed_file(finding: &str, changed: &[String]) -> Option<bool> {
-    let paths: Vec<&str> = finding
-        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '`' | '\'' | '"'))
-        .filter(|t| is_path_like(t))
-        .collect();
-    if paths.is_empty() {
-        return None;
-    }
-    Some(paths.iter().any(|p| {
-        let p = p.trim_matches(|c: char| c == ':' || c == '.');
-        let p = match p.rsplit_once(':') {
-            Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head,
-            _ => p,
-        };
-        changed
-            .iter()
-            .any(|f| f == p || f.ends_with(p) || p.ends_with(f.as_str()))
-    }))
-}
-
 /// After the first attempt only a P0/P1 finding about the task's own work
-/// blocks: an unmet criterion, a finding the reviewer says came back or an
-/// earlier review reported, or one about a file the task changed (or naming
-/// none). Everything else (P2/P3, a new P1 about files the task never
-/// touched) is moved out of `review.findings` and returned as follow-ups; a
-/// review left with no blocking finding becomes a PASS.
-pub(super) fn scope_review(
-    task: &Task,
-    idx: usize,
-    changed: &[String],
-    review: &mut ReviewResult,
-) -> Vec<String> {
-    let earlier: Vec<String> = task.attempts[..idx]
-        .iter()
-        .filter_map(|a| a.review.as_ref())
-        .flat_map(|r| r.findings.iter().map(|f| canon(f)))
-        .collect();
+/// blocks: an unmet criterion, a P0, a finding that came back or that the
+/// reviewer says the diff caused (a missing `causedByDiff` counts as true).
+/// Everything else (P2/P3, a P1 about a problem that was already there) is
+/// moved out of `review.findings` and returned as follow-ups; a review left
+/// with no blocking finding becomes a PASS.
+pub(super) fn scope_review(review: &mut ReviewResult) -> Vec<String> {
+    let own = review.severities.len().min(review.findings.len());
+    let mut unmet = review.criteria.iter().filter(|r| r.met != Some(true));
     let mut keep_findings = Vec::new();
     let mut keep_severities = Vec::new();
+    let mut keep_details = Vec::new();
     let mut follow_ups = Vec::new();
     for (i, finding) in review.findings.iter().enumerate() {
         let severity = review
@@ -985,19 +902,17 @@ pub(super) fn scope_review(
             .copied()
             .flatten()
             .or_else(|| brief::severity_of(finding));
-        let blocks = if finding.starts_with("Unmet criterion:")
-            || finding.starts_with("Another attempt was asked for:")
-        {
+        let detail = review.details.get(i);
+        let blocks = if i >= own {
+            unmet.next().is_none_or(|r| r.met == Some(false))
+        } else if finding.starts_with("Another attempt was asked for:") {
             true
-        } else if finding.starts_with("Not checked by review:") {
-            false
         } else {
             match severity {
                 Some(0) => true,
                 Some(1) | None => {
                     review.repeated.contains(finding)
-                        || earlier.contains(&canon(finding))
-                        || names_changed_file(finding, changed) != Some(false)
+                        || detail.and_then(|d| d.caused_by_diff).unwrap_or(true)
                 }
                 Some(_) => false,
             }
@@ -1005,12 +920,16 @@ pub(super) fn scope_review(
         if blocks {
             keep_findings.push(finding.clone());
             keep_severities.push(severity);
+            keep_details.extend(detail.cloned());
         } else {
             follow_ups.push(finding.clone());
         }
     }
     review.findings = keep_findings;
     review.severities = keep_severities;
+    if !review.details.is_empty() {
+        review.details = keep_details;
+    }
     if review.verdict == Verdict::Fail && review.findings.is_empty() {
         review.verdict = Verdict::Pass;
     }
@@ -1233,21 +1152,115 @@ mod tests {
         assert!(!is_ui_path("README.md"));
     }
 
+    fn scoped(findings: &[(&str, Option<bool>)], criteria: Vec<CriterionRuling>) -> ReviewResult {
+        let mut findings_text: Vec<String> =
+            findings.iter().map(|(text, _)| text.to_string()).collect();
+        findings_text.extend(
+            criteria
+                .iter()
+                .filter(|r| r.met != Some(true))
+                .map(|r| format!("criterion finding: {}", r.criterion)),
+        );
+        ReviewResult {
+            verdict: Verdict::Fail,
+            findings: findings_text,
+            repeated: Vec::new(),
+            severities: findings
+                .iter()
+                .map(|(t, _)| brief::severity_of(t))
+                .collect(),
+            details: findings
+                .iter()
+                .map(|(_, caused)| FindingDetail {
+                    caused_by_diff: *caused,
+                    ..Default::default()
+                })
+                .collect(),
+            criteria,
+        }
+    }
+
+    fn ruling(index: usize, met: Option<bool>) -> CriterionRuling {
+        CriterionRuling {
+            criterion: format!("c{index}"),
+            index: Some(index),
+            met,
+            evidence: None,
+        }
+    }
+
     #[test]
-    fn a_finding_names_the_files_it_is_about() {
-        let changed = vec!["src/a.rs".to_string()];
-        assert_eq!(
-            names_changed_file("P1: src/a.rs:12 - bug", &changed),
-            Some(true)
+    fn a_p1_the_diff_caused_blocks_even_when_it_names_only_an_untouched_caller() {
+        let mut review = scoped(
+            &[
+                (
+                    "P1: callers/untouched.rs:9 - breaks after the change",
+                    Some(true),
+                ),
+                ("P1: pre-existing.rs:2 - was already broken", Some(false)),
+                ("P1: no mark at all", None),
+            ],
+            Vec::new(),
         );
+        let follow_ups = scope_review(&mut review);
         assert_eq!(
-            names_changed_file("P1: other/b.rs:3 - bug", &changed),
-            Some(false)
+            review.findings,
+            [
+                "P1: callers/untouched.rs:9 - breaks after the change",
+                "P1: no mark at all"
+            ]
         );
-        assert_eq!(
-            names_changed_file("P1: something is wrong, e.g. here", &changed),
-            None
+        assert_eq!(follow_ups, ["P1: pre-existing.rs:2 - was already broken"]);
+        assert_eq!(review.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_p0_and_an_unmet_criterion_always_block_and_p2_never_does() {
+        let mut review = scoped(
+            &[("P0: crash", Some(false)), ("P2: smell", Some(true))],
+            vec![
+                ruling(0, Some(false)),
+                ruling(1, None),
+                ruling(2, Some(true)),
+            ],
         );
+        let follow_ups = scope_review(&mut review);
+        assert_eq!(review.findings, ["P0: crash", "criterion finding: c0"]);
+        assert_eq!(follow_ups, ["P2: smell", "criterion finding: c1"]);
+        assert_eq!(review.verdict, Verdict::Fail);
+        let mut only_pre_existing = scoped(&[("P1: old", Some(false))], Vec::new());
+        scope_review(&mut only_pre_existing);
+        assert_eq!(only_pre_existing.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_finding_that_came_back_blocks_whoever_caused_it() {
+        let mut review = scoped(&[("P1: back [F-1]", Some(false))], Vec::new());
+        review.repeated = vec!["P1: back [F-1]".into()];
+        assert!(scope_review(&mut review).is_empty());
+        assert_eq!(review.findings.len(), 1);
+    }
+
+    #[test]
+    fn two_criteria_where_one_text_prefixes_the_other_stay_distinct() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        task.criteria = vec!["Beta".into(), "Beta works -- check: read it".into()];
+        let review = |met: [Option<bool>; 2]| ReviewResult {
+            verdict: Verdict::Fail,
+            findings: Vec::new(),
+            repeated: Vec::new(),
+            severities: Vec::new(),
+            details: Vec::new(),
+            criteria: (0..2).map(|i| ruling(i, met[i])).collect(),
+        };
+        let mut first = attempt_with_failure(1, "x");
+        first.review = Some(review([Some(false), Some(true)]));
+        task.attempts = vec![first];
+        let now = review([Some(false), Some(true)]);
+        let rep = repeated_unmet(&task, 1, 2, &now).expect("criterion 0 repeats");
+        assert_eq!(rep.criterion, 0);
+        let only_longer = review([Some(true), Some(false)]);
+        assert!(repeated_unmet(&task, 1, 2, &only_longer).is_none());
     }
 
     #[test]
@@ -1426,7 +1439,7 @@ mod timeout_tests {
     async fn criterion_judge_timed_out_keeps_the_criterion() {
         let (app, _dir, mut task, _) = slow_helper_task();
         let review: ReviewResult = serde_json::from_value(
-            json!({"verdict":"FAIL", "findings":["Unmet criterion: Keep the API (missing)"]}),
+            json!({"verdict":"FAIL", "criteria":[{"criterion":"Keep the API","index":0,"met":false,"evidence":"missing"}]}),
         )
         .unwrap();
         task.attempts[0].review = Some(review.clone());

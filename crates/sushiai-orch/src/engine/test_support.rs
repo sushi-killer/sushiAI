@@ -131,7 +131,7 @@ pub(super) fn test_app_parallel_one() -> (Arc<App>, tempfile::TempDir) {
     (app, dir)
 }
 
-pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
+pub(crate) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
     Attempt {
         n,
         stage: Stage::Implement,

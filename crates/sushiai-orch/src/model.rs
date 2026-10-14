@@ -2373,10 +2373,15 @@ pub struct FindingScenario {
     pub fails: String,
 }
 
-/// The optional `kind` and `scenario` of one finding.
+/// The optional marks of one finding: `id` of a registered finding it is
+/// about, `caused_by_diff` (missing counts as true), `kind` and `scenario`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindingDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by_diff: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2389,8 +2394,8 @@ pub struct ReviewResult {
     pub verdict: Verdict,
     #[serde(default)]
     pub findings: Vec<String>,
-    /// The findings the reviewer marked `repeat: true`: still present after
-    /// the previous attempt's review reported them.
+    /// The findings the registry already held open from an earlier attempt:
+    /// still present after that attempt's review reported them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repeated: Vec<String>,
     /// The severity (0-3) of each finding by position, `None` when it named
@@ -2407,11 +2412,14 @@ pub struct ReviewResult {
 }
 
 /// One criterion ruling of a review: `met` is `None` when the reviewer could
-/// not check it.
+/// not check it. `index` is the criterion's position in the task, `None`
+/// when the reviewer named none the task has; `criterion` is its text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CriterionRuling {
     pub criterion: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     #[serde(default)]
     pub met: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

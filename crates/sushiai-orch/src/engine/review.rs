@@ -563,7 +563,6 @@ pub(super) async fn run_review(
             &shown,
             evidence_from,
             &brief::NarrowReview {
-                open_findings: &n.open_findings,
                 open_criteria: &n.open_criteria,
                 settled_criteria: &n.settled,
                 delta: &n.delta,
@@ -640,10 +639,12 @@ pub(super) async fn run_review(
                 )));
             }
             let text = outcome.final_text.unwrap_or_default();
-            if let Some((mut result, recorded_as_pass)) = brief::parse_review_with_rule(&text) {
+            if let Some((mut result, recorded_as_pass)) =
+                brief::parse_review_with_rule(&text, &task.criteria)
+            {
                 let scope = match &narrow {
                     Some(n) => {
-                        carry_settled(task, n, &mut result);
+                        carry_settled(n, &mut result);
                         ReviewScope::Narrow
                     }
                     None => ReviewScope::Full,
@@ -672,11 +673,10 @@ pub(super) async fn run_review(
 
 /// What a narrow review is given.
 struct NarrowInputs {
-    open_findings: Vec<String>,
-    open_criteria: Vec<String>,
+    /// The criteria (index, text) the basis review did not rule met.
+    open_criteria: Vec<(usize, String)>,
     /// Criteria the basis review ruled met, and that attempt's number.
-    settled: Vec<String>,
-    settled_index: Vec<usize>,
+    settled: Vec<(usize, String)>,
     settled_from: u32,
     delta: String,
 }
@@ -713,25 +713,21 @@ async fn narrow_inputs(
     .await
     .ok()??;
     let mut settled = Vec::new();
-    let mut settled_index = Vec::new();
     let mut open_criteria = Vec::new();
     for (i, criterion) in task.criteria.iter().enumerate() {
         let met = review
             .criteria
             .iter()
-            .any(|r| r.met == Some(true) && criterion_index(task, &r.criterion) == Some(i));
+            .any(|r| r.met == Some(true) && r.index == Some(i));
         if met {
-            settled.push(criterion.clone());
-            settled_index.push(i);
+            settled.push((i, criterion.clone()));
         } else {
-            open_criteria.push(criterion.clone());
+            open_criteria.push((i, criterion.clone()));
         }
     }
     Some(NarrowInputs {
-        open_findings: review.findings.clone(),
         open_criteria,
         settled,
-        settled_index,
         settled_from: basis.n,
         delta,
     })
@@ -740,15 +736,13 @@ async fn narrow_inputs(
 /// Copies the settled rulings into a narrow review's result, so the criteria
 /// results and the verdict rule still see them as met. A ruling the reviewer
 /// gave now wins.
-fn carry_settled(task: &Task, narrow: &NarrowInputs, result: &mut ReviewResult) {
-    for (&i, criterion) in narrow.settled_index.iter().zip(&narrow.settled) {
-        let ruled_now = result
-            .criteria
-            .iter()
-            .any(|r| criterion_index(task, &r.criterion) == Some(i));
+fn carry_settled(narrow: &NarrowInputs, result: &mut ReviewResult) {
+    for (i, criterion) in &narrow.settled {
+        let ruled_now = result.criteria.iter().any(|r| r.index == Some(*i));
         if !ruled_now {
             result.criteria.push(CriterionRuling {
                 criterion: criterion.clone(),
+                index: Some(*i),
                 met: Some(true),
                 evidence: Some(format!(
                     "settled in the attempt {} review",

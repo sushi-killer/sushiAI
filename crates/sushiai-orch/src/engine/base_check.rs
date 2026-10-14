@@ -559,8 +559,8 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
-/// same command on an unchanged base runs once. Environment results and
-/// checkout errors get one retry in a fresh worktree and are never cached.
+/// same command on an unchanged base runs once. A checkout error gets one retry
+/// in a fresh worktree.
 /// `Err` when neither checkout could be made; nothing is known about the base.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
@@ -654,13 +654,8 @@ pub(super) async fn run_on_base(
             Err(e) if known.is_empty() => return Err(e),
             Err(_) => break,
         };
-        let mut retry = Vec::new();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
-            if is_environment_result(&r) {
-                retry.push(c.clone());
-                continue;
-            }
             // An interrupted run says nothing about the commit.
             if !cancelled && r.code.is_some() && !is_interrupted(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
@@ -668,7 +663,7 @@ pub(super) async fn run_on_base(
             known.insert(c.clone(), r);
         }
         save_base_runs(&app.data_dir, &cache);
-        missing = retry;
+        missing.clear();
     }
     Ok(commands
         .iter()

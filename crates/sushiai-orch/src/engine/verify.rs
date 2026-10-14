@@ -1362,6 +1362,7 @@ pub async fn run_verify_command(
         passing: report.passing,
         truncated: report.truncated,
         crashed: report.crashed,
+        stopped_early: report.stopped_early,
         output_key: report.rest_key,
         ms: start.elapsed().as_millis() as u64,
         ..Default::default()

@@ -3600,12 +3600,12 @@ pub(super) async fn finish_after_review(
         let names: Vec<String> = on_base.iter().map(|(f, _)| f.command.clone()).collect();
         let kept = keep_planned_checks(app, task, &names);
         let mut pre_existing: Vec<VerifyOutcome> = Vec::new();
-        let changed = git::changed_files(worktree, &task.base_sha).unwrap_or_default();
         for (failed, base_run) in on_base {
             // A check the task is meant to turn green is never waived.
             if !kept.contains(&failed.command)
                 && !is_kept(task, &failed.command)
-                && is_task_target(task, &failed.command, &base_run.tail, &changed)
+                && (command_named_by_task(task, &failed.command)
+                    || failing_test_named_by_task(task, &base_run.failing))
             {
                 task.decisions
                     .push(kept_check_line(&failed.command, KEPT_BY_TASK_TARGET));

@@ -2290,6 +2290,9 @@ pub struct VerifyOutcome {
     /// The output shows a crash, an abort or a build that did not finish.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
+    /// A cargo run that stopped at its first failing test binary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_early: bool,
     /// A digit-blind fingerprint of the output without its test lines.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_key: String,

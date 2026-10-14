@@ -211,6 +211,33 @@ fn a_check_the_task_is_meant_to_fix_is_never_waived() {
 }
 
 #[test]
+fn an_unrelated_task_that_edits_the_file_of_the_failing_test_is_still_waived() {
+    let scripts = tempfile::tempdir().unwrap();
+    let daemon = spawn(scripts.path(), &[]);
+    let repo = init_git_repo();
+    // The failing test lives in the file the task writes, but nothing in the
+    // request names the check or the test.
+    let check = "printf 'ok 1 - fine\\nnot ok 2 - CHANGED_MARKER.txt::alpha\\n'; exit 1";
+    let id = start(&daemon, repo.path(), check);
+
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
+    assert_eq!(done["status"], "done", "{done}");
+    assert!(
+        decisions(&done)
+            .iter()
+            .any(|d| d.contains("base failures on") && d.contains("CHANGED_MARKER.txt::alpha")),
+        "{:?}",
+        decisions(&done)
+    );
+    assert!(
+        decisions(&done).iter().all(|d| !d.contains("kept check")),
+        "{:?}",
+        decisions(&done)
+    );
+    finish(daemon, &done);
+}
+
+#[test]
 fn a_gate_with_no_test_lines_is_not_waived_on_an_equal_fingerprint() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path(), &[]);

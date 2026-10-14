@@ -174,15 +174,9 @@ fn output_paths(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a pre-existing failing check is part of this task's target.
-/// `output` is the cached base-run tail, or the tail quoted in the question;
-/// changed files are relative to the task's base SHA.
-pub(super) fn is_task_target(
-    task: &Task,
-    command: &str,
-    output: &str,
-    changed_files: &[String],
-) -> bool {
+/// Whether the request, goal or criteria name `command` itself: the explicit
+/// evidence that the task is meant to make a failing check pass.
+pub(super) fn command_named_by_task(task: &Task, command: &str) -> bool {
     let flat = super::answer_policy::flat_command(command);
     let named_in_request_or_goal = task
         .request
@@ -203,12 +197,36 @@ pub(super) fn is_task_target(
             && !named_in_prose;
         !named_only_as_ci_gate
     });
-    if (named_in_request_or_goal || named_in_criteria)
-        && !super::answer_policy::runs_ci_entry(command)
-    {
+    (named_in_request_or_goal || named_in_criteria) && !super::answer_policy::runs_ci_entry(command)
+}
+
+/// Whether the request, goal or criteria name one of the failing `tests`.
+pub(super) fn failing_test_named_by_task(task: &Task, tests: &[String]) -> bool {
+    let text: String = task
+        .request
+        .iter()
+        .chain(std::iter::once(&task.goal))
+        .chain(task.criteria.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    tests
+        .iter()
+        .any(|name| name.chars().count() >= 4 && text.contains(name.as_str()))
+}
+
+/// Whether a pre-existing failing check is part of this task's target.
+/// `output` is the cached base-run tail, or the tail quoted in the question;
+/// changed files are relative to the task's base SHA.
+pub(super) fn is_task_target(
+    task: &Task,
+    command: &str,
+    output: &str,
+    changed_files: &[String],
+) -> bool {
+    if command_named_by_task(task, command) {
         return true;
     }
-
     let named_tokens: Vec<String> = task
         .request
         .iter()

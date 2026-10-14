@@ -20,6 +20,9 @@ pub struct Report {
     pub truncated: bool,
     /// The output shows a crash, an abort or a build that did not finish.
     pub crashed: bool,
+    /// A cargo run that stopped at its first failing test binary: tests of
+    /// the later binaries never ran.
+    pub stopped_early: bool,
     /// Digit-blind fingerprint of the output without its test lines.
     pub rest_key: String,
 }
@@ -39,8 +42,36 @@ fn strip_duration(name: &str) -> &str {
     name
 }
 
+/// Drops what changes between two runs of one test from the end of a name:
+/// a timing (`3ms`, `(0.9ms)`, `1.2s`) and a count (`(2 tests)`).
+fn normalize(name: &str) -> &str {
+    let mut name = strip_duration(name);
+    loop {
+        let before = name;
+        if let Some((head, last)) = name.rsplit_once(' ') {
+            let digits = last.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            let unit = &last[digits.len()..];
+            let numeric = !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && digits.chars().any(|c| c.is_ascii_digit());
+            if numeric && matches!(unit, "ms" | "s" | "m") {
+                name = head.trim_end();
+            }
+        }
+        if name.ends_with(" tests)") || name.ends_with(" test)") {
+            if let Some(open) = name.rfind(" (") {
+                name = name[..open].trim_end();
+            }
+        }
+        name = strip_duration(name);
+        if name == before {
+            return name;
+        }
+    }
+}
+
 fn clean(name: &str) -> Option<String> {
-    let name = name.trim();
+    let name = normalize(name.trim());
     (!name.is_empty() && name != "FAILED" && name != "ok").then(|| name.to_string())
 }
 
@@ -152,6 +183,17 @@ fn classify(line: &str) -> Option<Line> {
         let name = clean(rest)?;
         return looks_like_test_id(&name).then_some(Line::Failing(name));
     }
+    // node --test spec reporter: `✖ name (0.9ms)`, `✔ name (0.1ms)`
+    if let Some(rest) = t.strip_prefix('\u{2716}') {
+        let rest = rest.trim();
+        if rest.starts_with("failing tests:") {
+            return None;
+        }
+        return clean(rest).map(Line::Failing);
+    }
+    if let Some(rest) = t.strip_prefix('\u{2714}') {
+        return clean(rest).map(Line::Passing);
+    }
     // jest: `● suite › case`, `✓ case (3 ms)`
     if let Some(rest) = t.strip_prefix('\u{25cf}') {
         let name = clean(rest)?;
@@ -164,7 +206,7 @@ fn classify(line: &str) -> Option<Line> {
         .strip_prefix('\u{2713}')
         .or_else(|| t.strip_prefix('\u{221a}'))
     {
-        return clean(strip_duration(rest)).map(Line::Passing);
+        return clean(rest).map(Line::Passing);
     }
     None
 }
@@ -195,6 +237,8 @@ pub fn parse(output: &str, cwd: &str) -> Report {
     let mut failing = BTreeSet::new();
     let mut passing = BTreeSet::new();
     let mut crashed = false;
+    let mut first_stop = false;
+    let mut all_targets = false;
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut last_digit = false;
     for line in output.lines() {
@@ -218,6 +262,8 @@ pub fn parse(output: &str, cwd: &str) -> Report {
         {
             continue;
         }
+        first_stop |= t.starts_with("error: test failed, to rerun pass");
+        all_targets |= t.starts_with("error: ") && t.contains(" failed:") && t.contains("target");
         if CRASH_MARKERS.iter().any(|m| t.contains(m)) {
             crashed = true;
         }
@@ -243,6 +289,7 @@ pub fn parse(output: &str, cwd: &str) -> Report {
         passing: passing.into_iter().take(MAX_NAMES).collect(),
         truncated,
         crashed,
+        stopped_early: first_stop && !all_targets,
         rest_key: format!("{hash:016x}"),
     }
 }

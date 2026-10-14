@@ -37,6 +37,10 @@ pub(super) fn compare(run: &VerifyOutcome, base: &VerifyOutcome) -> Compared {
     if run.output_key.is_empty() || base.output_key.is_empty() {
         return Compared::Unparsed;
     }
+    // A run that stopped at its first failing unit never ran the rest.
+    if run.stopped_early || base.stopped_early {
+        return Compared::Unparsed;
+    }
     if run.truncated || base.truncated || run.crashed || base.crashed {
         return Compared::Unparsed;
     }
@@ -87,6 +91,67 @@ fn waive(task: &mut Task, run: &VerifyOutcome, tests: &[String], flaky: bool) {
 /// failures that change between runs are the environment, not the task, and
 /// count as the base's.
 pub(super) async fn judge_against_base(
+    app: &Arc<App>,
+    task: &mut Task,
+    failed: &VerifyOutcome,
+    base_run: &VerifyOutcome,
+    worktree: &Path,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> BaseVerdict {
+    if !(failed.stopped_early || base_run.stopped_early) {
+        return judge_pair(app, task, failed, base_run, worktree, run_dir, cancel).await;
+    }
+    // A fail-fast run is not comparable: take full runs of both sides, or
+    // give up (never a waiver).
+    let Some(full) = no_fail_fast(&failed.command) else {
+        return BaseVerdict::Unclear;
+    };
+    let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+    let ran = run_verify_commands(
+        CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
+        worktree,
+        &run_dir.join("final"),
+        std::slice::from_ref(&full),
+        sandbox.as_ref(),
+        &task.base_sha,
+        cancel,
+    )
+    .await;
+    let (repo, base_sha, id) = (task.repo.clone(), task.base_sha.clone(), task.id.clone());
+    let on_base = base_result(
+        app,
+        Some(&id),
+        &repo,
+        &base_sha,
+        &full,
+        &run_dir.join("full-base"),
+        cancel,
+        true,
+    )
+    .await;
+    let usable = |r: &VerifyOutcome| r.code.is_some_and(|c| c != 0) && !is_interrupted(r);
+    match (ran.first(), on_base.as_ref()) {
+        (Some(t), Some(b)) if usable(t) && usable(b) && !t.stopped_early && !b.stopped_early => {
+            judge_pair(app, task, t, b, worktree, run_dir, cancel).await
+        }
+        _ => BaseVerdict::Unclear,
+    }
+}
+
+/// `command` with `--no-fail-fast`, only for a plain `cargo test ...` it is
+/// safe to append to.
+fn no_fail_fast(command: &str) -> Option<String> {
+    let command = command.trim();
+    let plain = command == "cargo test" || command.starts_with("cargo test ");
+    let shell = command.contains(['&', '|', ';', '<', '>', '$', '`', '(', ')', '"', '\'', '\n']);
+    let flags = command
+        .split_whitespace()
+        .any(|w| matches!(w, "--" | "--no-fail-fast" | "--fail-fast"));
+    (plain && !shell && !flags).then(|| format!("{command} --no-fail-fast"))
+}
+
+async fn judge_pair(
     app: &Arc<App>,
     task: &mut Task,
     failed: &VerifyOutcome,
@@ -147,6 +212,7 @@ mod tests {
             passing: report.passing,
             truncated: report.truncated,
             crashed: report.crashed,
+            stopped_early: report.stopped_early,
             output_key: report.rest_key,
             ..Default::default()
         }
@@ -213,5 +279,59 @@ mod tests {
             "ERROR connecting to db\nsrc/a.ts(3,1): error TS2322: no\nnot ok 1 - alpha\n",
         );
         assert_eq!(compare(&task, &base), Compared::Unparsed);
+    }
+
+    fn fixture(name: &str) -> String {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runner");
+        std::fs::read_to_string(dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn a_fail_fast_cargo_run_is_never_covered() {
+        let base = run(101, &fixture("cargo_base.txt"));
+        let task = run(101, &fixture("cargo_task.txt"));
+        assert!(base.stopped_early && task.stopped_early);
+        assert_eq!(compare(&task, &base), Compared::Unparsed);
+    }
+
+    #[test]
+    fn only_a_plain_cargo_test_gets_no_fail_fast() {
+        assert_eq!(
+            no_fail_fast("cargo test --workspace").as_deref(),
+            Some("cargo test --workspace --no-fail-fast")
+        );
+        for no in [
+            "cargo test -- --nocapture",
+            "cargo build && cargo test",
+            "cargo test | tee x",
+            "cargo test --no-fail-fast",
+            "npm test",
+        ] {
+            assert_eq!(no_fail_fast(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn a_node_spec_red_base_is_covered_even_with_other_timings() {
+        let text = fixture("node_spec.txt");
+        let base = run(1, &text);
+        assert_eq!(base.failing, ["adds"]);
+        assert_eq!(base.passing, ["ok one"]);
+        let later = text
+            .replace("0.898ms", "1.4ms")
+            .replace("71.944917", "80.1");
+        assert!(matches!(
+            compare(&run(1, &later), &base),
+            Compared::Covered(_)
+        ));
+    }
+
+    #[test]
+    fn runs_that_differ_only_in_timing_are_covered() {
+        let a = "\u{2713} src/a.test.ts (2 tests) 3ms\n FAIL  src/b.test.ts > suite > case\n";
+        let b = "\u{2713} src/a.test.ts (2 tests) 12ms\n FAIL  src/b.test.ts > suite > case\n";
+        let (base, task) = (run(1, a), run(1, b));
+        assert_eq!(base.passing, ["src/a.test.ts"]);
+        assert!(matches!(compare(&task, &base), Compared::Covered(_)));
     }
 }

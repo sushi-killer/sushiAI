@@ -1,0 +1,36 @@
+TAP version 13
+# Subtest: adds
+not ok 1 - adds
+  ---
+  duration_ms: 0.879458
+  type: 'test'
+  location: '/work/nt/tests/a.test.cjs:2:1'
+  failureType: 'testCodeFailure'
+  error: '2 == 3'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 3
+  actual: 2
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/work/nt/tests/a.test.cjs:2:24)
+    Test.runInAsyncScope (node:async_hooks:226:14)
+    Test.run (node:internal/test_runner/test:1402:25)
+    Test.start (node:internal/test_runner/test:1262:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17)
+  ...
+# Subtest: ok one
+ok 2 - ok one
+  ---
+  duration_ms: 0.162709
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 68.751791

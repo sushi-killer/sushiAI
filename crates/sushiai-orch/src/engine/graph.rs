@@ -371,7 +371,6 @@ async fn parent_finals_on_base(
     let wt = PathBuf::from(&task.worktree);
     let mut unclear: Vec<VerifyOutcome> = Vec::new();
     let mut judged: Vec<String> = Vec::new();
-    let changed = git::changed_files(&wt, &task.base_sha).unwrap_or_default();
     for base_run in on_base {
         let Some(failed) = failing_finals
             .iter()
@@ -381,7 +380,9 @@ async fn parent_finals_on_base(
         };
         // A check the parent's work is meant to turn green is never waived;
         // it stays an ordinary failure.
-        if is_task_target(task, &base_run.command, &base_run.tail, &changed) {
+        if command_named_by_task(task, &base_run.command)
+            || failing_test_named_by_task(task, &base_run.failing)
+        {
             let line = kept_check_line(&base_run.command, KEPT_BY_TASK_TARGET);
             if !task.decisions.contains(&line) {
                 task.decisions.push(line);

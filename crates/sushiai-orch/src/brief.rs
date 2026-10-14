@@ -10,7 +10,7 @@ use crate::model::{
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 10;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 11;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -1216,13 +1216,13 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
     Some((result, recorded_as_pass))
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk the owner only about a call that belongs to a person, and only these four kinds: (1) a scope change against the request, (2) money or a paid service, (3) a destructive or irreversible action, (4) the security model or a public API or contract change. Anything else you settle yourself: decide it, fold the decision into the goal, and do not ask. At most 3 questions.";
 
 const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"],\"risk\":[],\"defaultOption\":null}]}\n```\n";
 
 const PLAN_COVERAGE: &str = "List in `coverage` every numbered or bulleted item of the request, as its `requirement` text and the 0-based indexes of the `criteria` that prove it; each such item needs at least one criterion with a runnable `-- check:`. A criterion is about the product's behaviour, never about what the agent writes in its report, handoff, summary or decisions.";
 
-const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
+const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when the question is one of the four kinds of call that belong to a person (a scope change against the request, money or a paid service, a destructive or irreversible action, the security model or a public API or contract change). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
@@ -3473,6 +3473,26 @@ mod tests {
     fn the_default_plan_brief_asks_for_a_recommended_option() {
         let brief = build_plan_brief("Fix it", &Variant::default(), "");
         assert!(brief.contains("\"recommended\""));
+    }
+
+    #[test]
+    fn the_plan_brief_asks_the_owner_only_the_closed_list_of_calls() {
+        let variant = Variant {
+            batch_questions: false,
+            ..Variant::default()
+        };
+        let batched = build_plan_brief("Fix it", &Variant::default(), "");
+        for brief in [build_plan_brief("Fix it", &variant, ""), batched] {
+            for call in [
+                "(1) a scope change against the request",
+                "(2) money or a paid service",
+                "(3) a destructive or irreversible action",
+                "(4) the security model or a public API or contract change",
+            ] {
+                assert!(brief.contains(call), "missing {call}");
+            }
+            assert!(brief.contains("Anything else you settle yourself"));
+        }
     }
 
     #[test]

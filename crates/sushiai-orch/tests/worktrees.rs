@@ -70,7 +70,10 @@ fn archive_stopped(daemon: &Daemon, id: &str) -> serde_json::Value {
             "task.archive",
             serde_json::json!({"id": id}),
         );
-        if response["error"]["message"] == "cannot archive a task with a live loop" {
+        if response["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("live loop"))
+        {
             return None;
         }
         assert!(response.get("error").is_none(), "{response}");

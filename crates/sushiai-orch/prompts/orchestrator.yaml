@@ -47,7 +47,7 @@ mcp_instructions: |
   - Never answer a permission question ("Allow ... for this task?") with Allow once or Always for this repo: which tools and paths a task may use is the owner's call, as is every write to an outside service.
   - Never answer "approve" for a protected-path decision or for committing an attempt the review gave no verdict, on the owner's behalf -- these are the owner's call to make.
   - Never answer "drop all" for a base-check question about a shared check: the repo's CI entry (`npm run ci`, `npm test`, `cargo test`), a check from the repo settings, or one the owner wrote in the request. Only the owner drops those; answer "keep all" when the task is meant to make the check pass, "retry after the base is fixed" only when other live work lands on that base branch, or "stop", or bring the owner the question. A check the planner invented for this task alone may be dropped.
-  - Never delete tasks; this tool intentionally cannot.
+  - task_stop when a live task must end; task_delete only when the owner asks and only after the task is stopped.
   - Tasks ask you questions without stopping (ask_orchestrator). One reaches you marked as a task's question with its message id: answer it with orchestrator_reply {question, text}. inbox_read shows everything sent to you.
   - peer_send {to, text} messages a task and peer_list {repo} lists a repository's tasks. A task reads a message on its next attempt; the attempt it is running is never interrupted.
   - task_report {id} returns the markdown report of a finished top-level task or graph; task_lead_touch {id, touched, note} records whether a done task's work needed a fix after the orchestrator said done. Mark it only when you or the owner really had to fix the work.

@@ -834,3 +834,101 @@ async fn helpers_folder_task_log_and_timeline_read_helpers_without_a_legacy_fall
         assert_eq!(segments[0].ended_at, start + 3_000);
     }
 }
+
+#[tokio::test]
+async fn task_delete_via_mcp_refuses_a_live_task_until_task_stop() {
+    let (app, _dir) = test_app();
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Drafting,
+        TaskStatus::Waiting,
+        TaskStatus::Landing,
+    ] {
+        let task = task_with_status(status);
+        app.store.save_task(&task).unwrap();
+        let err = app
+            .dispatch("task.delete", json!({"id": task.id, "source": "chat"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("task_stop"), "status {status:?}: {err}");
+        assert!(
+            app.store.load_task(&task.id).unwrap().is_some(),
+            "status {status:?} must keep its record"
+        );
+        app.dispatch("task.stop", json!({"id": task.id, "source": "chat"}))
+            .await
+            .unwrap();
+        app.dispatch("task.delete", json!({"id": task.id, "source": "chat"}))
+            .await
+            .unwrap();
+        assert!(
+            app.store.load_task(&task.id).unwrap().is_none(),
+            "status {status:?} must be deleted after task_stop"
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_delete_via_mcp_refuses_a_task_with_a_live_loop_but_the_owner_may_delete_it() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Queued);
+    app.store.save_task(&task).unwrap();
+    app.controls.lock().unwrap().insert(
+        task.id.clone(),
+        TaskControl {
+            cancel: CancelToken::new(),
+            pending_answer: Arc::new(StdMutex::new(None)),
+            pending_amend: Arc::new(StdMutex::new(None)),
+            handle: tokio::spawn(async {}),
+        },
+    );
+    let err = app
+        .dispatch("task.delete", json!({"id": task.id, "source": "lead"}))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("live loop") && err.contains("task_stop"),
+        "{err}"
+    );
+    assert!(app.store.load_task(&task.id).unwrap().is_some());
+    app.dispatch("task.delete", json!({"id": task.id}))
+        .await
+        .unwrap();
+    assert!(app.store.load_task(&task.id).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn task_archive_error_names_task_stop() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Running);
+    app.store.save_task(&task).unwrap();
+    let err = app
+        .dispatch("task.archive", json!({"id": task.id}))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("running, drafting, waiting or landing"),
+        "{err}"
+    );
+    assert!(err.contains("task_stop"), "{err}");
+
+    let queued = task_with_status(TaskStatus::Queued);
+    app.store.save_task(&queued).unwrap();
+    app.controls.lock().unwrap().insert(
+        queued.id.clone(),
+        TaskControl {
+            cancel: CancelToken::new(),
+            pending_answer: Arc::new(StdMutex::new(None)),
+            pending_amend: Arc::new(StdMutex::new(None)),
+            handle: tokio::spawn(async {}),
+        },
+    );
+    let err = app
+        .dispatch("task.archive", json!({"id": queued.id}))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("live loop") && err.contains("task_stop"),
+        "{err}"
+    );
+}

@@ -438,6 +438,14 @@ pub(super) fn drop_criterion(
             c.criterion -= 1;
         }
     }
+    for review in task.attempts.iter_mut().filter_map(|a| a.review.as_mut()) {
+        review.criteria.retain(|r| r.index != Some(n));
+        for ruling in review.criteria.iter_mut() {
+            if let Some(i) = ruling.index.as_mut().filter(|i| **i > n) {
+                *i -= 1;
+            }
+        }
+    }
     // Who dropped it is on the line: the report lists the criterion as not
     // done, and the owner must not read a judge's drop as their own answer.
     let by = match (origin, task.question_history.last().map(|h| h.answered_by)) {
@@ -519,6 +527,41 @@ mod grounded_checks_tests {
         let before = task.decisions.len();
         let _ = drop_criterion(&Settings::default(), &mut task, 9, Origin::Owner);
         assert_eq!(task.decisions.len(), before);
+    }
+
+    #[test]
+    fn dropping_a_criterion_shifts_the_stored_rulings_so_a_later_one_is_not_settled() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["A".into(), "B".into(), "C".into()];
+        let ruling = |index, met| CriterionRuling {
+            criterion: String::new(),
+            index: Some(index),
+            met: Some(met),
+            evidence: None,
+        };
+        let mut attempt = attempt_with_failure(1, "x");
+        attempt.review = Some(ReviewResult {
+            verdict: Verdict::Fail,
+            findings: Vec::new(),
+            repeated: Vec::new(),
+            severities: Vec::new(),
+            details: Vec::new(),
+            criteria: vec![ruling(0, false), ruling(1, true), ruling(2, false)],
+        });
+        task.attempts = vec![attempt];
+        let _ = drop_criterion(&Settings::default(), &mut task, 0, Origin::Owner);
+        let kept: Vec<(Option<usize>, Option<bool>)> = task.attempts[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .map(|r| (r.index, r.met))
+            .collect();
+        assert_eq!(kept, [(Some(0), Some(true)), (Some(1), Some(false))]);
+        let results = criteria_results(&task, &task.attempts[0]);
+        assert_eq!(results[0].status, CriterionStatus::Met);
+        assert_eq!(results[1].status, CriterionStatus::Failing);
     }
 
     #[test]

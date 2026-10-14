@@ -1143,8 +1143,8 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        // The plan gate: code checks and one plan review by another model
-        // family. A critical finding replans once.
+        // The plan gate: one typed plan review, then the code checks. A
+        // critical finding replans once.
         match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
             plan_gate::GateAction::Replan => continue,
             plan_gate::GateAction::Cancelled => {

@@ -440,6 +440,41 @@ impl App {
         }
     }
 
+    /// Outside quiet hours, a question whose overseer notice quiet hours held
+    /// back is the owner's (`for_owner`), with the digest on or off. One the
+    /// overseer holds again is handed on when that turn ends.
+    pub(super) fn hand_over_deferred(&self, now: i64) {
+        let waiting: Vec<Task> = self
+            .store
+            .list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Waiting && !t.archived)
+            .filter(|t| {
+                t.question
+                    .as_ref()
+                    .is_some_and(|q| !q.for_owner && !q.held_now(now))
+            })
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let deferred: std::collections::HashSet<String> = self
+            .notice_log()
+            .iter()
+            .filter(|e| e.kind == "skipped" && e.text == DEFERRED)
+            .flat_map(|e| e.decision_keys().map(str::to_string).collect::<Vec<_>>())
+            .collect();
+        for task in waiting {
+            let Some(q) = task.question.as_ref() else {
+                continue;
+            };
+            if deferred.contains(&decision_key(&task.id, q)) {
+                self.hand_to_owner(&task.id, q.asked_at);
+            }
+        }
+    }
+
     /// With the digest off, the first tick after quiet hours posts each held
     /// notice once, if its question still waits and nothing told the owner since.
     pub(super) fn post_held_notices(&self, now: i64) {

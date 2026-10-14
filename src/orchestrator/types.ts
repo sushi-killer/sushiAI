@@ -289,6 +289,9 @@ export type Question = {
   heldForOverseer?: boolean;
   /** When the hold began, ms epoch. A hold counts for ten minutes only. */
   heldAt?: number;
+  /** orchd handed this question to the owner: nobody else will settle it.
+   * Only then does a waiting task notify, badge or count. Absent when false. */
+  forOwner?: boolean;
 };
 
 /** One answered question in `Task.questionHistory`. */

@@ -1105,6 +1105,7 @@ mod tests {
     include!("tests/availability.rs");
     include!("tests/cost.rs");
     include!("tests/decision.rs");
+    include!("tests/for_owner.rs");
     include!("tests/graph.rs");
     include!("tests/lines.rs");
     include!("tests/core.rs");

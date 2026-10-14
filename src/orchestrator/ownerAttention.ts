@@ -44,26 +44,17 @@ export function needsOwner(task: Task): boolean {
   }
 }
 
-/** How long a hold counts (`HOLD_TTL_MS` in the daemon's model.rs). */
-export const HOLD_TTL_MS = 10 * 60 * 1000;
-
-/** A waiting task whose question the orchestrator agent is looking at: the
- * owner is asked only if that turn ends without an answer. A hold older than
- * ten minutes no longer counts, so a hung turn cannot hide a question. */
-export function heldForOverseer(task: Task, now = Date.now()): boolean {
-  const q = task.question;
-  return (
-    task.status === "waiting" &&
-    !!q?.heldForOverseer &&
-    typeof q.heldAt === "number" &&
-    now - q.heldAt < HOLD_TTL_MS
-  );
+/** A waiting task whose question orchd handed to the owner (`forOwner`):
+ * neither the orchestrator agent, triage nor the answer policy will settle it. */
+export function forOwner(task: Task): boolean {
+  return task.status === "waiting" && task.question?.forOwner === true;
 }
 
 /** `needsOwner` for what raises attention (Inbox, Dock badge, tray, counts): a
- * held question waits until the overseer's turn ends. The rail still lists it. */
-export function needsOwnerNow(task: Task, now = Date.now()): boolean {
-  return needsOwner(task) && !heldForOverseer(task, now);
+ * waiting task counts only once orchd hands its question to the owner. The
+ * rail still lists it. */
+export function needsOwnerNow(task: Task): boolean {
+  return needsOwner(task) && (task.status !== "waiting" || forOwner(task));
 }
 
 export function ownerTasks(tasks: Task[]): Task[] {

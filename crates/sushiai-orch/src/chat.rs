@@ -1586,8 +1586,11 @@ pub(super) fn wake_overseer(
     reason: &'static str,
     task_id: Option<&str>,
 ) -> bool {
-    if !Path::new(repo).is_dir()
-        || tokio::runtime::Handle::try_current().is_err()
+    if !Path::new(repo).is_dir() {
+        app.hand_over_unwoken(repo, reason, task_id);
+        return false;
+    }
+    if tokio::runtime::Handle::try_current().is_err()
         || app.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
     {
         return false;
@@ -1605,6 +1608,8 @@ pub(super) fn wake_overseer(
                     defer_wake(app, repo, prompt, read_only, reason, task_id);
                     "chat is busy, queued for the end of its turn"
                 } else {
+                    // Nobody will take its questions: they are the owner's.
+                    app.hand_over_unwoken(repo, reason, task_id);
                     "no route"
                 };
                 app.record_overseer(overseer::Entry::new(
@@ -2190,9 +2195,13 @@ async fn run_turn(
                 }
                 _ => None,
             };
+            // Still waiting after the turn: it escalated, the owner is asked
+            // now, unless quiet hours hold the notice (handed over when they end).
+            let hand_over = gate
+                .as_ref()
+                .is_none_or(|g| g.verdict != owner_notice::Verdict::Deferred);
             record_overseer_end(app, &repo, reason, task_id, started, cost, end, gate);
-            // Still waiting after the turn: it escalated, the owner is asked now.
-            app.release_holds(&repo, held);
+            app.release_holds(&repo, held, hand_over);
         }
     }
     match (result, &turn) {

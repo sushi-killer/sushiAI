@@ -216,6 +216,15 @@ function stoppedByEngine(task) {
   return !!attempt && attempt.status !== "interrupted" && !!attempt.failure;
 }
 
+/** Which question a waiting task asks, for the once-per-question notice: when
+ * it was asked, so a later question with the same text notifies again; the
+ * text for a question from before orchd recorded `askedAt`. */
+function questionIdentity(question) {
+  return typeof question?.askedAt === "number"
+    ? `at:${question.askedAt}`
+    : `text:${question?.text || ""}`;
+}
+
 function formatCost(costUsd) {
   return `$${(costUsd || 0).toFixed(2)}`;
 }
@@ -768,7 +777,8 @@ class OrchestratorService {
   }
 
   /** The transition detector: raises one notice per (task, question) for a
-   * task needing input, and one per (task, status) for a top-level task that
+   * task whose question orchd handed to the owner (`question.forOwner`), and
+   * one per (task, status) for a top-level task that
    * finished, failed, waits to land or was stopped by the engine. Subtasks never raise those, archived tasks
    * raise nothing. */
   #notifyTransition(message) {
@@ -787,18 +797,13 @@ class OrchestratorService {
     if (!this.notify) return;
     if (!task || typeof task !== "object" || task.archived) return;
     const changed = previous !== undefined && previous !== task.status;
-    // The overseer is on it: the notice comes only if it hands the question on.
-    // A hold older than ten minutes no longer counts (HOLD_TTL_MS in model.rs).
-    if (
-      task.status === "waiting" &&
-      task.question?.heldForOverseer &&
-      Date.now() - Number(task.question.heldAt || 0) < 10 * 60 * 1000
-    )
-      return;
     let key;
-    if (task.status === "waiting")
-      key = `input:${task.id}:${task.question?.text || ""}`;
-    else if (task.status === "done" && !task.parent)
+    if (task.status === "waiting") {
+      // Only a question orchd handed to the owner notifies: the overseer,
+      // triage or the answer policy may still settle any other.
+      if (task.question?.forOwner !== true) return;
+      key = `input:${task.id}:${questionIdentity(task.question)}`;
+    } else if (task.status === "done" && !task.parent)
       key = `${task.status}:${task.id}`;
     else if (
       (task.status === "failed" || task.status === "landing") &&

@@ -1787,6 +1787,13 @@ pub struct Question {
     /// counts, so a hung overseer turn cannot hide a question for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_at: Option<i64>,
+    /// orchd handed this question to the owner: neither the overseer, triage,
+    /// the answer policy nor a precedent will settle it. The app notifies,
+    /// badges and counts a waiting task only then. Once set it stays set
+    /// until the question is answered or replaced; a new question starts
+    /// without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_owner: bool,
     /// The check commands a base-check question is about, in listing order.
     /// Empty for every other question.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1857,6 +1864,7 @@ impl Question {
             asked_at: Some(now_ms()),
             held_for_overseer: false,
             held_at: None,
+            for_owner: false,
             commands: Vec::new(),
             failure_signature: None,
             risk: Vec::new(),

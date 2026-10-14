@@ -169,12 +169,13 @@ async fn park(
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
     app.save_task_logged(task);
-    // The wake may hold the question for the overseer; the broadcast that
-    // shows the waiting task carries that, so the app never sees it unheld first.
+    // The wake may hold the question for the overseer or hand it to the
+    // owner; the broadcast that shows the waiting task carries either.
     wake_orchestrator_for_waiting(app, task);
     if let (Some(q), Ok(Some(saved))) = (task.question.as_mut(), app.store.load_task(task_id)) {
-        if let Some(s) = saved.question {
+        if let Some(s) = saved.question.filter(|s| s.asked_at == q.asked_at) {
             (q.held_for_overseer, q.held_at) = (s.held_for_overseer, s.held_at);
+            q.for_owner |= s.for_owner;
         }
     }
     if need_overseer && !task.question.as_ref().is_some_and(|q| q.held_for_overseer) {
@@ -452,8 +453,13 @@ impl App {
 
     /// Ends the holds a finished turn made, each only if it is still the same
     /// hold (a newer turn or question replaced it otherwise) and no queued
-    /// wake for that task is about to hold it again.
-    pub(crate) fn release_holds(&self, repo: &str, held: &[(String, i64)]) {
+    /// wake for that task is about to hold it again. With `hand_over` the
+    /// question the turn left open is the owner's now, also when its hold
+    /// ran out (TTL) before the turn ended. An "attempts keep failing"
+    /// question takes the ladder's next rung instead.
+    pub(crate) fn release_holds(&self, repo: &str, held: &[(String, i64)], hand_over: bool) {
+        // A daemon that is stopping hands nothing on: its restart wake does.
+        let hand_over = hand_over && !self.shutting_down.load(Ordering::SeqCst);
         for (id, at) in held {
             if chat::wake_queued_for(self, repo, id) {
                 continue;
@@ -461,16 +467,17 @@ impl App {
             let Ok(Some(mut task)) = self.store.load_task(id) else {
                 continue;
             };
-            if task
-                .question
-                .as_ref()
-                .is_some_and(|q| q.held_at == Some(*at))
-            {
-                if task
-                    .question
-                    .as_ref()
-                    .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing)
-                {
+            let Some(q) = task.question.as_ref() else {
+                continue;
+            };
+            let ours = q.held_at == Some(*at);
+            // Unheld and asked no later than the hold: the same question,
+            // whose hold the TTL ended while the turn ran.
+            let lapsed = !q.held_for_overseer && q.asked_at.is_none_or(|asked| asked <= *at);
+            let asked_at = q.asked_at;
+            let waiting = task.status == TaskStatus::Waiting;
+            if ours {
+                if ladder_owns(q) {
                     if self.step_unanswered_exhausted(&mut task) {
                         self.advance_queue(&task.repo);
                     }
@@ -478,11 +485,46 @@ impl App {
                 }
                 if let Some(q) = task.question.as_mut() {
                     q.release();
+                    // One save, so the app never sees it released but unhanded.
+                    q.for_owner |= hand_over && waiting;
                 }
                 self.save_task_logged(&task);
                 self.broadcast_task(&task);
+            } else if hand_over && lapsed {
+                self.hand_to_owner(id, asked_at);
             }
         }
+    }
+
+    /// Marks task `id`'s waiting question as the owner's (`for_owner`), when
+    /// it is still the question asked at `asked_at` and not one the failure
+    /// ladder settles. Saved and broadcast only when that changes anything;
+    /// whether it did.
+    pub(crate) fn hand_to_owner(&self, id: &str, asked_at: Option<i64>) -> bool {
+        let lock = self.task_lock(id);
+        let task = {
+            let _guard = lock.lock().unwrap();
+            let Ok(Some(mut task)) = self.store.load_task(id) else {
+                return false;
+            };
+            if task.status != TaskStatus::Waiting {
+                return false;
+            }
+            let Some(question) = task.question.as_mut().filter(|question| {
+                !question.for_owner && !ladder_owns(question) && question.asked_at == asked_at
+            }) else {
+                return false;
+            };
+            question.for_owner = true;
+            task.updated_at = now_ms();
+            if let Err(e) = self.store.save_task(&task) {
+                eprintln!("orch: saving task {id} failed: {e}");
+                return false;
+            }
+            task
+        };
+        self.broadcast_task(&task);
+        true
     }
 
     /// An overseer turn ended on "attempts keep failing" and did not answer
@@ -542,9 +584,15 @@ impl App {
         false
     }
 
-    /// Releases every hold that `keep` does not keep.
-    fn release_holds_where(&self, keep: impl Fn(&Question) -> bool) {
+    /// Releases every hold that `keep` does not keep, handing the waiting
+    /// question to the owner in the same save when `hand_over` says so.
+    fn release_holds_where(
+        &self,
+        keep: impl Fn(&Question) -> bool,
+        hand_over: impl Fn(&Task) -> bool,
+    ) {
         for mut task in self.store.list_tasks().unwrap_or_default() {
+            let owners = task.status == TaskStatus::Waiting && hand_over(&task);
             let Some(q) = task
                 .question
                 .as_mut()
@@ -555,15 +603,14 @@ impl App {
             // An "attempts keep failing" question is never left open: with
             // the hold gone and no queued wake to answer it, the ladder takes
             // its next rung. A queued wake keeps the question for its turn.
-            if q.kind == QuestionKind::AttemptsFailing
-                && !chat::wake_queued_for(self, &task.repo, &task.id)
-            {
+            if ladder_owns(q) && !chat::wake_queued_for(self, &task.repo, &task.id) {
                 if self.step_unanswered_exhausted(&mut task) {
                     self.advance_queue(&task.repo);
                 }
                 continue;
             }
             q.release();
+            q.for_owner |= owners;
             self.save_task_logged(&task);
             self.broadcast_task(&task);
         }
@@ -583,10 +630,50 @@ impl App {
         }
     }
 
-    /// Holds older than [`HOLD_TTL_MS`] end, whatever the turn is doing.
+    /// Holds older than [`HOLD_TTL_MS`] end, whatever the turn is doing. A
+    /// turn still running in the repo hands its questions on when it ends; a
+    /// hold that no turn or queued wake owns any more goes to the owner now.
     pub(crate) fn release_expired_holds(&self, now: i64) {
-        self.release_holds_where(|q| q.held_now(now));
+        let busy: std::collections::HashSet<String> =
+            self.chat_turns.lock().unwrap().keys().cloned().collect();
+        self.release_holds_where(
+            |q| q.held_now(now),
+            |task| !busy.contains(&task.repo) && !chat::wake_queued_for(self, &task.repo, &task.id),
+        );
     }
+
+    /// A wake of `reason` that cannot run (no route, no repo directory):
+    /// nobody takes the questions it was for, so they are the owner's, and a
+    /// hold its queued copy left ends. A daemon that is stopping hands nothing
+    /// on; its restart wakes the overseer again. An "attempts keep failing"
+    /// question is left to the ladder.
+    pub(crate) fn hand_over_unwoken(&self, repo: &str, reason: &str, task_id: Option<&str>) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        for (id, _) in self.wake_questions(repo, reason, task_id) {
+            let Ok(Some(mut task)) = self.store.load_task(&id) else {
+                continue;
+            };
+            let Some(question) = task.question.as_mut() else {
+                continue;
+            };
+            if ladder_owns(question) || (!question.held_for_overseer && question.for_owner) {
+                continue;
+            }
+            question.release();
+            question.for_owner = true;
+            task.updated_at = now_ms();
+            self.save_task_logged(&task);
+            self.broadcast_task(&task);
+        }
+    }
+}
+
+/// An "attempts keep failing" question belongs to the failure ladder: it is
+/// never handed to the owner (`ladder.rs`).
+fn ladder_owns(question: &Question) -> bool {
+    question.kind == QuestionKind::AttemptsFailing
 }
 
 /// Wakes the orchestrator chat (an overseer turn) for a task that just parked
@@ -594,6 +681,12 @@ impl App {
 /// `auto_answer` is on. Parking happens once per question, so this never wakes
 /// twice for the same one. An owner-only kind never wakes it: the owner
 /// answers those, and `task_answer` would refuse the agent anyway.
+///
+/// The answer policy and triage had their turn before the task parked, so a
+/// question nobody else takes here is handed to the owner (`for_owner`): an
+/// owner-only kind at once (also in quiet hours), any question with
+/// auto-answer off, and one whose overseer turn cannot start
+/// (`chat::wake_overseer`). A held question is handed on when its turn ends.
 pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
     let Some(question) = task.question.as_ref() else {
         return;
@@ -601,9 +694,11 @@ pub(super) fn wake_orchestrator_for_waiting(app: &App, task: &Task) {
     if owner_only(question.kind) {
         // Nobody wakes for it; quiet hours would leave the owner unaware.
         app.record_quiet_parked(task);
+        app.hand_to_owner(&task.id, question.asked_at);
         return;
     }
     if !app.settings.read().unwrap().auto_answer {
+        app.hand_to_owner(&task.id, question.asked_at);
         return;
     }
     if answer_like_precedent(app, task, question) {
@@ -655,7 +750,7 @@ fn answer_like_precedent(app: &App, task: &Task, question: &Question) -> bool {
         if app.handle_task_answer(params).await.is_ok() {
             return;
         }
-        app.release_holds(&repo, &held);
+        app.release_holds(&repo, &held, false);
         if let Ok(Some(task)) = app.store.load_task(&id) {
             if task.status == TaskStatus::Waiting && task.question.is_some() {
                 wake_for_waiting(&app, &task);

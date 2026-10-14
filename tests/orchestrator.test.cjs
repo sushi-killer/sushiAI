@@ -478,49 +478,23 @@ test("orch.event arrives per host: a local one as is, a remote one tagged with i
   assert.equal(relayed.length, 2);
 });
 
-test("a question held for the overseer raises no notice until the overseer hands it on", async () => {
+test("a waiting task notifies only once orchd hands its question to the owner", async () => {
   const manager = twoHosts({ "orch.task.list": () => [] });
   const { hosts, notices } = await listening(manager);
-  const waiting = (held) => ({
+  const waiting = (question) => ({
     id: "t1",
     title: "T",
     repo: "/r",
     status: "waiting",
-    question: {
-      text: "Which?",
-      options: ["a", "b"],
-      heldForOverseer: held,
-      heldAt: Date.now(),
-    },
+    question: { text: "Which?", options: ["a", "b"], ...question },
   });
-  manager.notify("local", "orch.event", { event: "task", task: waiting(true) });
+  const push = (task) =>
+    manager.notify("local", "orch.event", { event: "task", task });
+  push(waiting({ heldForOverseer: true, heldAt: Date.now() }));
+  push(waiting({}));
+  push(waiting({ heldForOverseer: true, heldAt: Date.now() - 11 * 60 * 1000 }));
   assert.equal(notices.length, 0);
-  manager.notify("local", "orch.event", {
-    event: "task",
-    task: waiting(false),
-  });
-  assert.equal(notices.length, 1);
-  hosts.close();
-});
-
-test("a hold older than ten minutes no longer silences the notice", async () => {
-  const manager = twoHosts({ "orch.task.list": () => [] });
-  const { hosts, notices } = await listening(manager);
-  manager.notify("local", "orch.event", {
-    event: "task",
-    task: {
-      id: "t9",
-      title: "T",
-      repo: "/r",
-      status: "waiting",
-      question: {
-        text: "Which?",
-        options: ["a"],
-        heldForOverseer: true,
-        heldAt: Date.now() - 11 * 60 * 1000,
-      },
-    },
-  });
+  push(waiting({ forOwner: true }));
   assert.equal(notices.length, 1);
   hosts.close();
 });
@@ -534,7 +508,7 @@ test("events and notices are kept per host: the same task id on two hosts notifi
     title: "Do the thing",
     repo: "/repo",
     status: "waiting",
-    question: { text: "Delete old keys?", options: [] },
+    question: { text: "Delete old keys?", options: [], forOwner: true },
   };
   manager.notify("local", "orch.event", { event: "task", task: waiting });
   manager.notify("local", "orch.event", { event: "task", task: waiting });
@@ -749,14 +723,14 @@ test("the transition detector notifies done and failed once, only for live top-l
     id: "s3",
     status: "waiting",
     parent: "d1",
-    question: { text: "Which?" },
+    question: { text: "Which?", forOwner: true },
   });
   push({
     ...base,
     id: "a2",
     status: "waiting",
     archived: true,
-    question: { text: "Archived?" },
+    question: { text: "Archived?", forOwner: true },
   });
   assert.deepEqual(
     notices.map((n) => [n.taskId, n.kind, n.title, n.body, n.focus]),

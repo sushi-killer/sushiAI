@@ -503,7 +503,19 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     let task_id = task.id.clone();
     let worktree = PathBuf::from(&task.worktree);
     let mut landed = false;
-    if task.variant().land && task.parent.is_none() {
+    // A subtask no review read already landed on this branch: the parent
+    // is unreviewed too, is not landed by itself, and the owner gets a PR.
+    for child in app.repo_tasks(&task.repo) {
+        if child.parent.as_deref() == Some(task_id.as_str())
+            && child.unreviewed
+            && !child.archived
+            && !task.decisions.iter().any(|d| d.contains(&child.id))
+        {
+            task.unreviewed = true;
+            task.decisions.push(super::pr::unreviewed_part_line(&child));
+        }
+    }
+    if !task.unreviewed && task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
         match land_on_base(app, task, None, 0, &worktree, &run_dir, cancel).await {
@@ -583,6 +595,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     task.updated_at = now_ms();
     app.save_task_logged(task);
     app.broadcast_task(task);
+    app.notify_task_unreviewed(task);
     wake_orchestrator_for_done(app, task);
     super::pr_draft::spawn_pr_on_done(app, task);
     ParentEnd::Finished

@@ -52,11 +52,36 @@ pub(super) async fn run_cmd(
 pub(super) const UNREVIEWED_LINE: &str = "Unreviewed: no review route gave a verdict";
 
 /// The PR body: goal, criteria as a checklist, then the report summary.
+/// The decision a parent records for a subtask that landed unreviewed; the
+/// pull request names it.
+pub(super) fn unreviewed_part_line(child: &Task) -> String {
+    format!(
+        "{UNREVIEWED_PART} \"{}\" ({}) landed unreviewed: no review route gave a verdict",
+        child.title, child.id
+    )
+}
+
+const UNREVIEWED_PART: &str = "Orchestrator: subtask";
+
 pub(super) fn pr_body(task: &Task) -> String {
     let mark = if task.unreviewed { " " } else { "x" };
     let mut body = String::new();
     if task.unreviewed {
         body.push_str(&format!("{UNREVIEWED_LINE}\n\n"));
+        for d in task
+            .decisions
+            .iter()
+            .filter(|d| d.starts_with(UNREVIEWED_PART))
+        {
+            body.push_str(&format!("- {d}\n"));
+        }
+        if task
+            .decisions
+            .iter()
+            .any(|d| d.starts_with(UNREVIEWED_PART))
+        {
+            body.push('\n');
+        }
     }
     body.push_str(&format!("{}\n", task.goal.trim()));
     if !task.criteria.is_empty() {
@@ -435,5 +460,18 @@ mod unreviewed_tests {
             "{body}"
         );
         assert!(body.contains("- [ ] It toggles"), "{body}");
+    }
+
+    #[test]
+    fn a_parent_pr_names_its_unreviewed_subtasks() {
+        let mut child = task_with_status(TaskStatus::Done);
+        child.title = "Part".into();
+        let mut parent = task_with_status(TaskStatus::Done);
+        parent.goal = "Whole".into();
+        parent.unreviewed = true;
+        parent.decisions.push(unreviewed_part_line(&child));
+        let body = pr_body(&parent);
+        assert!(body.starts_with(UNREVIEWED_LINE), "{body}");
+        assert!(body.contains("subtask \"Part\""), "{body}");
     }
 }

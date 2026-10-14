@@ -2721,8 +2721,13 @@ pub(super) async fn run_task_loop(
                         attempt_n,
                     );
                     task.unreviewed = true;
+                    let after = if task.parent.is_some() {
+                        "it lands on the parent, which then becomes unreviewed"
+                    } else {
+                        "it is not landed, the owner gets a pull request"
+                    };
                     task.decisions.push(format!(
-                        "Orchestrator: attempt {attempt_n} committed unreviewed: no review route gave a verdict; it is not landed, the owner gets a pull request"
+                        "Orchestrator: attempt {attempt_n} committed unreviewed: no review route gave a verdict; {after}"
                     ));
                     break;
                 }
@@ -3878,9 +3883,11 @@ pub(super) async fn finish_attempt(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Tail {
-    // Work no review read is never landed by itself: it waits on its branch
-    // and a pull request marked unreviewed goes to the owner.
-    let landing = if task.unreviewed {
+    // Top-level work no review read is never landed by itself: it waits on
+    // its branch and a pull request marked unreviewed goes to the owner. A
+    // subtask lands on its parent's branch, which is not the default branch;
+    // the parent then carries the flag.
+    let landing = if task.unreviewed && task.parent.is_none() {
         None
     } else if let Some(parent_id) = task.parent.clone() {
         Some(

@@ -1236,3 +1236,47 @@ fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
         .map(|a| a.iter().all(|x| x["by"] != "review-judge"))
         .unwrap_or(true));
 }
+
+#[test]
+fn an_unreviewed_subtask_lands_on_its_parent_and_the_parent_completes_unreviewed() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
+    let repo = init_git_repo();
+    let make = |title: &str, parent: Option<&str>, start: bool| {
+        let task = daemon.request(
+            "task.create",
+            json!({
+                "repo": repo.path().to_str().unwrap(), "title": title,
+                "goal": "Make a trivial change", "criteria": [], "verify": ["true"],
+                "parent": parent, "start": start,
+            }),
+        );
+        task["id"].as_str().unwrap().to_string()
+    };
+    let parent_id = make("Whole", None, false);
+    let child_id = make("Part", Some(&parent_id), false);
+    daemon.request("task.start", json!({"id": parent_id}));
+
+    let parent = poll_until(&daemon, &parent_id, |s| {
+        matches!(s, "done" | "failed" | "stopped" | "waiting")
+    });
+    let child = daemon.request("task.get", json!({"id": child_id}));
+    assert_eq!(child["status"], "done", "{child}");
+    assert_eq!(child["unreviewed"], true, "{child}");
+    assert!(child["decisions"].to_string().contains("Land: landed on"));
+    assert_eq!(parent["status"], "done", "{parent}");
+    assert_eq!(parent["unreviewed"], true, "{parent}");
+    let decisions = parent["decisions"].to_string();
+    assert!(decisions.contains("landed unreviewed"), "{decisions}");
+    assert!(!decisions.contains("onto main"), "{decisions}");
+
+    let worktree = parent["worktree"].as_str().unwrap_or_default().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+}

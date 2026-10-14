@@ -34,6 +34,7 @@ mod messages;
 
 mod advisor;
 mod answer_policy;
+pub(crate) use answer_policy::migrate_check_sources;
 mod attempt_run;
 mod attribution;
 mod availability;

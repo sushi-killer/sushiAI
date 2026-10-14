@@ -1695,45 +1695,44 @@ impl Task {
 }
 
 impl Task {
-    /// The commands the planner wrote for this task: verify, finalVerify,
-    /// the checks, the held-out check and the `-- check:` part of each
-    /// criterion.
-    pub fn planner_check_commands(&self) -> Vec<String> {
+    /// The commands the planner wrote for this task, each with whether it
+    /// sits in verify or finalVerify: those, the checks, the held-out check
+    /// and the `-- check:` part of each criterion.
+    pub fn planner_check_commands(&self) -> Vec<(String, bool)> {
         self.verify
             .iter()
             .chain(&self.final_verify)
+            .cloned()
+            .map(|c| (c, true))
             .chain(
                 self.checks
                     .iter()
                     .chain(self.held_out.as_ref())
-                    .map(|c| &c.run),
+                    .map(|c| (c.run.clone(), false)),
             )
-            .cloned()
             .chain(
                 self.criteria
                     .iter()
                     .filter_map(|c| c.split_once("-- check:"))
-                    .map(|(_, command)| command.trim().to_string()),
+                    .map(|(_, command)| (command.trim().to_string(), false)),
             )
             .collect()
     }
 
-    /// Records the source of each command now in the plan: the planner's are
-    /// `Planner`, or `Owner` when `named_by_owner` says the owner wrote the
-    /// command. A command from a setting or a preset is never recorded, so
-    /// it counts as the repo's.
-    pub fn record_check_sources(&mut self, named_by_owner: impl Fn(&str) -> bool) {
+    /// Records the source of each command now in the plan. `classify` rules
+    /// on one command (and whether it sits in verify or finalVerify); a
+    /// command in several places gets the stricter source, the first that is
+    /// not `Planner`. A command from a setting or a preset is never
+    /// recorded, so it counts as the repo's.
+    pub fn record_check_sources(&mut self, classify: impl Fn(&Task, &str, bool) -> CheckSource) {
         let mut sources: Vec<SourcedCheck> = Vec::new();
-        for command in self.planner_check_commands() {
-            if sources.iter().any(|s| s.command == command) {
-                continue;
+        for (command, in_verify) in self.planner_check_commands() {
+            let source = classify(self, &command, in_verify);
+            match sources.iter_mut().find(|s| s.command == command) {
+                Some(known) if known.source == CheckSource::Planner => known.source = source,
+                Some(_) => {}
+                None => sources.push(SourcedCheck { command, source }),
             }
-            let source = if named_by_owner(&command) {
-                CheckSource::Owner
-            } else {
-                CheckSource::Planner
-            };
-            sources.push(SourcedCheck { command, source });
         }
         self.planner_tests.sources = sources;
         self.planner_tests.legacy_commands.clear();

@@ -198,9 +198,98 @@ pub(super) fn runs_ci_entry(command: &str) -> bool {
 }
 
 /// Whether `command` is named in the owner's request.
-pub(super) fn named_in_request(request: Option<&str>, command: &str) -> bool {
+fn named_in_request(request: Option<&str>, command: &str) -> bool {
     let command = flat_command(command);
     !command.is_empty() && request.is_some_and(|r| flat_command(r).contains(&command))
+}
+
+/// A plain file name: no glob, and an extension after a non-empty name.
+fn is_plain_file(target: &str) -> bool {
+    !target.contains(['*', '?', '['])
+        && target
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(name, ext)| {
+                !name.is_empty()
+                    && !name.ends_with('.')
+                    && ext.chars().any(|c| c.is_ascii_alphabetic())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+}
+
+/// Whether every part of `command` names only targets the planner made: a
+/// planner test file, or a plain file that is absent on the base. A bare
+/// word, `$(…)` or a backtick in it, or a part without a target (`go test
+/// ./...`), fails.
+fn made_by_planner(task: &Task, command: &str) -> bool {
+    let command = flat_command(command);
+    let absent = base_check::targets_absent_on_base(&task.repo, &task.base_sha, &command);
+    let planner_made = |target: &String| {
+        let target = target.strip_prefix("./").unwrap_or(target);
+        task.planner_tests.files.iter().any(|f| f.path == target)
+            || (is_plain_file(target) && absent.iter().any(|a| a == target))
+    };
+    let segments = command_segments(&command);
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            if segment.contains("$(") || segment.contains('`') {
+                return false;
+            }
+            let targets = base_check::check_targets(segment);
+            // Every word after the runner must be a flag or one of the
+            // targets: a bare word may name a directory or a path of the base.
+            let words = segment
+                .split_whitespace()
+                .skip_while(|word| is_assignment(word))
+                .skip(1)
+                .filter(|word| !word.starts_with('-'))
+                .count();
+            !targets.is_empty() && words == targets.len() && targets.iter().all(planner_made)
+        })
+}
+
+/// The source of one command of a plan, ruled once when the plan is stored:
+/// the owner's when the request names it, the repo's when it is a
+/// whole-repo suite or a verify command that is not about files the planner
+/// made, else the planner's.
+pub(super) fn classify_check_source(
+    task: &Task,
+    cwd: &Path,
+    command: &str,
+    in_verify: bool,
+) -> CheckSource {
+    if named_in_request(task.request.as_deref(), command) {
+        CheckSource::Owner
+    } else if verify::whole_repo_suite(cwd, command)
+        || (in_verify && !made_by_planner(task, command))
+    {
+        CheckSource::Repo
+    } else {
+        CheckSource::Planner
+    }
+}
+
+/// Older tasks stored the commands of the plan as bare strings. The same
+/// ruling as at plan time gives each its source, with the repo directory in
+/// place of the worktree; what it cannot decide is the repo's.
+pub(crate) fn migrate_check_sources(task: &mut Task) {
+    if task.planner_tests.legacy_commands.is_empty() {
+        return;
+    }
+    let legacy = std::mem::take(&mut task.planner_tests.legacy_commands);
+    let repo = PathBuf::from(&task.repo);
+    task.record_check_sources(|t, c, in_verify| {
+        if legacy.iter().any(|l| l == c) {
+            classify_check_source(t, &repo, c, in_verify)
+        } else {
+            CheckSource::Repo
+        }
+    });
+    // Only the commands the old build recorded are the plan's.
+    task.planner_tests
+        .sources
+        .retain(|s| legacy.contains(&s.command));
 }
 
 /// Whether only the owner may drop `command`. An agent may drop a check only
@@ -812,13 +901,13 @@ mod tests {
         let settings = Settings::default();
         let mut task = task_with_status(TaskStatus::Waiting);
         planner_made(&mut task, "pytest tests/test_new.py", "tests/test_new.py");
-        planner_made(&mut task, "go test ./...", "tests/new_test.go");
         planner_made(
             &mut task,
             "node --test tests/a.test.cjs README.md",
             "tests/a.test.cjs",
         );
         for command in [
+            "go test ./...",
             "pytest",
             "cargo nextest run",
             "just ci",
@@ -834,8 +923,6 @@ mod tests {
                 "{command}"
             );
         }
-        // Planner-made checks (also for a directory-wide runner) are not shared.
-        assert!(!is_shared_check(&settings, &task, "go test ./..."));
         assert!(!is_shared_check(
             &settings,
             &task,
@@ -876,6 +963,35 @@ mod tests {
             command: command.into(),
             source,
         });
+    }
+
+    #[test]
+    fn a_whole_suite_in_verify_is_the_repos_and_a_planner_file_check_is_not() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.path().to_string_lossy().into_owned();
+        task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        let suites = [
+            "go test ./...",
+            "pytest",
+            "just ci",
+            "./gradlew test",
+            "tox",
+            "make check",
+            "cargo nextest run",
+            "cargo test --workspace",
+            "pytest tests tests/new_test.py",
+        ];
+        task.verify = suites.iter().map(|c| c.to_string()).collect();
+        task.verify.push("test -f new/a.txt".into());
+        task.criteria = vec!["x -- check: go test ./...".into()];
+        task.record_check_sources(|t, c, v| classify_check_source(t, repo.path(), c, v));
+        let settings = Settings::default();
+        for command in suites {
+            assert!(is_shared_check(&settings, &task, command), "{command}");
+        }
+        assert!(!is_shared_check(&settings, &task, "test -f new/a.txt"));
     }
 
     #[test]

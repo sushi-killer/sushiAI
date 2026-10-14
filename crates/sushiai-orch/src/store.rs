@@ -7,9 +7,9 @@
 //! file for the next read.
 
 use crate::model::{
-    is_option, AnsweredBy, AttemptStatus, Audit, AuditReport, AuditStatus, BaseAnswer, CheckSource,
-    Proposal, QuestionKind, RepoNote, Settings, SourcedCheck, Stage, Task, TaskStatus,
-    UnreviewedPart, PRE_EXISTING_RETRY, STATE_VERSION,
+    is_option, AnsweredBy, AttemptStatus, Audit, AuditReport, AuditStatus, BaseAnswer, Proposal,
+    QuestionKind, RepoNote, Settings, Stage, Task, TaskStatus, UnreviewedPart, PRE_EXISTING_RETRY,
+    STATE_VERSION,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,7 +32,7 @@ fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
     migrate_loop_state(&mut task);
     migrate_base_and_permission_state(&mut task);
     migrate_final_check_failures(&mut task);
-    migrate_check_sources(&mut task);
+    crate::engine::migrate_check_sources(&mut task);
     Ok(task)
 }
 
@@ -271,41 +271,6 @@ fn migrate_final_check_failures(task: &mut Task) {
     }
     task.loop_state.final_check_failures = failures;
     task.loop_state.state_version = STATE_VERSION;
-}
-
-/// Older tasks stored the commands of the plan as bare strings. A command of a
-/// criterion, a check, the held-out check or verify came from the plan (`Planner`),
-/// one the request contains is the owner's, any other is the repo's, which is
-/// the cautious default.
-fn migrate_check_sources(task: &mut Task) {
-    if task.planner_tests.legacy_commands.is_empty() {
-        return;
-    }
-    let planner = task.planner_check_commands();
-    let request = task.request.clone().unwrap_or_default();
-    let flat = |c: &str| c.split_whitespace().collect::<Vec<_>>().join(" ");
-    let request = flat(&request);
-    let legacy = std::mem::take(&mut task.planner_tests.legacy_commands);
-    for command in legacy {
-        if task
-            .planner_tests
-            .sources
-            .iter()
-            .any(|s| s.command == command)
-        {
-            continue;
-        }
-        let source = if !command.trim().is_empty() && request.contains(&flat(&command)) {
-            CheckSource::Owner
-        } else if planner.contains(&command) {
-            CheckSource::Planner
-        } else {
-            CheckSource::Repo
-        };
-        task.planner_tests
-            .sources
-            .push(SourcedCheck { command, source });
-    }
 }
 
 /// The criterion number in the text of an impossible question.
@@ -809,16 +774,17 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Attempt, AttemptStatus, Harness, Stage, Tier};
+    use crate::model::{Attempt, AttemptStatus, CheckSource, Harness, Stage, Tier};
 
     #[test]
     fn an_older_task_gets_the_source_of_each_planner_command() {
         let mut task = sample_task("old", TaskStatus::Waiting, AttemptStatus::Passed);
         task.criteria = vec!["a -- check: grep -q x f".into(), "b".into()];
         task.request = Some("Please run `make owner` too".into());
+        task.verify = vec!["true".into(), "go test ./...".into(), "make owner".into()];
         let mut value = serde_json::to_value(&task).unwrap();
         value["plannerTests"] = serde_json::json!({
-            "commands": ["true", "grep -q x f", "make owner", "make other"]
+            "commands": ["true", "grep -q x f", "make owner", "make other", "go test ./..."]
         });
         let task = parse_task(&value.to_string()).unwrap();
         let source = |c: &str| {
@@ -828,19 +794,29 @@ mod tests {
                 .find(|s| s.command == c)
                 .map(|s| s.source)
         };
-        assert_eq!(source("true"), Some(CheckSource::Planner));
-        assert_eq!(source("make other"), Some(CheckSource::Repo));
+        assert_eq!(source("true"), Some(CheckSource::Repo));
+        // A legacy command the plan no longer holds is not recorded: the repo's.
+        assert_eq!(source("make other"), None);
+        assert_eq!(source("go test ./..."), Some(CheckSource::Repo));
         assert_eq!(source("grep -q x f"), Some(CheckSource::Planner));
         assert_eq!(source("make owner"), Some(CheckSource::Owner));
         assert!(task.planner_tests.legacy_commands.is_empty());
     }
 
     #[test]
-    fn a_plan_records_who_wrote_each_command() {
+    fn a_plan_records_who_wrote_each_command_and_the_stricter_source_wins() {
         let mut task = sample_task("new", TaskStatus::Waiting, AttemptStatus::Passed);
-        task.criteria = vec!["a -- check: grep -q x f".into()];
+        task.criteria = vec![
+            "a -- check: pytest".into(),
+            "b -- check: grep -q x f".into(),
+        ];
+        task.verify = vec!["pytest".into()];
         task.final_verify = vec!["make owner".into()];
-        task.record_check_sources(|c| c == "make owner");
+        task.record_check_sources(|_, c, in_verify| match (c, in_verify) {
+            ("make owner", _) => CheckSource::Owner,
+            ("pytest", true) => CheckSource::Repo,
+            _ => CheckSource::Planner,
+        });
         let got: Vec<_> = task
             .planner_tests
             .sources
@@ -850,7 +826,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("true", CheckSource::Planner),
+                ("pytest", CheckSource::Repo),
                 ("make owner", CheckSource::Owner),
                 ("grep -q x f", CheckSource::Planner),
             ]

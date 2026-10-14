@@ -922,23 +922,33 @@ fn a_retry_that_changed_the_same_ui_file_still_needs_new_evidence() {
 }
 
 #[test]
-fn a_retry_that_changed_other_source_carries_the_earlier_images_once() {
+fn a_retry_that_changed_other_source_does_not_reuse_the_earlier_images() {
     let (daemon, settled, _task_id) = run_retry_task("src/other.txt");
-    assert_eq!(settled["status"], "done", "{settled}");
+    // Any non-test change since the earlier screenshots reruns the screenshot
+    // command; the fake saves no new image, so the attempt fails on evidence.
+    assert_eq!(settled["status"], "failed", "{settled}");
     let implement: Vec<_> = settled["attempts"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|a| a["stage"] == "implement")
         .collect();
-    assert_eq!(implement.len(), 2, "{settled}");
-    let paths: Vec<&str> = implement[1]["evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|e| e.as_str())
-        .collect();
-    assert_eq!(paths.len(), 1, "{settled}");
+    assert!(implement.len() >= 2, "{settled}");
+    assert!(implement[1].get("evidenceFrom").is_none(), "{settled}");
+    assert!(
+        implement[1]["evidence"]
+            .as_array()
+            .is_none_or(|e| e.is_empty()),
+        "{settled}"
+    );
+    assert_eq!(implement[1]["failure"]["kind"], "evidence", "{settled}");
+    let detail = implement[1]["failure"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "Attempt 1's images were not reused because these files changed since: src/other.txt"
+        ),
+        "{detail}"
+    );
     daemon.shutdown_and_wait();
 }
 

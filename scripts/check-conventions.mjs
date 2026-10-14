@@ -5,6 +5,7 @@
 // prove the terminal renders non-Latin scripts, so their own text must stay.
 import { readdir, readFile, readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { addsMarkdownFragment } from "./lib/release-notes.mjs";
@@ -622,6 +623,36 @@ if (guide.includes(RETIRED_FLAG))
   problems.push(
     `AGENTS.md: ${RETIRED_FLAG} was replaced by SUSHIAI_TEST_WINDOW`,
   );
+
+// docs/MAP.md is the first lookup for an agent: every inline backticked repo
+// path in it must exist. MAP_ROOT_OVERRIDE points this at a throwaway tree.
+const mapRoot = process.env.MAP_ROOT_OVERRIDE || root;
+const mapText = await readFile(path.join(mapRoot, "docs/MAP.md"), "utf8").catch(
+  () => null,
+);
+if (mapText === null) problems.push("docs/MAP.md is missing");
+else {
+  const stripped = mapText.replace(/```[\s\S]*?```/g, (block) =>
+    block.replace(/[^\n]/g, ""),
+  );
+  const FILE_NAME = /\.(md|json|toml|ya?ml|cjs|mjs|js|tsx?|rs|css|html|sh)$/;
+  for (const [index, line] of stripped.split("\n").entries())
+    for (const [, raw] of line.matchAll(/`([^`]+)`/g)) {
+      const span = raw.trim();
+      if (
+        /[\s*<>{}$]/.test(span) ||
+        span.includes("://") ||
+        /^(\/|~|\.\/|\.\.\/)/.test(span)
+      )
+        continue;
+      if (!span.includes("/") && !FILE_NAME.test(span)) continue;
+      const target = span.replace(/:\d+(:\d+)?$/, "").replace(/\/$/, "");
+      if (!existsSync(path.join(mapRoot, target)))
+        problems.push(
+          `docs/MAP.md:${index + 1} names ${target}, which does not exist`,
+        );
+    }
+}
 
 if (problems.length) {
   console.error("Repository conventions failed:\n");

@@ -552,7 +552,8 @@ struct TriageRun {
 
 /// A planner question the planner called routine: triage reads it and either
 /// settles it (`Some((answer, reason))`) or the caller asks the owner. Triage
-/// that fails or escalates settles nothing.
+/// that fails or escalates settles nothing, and so does a closed or spent
+/// answer policy.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn triage_settles(
     app: &Arc<App>,
@@ -560,10 +561,13 @@ pub(super) async fn triage_settles(
     attempt_n: u32,
     task: &mut Task,
     worktree: &Path,
-    question: &str,
-    options: &[String],
+    asked: &Question,
     cancel: &CancelToken,
 ) -> Option<(String, String)> {
+    if !policy_open(app, task, asked) {
+        return None;
+    }
+    let (question, options) = (asked.text.as_str(), asked.options.as_slice());
     let TriageRun { decision, cost_usd } = run_triage(
         app, task_id, attempt_n, task, worktree, question, options, true, cancel,
     )

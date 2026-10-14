@@ -75,6 +75,7 @@ fn spawn(script: &Path, auto_answer: bool) -> Daemon {
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("");
     settings["autoAnswer"] = json!(auto_answer);
+    settings["answerPolicy"] = json!(true);
     daemon.request("settings.set", json!({"settings": settings}));
     daemon
 }
@@ -120,7 +121,7 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
         .as_str()
         .unwrap()
         .contains("the app is dark already Triage: routine"));
-    assert_eq!(assumptions[0]["by"], "planner");
+    assert_eq!(assumptions[0]["by"], "policy");
     assert_eq!(assumptions[0]["overturned"], false);
     daemon.shutdown_and_wait();
     remove_dir_retrying(task["worktree"].as_str().unwrap());
@@ -146,6 +147,37 @@ fn a_non_blocking_question_triage_escalates_is_asked_not_assumed() {
             .as_str()
             .unwrap()
             .contains("Also remove the legacy endpoint?"),
+        "{waiting}"
+    );
+    assert!(waiting.get("assumptions").is_none(), "{waiting}");
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
+fn triage_does_not_settle_a_planner_question_while_the_answer_policy_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = setup(
+        plan(json!([
+            {"text": "Which default theme?", "options": ["light", "dark"], "recommended": "dark", "evidence": "e", "blocking": false},
+        ])),
+        dir.path(),
+    );
+    triage(dir.path(), SETTLES());
+    let daemon = spawn(&script, false);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["answerPolicy"] = json!(false);
+    daemon.request("settings.set", json!({"settings": settings}));
+    let repo = init_git_repo();
+    let task = create(&daemon, repo.path(), true, true);
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, finished);
+    assert_eq!(waiting["status"], "waiting", "{waiting}");
+    assert!(
+        waiting["question"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Which default theme?"),
         "{waiting}"
     );
     assert!(waiting.get("assumptions").is_none(), "{waiting}");

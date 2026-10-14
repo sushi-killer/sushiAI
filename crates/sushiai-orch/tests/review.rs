@@ -113,13 +113,15 @@ case "$brief" in
 *"You check a coding task brief"*)
   printf '%s\n' '{"type":"result","result":"{\"contradiction\":false}"}' ;;
 *"You judge whether a check command"*)
-  while [ ! -f "$LOG_DIR/fast-checked" ]; do sleep 0.02; done
+  while [ ! -f "$LOG_DIR/implemented" ]; do sleep 0.02; done
   printf '%s\n' '{"type":"result","result":"{\"verdict\":\"unrelated\",\"reason\":\"broken on the base\"}"}' ;;
 "## Review"*)
   echo reviewed >> "$LOG_DIR/review-runs"
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *)
   echo changed > CHANGED_MARKER.txt
+  touch "$LOG_DIR/implemented"
+  cp "$LOG_DIR/check.sh" check.sh
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   printf '%s\n' '{"type":"result","result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
 esac
@@ -135,19 +137,8 @@ esac
     settings["maxAttempts"] = json!(1);
     daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
-    // Fail on the base, pass the fast check, and fail if run as a final.
-    std::fs::write(
-        log.path().join("check.sh"),
-        r#"if [ ! -f CHANGED_MARKER.txt ]; then echo broken on base; exit 3; fi
-if [ -f "$LOG_DIR/fast-checked" ]; then
-  echo ran >> "$LOG_DIR/final-runs"
-  echo broken final; exit 3
-fi
-touch "$LOG_DIR/fast-checked"
-"#,
-    )
-    .unwrap();
-    let command = format!("sh {}/check.sh CHANGED_MARKER.txt", log.path().display());
+    // Fails on the base, passes once the implementer wrote the marker.
+    let command = "test -f CHANGED_MARKER.txt".to_string();
     let plan = json!({
         "title": "Preflight before review", "goal": "Write the marker",
         "tier": "standard", "criteria": ["The marker exists"],
@@ -177,15 +168,16 @@ touch "$LOG_DIR/fast-checked"
         .collect();
     assert_eq!(implements.len(), 1);
     let attempt = implements[0];
-    assert_eq!(attempt["verify"][0]["code"], 0, "{settled}");
     assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
-    assert_eq!(settled["briefCheck"]["nonGating"], json!([command]));
+    assert_eq!(
+        settled["briefCheck"]["nonGating"],
+        json!([command]),
+        "{settled}"
+    );
     assert!(
         settled["finalVerify"].as_array().is_none_or(Vec::is_empty),
         "{settled}"
     );
-    assert!(log.path().join("fast-checked").exists());
-    assert!(!log.path().join("final-runs").exists());
     assert_eq!(
         std::fs::read_to_string(log.path().join("review-runs"))
             .unwrap()

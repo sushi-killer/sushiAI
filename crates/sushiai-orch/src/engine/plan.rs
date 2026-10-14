@@ -1174,30 +1174,27 @@ pub(super) async fn run_plan_stage(
                 if task.assumptions.iter().any(|a| a.question == q.text) {
                     continue;
                 }
+                let asked_q = Question::new(
+                    q.text.clone(),
+                    q.options.clone(),
+                    QuestionKind::PlanQuestion,
+                    AskedBy::Plan,
+                );
                 let Some((answer, reason)) = triage_settles(
-                    app, task_id, attempt_n, &mut task, &worktree, &q.text, &q.options, cancel,
+                    app, task_id, attempt_n, &mut task, &worktree, &asked_q, cancel,
                 )
                 .await
                 else {
                     blocking.push(q);
                     continue;
                 };
+                let evidence = format!("{} Triage: {reason}", q.evidence);
+                record_policy_answer(&mut task, &asked_q, &answer, "policy", &evidence, attempt_n);
                 app.broadcast_log(
                     task_id,
                     attempt_n,
-                    format!("Planner assumed: {} -> {answer}", q.text),
+                    task.decisions.last().cloned().unwrap_or_default(),
                 );
-                task.assumptions.push(Assumption {
-                    question: q.text.clone(),
-                    answer,
-                    evidence: format!("{} Triage: {reason}", q.evidence),
-                    by: "planner".to_string(),
-                    kind: None,
-                    attempt: None,
-                    commands: Vec::new(),
-                    overturned: false,
-                    owner_answer: None,
-                });
             }
             task.updated_at = now_ms();
             app.save_task_logged(&task);

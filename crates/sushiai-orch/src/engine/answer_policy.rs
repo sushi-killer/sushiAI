@@ -242,7 +242,8 @@ fn is_plain_file(target: &str) -> bool {
 /// Whether only the owner may drop `command`. An agent may drop a check only
 /// when the planner wrote it into the plan, no setting or request of the
 /// owner names it, it runs no CI entry, and every part of it names a planner
-/// test file or a plain file that does not exist on the base. Every other
+/// test file or a plain file that does not exist on the base, with no other
+/// word, `$(…)` or backtick in it. Every other
 /// check is the repo's or the owner's.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
     let command = flat_command(command);
@@ -277,8 +278,19 @@ pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -
     let segments = command_segments(&command);
     segments.is_empty()
         || segments.iter().any(|segment| {
+            if segment.contains("$(") || segment.contains('`') {
+                return true;
+            }
             let targets = base_check::check_targets(segment);
-            targets.is_empty() || !targets.iter().all(planner_made)
+            // Every word after the runner must be a flag or one of the
+            // targets: a bare word may name a directory or a path of the base.
+            let words = segment
+                .split_whitespace()
+                .skip_while(|word| is_assignment(word))
+                .skip(1)
+                .filter(|word| !word.starts_with('-'))
+                .count();
+            targets.is_empty() || words != targets.len() || !targets.iter().all(planner_made)
         })
 }
 
@@ -902,6 +914,9 @@ mod tests {
             "cargo test --workspace 2>&1 | tee logs/ci.log",
             "echo start && pytest new/test_x.py",
             "pytest new/test_x.py; true",
+            "pytest tests new/test_x.py",
+            "node --test tests new/x.test.cjs",
+            "pytest $(git ls-files tests) new/test_x.py",
         ];
         task.planner_tests.commands = droppable
             .iter()

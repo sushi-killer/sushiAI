@@ -106,7 +106,7 @@ pub(super) async fn judge_against_base(
     // A fail-fast run is not comparable: take full runs of both sides, or
     // give up (never a waiver).
     let Some(full) = no_fail_fast(&failed.command) else {
-        return settle_unclear(app, task, failed, base_run, cancel).await;
+        return settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await;
     };
     let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let ran = run_verify_commands(
@@ -136,7 +136,7 @@ pub(super) async fn judge_against_base(
         (Some(t), Some(b)) if usable(t) && usable(b) && !t.stopped_early && !b.stopped_early => {
             judge_pair(app, task, t, b, worktree, run_dir, cancel).await
         }
-        _ => settle_unclear(app, task, failed, base_run, cancel).await,
+        _ => settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await,
     }
 }
 
@@ -144,40 +144,81 @@ pub(super) async fn judge_against_base(
 /// turn that gives no valid verdict leaves the question to the owner.
 /// `introduced`, or a check the task is meant to turn green, is an ordinary
 /// failure; a verified `inherited` waives it as an assumption the owner can
-/// overturn; `environment` and `incomplete` stay a question.
+/// overturn. `environment` and `incomplete` first rerun the check once on the
+/// task tree; only a verdict that is still one of them stays a question.
 async fn settle_unclear(
     app: &Arc<App>,
     task: &mut Task,
     failed: &VerifyOutcome,
     base_run: &VerifyOutcome,
+    worktree: &Path,
+    run_dir: &Path,
     cancel: &CancelToken,
 ) -> BaseVerdict {
-    let Some(att) = attribute(app, task, failed, base_run, cancel).await else {
+    // ponytail: the turn reads the diff and both runs but cannot run
+    // commands; it should become a sandboxed, command-capable read-only turn
+    // that reproduces the narrowest failing piece on the base itself.
+    let Some(mut att) = attribute(app, task, failed, base_run, cancel).await else {
         return BaseVerdict::Unclear;
     };
-    if let Some(attempt) = task
-        .attempts
-        .iter_mut()
-        .rev()
-        .find(|a| a.stage == Stage::Implement)
-    {
-        attempt.cause = Some(att.cause);
+    let mut run = failed.clone();
+    if !att.target && matches!(att.cause, Blame::Environment | Blame::Incomplete) {
+        let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+        let again = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
+            worktree,
+            &run_dir.join("final"),
+            std::slice::from_ref(&failed.command),
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        let Some(again) = again.into_iter().next().filter(|r| !is_interrupted(r)) else {
+            set_cause(task, Some(att.cause));
+            return BaseVerdict::Unclear;
+        };
+        if again.code == Some(0) {
+            // The failure did not come back: it was the environment's.
+            set_cause(task, None);
+            waive(task, failed, &failed.failing, true);
+            return BaseVerdict::Waived;
+        }
+        match compare(&again, base_run) {
+            Compared::Covered(tests) => {
+                set_cause(task, None);
+                waive(task, &again, &tests, true);
+                return BaseVerdict::Waived;
+            }
+            Compared::New(_) => {
+                set_cause(task, Some(Blame::Introduced));
+                return BaseVerdict::NewFailures(again);
+            }
+            Compared::Unparsed => {}
+        }
+        let Some(second) = attribute(app, task, &again, base_run, cancel).await else {
+            set_cause(task, Some(att.cause));
+            return BaseVerdict::Unclear;
+        };
+        att = second;
+        run = again;
     }
+    set_cause(task, Some(att.cause));
     if att.target || att.cause == Blame::Introduced {
-        return BaseVerdict::NewFailures(failed.clone());
+        return BaseVerdict::NewFailures(run);
     }
     if att.cause != Blame::Inherited {
         return BaseVerdict::Unclear;
     }
-    waive(task, failed, &att.pre_existing, false);
-    let commands = vec![failed.command.clone()];
+    waive(task, &run, &att.pre_existing, false);
+    let commands = vec![run.command.clone()];
     if !task
         .assumptions
         .iter()
         .any(|a| a.commands == commands && a.by == WAIVER_BY)
     {
         task.assumptions.push(Assumption {
-            question: format!("{} fails on the base too: waive it?", failed.command),
+            question: format!("{} fails on the base too: waive it?", run.command),
             answer: WAIVED.to_string(),
             evidence: att.evidence,
             by: WAIVER_BY.to_string(),
@@ -189,6 +230,18 @@ async fn settle_unclear(
         });
     }
     BaseVerdict::Waived
+}
+
+/// The typed cause on the task's last implement attempt.
+fn set_cause(task: &mut Task, cause: Option<Blame>) {
+    if let Some(attempt) = task
+        .attempts
+        .iter_mut()
+        .rev()
+        .find(|a| a.stage == Stage::Implement)
+    {
+        attempt.cause = cause;
+    }
 }
 
 /// The answer and author of the assumption a verified `inherited` verdict
@@ -222,7 +275,9 @@ async fn judge_pair(
             waive(task, failed, &tests, false);
             return BaseVerdict::Waived;
         }
-        Compared::Unparsed => return settle_unclear(app, task, failed, base_run, cancel).await,
+        Compared::Unparsed => {
+            return settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await
+        }
         Compared::New(_) => {}
     }
     // New failures: one re-run tells a flaky failure from the task's own. It

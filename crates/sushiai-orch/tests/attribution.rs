@@ -156,3 +156,81 @@ fn a_claim_in_the_output_with_a_name_the_base_lacks_is_not_waived_and_the_verdic
     assert_eq!(turns(&count), 1);
     finish(daemon, &task);
 }
+
+/// Fails on the base and on the first run in the worktree, with other output
+/// each time; passes on the rerun.
+fn flaky_check(flag: &Path) -> String {
+    format!(
+        "case \"$PWD\" in */base-runs/*) printf 'not ok 1 - alpha\\nERROR on base\\n'; exit 1;; esac; if [ ! -f {f} ]; then touch {f}; printf 'not ok 1 - alpha\\nERROR in task\\n'; exit 1; fi; exit 0",
+        f = flag.display()
+    )
+}
+
+fn start_with(daemon: &Daemon, repo: &Path, check: &str) -> String {
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("claude-opus");
+    daemon.request("settings.set", json!({"settings": settings}));
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.to_str().unwrap(),
+            "title": "Red base",
+            "goal": "Write the marker",
+            "verify": ["true"],
+            "finalVerify": [check],
+            "start": true,
+        }),
+    );
+    task["id"].as_str().unwrap().to_string()
+}
+
+fn passes_on_the_rerun_without_asking(cause: &str) {
+    let scripts = tempfile::tempdir().unwrap();
+    let count = scripts.path().join("count");
+    let reply = format!(r#"{{\"cause\":\"{cause}\",\"evidence\":\"the run was cut short\"}}"#);
+    let daemon = spawn(scripts.path(), &count, &reply);
+    let repo = init_git_repo();
+    let check = flaky_check(&scripts.path().join("flag"));
+    let id = start_with(&daemon, repo.path(), &check);
+
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
+    assert_eq!(done["status"], "done", "{done}");
+    assert!(!asked_about_the_base(&done), "{done}");
+    assert!(
+        decisions(&done)
+            .iter()
+            .any(|d| d.contains("base failures on") && d.contains("differed between reruns")),
+        "{:?}",
+        decisions(&done)
+    );
+    assert_eq!(turns(&count), 1);
+    finish(daemon, &done);
+}
+
+#[test]
+fn an_environment_verdict_reruns_the_check_and_asks_nobody_when_it_passes() {
+    passes_on_the_rerun_without_asking("environment");
+}
+
+#[test]
+fn an_incomplete_verdict_reruns_the_check_and_asks_nobody_when_it_passes() {
+    passes_on_the_rerun_without_asking("incomplete");
+}
+
+#[test]
+fn an_environment_verdict_that_stands_after_the_rerun_asks_the_owner() {
+    let scripts = tempfile::tempdir().unwrap();
+    let count = scripts.path().join("count");
+    let reply = r#"{\"cause\":\"environment\",\"evidence\":\"connection refused\"}"#;
+    let daemon = spawn(scripts.path(), &count, reply);
+    let repo = init_git_repo();
+    let id = start_with(&daemon, repo.path(), CHECK);
+
+    poll_until(&daemon, &id, |s| s == "waiting");
+    let task = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
+    assert_eq!(task["attempts"][0]["cause"], "environment", "{task}");
+    // The rerun showed the same output: the cached verdict, no second turn.
+    assert_eq!(turns(&count), 1);
+    finish(daemon, &task);
+}

@@ -63,7 +63,7 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
         .iter()
         .map(|command| {
             base_check::is_task_target(task, command, &changed)
-                || attributed_target(app, &task.base_sha, command)
+                || attributed_target(app, task, command)
         })
         .collect();
     let may_land_on_default = app.settings.read().unwrap().may_land_on_default(&task.repo);

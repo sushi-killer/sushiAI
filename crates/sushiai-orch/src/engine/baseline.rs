@@ -119,12 +119,16 @@ pub(super) async fn judge_against_base(
         cancel,
     )
     .await;
-    let (repo, base_sha, id) = (task.repo.clone(), task.base_sha.clone(), task.id.clone());
+    // The commit the other final base checks run on.
+    let (repo, id) = (task.repo.clone(), task.id.clone());
+    let Ok(rev) = base_rev(task) else {
+        return settle_unclear(app, task, failed, base_run, worktree, run_dir, cancel).await;
+    };
     let on_base = base_result(
         app,
         Some(&id),
         &repo,
-        &base_sha,
+        &rev,
         &full,
         &run_dir.join("full-base"),
         cancel,
@@ -174,8 +178,12 @@ async fn settle_unclear(
             cancel,
         )
         .await;
-        let Some(again) = again.into_iter().next().filter(|r| !is_interrupted(r)) else {
-            set_cause(task, Some(att.cause));
+        let again = again.into_iter().next();
+        // A rerun that timed out is a code-checked environment signal.
+        let rerun_timed_out = again.as_ref().is_some_and(is_interrupted);
+        let Some(again) = again.filter(|r| !is_interrupted(r)) else {
+            let cause = typed_cause(att.cause, rerun_timed_out || environmental(failed));
+            set_cause(task, cause);
             return BaseVerdict::Unclear;
         };
         if again.code == Some(0) {
@@ -197,13 +205,15 @@ async fn settle_unclear(
             Compared::Unparsed => {}
         }
         let Some(second) = attribute(app, task, &again, base_run, cancel).await else {
-            set_cause(task, Some(att.cause));
+            let cause = typed_cause(att.cause, environmental(&again));
+            set_cause(task, cause);
             return BaseVerdict::Unclear;
         };
         att = second;
         run = again;
     }
-    set_cause(task, Some(att.cause));
+    let cause = typed_cause(att.cause, environmental(&run));
+    set_cause(task, cause);
     if att.target || att.cause == Blame::Introduced {
         return BaseVerdict::NewFailures(Box::new(run));
     }
@@ -230,6 +240,22 @@ async fn settle_unclear(
         });
     }
     BaseVerdict::Waived
+}
+
+/// Whether code saw the environment fail: the worktree setup did not finish
+/// or the run timed out.
+fn environmental(run: &VerifyOutcome) -> bool {
+    run.setup_failed || is_interrupted(run)
+}
+
+/// The cause to store for an agent's `cause`: `environment` only with a
+/// signal code checked, else none. The claim stays advice (the question and
+/// the assumption carry it) and never restarts the task.
+fn typed_cause(claimed: Blame, signal: bool) -> Option<Blame> {
+    match claimed {
+        Blame::Environment if !signal => None,
+        other => Some(other),
+    }
 }
 
 /// The typed cause on the task's last implement attempt.
@@ -313,6 +339,22 @@ async fn judge_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_environment_claim_is_stored_only_with_a_code_checked_signal() {
+        let mut quiet = run(1, "boom");
+        assert_eq!(typed_cause(Blame::Environment, environmental(&quiet)), None);
+        quiet.setup_failed = true;
+        assert_eq!(
+            typed_cause(Blame::Environment, environmental(&quiet)),
+            Some(Blame::Environment)
+        );
+        assert_eq!(
+            typed_cause(Blame::Incomplete, false),
+            Some(Blame::Incomplete)
+        );
+        assert_eq!(typed_cause(Blame::Inherited, false), Some(Blame::Inherited));
+    }
 
     fn run(code: i32, output: &str) -> VerifyOutcome {
         let report = crate::test_failures::parse(output, "");

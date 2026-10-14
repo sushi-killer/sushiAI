@@ -218,7 +218,7 @@ fn an_incomplete_verdict_reruns_the_check_and_asks_nobody_when_it_passes() {
 }
 
 #[test]
-fn an_environment_verdict_that_stands_after_the_rerun_asks_the_owner() {
+fn an_environment_claim_that_stands_after_the_rerun_asks_the_owner_and_types_no_cause() {
     let scripts = tempfile::tempdir().unwrap();
     let count = scripts.path().join("count");
     let reply = r#"{\"cause\":\"environment\",\"evidence\":\"connection refused\"}"#;
@@ -229,7 +229,8 @@ fn an_environment_verdict_that_stands_after_the_rerun_asks_the_owner() {
     poll_until(&daemon, &id, |s| s == "waiting");
     let task = daemon.request("task.get", json!({"id": id}));
     assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
-    assert_eq!(task["attempts"][0]["cause"], "environment", "{task}");
+    // The agent's word alone is advice: no typed cause, so no restart.
+    assert!(task["attempts"][0]["cause"].is_null(), "{task}");
     // The rerun showed the same output: the cached verdict, no second turn.
     assert_eq!(turns(&count), 1);
     finish(daemon, &task);

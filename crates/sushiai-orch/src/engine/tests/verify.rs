@@ -859,12 +859,13 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
     let mut task = task_with_status(TaskStatus::Running);
     app.store.save_task(&task).unwrap();
     *app.check_load.write().unwrap() = || (8.0, 8);
+    // 1 s, not 100 ms: a loaded CI runner may not reach the echo sooner.
     let command = "echo run >> count; exec sleep 5";
     let result = run_one_verify_command(
         CheckContext::new(&app, Some(&task.id)),
         dir.path(),
         command,
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         None,
         "",
         &CancelToken::new(),
@@ -879,7 +880,7 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
     );
     assert_eq!(classify_baseline(&result), Some(Baseline::Env));
     assert!(result.load_timeout);
-    assert!(result.ms >= 100);
+    assert!(result.ms >= 1000);
     assert_eq!((result.load, result.cores), (8.0, 8));
     assert!(result.tail.contains("timed out under load 8.00 on 8 cores"));
     record_check_outcomes(&app, &mut task, std::slice::from_ref(&result));
@@ -894,7 +895,7 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
         CheckContext::new(&app, Some(&task.id)),
         dir.path(),
         command,
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         None,
         "",
         &CancelToken::new(),

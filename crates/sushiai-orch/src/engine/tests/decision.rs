@@ -14,29 +14,26 @@ fn resume_eligibility_requires_a_failed_check_session_on_the_same_route() {
     let mut previous = attempt_with_failure(1, "verify");
     previous.session_id = Some("sess-1".into());
     task.attempts.push(previous);
-    assert!(resume_attempt(&task, &route, false, false).is_some());
-    assert!(resume_attempt(&task, &route, true, false).is_none());
-    assert!(resume_attempt(&task, &route, false, true).is_none());
+    assert!(resume_attempt(&task, &route, false).is_some());
+        assert!(resume_attempt(&task, &route, true).is_none());
     let mut changed = route.clone();
     changed.id = "other".into();
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    assert!(resume_attempt(&task, &changed, false).is_none());
     changed = route.clone();
     changed.harness = Harness::Codex;
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    assert!(resume_attempt(&task, &changed, false).is_none());
     changed = route.clone();
     changed.model = Some("opus".into());
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
+    assert!(resume_attempt(&task, &changed, false).is_none());
     task.attempts[0].session_id = None;
-    assert!(resume_attempt(&task, &route, false, false).is_none());
+    assert!(resume_attempt(&task, &route, false).is_none());
     task.attempts[0].session_id = Some("sess-1".into());
-    for kind in [
-        FailureKind::Loop,
-        FailureKind::Conflict,
-        FailureKind::Review,
-    ] {
+    task.attempts[0].failure.as_mut().unwrap().kind = FailureKind::Conflict;
+    assert!(resume_attempt(&task, &route, false).is_some());
+    for kind in [FailureKind::Loop, FailureKind::Review] {
         task.attempts[0].failure.as_mut().unwrap().kind = kind;
         assert!(
-            resume_attempt(&task, &route, false, false).is_none(),
+            resume_attempt(&task, &route, false).is_none(),
             "{kind:?}"
         );
     }
@@ -49,7 +46,7 @@ fn resume_eligibility_requires_a_failed_check_session_on_the_same_route() {
         criteria: vec![],
     });
     assert!(last_review_repeated(&task));
-    assert!(resume_attempt(&task, &route, false, false).is_none());
+    assert!(resume_attempt(&task, &route, false).is_none());
 }
 
 #[test]

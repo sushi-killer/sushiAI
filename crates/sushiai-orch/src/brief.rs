@@ -648,18 +648,21 @@ pub fn time_budget_report_prompt() -> String {
     format!("{}\n\n{}", brief_text("time_budget"), report_format_block())
 }
 
-/// Tells the implementer that the work was finished and checked, and only a
-/// landing conflict is left: resolve the markers, nothing else.
-pub fn conflict_only_block(files: &[String]) -> String {
-    let mut out = if files.is_empty() {
-        brief_text("conflict_only").to_string()
-    } else {
-        fill(
-            brief_text("conflict_only_files"),
-            &[("files", &files.join(", "))],
-        )
-    };
-    out.push_str("\n\n");
+/// Tells the implementer that carrying the task onto the moved base left
+/// conflicts: part of its ordinary attempt, not a separate mode.
+pub fn carry_conflict_block(files: &[String], task_id: &str) -> String {
+    let mut out = fill(
+        brief_text("carry_conflict"),
+        &[
+            ("files", &files.join(", ")),
+            ("wip", &crate::git::wip_ref(task_id)),
+        ],
+    );
+    out.push_str(
+        "
+
+",
+    );
     out
 }
 

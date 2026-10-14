@@ -18,7 +18,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
-  *'## Conflict-only attempt'*) printf 'base\nchild\n' > README.md; out "$report" ;;
+  *'## Base moved'*) printf 'base\nchild\n' > README.md; out "$report" ;;
   *'You review a coding task plan'*) out '"{\"findings\": []}"' ;;
   *sushi-plan*)
     case "$input" in
@@ -170,7 +170,6 @@ fn conflicting_retry(parent: bool) {
     let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     configure(&daemon.socket, false);
-    cheap_route_on_claude(&daemon);
     let repo = repo();
     let id = create(&daemon.socket, repo.path(), parent);
     let waiting = preexisting_question(&daemon.socket, &id);
@@ -189,15 +188,18 @@ fn conflicting_retry(parent: bool) {
         "{finished}"
     );
     assert!(
-        decisions(&finished)
+        !decisions(&finished)
             .iter()
-            .any(|d| d.contains("conflict-only attempt")),
+            .any(|d| d.contains("conflict-only")),
         "{finished}"
     );
     let implementing = attempts(&finished);
     assert_eq!(implementing.len(), if parent { 1 } else { 2 }, "{finished}");
     let conflict = implementing.last().unwrap();
-    assert_eq!(conflict["routeId"], "claude-cheap", "{finished}");
+    assert!(
+        conflict["reason"].as_str().unwrap().starts_with("tier "),
+        "{finished}"
+    );
     let brief = std::fs::read_to_string(
         daemon
             .data_dir()
@@ -208,7 +210,7 @@ fn conflicting_retry(parent: bool) {
             .join("brief.md"),
     )
     .unwrap();
-    assert!(brief.contains("## Conflict-only attempt"), "{brief}");
+    assert!(brief.contains("## Base moved"), "{brief}");
     assert!(
         brief.contains("README.md") && brief.contains(&base[..7]),
         "{brief}"
@@ -231,12 +233,12 @@ fn conflicting_retry(parent: bool) {
 }
 
 #[test]
-fn a_parent_carries_landed_child_commits_into_a_conflict_only_attempt() {
+fn a_parent_carries_landed_child_commits_into_an_ordinary_step() {
     conflicting_retry(true);
 }
 
 #[test]
-fn a_final_retry_carries_conflicts_into_a_conflict_only_attempt() {
+fn a_final_retry_carries_conflicts_into_an_ordinary_step() {
     conflicting_retry(false);
 }
 

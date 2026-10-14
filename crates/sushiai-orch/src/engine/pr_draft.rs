@@ -441,7 +441,7 @@ async fn loop_gone(app: &App, id: &str) -> bool {
     false
 }
 
-/// The PR carry conflicted: the task gets one conflict-only attempt on the
+/// The PR carry conflicted: the task gets one ordinary attempt on the
 /// newest base (the loop's own, with its checks and review), and opens the
 /// pull request when it is done again. The conflict is carried into the task's
 /// own worktree, as the loop carries one onto a moved base. A second conflict,
@@ -506,7 +506,7 @@ async fn resolve_conflict(
     }
     let files = task.queue.carry_conflicts.clone();
     task.decisions.push(format!(
-        "PR: the work conflicts with {upstream} in {}; one conflict-resolution attempt runs on the new base before the pull request opens",
+        "PR: the work conflicts with {upstream} in {}; an ordinary attempt resolves it on the new base before the pull request opens",
         files.join(", ")
     ));
     task.updated_at = now_ms();

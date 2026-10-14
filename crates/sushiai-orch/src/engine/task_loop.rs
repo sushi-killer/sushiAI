@@ -21,7 +21,6 @@ pub(super) async fn run_task_loop(
     // failure its own implement attempt has to fix. While it is set (and once
     // the parent has an attempt) the parent never goes back to `run_parent`.
     let mut parent_failure: Option<String> = None;
-    let mut parent_conflict_only = false;
     let mut base_refreshed = false;
 
     'attempts: loop {
@@ -42,6 +41,7 @@ pub(super) async fn run_task_loop(
             app.finish_task_loop(&task_id);
             return;
         }
+        settle_carry_conflicts(&mut task);
         if !budget_loaded {
             budget_loaded = true;
             if let Some(n) = task.variant().max_attempts {
@@ -159,13 +159,12 @@ pub(super) async fn run_task_loop(
         // so no planning is spent on a part that cannot start yet.
         if !needs_planning(&task) || task.parent.is_some() {
             let all = app.repo_tasks(&task.repo);
-            // A carry left conflicts in a parent's own tree: its one
-            // conflict-only attempt runs before any check, as for a part.
+            // A carry left conflicts in a parent's own tree: its own attempt
+            // resolves them before any check, as for a part.
             if parent_failure.is_none()
                 && !task.queue.carry_conflicts.is_empty()
                 && is_parent(&task, &all)
             {
-                parent_conflict_only = true;
                 parent_failure = Some(format!(
                     "The carry onto the newest base left conflicts in {}.",
                     task.queue.carry_conflicts.join(", ")
@@ -181,12 +180,7 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt {
-                        failure,
-                        budget,
-                        conflict_only,
-                    } => {
-                        parent_conflict_only = conflict_only;
+                    ParentEnd::Attempt { failure, budget } => {
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -278,7 +272,6 @@ pub(super) async fn run_task_loop(
                     {
                         record_failure(&mut task, idx, FailureKind::Conflict, detail);
                     } else {
-                        parent_conflict_only = true;
                         parent_failure = Some(detail);
                     }
                 }
@@ -436,12 +429,7 @@ pub(super) async fn run_task_loop(
                         app.finish_task_loop(&task_id);
                         return;
                     }
-                    ParentEnd::Attempt {
-                        failure,
-                        budget,
-                        conflict_only,
-                    } => {
-                        parent_conflict_only = conflict_only;
+                    ParentEnd::Attempt { failure, budget } => {
                         parent_failure = Some(failure);
                         attempt_budget = budget.unwrap_or(attempt_budget);
                         continue 'attempts;
@@ -729,25 +717,11 @@ pub(super) async fn run_task_loop(
             }
             let settings = app.settings.read().unwrap().clone();
             let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
-            // A landing that conflicted only needs its markers resolved: that
-            // runs on the cheap route, not as a full re-implementation.
+            // A carry that conflicted is an ordinary attempt on the task's own
+            // route; its brief names the conflicted files.
             let carry_conflicts = task.queue.carry_conflicts.clone();
-            let conflict_only = !carry_conflicts.is_empty()
-                || last_failure_is_conflict(&task)
-                || (parent_conflict_only && completed_implement_attempts(&task) == 0);
-            let (route_id, overridden) = task.variant().implement_route_id(
-                &settings,
-                if conflict_only {
-                    Tier::Mechanical
-                } else {
-                    task.tier
-                },
-            );
-            if conflict_only {
-                task.decisions.push(format!(
-                "Orchestrator: the carry conflicted -> conflict-only attempt on the cheap route {route_id}"
-            ));
-            } else if overridden {
+            let (route_id, overridden) = task.variant().implement_route_id(&settings, task.tier);
+            if overridden {
                 let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
                 if !task.decisions.contains(&line) {
                     task.decisions.push(line);
@@ -853,31 +827,17 @@ pub(super) async fn run_task_loop(
                 return;
             }
             let brief_text = brief::build_brief(&task, &status_short, &diff_stat);
-            let brief_text = if conflict_only {
-                brief::with_block_before_report(
-                    &brief_text,
-                    &brief::conflict_only_block(&carry_conflicts),
-                )
-            } else {
-                brief_text
-            };
             let brief_text = match &task.brief_check.conflict {
                 Some(conflict) if completed_implement_attempts(&task) == 0 => {
                     brief::with_block_before_report(&brief_text, &brief::conflict_block(conflict))
                 }
                 _ => brief_text,
             };
-            // The full brief carries the block unless the attempt is
-            // conflict-only (it touches only the conflicted files); a resumed
-            // retry sends a shorter resume brief instead of this one.
-            let brief_text = if conflict_only {
-                brief_text
-            } else {
-                brief::with_block_before_report(
-                    &brief_text,
-                    &brief::where_to_look_block(&worktree, &task.paths),
-                )
-            };
+            // A resumed retry sends a shorter resume brief instead of this one.
+            let brief_text = brief::with_block_before_report(
+                &brief_text,
+                &brief::where_to_look_block(&worktree, &task.paths),
+            );
             let brief_text = brief::with_block_before_report(
                 &brief_text,
                 &brief::landed_dependencies_block(&task, &app.repo_tasks(&task.repo), None),
@@ -929,15 +889,17 @@ pub(super) async fn run_task_loop(
             );
             let mut no_second = BestOfExtra::default();
             // Recorded after the reload below, which would drop a line pushed now.
-            let second = match if conflict_only {
-                Ok(None)
-            } else {
+            // A conflict step works in this tree: a second candidate would start
+            // from a sibling tree on the new base without the task's work.
+            let second = match if carry_conflicts.is_empty() {
                 second_route(
                     &task,
                     &settings,
                     &route,
                     implement_attempt_count(&task) == 0,
                 )
+            } else {
+                Ok(None)
             } {
                 Ok(second) => second,
                 Err(line) => {
@@ -946,11 +908,20 @@ pub(super) async fn run_task_loop(
                 }
             };
             let full_brief = brief_text;
-            let previous = resume_attempt(&task, &route, conflict_only, second.is_some());
+            let previous = resume_attempt(&task, &route, second.is_some());
             let resume = previous.and_then(|a| a.session_id.clone());
             let brief_text = match previous {
                 Some(a) => brief::build_resume_brief(&task, a, &messages, advice.as_deref()),
                 None => full_brief.clone(),
+            };
+            let (brief_text, full_brief) = if carry_conflicts.is_empty() {
+                (brief_text, full_brief)
+            } else {
+                let note = brief::carry_conflict_block(&carry_conflicts, &task.id);
+                (
+                    brief::with_block_before_report(&brief_text, &note),
+                    brief::with_block_before_report(&full_brief, &note),
+                )
             };
             if let Some(session) = &resume {
                 task.decisions.push(format!(
@@ -959,11 +930,7 @@ pub(super) async fn run_task_loop(
                 ));
             }
 
-            let reason = if conflict_only {
-                format!("conflict only -> route {}", route.id)
-            } else {
-                format!("tier {} -> route {}", task.tier.as_str(), route.id)
-            };
+            let reason = format!("tier {} -> route {}", task.tier.as_str(), route.id);
             let attempt = Attempt {
                 n: attempt_n,
                 stage: Stage::Implement,
@@ -1007,10 +974,7 @@ pub(super) async fn run_task_loop(
                 cause: None,
                 diff_stat: None,
             };
-            if !carry_conflicts.is_empty() {
-                task.queue.carry_conflict_attempt = Some(attempt_n);
-                task.queue.carry_conflicts.clear();
-            }
+            task.queue.carry_conflict_step = Some(attempt_n);
             task.attempts.push(attempt);
             let idx = task.attempts.len() - 1;
             refresh_criteria_results(&mut task, idx);
@@ -1848,8 +1812,8 @@ pub(super) async fn run_task_loop(
                             .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
                     }
                     task.base_sha = new_sha.clone();
-                    task.queue.carry_conflicts = files.clone();
-                    let detail = conflict_detail(&base_ref, &new_sha, &files, &task_id);
+                    let detail = conflict_detail(&base_ref, &new_sha, &files);
+                    set_carry_conflicts(&mut task, files);
                     match fail_and_continue(
                         &app,
                         &task_id,
@@ -2860,10 +2824,9 @@ pub(super) async fn run_task_loop(
 pub(super) fn resume_attempt<'a>(
     task: &'a Task,
     route: &Route,
-    conflict_only: bool,
     best_of: bool,
 ) -> Option<&'a Attempt> {
-    if conflict_only || best_of || last_review_repeated(task) {
+    if best_of || last_review_repeated(task) {
         return None;
     }
     task.attempts
@@ -2872,7 +2835,7 @@ pub(super) fn resume_attempt<'a>(
         .filter(|a| {
             a.failure
                 .as_ref()
-                .is_some_and(|f| f.kind == FailureKind::Verify)
+                .is_some_and(|f| matches!(f.kind, FailureKind::Verify | FailureKind::Conflict))
                 && a.session_id.as_ref().is_some_and(|id| !id.is_empty())
                 && a.route_id == route.id
                 && a.harness == route.harness
@@ -3055,8 +3018,8 @@ pub(super) async fn carry_onto_newest_base(
             task.planner_tests = tests;
             task.decisions
                 .push(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
-            let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
-            task.queue.carry_conflicts = files;
+            let detail = conflict_detail(&base_ref, &new_sha, &files);
+            set_carry_conflicts(task, files);
             task.base_sha = new_sha;
             BaseCarry::Conflict(detail)
         }
@@ -3163,7 +3126,7 @@ pub(super) enum BaseRetry {
 
 /// Waits for the base to move and carries onto it. A failed carry stays on
 /// an owner question until it can be retried, rather than implementing on
-/// the old base. Conflicts are left for a conflict-only implement attempt.
+/// the old base. Conflicts are left for the next implement attempt.
 pub(super) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,

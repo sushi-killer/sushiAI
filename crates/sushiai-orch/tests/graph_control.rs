@@ -35,7 +35,7 @@ mode = config.get('mode', 'complete')
 if mode == 'conflict':
     if n == 1:
         file.write_text('part change\n')
-    elif '## Conflict-only attempt' in brief:
+    elif '## Base moved' in brief:
         (gates / 'conflict_markers').write_text(file.read_text())
         # Deliberately leave markers; a failed conflict attempt must not loop.
         pathlib.Path('health.txt').write_text('broken\n')
@@ -63,7 +63,6 @@ fn daemon(gates: &Path) -> (Daemon, tempfile::TempDir) {
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("GATES", gates.to_str().unwrap()),
-        ("ORCHD_STUCK_PAUSE_SECS", "1"),
     ]);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("");
@@ -73,7 +72,6 @@ fn daemon(gates: &Path) -> (Daemon, tempfile::TempDir) {
     settings["maxAttempts"] = json!(1);
     fit_sandbox(&mut settings);
     daemon.request("settings.set", json!({"settings": settings}));
-    cheap_route_on_claude(&daemon);
     (daemon, scripts)
 }
 
@@ -246,7 +244,7 @@ fn base_commit_on_held_paths_waits_for_explicit_sync() {
 }
 
 #[test]
-fn conflicting_base_commit_gives_one_attempt_with_the_conflict_in_the_brief() {
+fn conflicting_base_commit_gives_an_ordinary_step_with_the_conflict_in_the_brief() {
     let gates = tempfile::tempdir().unwrap();
     configure(gates.path(), "part", "conflict", "shared.txt", true);
     let (daemon, _scripts) = daemon(gates.path());
@@ -271,7 +269,7 @@ fn conflicting_base_commit_gives_one_attempt_with_the_conflict_in_the_brief() {
     started(gates.path(), "part", 2);
     let brief = std::fs::read_to_string(gates.path().join("brief_part_2")).unwrap();
     assert!(
-        brief.contains("## Conflict-only attempt") && brief.contains("shared.txt"),
+        brief.contains("## Base moved") && brief.contains("shared.txt"),
         "{brief}"
     );
     let markers = std::fs::read_to_string(gates.path().join("conflict_markers")).unwrap();
@@ -281,16 +279,16 @@ fn conflicting_base_commit_gives_one_attempt_with_the_conflict_in_the_brief() {
             && markers.contains("part change"),
         "{markers}"
     );
-    // The failed conflict attempt no longer parks the task for good: it
-    // pauses for a timed retry and says so.
-    let paused = wait_until("the failed conflict attempt to pause", || {
-        let task = get(&daemon, &part);
-        decision_contains(&task, "Retry later: the base carry conflict attempt failed")
-            .then_some(task)
-    });
-    assert!(paused["park"].is_null(), "{paused}");
-    assert!(paused["question"].is_null(), "{paused}");
-    assert_eq!(paused["attempts"][1]["routeId"], "claude-cheap");
+    // A step that keeps failing goes to the ordinary ladder and ends it: the
+    // task fails or asks, and the attempts stay within twice the budget.
+    let ended = wait_until(
+        "the failing conflict step to reach the end of the ladder",
+        || {
+            let task = get(&daemon, &part);
+            (task["status"] == "failed" || task["question"].is_object()).then_some(task)
+        },
+    );
+    assert!(ended["attempts"].as_array().unwrap().len() <= 6, "{ended}");
 }
 
 #[test]

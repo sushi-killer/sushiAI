@@ -506,10 +506,9 @@ fn renders() -> Vec<(&'static str, String)> {
             brief::conflict_block("criterion [0] wants it hidden, criterion [1] clicked"),
         ),
         (
-            "conflict_only_block_files",
-            brief::conflict_only_block(&["src/a.ts".to_string(), "src/b.ts".to_string()]),
+            "carry_conflict_block",
+            brief::carry_conflict_block(&["src/a.ts".to_string(), "src/b.ts".to_string()], "t-1"),
         ),
-        ("conflict_only_block_bare", brief::conflict_only_block(&[])),
         (
             "parent_failure_block",
             brief::parent_failure_block("`npm run ci` exited 1."),

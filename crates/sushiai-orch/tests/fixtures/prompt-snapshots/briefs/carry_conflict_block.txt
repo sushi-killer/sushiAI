@@ -1,0 +1,4 @@
+## Base moved
+
+The base branch moved, and carrying this task onto it conflicts in: src/a.ts, src/b.ts. Text files carry `<<<<<<<` / `>>>>>>>` markers; for a binary or deleted file, your version is `git show refs/orchd/wip/t-1:<path>`. Resolve each conflict so both sides' intent survives, remove every conflict marker, regenerate anything generated from the old base, and make the task's checks pass.
+

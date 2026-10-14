@@ -372,9 +372,9 @@ the parent's new head at its next attempt boundary (`Rebase:`). Automatic
 sync runs at these boundaries only when incoming base commits touch no path
 the graph holds: the parent's and parts' declared paths plus their lease
 files. Explicit `task.sync` merges regardless of overlap. A part carry that
-conflicts gets one attempt on the conflict-only route, with the conflicting
-files in its brief; orchd never auto-resolves them. A failed conflict attempt
-parks for a fix and an explicit start.
+conflicts is one ordinary attempt on the task's own route, with the conflicting
+files in its brief; orchd never auto-resolves them. A failed attempt goes to
+the usual failure ladder.
 
 Answer history keeps `answeredBy` and an optional `failureSignature`. An
 omitted RPC source means the owner in the UI (`Owner: <answer>` and

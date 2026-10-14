@@ -180,7 +180,6 @@ pub(super) enum ParentEnd {
     Attempt {
         failure: String,
         budget: Option<u32>,
-        conflict_only: bool,
     },
 }
 
@@ -513,7 +512,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
                 app.broadcast_task(task);
                 return ParentEnd::Finished;
             }
-            Landing::Failed { kind, detail } => {
+            Landing::Failed { detail, .. } => {
                 task.status = TaskStatus::Running;
                 task.updated_at = now_ms();
                 app.save_task_logged(task);
@@ -521,7 +520,6 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
                 return ParentEnd::Attempt {
                     failure: detail,
                     budget: None,
-                    conflict_only: kind == FailureKind::Conflict,
                 };
             }
             Landing::Cancelled => {
@@ -557,7 +555,6 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
             return ParentEnd::Attempt {
                 failure,
                 budget: Some(1),
-                conflict_only: false,
             };
         }
         git::delete_wip_ref(&worktree, &task_id);
@@ -791,7 +788,6 @@ pub(super) async fn run_parent(
                 return ParentEnd::Attempt {
                     failure,
                     budget: Some(1),
-                    conflict_only: true,
                 };
             }
             ParentGate::End => {
@@ -914,7 +910,6 @@ pub(super) async fn run_parent(
         return ParentEnd::Attempt {
             failure,
             budget: Some(1),
-            conflict_only: false,
         };
     }
     task.decisions.push(format!(
@@ -950,21 +945,39 @@ async fn remove_chain_branches(app: &Arc<App>, task: &mut Task) {
 
 /// The carry-onto-moved-base failure detail the agent gets: which files
 /// conflict and how to resolve them.
-pub(super) fn conflict_detail(
-    base_ref: &str,
-    new_sha: &str,
-    files: &[String],
-    task_id: &str,
-) -> String {
+pub(super) fn conflict_detail(base_ref: &str, new_sha: &str, files: &[String]) -> String {
     format!(
         "{base_ref} moved ahead to {}, and your changes were carried onto it. \
-         These files conflict: {}. Text files carry <<<<<<< / >>>>>>> markers; \
-         for a binary or deleted file, your version is `git show {}:<path>`. \
-         Resolve each one so both the base's change and yours survive, then finish the task.",
+         These files conflict: {}.",
         short_sha(new_sha),
-        files.join(", "),
-        git::wip_ref(task_id)
+        files.join(", ")
     )
+}
+
+/// Records the files a carry left conflicted: the next implement attempt's
+/// brief names them (`brief::carry_conflict_block`).
+pub(super) fn set_carry_conflicts(task: &mut Task, files: Vec<String>) {
+    task.queue.carry_conflicts = files;
+    task.queue.carry_conflict_step = None;
+}
+
+/// Clears the conflict note once the attempt that carried it ended with a
+/// recorded outcome; an interrupted attempt keeps it for the next one.
+pub(super) fn settle_carry_conflicts(task: &mut Task) {
+    let Some(n) = task.queue.carry_conflict_step else {
+        return;
+    };
+    let ended = task.attempts.iter().any(|a| {
+        a.n == n
+            && !matches!(
+                a.status,
+                AttemptStatus::Running | AttemptStatus::Interrupted
+            )
+    });
+    if ended {
+        task.queue.carry_conflicts.clear();
+        task.queue.carry_conflict_step = None;
+    }
 }
 
 /// A relay link's start: its worktree continues the previous link's branch
@@ -1366,10 +1379,9 @@ pub(super) async fn carry_and_check(
                 ));
             }
             task.base_sha = new_sha.clone();
-            return failed(
-                FailureKind::Conflict,
-                conflict_detail(&branch, &new_sha, &files, &task.id),
-            );
+            let detail = conflict_detail(&branch, &new_sha, &files);
+            set_carry_conflicts(task, files);
+            return failed(FailureKind::Conflict, detail);
         }
         Ok(git::Rebase::Skipped { reason }) => {
             return failed(

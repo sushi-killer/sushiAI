@@ -40,6 +40,7 @@ Rule: carry a PR branch onto the newest base and recheck it before the push; a "
 
 ## Promoted
 
+- 2026-10-14 A fail-fast `cargo test` hid a regression in a later binary from the baseline diff → rerun with `--no-fail-fast`. `tests/baseline_cargo.rs`.
 - 2026-10-13 An agent host's own git identity reached PR commits and main → PR commits need a noreply author. `check-conventions.mjs`.
 - 2026-10-13 Planner tests that failed the repo formatter stalled tasks → a repo `format` command runs before they are committed. `protected.rs`.
 - 2026-10-13 Node 22 host: unref'd awaited timer failed `npm run ci` on main → `node-floor` CI job.
@@ -56,4 +57,3 @@ Rule: carry a PR branch onto the newest base and recheck it before the push; a "
 - 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.
 - 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.
-- 2026-10-02 Fixtures invented `gh` output → copy real CLI shapes (`MERGED`). `worktree-session.test.cjs`.

@@ -391,7 +391,7 @@ async fn parent_finals_on_base(
         }
         match judge_against_base(app, task, failed, &base_run, &wt, &dir, cancel).await {
             BaseVerdict::Waived => judged.push(base_run.command.clone()),
-            BaseVerdict::NewFailures => {}
+            BaseVerdict::NewFailures(_) => {}
             BaseVerdict::Unclear => unclear.push(base_run),
         }
     }

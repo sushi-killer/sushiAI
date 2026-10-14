@@ -154,13 +154,6 @@ fn scratch_path(task: &Task, name: &str) -> PathBuf {
     PathBuf::from(format!("{}-{name}", task.worktree))
 }
 
-/// Whether `new` drops most of the lines that carry `old`'s checking: fewer
-/// than half of its non-blank lines are left.
-fn weakens(old: &str, new: &str) -> bool {
-    let lines = |t: &str| t.lines().filter(|l| !l.trim().is_empty()).count();
-    lines(new) * 2 < lines(old)
-}
-
 /// The tests-first rule for a rewrite: on a clean checkout of the base with
 /// `files` written, every check that gated the task before must still fail.
 async fn still_fails_on_base(
@@ -224,6 +217,25 @@ async fn still_fails_on_base(
     result
 }
 
+/// The only gate a planner rewrite passes: it must change the file and the
+/// checks that gated the task must still fail on the base. Returns the test
+/// files with the rewrite in place.
+async fn accept_rewrite(
+    app: &Arc<App>,
+    task: &Task,
+    idx: usize,
+    new: String,
+    cancel: &CancelToken,
+) -> Result<Vec<PlannedTest>, String> {
+    if new == task.planner_tests.files[idx].content {
+        return Err("the planner returned the test unchanged".into());
+    }
+    let mut files = task.planner_tests.files.clone();
+    files[idx].content = new;
+    still_fails_on_base(app, task, &files, cancel).await?;
+    Ok(files)
+}
+
 /// Rewrites `path` through the planner and rebuilds the planner tests commit
 /// with it; the decision line says what changed and why. `scratch` is a
 /// checkout of the tests commit, not the agent's worktree.
@@ -261,15 +273,7 @@ async fn rewrite_test(
     )
     .await?;
     let new = parse_rewrite(&text).ok_or("the planner gave no usable file")?;
-    if new == old {
-        return Err("the planner returned the test unchanged".into());
-    }
-    if weakens(&old, &new) {
-        return Err("the rewrite drops most of the test's lines".into());
-    }
-    let mut files = task.planner_tests.files.clone();
-    files[idx].content = new.clone();
-    still_fails_on_base(app, task, &files, cancel).await?;
+    let files = accept_rewrite(app, task, idx, new.clone(), cancel).await?;
     let (wt, base, rebuilt) = (worktree.to_path_buf(), task.base_sha.clone(), files.clone());
     let (id, title) = (task.id.clone(), task.title.clone());
     let sha = tokio::task::spawn_blocking(move || {
@@ -454,11 +458,57 @@ mod tests {
             .starts_with(&deny_read));
     }
 
-    #[test]
-    fn a_rewrite_that_drops_most_lines_is_weaker() {
-        let old = "a\nb\nc\nd\n";
-        assert!(weakens(old, "a\n"));
-        assert!(!weakens(old, "a\nb\nx\n"));
+    /// A task gated by `sh t/a.test`, which fails on the base: the base has
+    /// no `answer.txt`. `old` is the planner's test file as committed.
+    fn gated_task(dir: &tempfile::TempDir, old: &str) -> Task {
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = dir.path().join("task").to_string_lossy().to_string();
+        task.base_sha = git::head_sha(&repo).unwrap();
+        task.criteria = vec!["the answer is written".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "sh t/a.test".into(),
+            baseline: Some(Baseline::Fail),
+        }];
+        task.planner_tests.files = vec![PlannedTest {
+            path: "t/a.test".into(),
+            content: old.into(),
+        }];
+        task
+    }
+
+    #[tokio::test]
+    async fn a_shorter_rewrite_that_still_fails_on_the_base_is_accepted() {
+        let (app, dir) = test_app_fitting_sandbox();
+        let old = "#!/bin/sh\nset -e\n# the file must exist and hold the answer\ntest -f answer.txt\ntest -s answer.txt\ngrep -q 42 answer.txt\necho checked\n";
+        let task = gated_task(&dir, old);
+        // Well under half of the original's lines, and it fails on the base.
+        let new = "test -f answer.txt\n".to_string();
+        let files = accept_rewrite(&app, &task, 0, new.clone(), &CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(files[0].content, new);
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_passes_on_the_base_is_refused_whatever_its_length() {
+        let (app, dir) = test_app_fitting_sandbox();
+        let old = "#!/bin/sh\nset -e\n# the file must exist and hold the answer\ntest -f answer.txt\ntest -s answer.txt\ngrep -q 42 answer.txt\necho checked\n";
+        let task = gated_task(&dir, old);
+        // Same number of lines as the original, and it passes on the base.
+        let same_length =
+            "#!/bin/sh\nset -e\n# nothing is checked here\ntrue\ntrue\ntrue\necho checked\n";
+        let shorter = "true\n";
+        for new in [same_length, shorter] {
+            let err = accept_rewrite(&app, &task, 0, new.to_string(), &CancelToken::new())
+                .await
+                .unwrap_err();
+            assert!(err.contains("no longer fails on the base"), "{err}");
+        }
     }
 
     #[test]

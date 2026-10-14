@@ -594,16 +594,9 @@ fn web_allowed(domains: &[String], tool: &str, input: Option<&serde_json::Value>
     let host = (tool == "WebFetch")
         .then(|| input.and_then(|i| i.get("url")).and_then(|u| u.as_str()))
         .flatten()
-        .and_then(|url| url.split_once("://").map(|(_, rest)| rest))
-        .and_then(|rest| rest.split(['/', '?', '#']).next())
-        .map(|authority| authority.rsplit('@').next().unwrap_or(authority))
-        .map(|authority| {
-            authority
-                .split(':')
-                .next()
-                .unwrap_or(authority)
-                .to_ascii_lowercase()
-        });
+        .and_then(|url| url::Url::parse(url).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
     let Some(host) = host else {
         return false;
     };
@@ -1338,6 +1331,19 @@ mod tests {
             &some,
             "WebFetch",
             Some(&fetch("https://u@evil.test/"))
+        ));
+        for url in [
+            "https://evil.test\\@docs.rs/",
+            "https://evil.test\\.docs.rs/",
+            "not a url",
+            "ftp://docs.rs/x",
+        ] {
+            assert!(!web_allowed(&some, "WebFetch", Some(&fetch(url))), "{url}");
+        }
+        assert!(web_allowed(
+            &open,
+            "WebFetch",
+            Some(&fetch("https://anything.example/x"))
         ));
         assert!(!web_allowed(&some, "WebSearch", None));
         assert!(!web_allowed(

@@ -17,6 +17,7 @@ serde_json.workspace = true
 uuid.workspace = true
 libc.workspace = true
 sha2 = "0.10"
+url = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

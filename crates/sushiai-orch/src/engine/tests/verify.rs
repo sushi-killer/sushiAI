@@ -768,7 +768,7 @@ async fn check_slots_settings_set_raises_parallel_and_starts_a_waiting_task_loop
     task.brief_check.missing_tool = Some(MissingTool {
         criterion: 0,
         capability: "test capability".into(),
-        tool_id: None,
+        tool_id: Some("asana".into()),
     });
     app.store.save_task(&task).unwrap();
     let held = app.slots.clone().try_acquire_owned().unwrap();

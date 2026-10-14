@@ -377,9 +377,7 @@ async fn parent_finals_on_base(
         };
         // A check the parent's work is meant to turn green is never waived;
         // it stays an ordinary failure.
-        if command_named_by_task(task, &base_run.command)
-            || failing_test_named_by_task(task, &base_run.failing)
-        {
+        if command_named_by_task(task, &base_run.command) {
             keep_check(task, &base_run.command, KEPT_BY_TASK_TARGET);
             continue;
         }

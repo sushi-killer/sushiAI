@@ -172,21 +172,6 @@ pub(super) fn command_named_by_task(task: &Task, command: &str) -> bool {
     (named_in_request_or_goal || named_in_criteria) && !super::answer_policy::runs_ci_entry(command)
 }
 
-/// Whether the request, goal or criteria name one of the failing `tests`.
-pub(super) fn failing_test_named_by_task(task: &Task, tests: &[String]) -> bool {
-    let text: String = task
-        .request
-        .iter()
-        .chain(std::iter::once(&task.goal))
-        .chain(task.criteria.iter())
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("\n");
-    tests
-        .iter()
-        .any(|name| name.chars().count() >= 4 && text.contains(name.as_str()))
-}
-
 /// Whether a pre-existing failing check is part of this task's target: the
 /// task names the command, or the command names a file the task changed.
 /// Changed files are relative to the task's base SHA.
@@ -1925,6 +1910,22 @@ mod tests {
             "node --test tests/base_retry.test.cjs",
             &[]
         ));
+    }
+
+    #[test]
+    fn a_crate_name_in_the_request_does_not_make_a_shared_check_the_target() {
+        // Live: a docs task named the crate "sushiai-orch"; a flaky test
+        // "sushiai-orch::report ..." failed in the shared check on the base and
+        // the task, and the check was kept as the task's own target.
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        task.request = Some("Document sushiai-orch and its engine modules in docs/MAP.md".into());
+        task.goal = "Add docs/MAP.md describing sushiai-orch".into();
+        task.criteria = vec!["The map exists -- check: test -f docs/MAP.md".into()];
+        assert!(!command_named_by_task(&task, "npm run ci"));
+        assert!(!is_task_target(&task, "npm run ci", &[]));
+        assert!(!is_task_target(&task, "cargo test --workspace", &[]));
+        // The planner's exact `-- check:` command still is the target.
+        assert!(is_task_target(&task, "test -f docs/MAP.md", &[]));
     }
 
     #[test]

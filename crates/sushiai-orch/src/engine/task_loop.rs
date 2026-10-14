@@ -3631,8 +3631,7 @@ pub(super) async fn finish_after_review(
             // A check the task is meant to turn green is never waived.
             if !kept.contains(&failed.command)
                 && !is_kept(task, &failed.command)
-                && (command_named_by_task(task, &failed.command)
-                    || failing_test_named_by_task(task, &base_run.failing))
+                && command_named_by_task(task, &failed.command)
             {
                 keep_check(task, &failed.command, KEPT_BY_TASK_TARGET);
             }

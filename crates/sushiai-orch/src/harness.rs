@@ -220,11 +220,40 @@ pub(super) fn task_run_uses_outer_sandbox(req: &RunRequest<'_>) -> bool {
     cfg!(target_os = "macos") && req.task_run && !req.review && req.task_sandbox.is_some()
 }
 
+/// The JSON schema an agent's final reply must match: Claude gets the text
+/// (`--json-schema`), Codex the file it reads (`--output-schema`).
+#[derive(Clone, Copy)]
+pub struct OutputSchema<'a> {
+    pub json: &'a str,
+    pub path: &'a Path,
+}
+
 pub fn build_argv(req: &RunRequest) -> Vec<String> {
-    match req.harness {
+    build_argv_with_schema(req, None)
+}
+
+/// [`build_argv`] plus the schema flag for the harness. Codex reads its prompt
+/// from stdin after the flags, so the trailing `-` stays last.
+pub fn build_argv_with_schema(req: &RunRequest, schema: Option<&OutputSchema>) -> Vec<String> {
+    let mut argv = match req.harness {
         Harness::Claude => claude_argv(req),
         Harness::Codex => codex_argv(req),
+    };
+    if let Some(schema) = schema {
+        match req.harness {
+            Harness::Claude => {
+                argv.push("--json-schema".to_string());
+                argv.push(schema.json.to_string());
+            }
+            Harness::Codex => {
+                let stdin = argv.pop();
+                argv.push("--output-schema".to_string());
+                argv.push(schema.path.to_string_lossy().to_string());
+                argv.extend(stdin);
+            }
+        }
     }
+    argv
 }
 
 /// The Stop hook wiring for a Claude run: the `sushiai` executable, the home
@@ -417,7 +446,9 @@ fn stable_argv(argv: &[String]) -> Vec<&str> {
             continue;
         }
         match arg.as_str() {
-            "--mcp-config" | "--settings" | "--resume" | "-C" => skip_next = true,
+            "--mcp-config" | "--settings" | "--resume" | "-C" | "--output-schema" => {
+                skip_next = true
+            }
             "resume" if i == 1 => after_resume = true,
             a if a.starts_with("--image=") => {}
             a if a.starts_with("mcp_servers.") && prev == Some("-c") => {
@@ -693,6 +724,11 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
                 .get("result")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string());
+            // With `--json-schema` the checked reply is `structured_output`; the
+            // result text is prose around it.
+            if let Some(structured) = v.get("structured_output").filter(|s| !s.is_null()) {
+                outcome.final_text = Some(structured.to_string());
+            }
             if v.get("subtype").and_then(|x| x.as_str()) == Some("error_max_budget_usd") {
                 outcome.over_budget = true;
             }
@@ -1186,6 +1222,38 @@ mod tests {
         let mut req = base_req(Harness::Claude, &wt);
         req.review = true;
         assert!(!claude_argv(&req).contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn the_schema_flag_reaches_each_harness_and_its_file_is_not_hashed() {
+        let wt = PathBuf::from("/repo-task");
+        let req = base_req(Harness::Claude, &wt);
+        let json = r#"{"type":"object"}"#;
+        let (a, b) = (Path::new("/run/a.json"), Path::new("/run/b.json"));
+        assert_eq!(build_argv(&req), claude_argv(&req));
+        let argv = build_argv_with_schema(&req, Some(&OutputSchema { json, path: a }));
+        let flag = argv.iter().position(|a| a == "--json-schema").unwrap();
+        assert_eq!(argv[flag + 1], json);
+
+        let req = base_req(Harness::Codex, &wt);
+        let argv = build_argv_with_schema(&req, Some(&OutputSchema { json, path: a }));
+        let flag = argv.iter().position(|a| a == "--output-schema").unwrap();
+        assert_eq!(argv[flag + 1], "/run/a.json");
+        assert_eq!(argv.last().map(String::as_str), Some("-"));
+        let other = build_argv_with_schema(&req, Some(&OutputSchema { json, path: b }));
+        assert_eq!(
+            prompt_hash(&argv, None),
+            prompt_hash(&other, None),
+            "the per-run schema file is not part of the fingerprint"
+        );
+    }
+
+    #[test]
+    fn a_structured_output_is_the_reply_and_replaces_the_prose_result() {
+        let out = replay_events(Harness::Claude, &[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","structured_output":{"title":"t"}}"#,
+        ].join("\n"));
+        assert_eq!(out.final_text.as_deref(), Some(r#"{"title":"t"}"#));
     }
 
     #[test]

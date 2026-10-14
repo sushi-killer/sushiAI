@@ -1027,7 +1027,7 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_h
         .collect();
     // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
     // repeat -> advisor and a tier up. Attempt 3: repeated a second time ->
-    // handled (the judge), not the owner; the budget of 6 and one changed approach (two more) end the task.
+    // handled, not the owner; the budget of 6 and one changed approach (two more) end the task.
     assert_eq!(implements.len(), 8, "{settled}");
     assert!(
         implements[0]["review"].get("repeated").is_none(),
@@ -1081,21 +1081,19 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_h
     remove_dir_retrying(worktree);
 }
 
-/// Implements (appending), answers the advisor, and reviews: FAIL with a
-/// plain finding first, FAIL with it marked `repeat` once the review brief
-/// carries the previous review, PASS once it names a dropped finding. An
-/// implement brief that shows a review failure gets a report disputing it.
-const FAKE_DISPUTE_SCRIPT: &str = r###"#!/bin/sh
+/// Implements (appending), and reviews: a first FAIL with a plain finding; a
+/// review that has declined findings to rule on answers `UPHELD` for the
+/// declined F-1. An implement brief that shows a review failure gets a report
+/// declining F-1 with evidence.
+const FAKE_DECLINE_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
 *"An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
 "## Review"*)
   case "$brief" in
-  *"## Findings dropped by a tie-break judge"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
-  *"## Previous review"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"id\":\"F-1\"}]}\n```"}' ;;
+  *"## Declined findings"*)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"declineRulings\":[{\"id\":\"F-1\",\"upheld\":UPHELD}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
   esac
@@ -1105,7 +1103,7 @@ case "$brief" in
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   case "$brief" in
   *"The last attempt failed review"*)
-    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"disputes\":[{\"finding\":\"a.rs:1 - null check missing\",\"rebuttal\":\"the check is at a.rs:1\",\"evidence\":[\"a.rs:1\"]}]}\n```' ;;
+    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"declines\":[{\"id\":\"F-1\",\"reason\":\"wrong\",\"evidence\":[\"a.rs:1\"]}]}\n```' ;;
   *)
     report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```' ;;
   esac
@@ -1113,48 +1111,32 @@ case "$brief" in
 esac
 "###;
 
-fn judge_script(finding_valid: bool) -> String {
-    format!(
-        "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo codex-cli 0.1; exit 0; }}\ncat > /dev/null\necho judge >> \"$LOG_DIR/judge.log\"\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"```sushi-judge\\n{{\\\"finding_valid\\\": {finding_valid}, \\\"why\\\": \\\"the ruling\\\"}}\\n```\"}}}}'\n"
-    )
+/// The decline script with the review's ruling on F-1 filled in.
+fn decline_script(upheld: bool) -> String {
+    FAKE_DECLINE_SCRIPT.replace("UPHELD", if upheld { "true" } else { "false" })
 }
 
-/// Runs the dispute flow with a judge answering `finding_valid`; returns the
-/// settled task and the number of judge runs.
-fn run_dispute_task(finding_valid: bool) -> (serde_json::Value, usize) {
+/// Runs the decline flow with the review ruling `upheld` on the declined
+/// finding; returns the settled task.
+fn run_decline_task(upheld: bool) -> serde_json::Value {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let claude = fake_harness_script(scripts_dir.path(), "fake-dispute.sh", FAKE_DISPUTE_SCRIPT);
-    let codex = fake_harness_script(
+    let claude = fake_harness_script(
         scripts_dir.path(),
-        "fake-judge.sh",
-        &judge_script(finding_valid),
+        "fake-decline.sh",
+        &decline_script(upheld),
     );
-    let daemon = Daemon::spawn(&[
-        ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
-        ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
-        ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
-    ]);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", claude.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["maxAttempts"] = serde_json::json!(6);
     settings["answerPolicy"] = serde_json::json!(false);
     settings["review"] = serde_json::json!("claude-opus");
-    // Sonnet stays the implementer but is too weak to judge, so the judge is
-    // Codex; a route with no model has no known strength until one is set.
-    for route in settings["routes"].as_array_mut().unwrap() {
-        if route["id"] == "claude-sonnet" {
-            route["strength"] = serde_json::json!(1);
-        }
-        if route["id"] == "codex" {
-            route["strength"] = serde_json::json!(3);
-        }
-    }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
-            "title": "Dispute",
+            "title": "Decline",
             "goal": "Write the marker",
             "verify": ["true"],
             "start": true,
@@ -1162,13 +1144,10 @@ fn run_dispute_task(finding_valid: bool) -> (serde_json::Value, usize) {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
     let settled = poll_task_status(&daemon, &task_id);
-    let runs = std::fs::read_to_string(scripts_dir.path().join("judge.log"))
-        .map(|t| t.lines().count())
-        .unwrap_or(0);
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);
-    (settled, runs)
+    settled
 }
 
 fn decision_lines(task: &serde_json::Value) -> Vec<String> {
@@ -1181,60 +1160,45 @@ fn decision_lines(task: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() {
-    let (settled, runs) = run_dispute_task(false);
+fn a_declined_finding_the_review_upholds_is_resolved_and_the_task_commits() {
+    let settled = run_decline_task(true);
     assert_eq!(settled["status"], "done", "{settled}");
-    assert_eq!(runs, 1, "{settled}");
     let assumption = settled["assumptions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["by"] == "review-judge")
-        .unwrap_or_else(|| panic!("no review-judge assumption: {settled}"));
+        .find(|a| a["by"] == "review")
+        .unwrap_or_else(|| panic!("no review assumption: {settled}"));
     assert_eq!(assumption["answer"], "finding dropped", "{settled}");
     assert_eq!(assumption["kind"], "review_dispute", "{settled}");
     assert_eq!(assumption["attempt"], 2, "{settled}");
-    assert_eq!(assumption["evidence"], "the ruling", "{settled}");
+    assert_eq!(assumption["evidence"], "a.rs:1", "{settled}");
     assert!(
-        decision_lines(&settled).iter().any(|d| d
-            .starts_with("Orchestrator: disputed review finding dropped by the judge (")
-            && d.contains("null check missing")),
+        decision_lines(&settled).iter().any(|d| d.starts_with(
+            "Orchestrator: review finding F-1 declined by the implementer and upheld by the review; resolved:"
+        ) && d.contains("null check missing")),
         "{settled}"
     );
 }
 
 #[test]
-fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
-    let (settled, runs) = run_dispute_task(true);
+fn a_declined_finding_the_review_does_not_uphold_stays_blocking() {
+    let settled = run_decline_task(false);
     assert_eq!(settled["status"], "failed", "{settled}");
-    assert_eq!(runs, 1, "the finding is judged once: {settled}");
-    let implements: Vec<&serde_json::Value> = settled["attempts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["stage"] == "implement")
-        .collect();
-    // The second repeat (attempt 3) is handled, not escalated: the judge
-    // already ruled, so the attempts run until the budget of 6 and one changed approach are spent.
-    assert_eq!(implements.len(), 8, "{settled}");
-    assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
-    assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
-    let decisions = decision_lines(&settled);
+    let lines = decision_lines(&settled);
     assert!(
-        decisions
-            .iter()
-            .any(|d| d.contains("a review finding repeated -> advisor, tier hard")),
+        lines.iter().any(|d| d.starts_with(
+            "Orchestrator: review finding F-1 declined by the implementer but not upheld; it stays open:"
+        )),
         "{settled}"
     );
     assert!(
-        decisions
-            .iter()
-            .any(|d| d.starts_with("Orchestrator: disputed review finding kept by the judge (")),
+        !lines.iter().any(|d| d.contains("upheld by the review")),
         "{settled}"
     );
     assert!(settled["assumptions"]
         .as_array()
-        .map(|a| a.iter().all(|x| x["by"] != "review-judge"))
+        .map(|a| a.iter().all(|x| x["by"] != "review"))
         .unwrap_or(true));
 }
 

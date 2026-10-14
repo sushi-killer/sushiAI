@@ -56,10 +56,10 @@ fn no_verdict() -> String {
     json!({"type": "result", "result": "Looks fine to me."}).to_string()
 }
 
-fn report(summary: &str, disputes: Value) -> String {
+fn report(summary: &str, declines: Value) -> String {
     let body = json!({
         "outcome": "complete", "summary": summary, "decisions": [], "question": "",
-        "disputes": disputes,
+        "declines": declines,
     });
     json!({
         "type": "result", "total_cost_usd": 0.01,
@@ -96,8 +96,8 @@ impl Rig {
         settings["maxAttempts"] = json!(6);
         settings["answerPolicy"] = json!(false);
         settings["review"] = json!("claude-opus");
-        // Sonnet stays the implementer but is too weak to judge: Codex judges, at
-        // any tier.
+        // Sonnet stays the implementer but is too weak to review: Codex is the
+        // fallback reviewer, at any tier.
         for route in settings["routes"].as_array_mut().unwrap() {
             if route["id"] == "claude-sonnet" {
                 route["strength"] = json!(1);
@@ -213,51 +213,63 @@ fn every_finding_gets_a_stable_id_and_a_status() {
 }
 
 #[test]
-fn review_runs_stop_after_round_two_with_the_last_result() {
+fn a_decline_is_ruled_on_by_id_and_only_an_upheld_one_resolves() {
     let rig = Rig::new(&[
         fail(json!([
             "P1: a.rs:1 - first problem",
             "P1: b.rs:2 - second problem"
         ])),
-        fail(json!([
-            {"finding": "P1: a.rs:1 - first problem", "id": "F-1"},
-            {"finding": "P1: b.rs:2 - second problem", "id": "F-2"},
-            {"finding": "P1: c.rs:3 - third problem", "id": null}
-        ])),
-        fail(json!([{"finding": "P1: c.rs:3 - third problem", "id": "F-3"}])),
-        pass(json!([])),
+        review_line(json!({
+            "verdict": "PASS",
+            "findings": [],
+            "declineRulings": [
+                {"id": "F-1", "upheld": true},
+                {"id": "F-2", "upheld": false}
+            ]
+        })),
+        review_line(json!({
+            "verdict": "PASS",
+            "findings": [],
+            "declineRulings": [{"id": "F-2", "upheld": true}]
+        })),
     ]);
     rig.file(
         "implement.disputed",
         &report(
             "done",
             json!([
-                {"finding": "F-1", "rebuttal": "wrong", "evidence": []},
-                {"finding": "F-2", "rebuttal": "wrong", "evidence": []},
-                {"finding": "F-3", "rebuttal": "wrong", "evidence": []}
+                {"id": "F-1", "reason": "wrong", "evidence": ["a.rs:1"]},
+                {"id": "F-2", "reason": "already_satisfied", "evidence": ["b.rs:2"]}
             ]),
         ),
     );
-    let (id, settled) = rig.run("Write the marker");
+    let (_, settled) = rig.run("Write the marker");
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
     assert_eq!(attempts.len(), 3, "{settled}");
-    // Attempt 1: one run. Attempt 2: a judge drop re-ran the review once and
-    // the second run's drop would have asked for a third. Attempt 3: a narrow
-    // run that passed, then one whole-change run because the marker file
-    // changed since the last full review (still within the two-run bound).
-    assert_eq!(rig.count("review.brief."), 5);
-    assert_eq!(rig.review_runs(&id, 3), 2, "no third run");
-    assert_eq!(rig.review_runs(&id, 2), 2, "no third run");
+    // Attempt 2: F-2's decline is not upheld, so it stays blocking even
+    // though the reviewer passed; F-1's upheld decline is gone from the list.
     assert_eq!(attempts[1]["review"]["verdict"], "FAIL", "{settled}");
+    assert_eq!(
+        attempts[1]["review"]["findings"].as_array().unwrap().len(),
+        1
+    );
     assert!(attempts[1]["review"]["findings"][0]
         .as_str()
         .unwrap()
-        .contains("third problem"));
+        .contains("[F-2]"));
+    assert_eq!(rig.count("judge.brief."), 0, "no judge turn");
+    let lines = decisions(&settled);
     assert!(
-        decisions(&settled)
+        lines
             .iter()
-            .any(|d| d == "Orchestrator: attempt 2 review stopped after 2 runs"),
+            .any(|d| d.contains("F-1") && d.contains("upheld by the review; resolved")),
+        "{settled}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|d| d.contains("F-2") && d.contains("not upheld; it stays open")),
         "{settled}"
     );
     rig.finish(&settled);
@@ -421,7 +433,7 @@ fn a_twice_repeated_finding_with_a_failing_scenario_becomes_a_check() {
 }
 
 #[test]
-fn a_twice_repeated_finding_without_a_scenario_goes_to_the_judge() {
+fn a_twice_repeated_finding_without_a_scenario_stays_open_until_a_review_omits_it() {
     let again = json!({"finding": "P1: a.rs:1 - null check missing", "id": "F-1"});
     let rig = Rig::new(&[
         fail(json!(["P1: a.rs:1 - null check missing"])),
@@ -434,30 +446,17 @@ fn a_twice_repeated_finding_without_a_scenario_goes_to_the_judge() {
         &report("the check sits at a.rs:1", json!([])),
     );
     let (_, settled) = rig.run("Write the marker");
-    // The judge drops it at attempt 3, the review re-runs once and passes;
-    // the owner is never asked.
+    // No judge rules on it: the third review repeats it with no scenario, so
+    // it stays open, and the fourth review no longer names it.
     assert_eq!(settled["status"], "done", "{settled}");
-    assert_eq!(implements(&settled).len(), 3, "{settled}");
-    let judge = std::fs::read_to_string(rig.dir.path().join("judge.log")).unwrap();
-    assert_eq!(judge.lines().count(), 1);
-    let briefs: Vec<String> = std::fs::read_dir(rig.dir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("judge.brief."))
-        .map(|e| std::fs::read_to_string(e.path()).unwrap())
-        .collect();
-    assert!(
-        briefs[0].contains("the check sits at a.rs:1"),
-        "the implementer's report is the rebuttal: {}",
-        briefs[0]
-    );
+    assert_eq!(implements(&settled).len(), 4, "{settled}");
+    assert_eq!(rig.count("judge.brief."), 0, "no judge turn");
     assert!(
         decisions(&settled)
             .iter()
-            .any(|d| d.contains("repeated twice with no scenario")),
+            .any(|d| d.contains("repeated twice with no scenario; it stays open")),
         "{settled}"
     );
-    assert!(settled["question"].is_null(), "{settled}");
     rig.finish(&settled);
 }
 

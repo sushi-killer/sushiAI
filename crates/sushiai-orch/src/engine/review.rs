@@ -446,11 +446,12 @@ pub(super) fn head_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// What a review run looked at: the scope it ran with and the worktree tree
-/// it saw (`None` when the snapshot failed).
+/// What a review run looked at: the scope it ran with, the worktree tree it
+/// saw (`None` when the snapshot failed) and its ruling on each decline.
 pub(super) struct ReviewSaw {
     pub scope: ReviewScope,
     pub tree: Option<String>,
+    pub rulings: Vec<DeclineRuling>,
 }
 
 /// The earlier implement attempt a retry review builds on: the latest one
@@ -492,7 +493,6 @@ pub(super) async fn run_review(
     cost_usd: &mut f64,
     fingerprint: &mut Option<Fingerprint>,
     after_no_verdict: bool,
-    dropped: &[(String, String)],
     force_full: bool,
 ) -> Result<(ReviewResult, bool, ReviewSaw), ReviewFailure> {
     let wt = worktree.to_path_buf();
@@ -554,6 +554,7 @@ pub(super) async fn run_review(
             .map(|s| (s, Some(source_attempt)))
             .collect()
     };
+    let declines = this_attempt.map_or(&[][..], |a| a.declines.as_slice());
     let mut brief_text = match &narrow {
         Some(n) => brief::build_narrow_review_brief(
             task,
@@ -567,6 +568,7 @@ pub(super) async fn run_review(
                 settled_criteria: &n.settled,
                 delta: &n.delta,
             },
+            declines,
         ),
         None => brief::build_review_brief(
             task,
@@ -576,9 +578,9 @@ pub(super) async fn run_review(
             &shown,
             evidence_from,
             &diff,
+            declines,
         ),
     };
-    brief_text.push_str(&brief::dropped_findings_block(dropped));
     if after_no_verdict {
         brief_text.push('\n');
         brief_text.push_str(&brief::review_retry_note());
@@ -649,7 +651,16 @@ pub(super) async fn run_review(
                     }
                     None => ReviewScope::Full,
                 };
-                return Ok((result, recorded_as_pass, ReviewSaw { scope, tree }));
+                let rulings = brief::parse_decline_rulings(&text);
+                return Ok((
+                    result,
+                    recorded_as_pass,
+                    ReviewSaw {
+                        scope,
+                        tree,
+                        rulings,
+                    },
+                ));
             }
             Err(match outcome.error {
                 Some(error) => ReviewFailure::Harness(format!("review did not run ({error})")),
@@ -907,7 +918,6 @@ mod timeout_tests {
             &mut cost,
             &mut fingerprint,
             false,
-            &[],
             false,
         )
         .await;

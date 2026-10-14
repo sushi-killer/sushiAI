@@ -196,7 +196,7 @@ fn task_state(
             }
         }
         "judge" => {
-            if !task.brief_check.judged.is_empty() || !task.judged_findings.is_empty() {
+            if !task.brief_check.judged.is_empty() {
                 "done"
             } else {
                 "pending"
@@ -370,7 +370,6 @@ impl App {
                                 implementer,
                                 tier,
                             )
-                            .0
                         }
                         _ => None,
                     };
@@ -383,7 +382,6 @@ impl App {
                                 implementer,
                                 tier,
                             )
-                            .0
                         }
                         _ => None,
                     };

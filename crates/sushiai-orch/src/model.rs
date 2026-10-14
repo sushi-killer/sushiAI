@@ -1809,7 +1809,7 @@ pub enum QuestionKind {
     /// A tool call or path write the run is not allowed to make; answered by
     /// the owner only.
     Permission,
-    /// A review finding the implementer disputed and a judge dropped.
+    /// A review finding the implementer declined and the review upheld.
     ReviewDispute,
     PlanQuestion,
     /// Today's spend reached `dailyBudgetUsd`; never answered by policy.
@@ -1820,14 +1820,31 @@ pub enum QuestionKind {
     AgentQuestion,
 }
 
-/// A review finding the implementer disputes, with its rebuttal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Dispute {
-    pub finding: String,
-    pub rebuttal: String,
-    #[serde(default)]
+/// Why the implementer declines a review finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclineReason {
+    Wrong,
+    AlreadySatisfied,
+    ChangesBehaviour,
+}
+
+/// A review finding the implementer declines, with its evidence. The next
+/// review rules on it by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decline {
+    pub id: String,
+    pub reason: DeclineReason,
     pub evidence: Vec<String>,
+}
+
+/// The next review's ruling on one decline: an upheld decline resolves its
+/// finding; otherwise the finding stays blocking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclineRuling {
+    pub id: String,
+    pub upheld: bool,
 }
 
 /// A choice the planner made itself instead of asking the owner
@@ -2108,10 +2125,6 @@ pub struct Task {
     /// Every answered question, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub question_history: Vec<AnsweredQuestion>,
-    /// Keys of the disputed review findings a judge already ruled on: each
-    /// is judged at most once per task.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub judged_findings: Vec<String>,
     /// Every review finding of the task by stable id, with whether the
     /// latest review still reports it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2701,9 +2714,9 @@ pub struct Attempt {
     /// what was tried, what to do next.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
-    /// Review findings the agent disputed in its report.
+    /// Review findings the agent declined in its report, with evidence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disputes: Vec<Dispute>,
+    pub declines: Vec<Decline>,
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
@@ -3223,7 +3236,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -3492,7 +3504,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -3586,7 +3597,6 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             source: None,
-            judged_findings: vec![],
             findings: vec![],
             brief_check: Default::default(),
             plan_gate: Default::default(),
@@ -3672,7 +3682,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: true,
             pr_url: None,

@@ -427,7 +427,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         status: AttemptStatus::Running,
         summary: None,
         handoff: None,
-        disputes: vec![],
+        declines: vec![],
         changed_files: vec![],
         verify: vec![],
         gate_blocks: 0,

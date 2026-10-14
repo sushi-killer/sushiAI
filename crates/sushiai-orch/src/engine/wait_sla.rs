@@ -138,6 +138,10 @@ impl App {
             .into_iter()
             .filter(|t| t.status == TaskStatus::Waiting && !t.archived)
             .filter_map(|t| Some((t.id, t.question?.kind)))
+            .filter(|(id, kind)| {
+                *kind != QuestionKind::HarnessMissing
+                    || !self.harness_resumed.lock().unwrap().contains(id)
+            })
             .filter(|(_, k)| matches!(k, QuestionKind::HarnessMissing | QuestionKind::DailyBudget))
             .collect();
         if waiting.is_empty() {
@@ -165,6 +169,9 @@ impl App {
                 _ => (budget_clear, "today's spend is under the daily budget"),
             };
             if clear {
+                if kind == QuestionKind::HarnessMissing {
+                    self.harness_resumed.lock().unwrap().insert(id.clone());
+                }
                 let params = json!({
                     "id": id,
                     "answer": "retry",
@@ -444,19 +451,50 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Waiting);
     }
 
+    /// Sets one variable for the test and removes it again, even when the
+    /// test panics; tests that set it run one at a time.
+    struct VarGuard(
+        &'static str,
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    );
+
+    impl VarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            static LOCK: StdMutex<()> = StdMutex::new(());
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var(key, value);
+            Self(key, guard)
+        }
+    }
+
+    impl Drop for VarGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
     #[tokio::test]
-    async fn a_harness_wait_resumes_once_a_cli_can_be_started() {
+    async fn a_harness_wait_resumes_once_a_cli_can_be_started_and_only_once() {
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        std::env::set_var("ORCHD_CODEX_BIN", "/bin/sh");
+        let _cli = VarGuard::set("ORCHD_CODEX_BIN", "/bin/sh");
         let task = waiting_in(&repo, QuestionKind::HarnessMissing, &["retry"]);
         app.store.save_task(&task).unwrap();
-        let waiter = park_live(&app, task).await;
+        let waiter = park_live(&app, task.clone()).await;
         app.wait_sla_tick(T0).await;
         let (answer, _) = waiter.await.unwrap();
-        std::env::remove_var("ORCHD_CODEX_BIN");
         assert_eq!(answer.as_deref(), Some("retry"));
+        // The spawn fails again and the owner is asked again: no new resume.
+        let mut again = task;
+        again.status = TaskStatus::Waiting;
+        app.store.save_task(&again).unwrap();
+        let waiter = park_live(&app, again.clone()).await;
+        app.wait_sla_tick(T0 + 60_000).await;
+        assert!(!waiter.is_finished());
+        let saved = app.store.load_task(&again.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        waiter.abort();
     }
 
     #[tokio::test]

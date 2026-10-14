@@ -259,7 +259,16 @@ pub(super) async fn run_task_loop(
             .collect();
         if base_retry_requested(&task, &checks, &task.base_sha) {
             let worktree = PathBuf::from(&task.worktree);
-            match carry_after_base_moves(&app, &mut task, &worktree, &cancel, &mut None).await {
+            match carry_after_base_moves(
+                &app,
+                &mut task,
+                &worktree,
+                &pending_answer,
+                &cancel,
+                &mut None,
+            )
+            .await
+            {
                 BaseRetry::Ready => {}
                 BaseRetry::Conflict(detail) => {
                     if let Some(idx) = task
@@ -3000,7 +3009,10 @@ fn rebase_conflict_note(
 pub(super) enum BaseCarry {
     Ready,
     Conflict(String),
+    /// Carrying went wrong in a way that may pass on another try.
     Failed(String),
+    /// Carrying was left out on purpose; trying again changes nothing.
+    Skipped(String),
 }
 
 /// Carries committed and uncommitted task work (and its trusted planner test
@@ -3014,7 +3026,7 @@ pub(super) async fn carry_onto_newest_base(
     let Some(base_ref) = task.base_ref.clone() else {
         let reason = "Rebase: cannot carry the work without a base branch".to_string();
         task.decisions.push(reason.clone());
-        return BaseCarry::Failed(reason);
+        return BaseCarry::Skipped(reason);
     };
     let (wt, mut snapshot, r) = (worktree.to_path_buf(), task.clone(), base_ref.clone());
     let carried = tokio::task::spawn_blocking(move || {
@@ -3104,7 +3116,7 @@ pub(super) async fn carry_onto_newest_base(
         Ok((git::Rebase::Skipped { reason }, _, _)) => {
             let detail = format!("Rebase: not carried onto {base_ref}: {reason}");
             task.decisions.push(detail.clone());
-            BaseCarry::Failed(detail)
+            BaseCarry::Skipped(detail)
         }
         Err(e) => {
             let detail = format!("Rebase: carrying onto {base_ref} failed: {e}");
@@ -3203,6 +3215,7 @@ pub(super) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,
     worktree: &Path,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> BaseRetry {
@@ -3280,6 +3293,29 @@ pub(super) async fn carry_after_base_moves(
         match carry_onto_newest_base(app, task, worktree, cancel).await {
             BaseCarry::Ready => return BaseRetry::Ready,
             BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
+            BaseCarry::Skipped(reason) => {
+                task.question = Some(Question::new(
+                    format!("{reason}. Fix the carry problem, then retry, or stop?"),
+                    vec!["retry".to_string(), "stop".to_string()],
+                    QuestionKind::AgentQuestion,
+                    AskedBy::Verify,
+                ));
+                task.status = TaskStatus::Waiting;
+                task.updated_at = now_ms();
+                let task_id = task.id.clone();
+                let Some(answer) =
+                    wait_for_answer(app, &task_id, task, pending_answer, cancel, permit).await
+                else {
+                    return BaseRetry::Stopped;
+                };
+                if is_option(&answer, "stop") {
+                    task.status = TaskStatus::Stopped;
+                    task.updated_at = now_ms();
+                    app.save_task_logged(task);
+                    app.broadcast_task(task);
+                    return BaseRetry::Stopped;
+                }
+            }
             BaseCarry::Failed(reason) => {
                 failed_carries += 1;
                 if failed_carries > CARRY_RETRIES {
@@ -3790,7 +3826,9 @@ pub(super) async fn finish_after_review(
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                match carry_after_base_moves(app, task, worktree, cancel, permit).await {
+                match carry_after_base_moves(app, task, worktree, pending_answer, cancel, permit)
+                    .await
+                {
                     BaseRetry::Ready => {}
                     BaseRetry::Conflict(detail) => {
                         record_failure(task, idx, FailureKind::Conflict, detail);
@@ -4202,17 +4240,25 @@ mod carry_retry_tests {
     use super::*;
     use crate::engine::test_support::{task_with_status, test_app};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_carry_that_keeps_failing_becomes_a_conflict_attempt_and_asks_nobody() {
-        std::env::set_var("ORCHD_CARRY_RETRY_MS", "0");
-        let (app, _dir) = test_app();
+        let (app, dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.base_ref = None;
+        task.repo = dir.path().to_string_lossy().into_owned();
+        task.base_ref = Some("main".into());
+        task.worktree = dir.path().join("missing").to_string_lossy().into_owned();
         app.store.save_task(&task).unwrap();
         let worktree = PathBuf::from(&task.worktree);
-        let result =
-            carry_after_base_moves(&app, &mut task, &worktree, &CancelToken::new(), &mut None)
-                .await;
+        let pending = Arc::new(StdMutex::new(None));
+        let result = carry_after_base_moves(
+            &app,
+            &mut task,
+            &worktree,
+            &pending,
+            &CancelToken::new(),
+            &mut None,
+        )
+        .await;
         match result {
             BaseRetry::Conflict(detail) => assert!(detail.contains("failed 4 times"), "{detail}"),
             _ => panic!("expected a conflict attempt"),
@@ -4225,5 +4271,32 @@ mod carry_retry_tests {
                 .count(),
             CARRY_RETRIES as usize
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_carry_left_out_on_purpose_is_not_retried_and_asks_the_owner() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.base_ref = None;
+        app.store.save_task(&task).unwrap();
+        let worktree = PathBuf::from(&task.worktree);
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let waiting = tokio::time::timeout(
+            Duration::from_secs(5),
+            carry_after_base_moves(&app, &mut task, &worktree, &pending, &cancel, &mut None),
+        )
+        .await;
+        assert!(waiting.is_err(), "the owner is asked");
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        assert_eq!(
+            saved.question.unwrap().options,
+            vec!["retry".to_string(), "stop".to_string()]
+        );
+        assert!(!saved
+            .decisions
+            .iter()
+            .any(|d| d.contains("trying again after the next fetch")));
     }
 }

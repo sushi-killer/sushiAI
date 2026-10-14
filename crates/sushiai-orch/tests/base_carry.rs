@@ -269,18 +269,36 @@ fn failed_carry(ignored: bool) {
     } else {
         "index.lock"
     };
-    let failed = wait_until("a failed carry that is tried again", || {
-        let task = get(&daemon.socket, &id);
-        decisions(&task)
-            .iter()
-            .any(|d| d.contains("trying again after the next fetch"))
-            .then_some(task)
-    });
+    let failed = if ignored {
+        let failed = wait_until("a carry question with retry and stop", || {
+            let task = get(&daemon.socket, &id);
+            (task["status"] == "waiting" && task["question"]["kind"] == "agent_question")
+                .then_some(task)
+        });
+        assert_eq!(failed["question"]["options"], json!(["retry", "stop"]));
+        assert!(
+            failed["question"]["text"]
+                .as_str()
+                .unwrap()
+                .contains(reason),
+            "{failed}"
+        );
+        failed
+    } else {
+        let failed = wait_until("a failed carry that is tried again", || {
+            let task = get(&daemon.socket, &id);
+            decisions(&task)
+                .iter()
+                .any(|d| d.contains("trying again after the next fetch"))
+                .then_some(task)
+        });
+        assert!(failed["question"].is_null(), "{failed}");
+        failed
+    };
     assert!(
         decisions(&failed).iter().any(|d| d.contains(reason)),
         "{failed}"
     );
-    assert!(failed["question"].is_null(), "{failed}");
     assert_eq!(attempts(&failed).len(), 1, "{failed}");
     if ignored {
         assert_eq!(
@@ -289,6 +307,9 @@ fn failed_carry(ignored: bool) {
         );
     }
     std::fs::remove_file(obstruction).unwrap();
+    if ignored {
+        daemon.request("task.answer", json!({"id": id, "answer": "retry"}));
+    }
     let finished = done(&daemon.socket, &id);
     assert_eq!(finished["baseSha"], base, "{finished}");
     assert_eq!(preexisting_count(&finished), 1, "{finished}");
@@ -300,7 +321,7 @@ fn failed_carry(ignored: bool) {
 }
 
 #[test]
-fn an_ignored_local_file_in_the_carry_is_retried_without_asking_the_owner() {
+fn an_ignored_local_file_blocks_the_carry_on_an_owner_question() {
     failed_carry(true);
 }
 

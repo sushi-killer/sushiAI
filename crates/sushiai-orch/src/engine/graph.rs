@@ -465,7 +465,7 @@ async fn parent_finals_on_base(
                 .any(|c| task.final_verify.contains(c)))
     {
         let wt = PathBuf::from(&task.worktree);
-        match carry_after_base_moves(app, task, &wt, cancel, &mut None).await {
+        match carry_after_base_moves(app, task, &wt, pending_answer, cancel, &mut None).await {
             BaseRetry::Ready => {}
             BaseRetry::Conflict(detail) => {
                 task.status = TaskStatus::Running;

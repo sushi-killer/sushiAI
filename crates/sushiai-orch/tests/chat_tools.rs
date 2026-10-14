@@ -29,7 +29,8 @@ printf '%s\n' '{"type":"result","session_id":"sess-chat","result":"'"$r"'"}'
 const FAKE_MCP: &str = r##"import json, os, sys
 TOOLS = [
     {"name": "get_item", "annotations": {"readOnlyHint": True}},
-    {"name": "find_item"},
+    {"name": "find_item", "annotations": {"readOnlyHint": True}},
+    {"name": "query_item"},
     {"name": "send_note", "annotations": {"readOnlyHint": False}},
     {"name": "post_quiet", "annotations": {"readOnlyHint": True}},
 ]
@@ -231,6 +232,7 @@ fn settings_start_with_no_tools_store_them_by_reference_and_offer_only_servers_n
         .collect();
     assert!(kinds.contains(&("\"get_item\"".into(), "\"read\"".into())));
     assert!(kinds.contains(&("\"find_item\"".into(), "\"read\"".into())));
+    assert!(kinds.contains(&("\"query_item\"".into(), "\"write\"".into())));
     assert!(kinds.contains(&("\"send_note\"".into(), "\"write\"".into())));
     let missing = shown["tools"]
         .as_array()
@@ -261,6 +263,7 @@ fn a_read_tool_joins_every_mode_a_write_tool_never_and_a_failing_server_is_skipp
         assert!(allowed.contains("mcp__fake__find_item"), "{allowed}");
         assert!(allowed.contains("mcp__fake__post_quiet"), "{allowed}");
         assert!(!allowed.contains("send_note"), "{allowed}");
+        assert!(!allowed.contains("query_item"), "{allowed}");
         assert!(!allowed.contains("broken"), "{allowed}");
         let servers = env.mcp_servers();
         assert!(servers.contains(&"fake".to_string()));

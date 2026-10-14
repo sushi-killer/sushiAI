@@ -15,11 +15,6 @@ const MCP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A failed discovery is not retried on every turn, only after this long or
 /// when the owner refreshes the list in Settings.
 const RETRY_AFTER_MS: i64 = 10 * 60 * 1000;
-const READ_VERBS: [&str; 7] = ["get", "list", "search", "read", "query", "find", "fetch"];
-const WRITE_VERBS: [&str; 18] = [
-    "add", "create", "update", "delete", "remove", "send", "write", "post", "edit", "set",
-    "rename", "copy", "move", "insert", "append", "clear", "forget", "upload",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
@@ -177,7 +172,7 @@ impl Kind {
 }
 
 /// Read or write: the owner's override first, then the server's
-/// `readOnlyHint`, then the tool's name.
+/// `readOnlyHint`; a tool with neither is a write.
 pub fn classify(
     name: &str,
     read_only_hint: Option<bool>,
@@ -188,17 +183,7 @@ pub fn classify(
         Some("write") => return Kind::Write,
         _ => {}
     }
-    if let Some(read_only) = read_only_hint {
-        return if read_only { Kind::Read } else { Kind::Write };
-    }
-    let lower = name.to_lowercase();
-    let tokens: Vec<&str> = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let reads = tokens.iter().any(|t| READ_VERBS.contains(t));
-    let writes = tokens.iter().any(|t| WRITE_VERBS.contains(t));
-    if reads && !writes {
+    if read_only_hint == Some(true) {
         Kind::Read
     } else {
         Kind::Write
@@ -930,26 +915,12 @@ mod tests {
     }
 
     #[test]
-    fn names_decide_read_or_write_when_nothing_else_does() {
+    fn a_tool_without_a_hint_or_override_is_a_write() {
         let none = BTreeMap::new();
-        for read in [
-            "google_sheets_read_data",
-            "find",
-            "slack_search_public",
-            "list_watches",
-            "asana_get_task",
-        ] {
-            assert_eq!(classify(read, None, &none), Kind::Read, "{read}");
+        for name in ["run_query", "query", "search_and_replace", "list_watches"] {
+            assert_eq!(classify(name, None, &none), Kind::Write, "{name}");
         }
-        for write in [
-            "google_sheets_update_cells",
-            "remember",
-            "slack_send_message",
-            "get_or_create_task",
-            "tree",
-        ] {
-            assert_eq!(classify(write, None, &none), Kind::Write, "{write}");
-        }
+        assert_eq!(classify("run_query", Some(true), &none), Kind::Read);
     }
 
     #[test]

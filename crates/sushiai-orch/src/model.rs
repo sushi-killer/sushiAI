@@ -1585,6 +1585,18 @@ pub struct PlannerTests {
     /// computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<std::collections::BTreeMap<String, String>>,
+    /// Protected files the last attempt changed and orchd restored; the next
+    /// brief tells the agent. Replaced after every attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discarded: Vec<String>,
+    /// Planner test files whose "this test is wrong" claim was already ruled
+    /// on; a claim is judged once per file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ruled: Vec<String>,
+    /// The planner files were run through the repo's formatter and the tests
+    /// commit rebuilt when they were not clean (once per task).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub format_checked: bool,
 }
 
 impl Task {

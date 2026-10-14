@@ -26,6 +26,14 @@ if head -c 9 "$LOG_DIR/brief.$$" | grep -q '## Review'; then
   printf '%s\n' '{{"type":"result","result":"```sushi-review\n{{\"verdict\":\"PASS\",\"findings\":[]}}\n```"}}'
   exit 0
 fi
+if grep -q 'An implementer says one of the task' "$LOG_DIR/brief.$$"; then
+  cat "$LOG_DIR/ruling.json"
+  exit 0
+fi
+if grep -q 'Rewrite one acceptance test' "$LOG_DIR/brief.$$"; then
+  cat "$LOG_DIR/rewrite.json"
+  exit 0
+fi
 if grep -q 'sushi-plan' "$LOG_DIR/brief.$$"; then
   cat "$LOG_DIR/plan.json"
   exit 0
@@ -84,6 +92,14 @@ fn plan_with(s: &Setup, plan: Value) {
     let event = json!({"type": "result", "result": text}).to_string();
     std::fs::write(s.log.path().join("plan.json"), format!("{event}\n")).unwrap();
 }
+
+fn reply_file(s: &Setup, name: &str, tag: &str, body: Value) {
+    let text = format!("```{tag}\n{body}\n```");
+    let event = json!({"type": "result", "result": text}).to_string();
+    std::fs::write(s.log.path().join(name), format!("{event}\n")).unwrap();
+}
+
+const CLAIM_REPORT: &str = r#"CLAIM='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"testClaims\":[{\"path\":\"tests/new_test.sh\",\"reason\":\"the test looks for a file the goal never mentions\"}]}\n```"'"#;
 
 fn plan_json(verify: &str, checks: Value, held_out: Value) -> Value {
     json!({
@@ -189,12 +205,13 @@ emit "$REPORT""#,
 }
 
 #[test]
-fn an_attempt_that_edits_a_planner_test_fails_protected_and_the_file_is_restored() {
+fn an_attempt_that_edits_a_planner_test_is_not_failed_the_file_is_restored_and_the_next_brief_says_so(
+) {
     let s = setup(
         r#"if [ "$n" = 0 ]; then
   echo 'exit 0' > tests/new_test.sh
-  echo ok > impl.txt
 else
+  cp "$LOG_DIR/brief.$$" "$LOG_DIR/second-brief.md"
   cp tests/new_test.sh "$LOG_DIR/restored.sh"
   echo ok > impl.txt
 fi
@@ -210,13 +227,19 @@ emit "$REPORT""#,
     assert_eq!(done["status"], "done", "task JSON: {done}");
     let attempts = implement_attempts(&done);
     assert_eq!(attempts.len(), 2, "{done}");
-    assert_eq!(attempts[0]["failure"]["kind"], "protected");
-    assert!(attempts[0]["failure"]["detail"]
-        .as_str()
-        .unwrap()
-        .contains(TEST_FILE));
+    // The first attempt failed on the original test (no impl.txt), not as a
+    // protected failure, and no question was asked.
+    assert_ne!(attempts[0]["failure"]["kind"], "protected", "{done}");
     assert_eq!(attempts[1]["status"], "passed");
     assert_eq!(read_log(&s, "restored.sh"), TEST_BODY);
+    let second = read_log(&s, "second-brief.md");
+    assert!(second.contains("were discarded"), "{second}");
+    assert!(second.contains(TEST_FILE), "{second}");
+    let decisions = done["decisions"].to_string();
+    assert!(
+        decisions.contains("discarded the attempt's edits"),
+        "{decisions}"
+    );
     assert!(
         done.get("question").is_none() || done["question"].is_null(),
         "{done}"
@@ -225,14 +248,10 @@ emit "$REPORT""#,
 }
 
 #[test]
-fn an_attempt_that_deletes_a_file_a_check_names_fails_protected() {
+fn an_attempt_that_deletes_a_file_a_check_names_gets_it_back_without_failing() {
     let s = setup(
-        r#"if [ "$n" = 0 ]; then
-  rm data.txt
-  echo ok > impl.txt
-else
-  echo ok > impl.txt
-fi
+        r#"rm data.txt
+echo ok > impl.txt
 emit "$REPORT""#,
         false,
     );
@@ -250,14 +269,10 @@ emit "$REPORT""#,
         done["plannerTests"]["protected"],
         json!({"data.txt": sha256_hex("fixture\n")})
     );
-    let attempts = implement_attempts(&done);
-    assert_eq!(attempts.len(), 2, "{done}");
-    assert_eq!(attempts[0]["failure"]["kind"], "protected");
-    assert!(attempts[0]["failure"]["detail"]
-        .as_str()
-        .unwrap()
-        .contains("data.txt"));
-    // Put back from the base: nothing is left of the deletion.
+    assert_eq!(implement_attempts(&done).len(), 1, "{done}");
+    assert!(done["decisions"]
+        .to_string()
+        .contains("discarded the attempt's edits to protected files: data.txt"));
     assert_eq!(
         git_out(
             repo.path(),
@@ -272,7 +287,7 @@ emit "$REPORT""#,
 }
 
 #[test]
-fn the_run_denies_edits_to_protected_files_and_the_brief_lists_them() {
+fn the_run_blocks_no_write_to_protected_files_and_the_brief_lists_them() {
     let s = setup(r#"echo ok > impl.txt; emit "$REPORT""#, false);
     plan_with(
         &s,
@@ -289,11 +304,10 @@ fn the_run_denies_edits_to_protected_files_and_the_brief_lists_them() {
         .iter()
         .filter_map(|d| d.as_str())
         .collect();
-    let abs = format!("{}/{TEST_FILE}", done["worktree"].as_str().unwrap());
-    for tool in ["Edit", "Write"] {
-        let rule = format!("{tool}(/{abs})");
-        assert!(deny.contains(&rule.as_str()), "{rule} not in {deny:?}");
-    }
+    assert!(
+        deny.iter().all(|d| !d.contains(TEST_FILE)),
+        "a protected file must not be write-blocked: {deny:?}"
+    );
     let brief = run_file(&s.daemon, id, "brief.md");
     let block = brief.split("## Protected files").nth(1).expect(&brief);
     assert!(block.contains(&format!("`{TEST_FILE}`")), "{brief}");
@@ -385,5 +399,146 @@ fn unsafe_and_oversized_planner_test_files_are_dropped_with_a_decision() {
         );
     }
     assert!(!repo.path().join("..").join("escape.sh").exists());
+    cleanup(s, &done);
+}
+
+const WRONG_BODY: &str = "#!/bin/sh\ntest -f missing.txt\n";
+
+#[test]
+fn a_confirmed_wrong_test_claim_has_the_planner_rewrite_and_commit_the_test() {
+    let s = setup(
+        &format!(
+            "{CLAIM_REPORT}\necho 'exit 1' > tests/new_test.sh\necho ok > impl.txt\nemit \"$CLAIM\""
+        ),
+        false,
+    );
+    let mut plan = plan_json("true", json!([{"criterion": 0, "run": CHECK}]), Value::Null);
+    plan["tests"] = json!([{"path": TEST_FILE, "content": WRONG_BODY}]);
+    plan_with(&s, plan);
+    reply_file(
+        &s,
+        "ruling.json",
+        "sushi-test-ruling",
+        json!({"verdict": "confirmed", "why": "the goal never mentions missing.txt"}),
+    );
+    reply_file(
+        &s,
+        "rewrite.json",
+        "sushi-test",
+        json!({"content": TEST_BODY}),
+    );
+    let repo = repo_with(&[]);
+    let done = run_task(&s, repo.path());
+    assert_eq!(done["status"], "done", "task JSON: {done}");
+    assert_eq!(implement_attempts(&done).len(), 1, "{done}");
+    let decisions = done["decisions"].to_string();
+    assert!(
+        decisions.contains("the planner rewrote protected test"),
+        "{decisions}"
+    );
+    assert!(
+        decisions.contains("the goal never mentions missing.txt"),
+        "{decisions}"
+    );
+    assert_eq!(
+        done["plannerTests"]["protected"][TEST_FILE],
+        sha256_hex(TEST_BODY),
+        "{done}"
+    );
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &[
+                "show",
+                &format!("{}:{TEST_FILE}", done["branch"].as_str().unwrap())
+            ]
+        ),
+        TEST_BODY.trim_end()
+    );
+    cleanup(s, &done);
+}
+
+#[test]
+fn a_rejected_wrong_test_claim_leaves_the_test_unchanged_and_the_agent_continues() {
+    let s = setup(
+        &format!(
+            "{CLAIM_REPORT}\nif [ \"$n\" = 0 ]; then\n  echo 'exit 0' > tests/new_test.sh\n  emit \"$CLAIM\"\nelse\n  echo ok > impl.txt\n  emit \"$REPORT\"\nfi"
+        ),
+        false,
+    );
+    plan_with(
+        &s,
+        plan_json("true", json!([{"criterion": 0, "run": CHECK}]), Value::Null),
+    );
+    reply_file(
+        &s,
+        "ruling.json",
+        "sushi-test-ruling",
+        json!({"verdict": "rejected", "why": "the test is right"}),
+    );
+    reply_file(
+        &s,
+        "rewrite.json",
+        "sushi-test",
+        json!({"content": "exit 0\n"}),
+    );
+    let repo = repo_with(&[]);
+    let done = run_task(&s, repo.path());
+    assert_eq!(done["status"], "done", "task JSON: {done}");
+    assert_eq!(implement_attempts(&done).len(), 2, "{done}");
+    let decisions = done["decisions"].to_string();
+    assert!(
+        decisions.contains("was rejected: the test is right"),
+        "{decisions}"
+    );
+    assert!(!decisions.contains("the planner rewrote"), "{decisions}");
+    assert_eq!(
+        done["plannerTests"]["protected"][TEST_FILE],
+        sha256_hex(TEST_BODY),
+        "{done}"
+    );
+    cleanup(s, &done);
+}
+
+#[test]
+fn a_rewrite_that_passes_on_the_base_is_rejected_and_the_test_stays() {
+    let s = setup(
+        &format!(
+            "{CLAIM_REPORT}\necho 'exit 1' > tests/new_test.sh\necho ok > impl.txt\nemit \"$CLAIM\""
+        ),
+        false,
+    );
+    let mut plan = plan_json("true", json!([{"criterion": 0, "run": CHECK}]), Value::Null);
+    plan["tests"] = json!([{"path": TEST_FILE, "content": WRONG_BODY}]);
+    plan_with(&s, plan);
+    reply_file(
+        &s,
+        "ruling.json",
+        "sushi-test-ruling",
+        json!({"verdict": "confirmed", "why": "the test asks for the wrong file"}),
+    );
+    // A rewrite that would pass on the base proves nothing.
+    reply_file(
+        &s,
+        "rewrite.json",
+        "sushi-test",
+        json!({"content": "#!/bin/sh\ntrue\n# no assertion\n"}),
+    );
+    let repo = repo_with(&[]);
+    let done = run_task(&s, repo.path());
+    let decisions = done["decisions"].to_string();
+    assert!(
+        decisions.contains("rewriting tests/new_test.sh failed"),
+        "{decisions}"
+    );
+    assert!(
+        decisions.contains("no longer fails on the base"),
+        "{decisions}"
+    );
+    assert_eq!(
+        done["plannerTests"]["protected"][TEST_FILE],
+        sha256_hex(WRONG_BODY),
+        "{done}"
+    );
     cleanup(s, &done);
 }

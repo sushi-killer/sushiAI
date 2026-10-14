@@ -82,6 +82,7 @@ mod slots;
 mod subtask_checks;
 mod sync;
 mod task_loop;
+mod test_claim;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod time_budget;

@@ -521,6 +521,7 @@ pub(super) async fn run_task_loop(
         }
         let wt = PathBuf::from(&task.worktree);
         recover_format_aside(&mut task, &wt).await;
+        repair_protection(&app, &mut task, &wt, &cancel).await;
         if task.parent.is_some() {
             let _ = app.sync_graph_base(&task.id, false).await;
             app.carry_part_onto_parent(&mut task, &cancel).await;
@@ -1141,6 +1142,7 @@ pub(super) async fn run_task_loop(
         task.cost_usd += best_of.cost;
         task.attempts[idx].candidates = best_of.candidates;
         record_check_decisions(&mut task, best_of.decisions);
+        let best_of_discarded = best_of.discarded;
         let b_won = best_of.winner.is_some();
         let route = match best_of.winner {
             Some(winner) => {
@@ -1355,7 +1357,13 @@ pub(super) async fn run_task_loop(
 
         // A call the run was refused and orchd never decided: one owner
         // question, not another attempt that would be refused the same way.
-        let refused = permissions::unhandled_denials(&handled, &worktree, &outcome);
+        let protected_now: Vec<String> = task
+            .planner_tests
+            .protected
+            .iter()
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        let refused = permissions::unhandled_denials(&handled, &worktree, &outcome, &protected_now);
         if !refused.is_empty() {
             let (wt, base) = (worktree.clone(), task.work_base().to_string());
             task.attempts[idx].changed_files = tokio::task::spawn_blocking(move || {
@@ -1447,7 +1455,7 @@ pub(super) async fn run_task_loop(
 
         let wt3 = worktree.clone();
         let base3 = task.work_base().to_string();
-        let changed = tokio::task::spawn_blocking(move || {
+        let mut changed = tokio::task::spawn_blocking(move || {
             git::changed_files(&wt3, &base3).unwrap_or_default()
         })
         .await
@@ -1455,33 +1463,43 @@ pub(super) async fn run_task_loop(
         task.attempts[idx].changed_files = changed.clone();
         record_diff_stat(&mut task, idx, &worktree).await;
 
-        // The planner's tests and the files the checks name: a change fails
-        // the attempt outright, no owner question, and the files go back.
-        if let Some(detail) = guard_protected(&task, &worktree, &changed).await {
-            match fail_and_continue(
+        // The planner's tests and the files the checks name: a change is put
+        // back, silently. No failure, no question; the next brief says so and
+        // the checks run on the originals.
+        let restored = guard_protected(&task, &worktree, &changed)
+            .await
+            .unwrap_or_default();
+        if !restored.is_empty() {
+            task.decisions.push(format!(
+                "Orchestrator: discarded the attempt's edits to protected files: {}; checks run on the originals",
+                restored.join(", ")
+            ));
+            changed.retain(|f| !restored.contains(f));
+            task.attempts[idx].changed_files = changed.clone();
+        }
+        let mut restored = restored;
+        if !restored.is_empty() {
+            // An agent that edits a planner file is usually formatting it: the
+            // next attempt starts with the formatter run over the tests again.
+            task.planner_tests.format_checked = false;
+        }
+        restored.extend(best_of_discarded);
+        restored.sort();
+        restored.dedup();
+        task.planner_tests.discarded = restored;
+        if let Some(r) = report.as_ref().filter(|r| !r.test_claims.is_empty()) {
+            let claims = r.test_claims.clone();
+            test_claim::rule_on_claims(
                 &app,
-                &task_id,
                 &mut task,
                 idx,
-                FailureKind::Protected,
-                detail,
-                &mut attempt_budget,
+                &claims,
+                &worktree,
                 &pending_answer,
                 &cancel,
                 &mut permit,
             )
-            .await
-            {
-                LoopSignal::Continue => {
-                    drop(permit);
-                    continue;
-                }
-                LoopSignal::Stop => {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                }
-            }
+            .await;
         }
 
         if let Some(claim) = brief::parse_impossible(&final_text, task.criteria.len()) {
@@ -1703,7 +1721,6 @@ pub(super) async fn run_task_loop(
         // back to the agent as a failure; it resolves them, not this code.
         let attempt_start_base = base_sha.clone();
         let mut base_sha = base_sha;
-        let mut changed = changed;
         if let Some(base_ref) = task.base_ref.clone() {
             let (wt, mut snapshot, r) = (worktree.clone(), task.clone(), base_ref.clone());
             let carried = tokio::task::spawn_blocking(move || {
@@ -1713,7 +1730,7 @@ pub(super) async fn run_task_loop(
             .await
             .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
             let carried = carried.map(|(carried, tests)| {
-                task.planner_tests = tests;
+                adopt_carried_tests(&mut task, tests, &carried);
                 carried
             });
             if matches!(
@@ -3018,7 +3035,14 @@ pub(super) async fn carry_onto_newest_base(
     match carried {
         Ok((git::Rebase::Unchanged, _, _)) => BaseCarry::Ready,
         Ok((git::Rebase::Moved { new_sha, rewritten }, already_contained, tests)) => {
-            task.planner_tests = tests;
+            adopt_carried_tests(
+                task,
+                tests,
+                &git::Rebase::Moved {
+                    new_sha: new_sha.clone(),
+                    rewritten,
+                },
+            );
             reformat_carried_tests(app, task, worktree, cancel).await;
             task.decisions.push(if already_contained {
                 format!(

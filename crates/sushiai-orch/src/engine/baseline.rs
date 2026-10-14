@@ -4,7 +4,6 @@
 //! that adds a failure fixes it like any other failing check.
 
 use super::*;
-use crate::test_failures::{failing_tests, output_key};
 use std::collections::BTreeSet;
 
 /// What the baseline diff decided about one failing check.
@@ -19,67 +18,59 @@ pub(super) enum BaseVerdict {
 }
 
 /// The pure comparison of one run with the base's run of the same command.
+/// A waiver needs strong evidence; anything doubtful is `Unparsed`.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Compared {
-    /// Nothing fails here that does not fail on the base; the names failing
-    /// in both (empty when the outputs were identical but unparsed).
+    /// Nothing fails here that does not fail on the base, every test that
+    /// passes on the base passes here, and the rest of the output matches;
+    /// the names failing in both.
     Covered(Vec<String>),
     /// Tests failing here and not on the base.
     New(BTreeSet<String>),
-    /// Not comparable: an output no runner format explains, and it differs.
+    /// Not comparable: no parsed run, a crash, a cut list, an early stop or
+    /// output beyond the test lines that differs.
     Unparsed,
 }
 
-fn failing_of(outcome: &VerifyOutcome) -> BTreeSet<String> {
-    if outcome.failing.is_empty() {
-        failing_tests(&outcome.tail)
-    } else {
-        outcome.failing.iter().cloned().collect()
-    }
-}
-
-fn key_of(outcome: &VerifyOutcome) -> String {
-    if outcome.output_key.is_empty() {
-        output_key(&outcome.tail)
-    } else {
-        outcome.output_key.clone()
-    }
-}
-
 pub(super) fn compare(run: &VerifyOutcome, base: &VerifyOutcome) -> Compared {
-    let (now, before) = (failing_of(run), failing_of(base));
-    if !now.is_empty() && !before.is_empty() {
-        let new: BTreeSet<String> = now.difference(&before).cloned().collect();
-        return if new.is_empty() {
-            Compared::Covered(now.into_iter().collect())
-        } else {
-            Compared::New(new)
-        };
+    // A silent or unparsed run (no stored fingerprint) has nothing to compare.
+    if run.output_key.is_empty() || base.output_key.is_empty() {
+        return Compared::Unparsed;
     }
-    // A silent failure has nothing to compare: it stays a question.
-    if run.code == base.code && !run.tail.trim().is_empty() && key_of(run) == key_of(base) {
-        return Compared::Covered(Vec::new());
+    if run.truncated || base.truncated || run.crashed || base.crashed {
+        return Compared::Unparsed;
     }
-    Compared::Unparsed
+    if run.failing.is_empty() || base.failing.is_empty() {
+        return Compared::Unparsed;
+    }
+    let (now, before): (BTreeSet<&String>, BTreeSet<&String>) =
+        (run.failing.iter().collect(), base.failing.iter().collect());
+    let new: BTreeSet<String> = now.difference(&before).map(|n| (*n).clone()).collect();
+    if !new.is_empty() {
+        return Compared::New(new);
+    }
+    // An early stop (fail-fast) leaves out tests the base ran and passed.
+    let passing: BTreeSet<&String> = run.passing.iter().collect();
+    if !base.passing.iter().all(|t| passing.contains(t)) {
+        return Compared::Unparsed;
+    }
+    // Same tests, but something else in the output changed (a new error).
+    if run.output_key != base.output_key {
+        return Compared::Unparsed;
+    }
+    Compared::Covered(run.failing.clone())
 }
 
 fn waiver_line(base_sha: &str, run: &VerifyOutcome, tests: &[String], flaky: bool) -> String {
-    let accepted = if tests.is_empty() {
-        format!(
-            "output identical to the base's (exit {})",
-            run.code.unwrap_or(-1)
-        )
-    } else {
-        tests.join(", ")
-    };
     let note = if flaky {
         "; differed between reruns"
     } else {
         ""
     };
     format!(
-        "Orchestrator: base failures on {} accepted: {accepted} (check: {}{note})",
+        "Orchestrator: base failures on {} accepted: {} (check: {}{note})",
         short_sha(base_sha),
+        tests.join(", "),
         run.command
     )
 }
@@ -104,14 +95,16 @@ pub(super) async fn judge_against_base(
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> BaseVerdict {
-    let first = match compare(failed, base_run) {
+    match compare(failed, base_run) {
         Compared::Covered(tests) => {
             waive(task, failed, &tests, false);
             return BaseVerdict::Waived;
         }
         Compared::Unparsed => return BaseVerdict::Unclear,
-        Compared::New(new) => new,
-    };
+        Compared::New(_) => {}
+    }
+    // New failures: one re-run tells a flaky failure from the task's own. It
+    // is flaky only when the re-run passes or shows nothing the base lacks.
     let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let again = run_verify_commands(
         CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
@@ -126,17 +119,13 @@ pub(super) async fn judge_against_base(
     let Some(again) = again.first().filter(|r| !is_interrupted(r)) else {
         return BaseVerdict::NewFailures;
     };
+    let tests = failed.failing.clone();
     if again.code == Some(0) {
-        waive(task, failed, &[], true);
+        waive(task, failed, &tests, true);
         return BaseVerdict::Waived;
     }
     match compare(again, base_run) {
-        Compared::Covered(tests) => {
-            waive(task, failed, &tests, true);
-            BaseVerdict::Waived
-        }
-        Compared::New(second) if first.is_disjoint(&second) => {
-            let tests: Vec<String> = failing_of(failed).into_iter().collect();
+        Compared::Covered(_) => {
             waive(task, failed, &tests, true);
             BaseVerdict::Waived
         }
@@ -148,40 +137,81 @@ pub(super) async fn judge_against_base(
 mod tests {
     use super::*;
 
-    fn run(code: i32, tail: &str) -> VerifyOutcome {
+    fn run(code: i32, output: &str) -> VerifyOutcome {
+        let report = crate::test_failures::parse(output, "");
         VerifyOutcome {
             command: "check".into(),
             code: Some(code),
-            tail: tail.into(),
+            tail: output.into(),
+            failing: report.failing,
+            passing: report.passing,
+            truncated: report.truncated,
+            crashed: report.crashed,
+            output_key: report.rest_key,
             ..Default::default()
         }
     }
 
+    const BASE: &str = "test a::one ... ok\ntest a::two ... ok\ntest a::bad ... FAILED\n";
+
     #[test]
     fn the_same_failing_tests_are_covered_and_a_new_one_is_not() {
-        let base = run(1, "test a ... FAILED\ntest b ... FAILED");
+        let base = run(1, BASE);
         assert!(matches!(
-            compare(&run(1, "test b ... FAILED"), &base),
-            Compared::Covered(t) if t == ["b"]
+            compare(&run(1, BASE), &base),
+            Compared::Covered(t) if t == ["a::bad"]
         ));
-        let Compared::New(new) = compare(&run(1, "test b ... FAILED\ntest c ... FAILED"), &base)
+        let Compared::New(new) =
+            compare(&run(1, &format!("{BASE}test a::worse ... FAILED\n")), &base)
         else {
             panic!("a new failure must be reported");
         };
-        assert_eq!(new.into_iter().collect::<Vec<_>>(), ["c"]);
+        assert_eq!(new.into_iter().collect::<Vec<_>>(), ["a::worse"]);
     }
 
     #[test]
-    fn unparsed_outputs_compare_by_code_and_digit_blind_text() {
-        let base = run(2, "lint: bad file after 12ms");
-        assert_eq!(
-            compare(&run(2, "lint: bad file after 7ms"), &base),
-            Compared::Covered(Vec::new())
+    fn a_fail_fast_run_that_skips_tests_the_base_passed_is_not_covered() {
+        let base = run(1, BASE);
+        let early = run(1, "test a::bad ... FAILED\n");
+        assert_eq!(compare(&early, &base), Compared::Unparsed);
+    }
+
+    #[test]
+    fn a_crash_or_a_red_build_is_never_covered() {
+        let base = run(1, BASE);
+        let crash = run(
+            1,
+            &format!("{BASE}process didn't exit successfully (signal: 11, SIGSEGV)\n"),
         );
-        assert_eq!(compare(&run(2, "lint: other"), &base), Compared::Unparsed);
-        assert_eq!(
-            compare(&run(3, "lint: bad file after 1ms"), &base),
-            Compared::Unparsed
+        assert_eq!(compare(&crash, &base), Compared::Unparsed);
+        let build = run(101, "error: could not compile `x`\n");
+        assert_eq!(compare(&build, &build), Compared::Unparsed);
+    }
+
+    #[test]
+    fn an_identical_fingerprint_alone_is_never_covered() {
+        let base = run(1, "coverage 85.2% is below the gate\n");
+        let task = run(1, "coverage 12.4% is below the gate\n");
+        assert_eq!(compare(&task, &base), Compared::Unparsed);
+        assert_eq!(compare(&base, &base), Compared::Unparsed);
+    }
+
+    #[test]
+    fn a_cut_list_is_not_comparable() {
+        let many: String = (0..600).map(|i| format!("not ok {i} - t{i}\n")).collect();
+        let base = run(1, &many);
+        let task = run(1, &format!("{many}not ok 900 - new\n"));
+        assert!(base.truncated);
+        assert_eq!(compare(&task, &base), Compared::Unparsed);
+    }
+
+    #[test]
+    fn other_output_that_changed_is_not_covered() {
+        let base = run(1, "ERROR connecting to db\nnot ok 1 - alpha\n");
+        let task = run(
+            1,
+            "ERROR connecting to db\nsrc/a.ts(3,1): error TS2322: no\nnot ok 1 - alpha\n",
         );
+        assert_eq!(compare(&task, &base), Compared::Unparsed);
     }
 }

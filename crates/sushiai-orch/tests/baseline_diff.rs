@@ -99,7 +99,7 @@ fn a_new_failing_test_is_an_ordinary_failure_the_agent_fixes() {
     let daemon = spawn(scripts.path(), &[]);
     let repo = init_git_repo();
     // The base fails `alpha`; the implementer's marker adds `beta`.
-    let check = "printf 'not ok 1 - alpha\\n'; if [ -f CHANGED_MARKER.txt ]; then printf 'not ok 2 - beta\\n'; fi; exit 1";
+    let check = "printf 'not ok 1 - alpha\\n'; case \"$PWD\" in */base-runs/*);; *) printf 'not ok 2 - beta\\n';; esac; exit 1";
     let id = start(&daemon, repo.path(), check);
 
     let task = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
@@ -124,22 +124,48 @@ fn a_new_failing_test_is_an_ordinary_failure_the_agent_fixes() {
 }
 
 #[test]
-fn failures_that_change_between_reruns_count_as_the_base() {
+fn two_runs_that_each_show_a_new_failure_are_an_ordinary_failure() {
     let scripts = tempfile::tempdir().unwrap();
     let count = scripts.path().join("count");
     let daemon = spawn(scripts.path(), &[]);
     let repo = init_git_repo();
     // Every run on the worktree names a different extra test.
     let check = format!(
-        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; printf 'not ok 1 - alpha\\n'; if [ -f CHANGED_MARKER.txt ]; then printf 'not ok 9 - flaky%s\\n' \"$n\"; fi; exit 1",
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; printf 'not ok 1 - alpha\\n'; case \"$PWD\" in */base-runs/*);; *) printf 'not ok 9 - flaky%s\\n' \"$n\";; esac; exit 1",
         c = count.display()
+    );
+    let id = start(&daemon, repo.path(), &check);
+
+    let task = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
+    assert_eq!(task["attempts"][0]["failure"]["kind"], "verify", "{task}");
+    assert!(task["attempts"].as_array().unwrap().len() > 1, "{task}");
+    assert!(!asked_about_the_base(&task), "{task}");
+    assert!(
+        decisions(&task)
+            .iter()
+            .all(|d| !d.contains("base failures on")),
+        "{:?}",
+        decisions(&task)
+    );
+    finish(daemon, &task);
+}
+
+#[test]
+fn a_failure_that_does_not_come_back_on_the_rerun_is_flaky_and_waived() {
+    let scripts = tempfile::tempdir().unwrap();
+    let flag = scripts.path().join("flag");
+    let daemon = spawn(scripts.path(), &[]);
+    let repo = init_git_repo();
+    // The first run on the worktree adds `beta`; the rerun shows the base's set.
+    let check = format!(
+        "printf 'not ok 1 - alpha\\n'; case \"$PWD\" in */base-runs/*);; *) if [ ! -f {f} ]; then touch {f}; printf 'not ok 2 - beta\\n'; fi;; esac; exit 1",
+        f = flag.display()
     );
     let id = start(&daemon, repo.path(), &check);
 
     let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["attempts"].as_array().unwrap().len(), 1, "{done}");
-    assert!(!asked_about_the_base(&done), "{done}");
     assert!(
         decisions(&done)
             .iter()
@@ -151,11 +177,58 @@ fn failures_that_change_between_reruns_count_as_the_base() {
 }
 
 #[test]
+fn a_check_the_task_is_meant_to_fix_is_never_waived() {
+    let scripts = tempfile::tempdir().unwrap();
+    let daemon = spawn(scripts.path(), &[]);
+    let repo = init_git_repo();
+    let check = "printf 'not ok 1 - alpha\\n'; exit 1";
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("claude-opus");
+    daemon.request("settings.set", json!({"settings": settings}));
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Fix the red test",
+            "goal": format!("Make this check pass: {check}"),
+            "verify": ["true"],
+            "finalVerify": [check],
+            "start": true,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+    let task = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
+    assert_ne!(task["status"], "done", "{task}");
+    assert_eq!(task["attempts"][0]["failure"]["kind"], "verify", "{task}");
+    assert!(
+        decisions(&task)
+            .iter()
+            .all(|d| !d.contains("base failures on")),
+        "{:?}",
+        decisions(&task)
+    );
+    finish(daemon, &task);
+}
+
+#[test]
+fn a_gate_with_no_test_lines_is_not_waived_on_an_equal_fingerprint() {
+    let scripts = tempfile::tempdir().unwrap();
+    let daemon = spawn(scripts.path(), &[]);
+    let repo = init_git_repo();
+    let check = "case \"$PWD\" in */base-runs/*) echo 'coverage 85.2% is below the gate';; *) echo 'coverage 12.4% is below the gate';; esac; exit 1";
+    let id = start(&daemon, repo.path(), check);
+    poll_until(&daemon, &id, |s| s == "waiting");
+    let task = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
+    finish(daemon, &task);
+}
+
+#[test]
 fn outputs_that_no_runner_explains_and_that_differ_still_ask_the_owner() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path(), &[]);
     let repo = init_git_repo();
-    let check = "if [ -f CHANGED_MARKER.txt ]; then echo 'strange task output'; else echo 'strange base output'; fi; exit 1";
+    let check = "case \"$PWD\" in */base-runs/*) echo 'strange base output';; *) echo 'strange task output';; esac; exit 1";
     let id = start(&daemon, repo.path(), check);
 
     poll_until(&daemon, &id, |s| s == "waiting");
@@ -169,7 +242,7 @@ fn an_owner_retry_waits_a_bounded_time_for_the_base_and_then_asks_again() {
     let scripts = tempfile::tempdir().unwrap();
     let daemon = spawn(scripts.path(), &[("ORCHD_BASE_WAIT_SECS", "3")]);
     let repo = init_git_repo();
-    let check = "if [ -f CHANGED_MARKER.txt ]; then echo 'strange task output'; else echo 'strange base output'; fi; exit 1";
+    let check = "case \"$PWD\" in */base-runs/*) echo 'strange base output';; *) echo 'strange task output';; esac; exit 1";
     let id = start(&daemon, repo.path(), check);
     poll_until(&daemon, &id, |s| s == "waiting");
 

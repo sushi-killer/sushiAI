@@ -2281,7 +2281,16 @@ pub struct VerifyOutcome {
     /// run or an output no known runner format matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<String>,
-    /// A digit-blind fingerprint of the full output of a failing run.
+    /// The passing tests the full output named (capped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passing: Vec<String>,
+    /// A test list was cut at its cap: the run cannot be compared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// The output shows a crash, an abort or a build that did not finish.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crashed: bool,
+    /// A digit-blind fingerprint of the output without its test lines.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_key: String,
     /// Returned to the task owner as well as published while the check waits.

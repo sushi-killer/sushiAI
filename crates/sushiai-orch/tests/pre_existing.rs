@@ -69,7 +69,7 @@ fn a_final_check_that_fails_twice_on_base_is_asked_after_the_first_attempt_and_l
     let repo = init_git_repo();
     // The worktree prints one more line than the base: not the base's failure alone.
     let check = format!(
-        "echo ran >> {}; echo boom; [ -f CHANGED_MARKER.txt ] && echo changed; exit 3",
+        "echo ran >> {}; echo boom; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 3",
         log.display()
     );
     let id = start(&daemon, repo.path(), &check);
@@ -109,8 +109,8 @@ fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     let mut daemon = spawn(scripts.path());
     let repo = init_git_repo();
     let (first, second) = (
-        "echo one; [ -f CHANGED_MARKER.txt ] && echo changed; exit 3",
-        "echo two; [ -f CHANGED_MARKER.txt ] && echo changed; exit 4",
+        "echo one; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 3",
+        "echo two; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 4",
     );
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("claude-opus");

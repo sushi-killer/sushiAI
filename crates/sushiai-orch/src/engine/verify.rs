@@ -1349,22 +1349,20 @@ pub async fn run_verify_command(
         Outcome::Cancelled => (None, CANCELLED_TAIL.to_string()),
     };
     // The tail is truncated; the baseline diff reads the whole output.
-    let (failing, output_key) = if full.is_empty() {
-        (Vec::new(), String::new())
+    let report = if full.is_empty() {
+        Default::default()
     } else {
-        (
-            crate::test_failures::failing_tests(&full)
-                .into_iter()
-                .collect(),
-            crate::test_failures::output_key(&full),
-        )
+        crate::test_failures::parse(&full, &cwd.to_string_lossy())
     };
     VerifyOutcome {
         command: cmd.to_string(),
         code,
         tail,
-        failing,
-        output_key,
+        failing: report.failing,
+        passing: report.passing,
+        truncated: report.truncated,
+        crashed: report.crashed,
+        output_key: report.rest_key,
         ms: start.elapsed().as_millis() as u64,
         ..Default::default()
     }

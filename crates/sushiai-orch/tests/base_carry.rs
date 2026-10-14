@@ -562,9 +562,7 @@ fn two_red_tasks_asking_about_one_base_do_not_make_the_policy_wait_for_each_othe
         assert_eq!(task["status"], "waiting", "{task}");
         assert!(task["question"].is_object(), "{task}");
         assert!(
-            decisions(&task)
-                .iter()
-                .all(|d| !d.contains("waiting for work to move")),
+            decisions(&task).iter().all(|d| !d.contains("to move past")),
             "{task}"
         );
     }
@@ -614,31 +612,14 @@ fn a_targeted_final_keeps_the_check_and_retries_on_the_unchanged_base() {
             .any(|d| d.contains("kept check") && d.contains("task is meant to make it pass")),
         "{finished}"
     );
-    assert!(
-        decisions(&finished)
-            .iter()
-            .any(|d| d.starts_with("Policy:") && d.contains("-> keep all")),
-        "{finished}"
-    );
-    assert!(
-        finished["questionHistory"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| {
-                entry["kind"] == "preexisting_failure"
-                    && entry["answer"] == "keep all"
-                    && entry["answeredBy"] == "policy"
-            }),
-        "{finished}"
-    );
+    // The rule keeps the check by itself: no question, no waiting for the base.
     assert!(
         !decisions(&finished)
             .iter()
-            .any(|d| d.contains("waiting for work to move")),
+            .any(|d| d.contains("to move past")),
         "{finished}"
     );
-    assert_eq!(preexisting_count(&finished), 1, "{finished}");
+    assert_eq!(preexisting_count(&finished), 0, "{finished}");
     let worktrees = clean_worktrees(&daemon.socket, repo.path());
     daemon.shutdown_and_wait();
     for wt in worktrees {
@@ -671,7 +652,7 @@ fn an_untargeted_final_on_an_idle_base_stays_open_for_the_overseer() {
     assert!(
         decisions(&waiting)
             .iter()
-            .all(|d| !d.contains("waiting for work to move")),
+            .all(|d| !d.contains("to move past")),
         "{waiting}"
     );
     assert!(

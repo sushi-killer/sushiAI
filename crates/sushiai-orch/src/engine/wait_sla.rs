@@ -491,7 +491,9 @@ mod tests {
         app.store.save_task(&again).unwrap();
         let waiter = park_live(&app, again.clone()).await;
         app.wait_sla_tick(T0 + 60_000).await;
-        assert!(!waiter.is_finished());
+        let mut waiter = waiter;
+        let resumed = tokio::time::timeout(Duration::from_millis(300), &mut waiter).await;
+        assert!(resumed.is_err(), "the second wait is not resumed");
         let saved = app.store.load_task(&again.id).unwrap().unwrap();
         assert_eq!(saved.status, TaskStatus::Waiting);
         waiter.abort();

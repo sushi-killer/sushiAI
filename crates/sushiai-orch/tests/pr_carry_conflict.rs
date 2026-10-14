@@ -36,7 +36,7 @@ cat "$dir/plan.json"
 ;;
 *"## Conflict-only attempt"*)
 printf '%s' "$brief" > "$dir/resolve-brief.md"
-cat "$dir/resolution" > pr.txt
+if [ -f .need-setup ] && [ ! -f "$(git rev-parse --git-dir)/setup-ran" ]; then echo nosetup > pr.txt; else cat "$dir/resolution" > pr.txt; fi
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
 printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"resolved\",\"decisions\":[],\"question\":\"\"}\n```"}'
 ;;
@@ -66,7 +66,11 @@ impl Setup {
     }
 
     fn create(&self, verify: &str) -> String {
-        let params = json!({
+        self.create_with(verify, json!({}))
+    }
+
+    fn create_with(&self, verify: &str, extra: Value) -> String {
+        let mut params = json!({
             "repo": self.repo.path().to_str().unwrap(),
             "title": "Add pr file",
             "goal": "write pr.txt",
@@ -74,6 +78,9 @@ impl Setup {
             "verify": [verify],
             "start": true,
         });
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
         self.daemon.request("task.create", params)["id"]
             .as_str()
             .unwrap()
@@ -185,6 +192,7 @@ fn a_conflicting_carry_gets_one_resolution_attempt_and_then_the_pull_request() {
     });
     assert_eq!(task["prUrl"], URL, "{task}");
     assert_eq!(task["status"], "done", "{task}");
+    assert!(task["prConflictTried"].is_null(), "{task}");
     let decisions = task["decisions"].to_string();
     assert!(
         decisions.contains("PR: the work conflicts with origin/main in pr.txt"),
@@ -226,6 +234,9 @@ fn a_resolution_that_fails_ends_the_task_failed_with_one_notice_and_no_pull_requ
         .filter(|t| t.contains("Add pr file") && t.contains("failed"))
         .count();
     assert_eq!(notices, 1, "{:?}", s.chat());
+    assert_eq!(task["prConflictTried"], true, "{task}");
+    let again = s.daemon.request("task.start", json!({"id": id}));
+    assert!(again["prConflictTried"].is_null(), "{again}");
     s.daemon.shutdown_and_wait();
 }
 
@@ -272,6 +283,85 @@ fn task_pr_carries_the_branch_onto_the_newest_base_like_the_automatic_pull_reque
     assert!(
         files.contains("pr.txt") && files.contains("newer.txt"),
         "{files}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_conflict_in_a_parent_task_is_resolved_before_its_checks_and_the_pull_request_opens() {
+    let s = setup(true, &[]);
+    let newer = s.advance_origin(&[("pr.txt", "theirs\n")]);
+    let parent = s.create_with("test -f pr.txt", json!({"start": false}));
+    let child = s.daemon.request(
+        "task.create",
+        json!({
+            "repo": s.repo.path().to_str().unwrap(), "title": "Child", "goal": "write pr.txt",
+            "criteria": ["pr.txt exists"], "verify": ["test -f pr.txt"],
+            "parent": parent, "start": true,
+        }),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    poll_until(&s.daemon, &child, |st| st == "done");
+    let task = s.wait_task(&parent, "no pull request for the parent", |t| {
+        t["prUrl"].is_string()
+    });
+    let pushed = s.pushed(&task);
+    git_out(
+        s.remote.path(),
+        &["merge-base", "--is-ancestor", &newer, &pushed],
+    );
+    let text = blob(s.remote.path(), &pushed, "pr.txt");
+    assert_eq!(text, "resolved", "markers or old content pushed: {text}");
+    assert!(
+        std::fs::read_to_string(s.tools.path().join("resolve-brief.md")).is_ok(),
+        "no conflict-only attempt ran"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn the_resolution_attempt_runs_in_a_worktree_with_its_setup_done() {
+    let s = setup(true, &[]);
+    let setup_json = json!({"setup": "touch .need-setup-unused; touch \"$(git rev-parse --git-dir)/setup-ran\""});
+    std::fs::create_dir_all(s.repo.path().join(".sushiai")).unwrap();
+    std::fs::write(
+        s.repo.path().join(".sushiai/setup.json"),
+        setup_json.to_string(),
+    )
+    .unwrap();
+    std::fs::write(s.repo.path().join(".need-setup"), "").unwrap();
+    git_out(s.repo.path(), &["add", "-f", "."]);
+    git_out(s.repo.path(), &["commit", "-q", "-m", "add setup"]);
+    git_out(s.repo.path(), &["push", "-q", "origin", "main"]);
+    s.advance_origin(&[("pr.txt", "theirs\n")]);
+    let id = s.create("test -f pr.txt");
+    let task = s.wait_task(&id, "no pull request after the resolution", |t| {
+        t["prUrl"].is_string()
+    });
+    let pushed = s.pushed(&task);
+    assert_eq!(blob(s.remote.path(), &pushed, "pr.txt"), "resolved");
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn task_pr_keeps_the_owners_title_through_a_resolution_attempt() {
+    let s = setup(false, &[]);
+    let id = s.create("test -f pr.txt");
+    poll_until(&s.daemon, &id, |st| st == "done");
+    s.advance_origin(&[("pr.txt", "theirs\n")]);
+    let refused = s
+        .daemon
+        .request_error("task.pr", json!({"id": id, "title": "Owner chosen title"}));
+    assert!(refused.contains("conflict"), "{refused}");
+    s.wait_task(&id, "no pull request after the resolution", |t| {
+        t["prUrl"].is_string()
+    });
+    assert!(
+        s.gh_log().contains("--title Owner chosen title"),
+        "{}",
+        s.gh_log()
     );
     s.daemon.shutdown_and_wait();
 }

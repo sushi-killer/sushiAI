@@ -760,6 +760,7 @@ impl App {
                 // A manual `task.start` on a still-drafting task (e.g. one
                 // left there by a daemon that died mid-plan) means proceed
                 // straight to implementing once planning finishes.
+                let _ = self.update_task(&p.id, |t| t.queue.pr_conflict_tried = false);
                 self.start_task(&p.id, Starter::Owner);
             }
         }

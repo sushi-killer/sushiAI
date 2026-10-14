@@ -329,7 +329,12 @@ impl App {
             ));
         }
         // The same carry as the automatic pull request: never push a stale base.
-        match super::pr_draft::carry_for_pr(&self.arc(), &task).await? {
+        let owner_plan = PrPlan {
+            branch: branch.clone(),
+            title: p.title.clone().unwrap_or_default(),
+            body: p.body.clone().unwrap_or_default(),
+        };
+        match super::pr_draft::carry_for_pr(&self.arc(), &task, Some(owner_plan)).await? {
             super::pr_draft::PrCarry::Ready => {}
             super::pr_draft::PrCarry::Contained => {
                 return Err(format!(
@@ -443,6 +448,7 @@ impl App {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         task.pr_url = Some(url.clone());
+        task.queue.pr_conflict_tried = false;
         task.pr_branch = Some(branch.clone());
         task.decisions.push(format!("PR: {verb} {url}"));
         task.updated_at = now_ms();

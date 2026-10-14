@@ -7,8 +7,9 @@
 //! file for the next read.
 
 use crate::model::{
-    AnsweredBy, AttemptStatus, Audit, AuditReport, AuditStatus, Proposal, QuestionKind, RepoNote,
-    Settings, Stage, Task, TaskStatus, UnreviewedPart, STATE_VERSION,
+    is_option, AnsweredBy, AttemptStatus, Audit, AuditReport, AuditStatus, BaseAnswer, Proposal,
+    QuestionKind, RepoNote, Settings, Stage, Task, TaskStatus, UnreviewedPart, PRE_EXISTING_RETRY,
+    STATE_VERSION,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,6 +30,8 @@ pub struct Store {
 fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
     let mut task: Task = serde_json::from_str(text)?;
     migrate_loop_state(&mut task);
+    migrate_base_and_permission_state(&mut task);
+    migrate_final_check_failures(&mut task);
     Ok(task)
 }
 
@@ -36,7 +39,7 @@ fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
 /// lines and question texts older versions wrote them into. This is the only
 /// reader of those formats; afterwards the fields are the state.
 fn migrate_loop_state(task: &mut Task) {
-    if task.loop_state.state_version >= STATE_VERSION {
+    if task.loop_state.state_version >= 1 {
         return;
     }
     let decisions = &task.decisions;
@@ -136,7 +139,7 @@ fn migrate_loop_state(task: &mut Task) {
         }
     }
     let state = &mut task.loop_state;
-    state.state_version = STATE_VERSION;
+    state.state_version = 1;
     state.unreviewed_attempt = unreviewed_attempt;
     state.agent_restarted = agent_restarted;
     state.dependency_restarted = dependency_restarted;
@@ -146,6 +149,127 @@ fn migrate_loop_state(task: &mut Task) {
     state.non_owner_continues = non_owner_continues;
     state.unreviewed_parts = unreviewed_parts;
     state.impossible_answers = impossible_answers;
+}
+
+/// Version 2 of the loop state: the kept checks, base-check answers, waited
+/// out bases and answered permissions that version 1 kept in decision lines
+/// and assumption texts. Like version 1, the only reader of those formats.
+fn migrate_base_and_permission_state(task: &mut Task) {
+    if task.loop_state.state_version >= 2 {
+        return;
+    }
+    let mut kept_checks: Vec<String> = Vec::new();
+    let mut base_answers: Vec<BaseAnswer> = Vec::new();
+    let mut waited_out_bases: Vec<String> = Vec::new();
+    let mut answered_permissions: Vec<String> = Vec::new();
+    let mut push_answer = |answer: BaseAnswer| {
+        if !base_answers.contains(&answer) {
+            base_answers.push(answer);
+        }
+    };
+    for d in &task.decisions {
+        if let Some(rest) = d.strip_prefix("Orchestrator: kept check ") {
+            if let Some((command, _reason)) = rest.rsplit_once(", ") {
+                if !kept_checks.iter().any(|c| c == command) {
+                    kept_checks.push(command.to_string());
+                }
+            }
+        } else if let Some(rest) = d.strip_prefix("Orchestrator: waited out base ") {
+            if let Some(sha) = rest.strip_suffix("; not waiting for it to move again") {
+                waited_out_bases.push(sha.to_string());
+            }
+        } else if let Some(rest) = d.strip_prefix("Orchestrator: retry base check ") {
+            if let Some((command, rest)) = rest.rsplit_once(" after ") {
+                if let Some(sha) = rest.strip_suffix(" moves") {
+                    push_answer(BaseAnswer {
+                        command: command.to_string(),
+                        sha: sha.to_string(),
+                        by: String::new(),
+                        retry: true,
+                    });
+                }
+            }
+        } else if let Some(name) = [
+            "Permission: allowed once: ",
+            "Permission: allowed for this repo: ",
+            "Permission: denied: ",
+        ]
+        .iter()
+        .find_map(|p| d.strip_prefix(p))
+        {
+            if !answered_permissions.iter().any(|n| n == name) {
+                answered_permissions.push(name.to_string());
+            }
+        } else if let Some((who, rest)) = d.split_once(": base check ") {
+            if !matches!(who, "Owner" | "Orchestrator" | "Lead") {
+                continue;
+            }
+            let Some((head, answer)) = rest.split_once(" -> ") else {
+                continue;
+            };
+            let Some((command, sha)) = head.rsplit_once(" on ") else {
+                continue;
+            };
+            if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            push_answer(BaseAnswer {
+                command: command.to_string(),
+                sha: sha.to_string(),
+                by: who.to_string(),
+                retry: is_option(answer, PRE_EXISTING_RETRY),
+            });
+        }
+    }
+    for a in &task.assumptions {
+        if a.kind != Some(QuestionKind::PreexistingFailure) || a.overturned {
+            continue;
+        }
+        if !matches!(a.by.as_str(), "policy" | "judge") {
+            continue;
+        }
+        let first_line = a.question.lines().next().unwrap_or_default();
+        let sha = first_line
+            .split_once(" on base ")
+            .map(|(_, rest)| rest.split(':').next().unwrap_or_default())
+            .unwrap_or_default();
+        for command in &a.commands {
+            push_answer(BaseAnswer {
+                command: command.clone(),
+                sha: sha.to_string(),
+                by: a.by.clone(),
+                retry: is_option(&a.answer, PRE_EXISTING_RETRY),
+            });
+        }
+    }
+    let state = &mut task.loop_state;
+    state.state_version = 2;
+    state.kept_checks = kept_checks;
+    state.base_answers = base_answers;
+    state.waited_out_bases = waited_out_bases;
+    state.answered_permissions = answered_permissions;
+}
+
+/// Version 3 of the loop state: the commands a parent's final check failed
+/// on, which version 2 kept only in a decision line.
+fn migrate_final_check_failures(task: &mut Task) {
+    if task.loop_state.state_version >= STATE_VERSION {
+        return;
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for d in &task.decisions {
+        let command = d
+            .strip_prefix("Orchestrator: every subtask landed, but `")
+            .and_then(|r| r.split_once("` exited"))
+            .map(|(command, _)| command);
+        if let Some(command) = command {
+            if !failures.iter().any(|c| c == command) {
+                failures.push(command.to_string());
+            }
+        }
+    }
+    task.loop_state.final_check_failures = failures;
+    task.loop_state.state_version = STATE_VERSION;
 }
 
 /// The criterion number in the text of an impossible question.
@@ -940,6 +1064,84 @@ mod tests {
                 .stuck_retries,
             0
         );
+    }
+
+    #[test]
+    fn a_version_one_task_gets_base_check_and_permission_state_from_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut task = sample_task("v1", TaskStatus::Waiting, AttemptStatus::Passed);
+        task.decisions = vec![
+            "Orchestrator: kept check npm test, the task is meant to make it pass".into(),
+            "Orchestrator: kept check cargo test -- a, b, targets absent on base; the plan creates them".into(),
+            "Orchestrator: waited out base abcdef0123; not waiting for it to move again".into(),
+            "Lead: base check npm test on 0123456 -> retry after the base is fixed".into(),
+            "Owner: base check npm run lint on 0123456 -> drop all".into(),
+            "Orchestrator: retry base check npm test after 0123456789abcdef moves".into(),
+            "Permission: allowed once: Write(src/a.rs)".into(),
+            "Permission: denied: mcp__x__y".into(),
+        ];
+        let mut policy = crate::model::Assumption {
+            question: "npm ci already fails on base 89abcde: boom".into(),
+            answer: "retry after the base is fixed".into(),
+            evidence: String::new(),
+            by: "policy".into(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: Some(1),
+            commands: vec!["npm ci".into()],
+            overturned: false,
+            owner_answer: None,
+        };
+        task.assumptions.push(policy.clone());
+        policy.by = "Owner".into();
+        task.assumptions.push(policy);
+        store.save_task(&task).unwrap();
+        let path = store.task_path("v1");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["stateVersion"] = 1.into();
+        fs::write(&path, value.to_string()).unwrap();
+
+        let state = store.load_task("v1").unwrap().unwrap().loop_state;
+        assert_eq!(state.state_version, STATE_VERSION);
+        assert_eq!(state.kept_checks, ["npm test", "cargo test -- a, b"]);
+        assert_eq!(state.waited_out_bases, ["abcdef0123"]);
+        assert_eq!(state.answered_permissions, ["Write(src/a.rs)", "mcp__x__y"]);
+        let answer = |command: &str, sha: &str, by: &str, retry: bool| BaseAnswer {
+            command: command.into(),
+            sha: sha.into(),
+            by: by.into(),
+            retry,
+        };
+        assert_eq!(
+            state.base_answers,
+            [
+                answer("npm test", "0123456", "Lead", true),
+                answer("npm run lint", "0123456", "Owner", false),
+                answer("npm test", "0123456789abcdef", "", true),
+                answer("npm ci", "89abcde", "policy", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_two_task_gets_its_final_check_failures_from_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let mut task = sample_task("v2", TaskStatus::Failed, AttemptStatus::Passed);
+        task.decisions = vec![
+            "Orchestrator: every subtask landed, but `npm run ci` exited 2 on b: x".into(),
+            "Orchestrator: every subtask landed, but `npm run ci` exited 2 on b: y".into(),
+        ];
+        store.save_task(&task).unwrap();
+        let path = store.task_path("v2");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["stateVersion"] = 2.into();
+        fs::write(&path, value.to_string()).unwrap();
+        let state = store.load_task("v2").unwrap().unwrap().loop_state;
+        assert_eq!(state.state_version, STATE_VERSION);
+        assert_eq!(state.final_check_failures, ["npm run ci"]);
     }
 
     #[test]

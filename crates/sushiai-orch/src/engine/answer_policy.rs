@@ -271,7 +271,7 @@ pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -
 fn shared_check_refusal(command: &str) -> String {
     format!(
         "`{command}` is a shared check (not made by the planner for this task, or named by a setting or the owner): only the owner may drop it. An agent can answer \"{}\" or \"stop\", otherwise the owner decides",
-        base_check::PRE_EXISTING_RETRY
+        PRE_EXISTING_RETRY
     )
 }
 
@@ -449,8 +449,7 @@ fn covered_by_rule(task: &Task, question: &Question, answer: &str) -> bool {
     }
     question.commands.iter().all(|c| {
         earlier().any(|a| a.commands.contains(c))
-            || (answer == base_check::PRE_EXISTING_RETRY
-                && base_check::non_owner_base_retry(task, c, None))
+            || (answer == PRE_EXISTING_RETRY && base_check::non_owner_base_retry(task, c, None))
     })
 }
 
@@ -496,7 +495,7 @@ fn rule_answer_with_context(
                     )
                 } else if base_moves {
                     (
-                        base_check::PRE_EXISTING_RETRY,
+                        PRE_EXISTING_RETRY,
                         "another live task targets this base branch: wait for it to move, once",
                         None,
                     )
@@ -576,7 +575,8 @@ pub(super) fn record_answered_question(
 ) {
     if question.kind == QuestionKind::PreexistingFailure {
         let base_sha = task.base_sha.clone();
-        base_check::record_base_retry(task, &question.commands, &base_sha, answer);
+        let by = base_check::answerer_name(Some(answered_by));
+        base_check::record_base_answer(task, &question.commands, &base_sha, by, answer);
     }
     // The owner's answers do not count against the orchestrator's continues.
     if question.kind == QuestionKind::AttemptsFailing
@@ -1081,7 +1081,7 @@ mod tests {
         assert!(rule_answer_with_context(&task, &second, 1, &[true, true], false).is_none());
 
         // The retry rule of a single task is per command too.
-        let retry = base_check::PRE_EXISTING_RETRY;
+        let retry = PRE_EXISTING_RETRY;
         let mut task = task_with_status(TaskStatus::Waiting);
         let one = base_check_question(&["a.sh"], &[retry, "drop all", "stop"]);
         let (answer, _) = rule_answer_with_context(&task, &one, 1, &[false], true).unwrap();
@@ -1134,13 +1134,11 @@ mod tests {
             rule_answer_with_context(&task, &path_question, 1, &[path_target], false).unwrap();
         assert_eq!(answer, base_check::KEEP_ALL);
 
-        let control = base_check_question(
-            &["make verify"],
-            &[base_check::PRE_EXISTING_RETRY, "drop all", "stop"],
-        );
+        let control =
+            base_check_question(&["make verify"], &[PRE_EXISTING_RETRY, "drop all", "stop"]);
         assert!(rule_answer_with_context(&task, &control, 1, &[false], false).is_none());
         let (answer, _) = rule_answer_with_context(&task, &control, 1, &[false], true).unwrap();
-        assert_eq!(answer, base_check::PRE_EXISTING_RETRY);
+        assert_eq!(answer, PRE_EXISTING_RETRY);
 
         let parent_options = base_check_question(
             &["make verify"],
@@ -1158,10 +1156,10 @@ mod tests {
                 "cargo test -p sushiai-orch --test base_retry",
                 "make verify",
             ],
-            &[base_check::PRE_EXISTING_RETRY, "drop all", "stop"],
+            &[PRE_EXISTING_RETRY, "drop all", "stop"],
         );
         let (answer, _) = rule_answer_with_context(&task, &mixed, 1, &[true, false], true).unwrap();
-        assert_eq!(answer, base_check::PRE_EXISTING_RETRY);
+        assert_eq!(answer, PRE_EXISTING_RETRY);
         assert!(rule_answer_with_context(&task, &mixed, 1, &[true, false], false).is_none());
     }
 }
@@ -1188,20 +1186,9 @@ mod answer_caller_tests {
                 &task.base_sha,
             );
             assert!(rule_answer(&task, &first, 1).is_some());
-            record_answer(
-                &mut task,
-                Some(&first),
-                base_check::PRE_EXISTING_RETRY,
-                caller,
-            );
+            record_answer(&mut task, Some(&first), PRE_EXISTING_RETRY, caller);
             let sha = task.base_sha.clone();
-            record_owner_base_check(
-                &mut task,
-                &first.commands,
-                &sha,
-                base_check::PRE_EXISTING_RETRY,
-                false,
-            );
+            record_owner_base_check(&mut task, &first.commands, &sha, PRE_EXISTING_RETRY, false);
             assert_eq!(
                 rule_answer(&task, &first, 1).is_none(),
                 caller != AnsweredBy::Owner
@@ -1269,7 +1256,7 @@ mod base_moves_tests {
         app.store.save_task(&other).unwrap();
         let question = Question::new(
             "make verify already fails on base",
-            vec![base_check::PRE_EXISTING_RETRY.into(), "stop".into()],
+            vec![PRE_EXISTING_RETRY.into(), "stop".into()],
             QuestionKind::PreexistingFailure,
             AskedBy::Verify,
         );
@@ -1311,7 +1298,7 @@ mod base_moves_tests {
         app.store.save_task(&red).unwrap();
         let question = Question::new(
             "make verify already fails on base",
-            vec![base_check::PRE_EXISTING_RETRY.into(), "stop".into()],
+            vec![PRE_EXISTING_RETRY.into(), "stop".into()],
             QuestionKind::PreexistingFailure,
             AskedBy::Verify,
         );

@@ -99,13 +99,8 @@ fn failing_commands(task: &Task) -> Vec<String> {
             add(&v.command);
         }
     }
-    for d in &task.decisions {
-        if let Some(rest) = d
-            .strip_prefix("Orchestrator: every subtask landed, but `")
-            .and_then(|r| r.split_once("` exited"))
-        {
-            add(rest.0);
-        }
+    for command in &task.loop_state.final_check_failures {
+        add(command);
     }
     out
 }
@@ -209,6 +204,23 @@ impl App {
     }
 }
 
+/// An answered question for tests; the owner gave `answer`.
+#[cfg(test)]
+pub(crate) fn owner_answer(question: &str, answer: &str) -> crate::model::AnsweredQuestion {
+    crate::model::AnsweredQuestion {
+        question: question.into(),
+        options: Vec::new(),
+        kind: crate::model::QuestionKind::AgentQuestion,
+        asked_by: None,
+        asked_at: None,
+        answer: answer.into(),
+        answered_at: 1,
+        answered_by: crate::model::AnsweredBy::Owner,
+        failure_signature: None,
+        commands: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{task_with_status, test_app};
@@ -226,7 +238,7 @@ mod tests {
     async fn evolution_second_call_appends_nothing() {
         let (app, _dir) = test_app();
         let mut t = task_with_status(TaskStatus::Done);
-        t.decisions = vec!["Owner: which one? -> first".into()];
+        t.question_history = vec![owner_answer("which one?", "first")];
         app.store.save_task(&t).unwrap();
         app.detect_evolution_signals(&t.id).await;
         let first = lines(&app, "signals.jsonl");
@@ -243,7 +255,7 @@ mod tests {
     async fn evolution_every_recorded_signal_carries_a_timestamp() {
         let (app, _dir) = test_app();
         let mut t = task_with_status(TaskStatus::Done);
-        t.decisions = vec!["Owner: which one? -> first".into()];
+        t.question_history = vec![owner_answer("which one?", "first")];
         app.store.save_task(&t).unwrap();
         let before = now_ms();
         app.detect_evolution_signals(&t.id).await;
@@ -267,9 +279,9 @@ mod tests {
         let (app, _dir) = test_app();
         let mut eval = task_with_status(TaskStatus::Done);
         eval.eval_set = Some("set".into());
-        eval.decisions = vec!["Owner: q -> a".into()];
+        eval.question_history = vec![owner_answer("q", "a")];
         let mut running = task_with_status(TaskStatus::Running);
-        running.decisions = vec!["Owner: q -> a".into()];
+        running.question_history = vec![owner_answer("q", "a")];
         app.store.save_task(&eval).unwrap();
         app.store.save_task(&running).unwrap();
         app.detect_evolution_signals(&eval.id).await;
@@ -297,8 +309,8 @@ mod tests {
         let mut b = a.clone();
         b.n = 2;
         t.attempts = vec![a, b];
-        t.decisions =
-            vec!["Orchestrator: every subtask landed, but `npm run ci` exited 2 on b: x".into()];
+        t.decisions = vec!["reworded".into()];
+        t.loop_state.final_check_failures = vec!["npm run ci".into()];
         assert_eq!(failing_commands(&t), vec!["npm test", "npm run ci"]);
     }
 }

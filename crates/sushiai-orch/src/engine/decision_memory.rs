@@ -911,10 +911,14 @@ mod tests {
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         let mut retried = waiting_task(&repo, base_q());
-        retried.decisions.push(format!(
-            "Lead: base check cargo test on {} -> {RETRY}",
-            &retried.base_sha[..7]
-        ));
+        let base_sha = retried.base_sha.clone();
+        crate::engine::base_check::record_base_answer(
+            &mut retried,
+            &["cargo test".to_string()],
+            &base_sha,
+            "Lead",
+            RETRY,
+        );
         let (answer, _) = park(&app, retried).await;
         assert_eq!(answer, None);
         chat::wait_idle(&app, &repo).await;

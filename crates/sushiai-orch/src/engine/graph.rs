@@ -218,10 +218,7 @@ pub(super) fn apply_base_check_answer(
     }
     if is_option(answer, KEEP_ALL) {
         for command in &question.commands {
-            let line = kept_check_line(command, KEPT_BY_TASK_TARGET);
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
-            }
+            keep_check(task, command, KEPT_BY_TASK_TARGET);
         }
     }
     false
@@ -383,10 +380,7 @@ async fn parent_finals_on_base(
         if command_named_by_task(task, &base_run.command)
             || failing_test_named_by_task(task, &base_run.failing)
         {
-            let line = kept_check_line(&base_run.command, KEPT_BY_TASK_TARGET);
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
-            }
+            keep_check(task, &base_run.command, KEPT_BY_TASK_TARGET);
             continue;
         }
         match judge_against_base(app, task, failed, &base_run, &wt, &dir, cancel).await {
@@ -458,7 +452,7 @@ async fn parent_finals_on_base(
     let kept_all =
         !question.commands.is_empty() && question.commands.iter().all(|c| is_kept(task, c));
     if !kept_all
-        && (is_option(&answer, super::base_check::PRE_EXISTING_RETRY)
+        && (is_option(&answer, PRE_EXISTING_RETRY)
             || question
                 .commands
                 .iter()
@@ -889,6 +883,15 @@ pub(super) async fn run_parent(
                 .code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "null".to_string());
+            if !task
+                .loop_state
+                .final_check_failures
+                .contains(&failed.command)
+            {
+                task.loop_state
+                    .final_check_failures
+                    .push(failed.command.clone());
+            }
             task.decisions.push(format!(
                 "Orchestrator: every subtask landed, but `{}` exited {code} on {}: {}",
                 failed.command,

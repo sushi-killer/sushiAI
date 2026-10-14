@@ -259,16 +259,7 @@ pub(super) async fn run_task_loop(
             .collect();
         if base_retry_requested(&task, &checks, &task.base_sha) {
             let worktree = PathBuf::from(&task.worktree);
-            match carry_after_base_moves(
-                &app,
-                &mut task,
-                &worktree,
-                &pending_answer,
-                &cancel,
-                &mut None,
-            )
-            .await
-            {
+            match carry_after_base_moves(&app, &mut task, &worktree, &cancel, &mut None).await {
                 BaseRetry::Ready => {}
                 BaseRetry::Conflict(detail) => {
                     if let Some(idx) = task
@@ -1654,9 +1645,13 @@ pub(super) async fn run_task_loop(
                 drop(permit);
                 continue;
             }
+            let options = report
+                .as_ref()
+                .map(|r| r.options.clone())
+                .unwrap_or_default();
             task.question = Some(Question::new(
                 question_text,
-                vec![],
+                options,
                 QuestionKind::AgentQuestion,
                 AskedBy::Implement,
             ));
@@ -3110,6 +3105,9 @@ const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
 /// How often that wait fetches the base from `origin`: the base often moves
 /// only by a merge on the remote, which the local branch never sees itself.
 const BASE_FETCH_EVERY: Duration = Duration::from_secs(60);
+/// How many times a failed carry is retried before the agent gets it as a
+/// conflict to fix.
+const CARRY_RETRIES: u32 = 3;
 /// The longest a task waits for its base to move, in seconds; after it the
 /// baseline rule judges the check against the base as it is. A test run may
 /// shorten it with `ORCHD_BASE_WAIT_SECS`.
@@ -3181,10 +3179,10 @@ pub(super) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,
     worktree: &Path,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> BaseRetry {
+    let mut failed_carries = 0;
     loop {
         if let Some(base_ref) = task.base_ref.clone() {
             let mut noted = false;
@@ -3259,27 +3257,18 @@ pub(super) async fn carry_after_base_moves(
             BaseCarry::Ready => return BaseRetry::Ready,
             BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
             BaseCarry::Failed(reason) => {
-                task.question = Some(Question::new(
-                    format!("{reason}. Fix the carry problem, then retry, or stop?"),
-                    vec!["retry".to_string(), "stop".to_string()],
-                    QuestionKind::AgentQuestion,
-                    AskedBy::Verify,
-                ));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let task_id = task.id.clone();
-                let Some(answer) =
-                    wait_for_answer(app, &task_id, task, pending_answer, cancel, permit).await
-                else {
-                    return BaseRetry::Stopped;
-                };
-                if is_option(&answer, "stop") {
-                    task.status = TaskStatus::Stopped;
-                    task.updated_at = now_ms();
-                    app.save_task_logged(task);
-                    app.broadcast_task(task);
-                    return BaseRetry::Stopped;
+                failed_carries += 1;
+                if failed_carries > CARRY_RETRIES {
+                    return BaseRetry::Conflict(format!(
+                        "Carrying the work onto the newest base failed {failed_carries} times: {reason}. Bring the work up to date with the base yourself."
+                    ));
                 }
+                task.decisions.push(format!(
+                    "Orchestrator: the carry failed ({failed_carries} of {CARRY_RETRIES} retries), trying again after the next fetch"
+                ));
+                task.updated_at = now_ms();
+                app.save_task_logged(task);
+                app.broadcast_task(task);
             }
         }
     }
@@ -3773,9 +3762,7 @@ pub(super) async fn finish_after_review(
             if stays {
                 // Retry (any other answer): one more attempt on the newest
                 // base, even when the attempt budget is spent.
-                match carry_after_base_moves(app, task, worktree, pending_answer, cancel, permit)
-                    .await
-                {
+                match carry_after_base_moves(app, task, worktree, cancel, permit).await {
                     BaseRetry::Ready => {}
                     BaseRetry::Conflict(detail) => {
                         record_failure(task, idx, FailureKind::Conflict, detail);
@@ -4179,5 +4166,35 @@ mod follow_origin_tests {
         git_in(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
         follow_origin(&repo, "main").await;
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), local);
+    }
+}
+
+#[cfg(test)]
+mod carry_retry_tests {
+    use super::*;
+    use crate::engine::test_support::{task_with_status, test_app};
+
+    #[tokio::test]
+    async fn a_carry_that_keeps_failing_becomes_a_conflict_attempt_and_asks_nobody() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.base_ref = None;
+        app.store.save_task(&task).unwrap();
+        let worktree = PathBuf::from(&task.worktree);
+        let result =
+            carry_after_base_moves(&app, &mut task, &worktree, &CancelToken::new(), &mut None)
+                .await;
+        match result {
+            BaseRetry::Conflict(detail) => assert!(detail.contains("failed 4 times"), "{detail}"),
+            _ => panic!("expected a conflict attempt"),
+        }
+        assert!(task.question.is_none());
+        assert_eq!(
+            task.decisions
+                .iter()
+                .filter(|d| d.contains("trying again after the next fetch"))
+                .count(),
+            CARRY_RETRIES as usize
+        );
     }
 }

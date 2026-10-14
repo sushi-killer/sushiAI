@@ -287,16 +287,17 @@ configured, a duplicate or built-in id, `maxAttempts` of 0, and a
 
 ## `experiments` flags
 
-| Flag                                                                    | Default | What it does                                                                                         |
-| ----------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `stallTimeoutSecs`                                                      | `0`     | Stop an attempt whose harness prints nothing for this long; 0 is off.                                |
-| `reviewEvidence`                                                        | `false` | The reviewer gets saved screenshots and longer verify output.                                        |
-| `heldOut`                                                               | `true`  | Run the hidden planner check. Regular behaviour checks always run.                                   |
-| `advisor`                                                               | `false` | After a failed attempt, one read-only call diagnoses it for the next attempt.                        |
-| `loopDetect`                                                            | `true`  | Stop an attempt that repeats itself.                                                                 |
-| `land`                                                                  | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
-| `maxCostUsd`, `maxAttemptCostUsd`                                       | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
-| `plannerRoute`, `tierRoutes`, `batchQuestions`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                       |
+| Flag                                                  | Default | What it does                                                                                         |
+| ----------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `stallTimeoutSecs`                                    | `0`     | Stop an attempt whose harness prints nothing for this long; 0 is off.                                |
+| `reviewEvidence`                                      | `false` | The reviewer gets saved screenshots and longer verify output.                                        |
+| `heldOut`                                             | `true`  | Run the hidden planner check. Regular behaviour checks always run.                                   |
+| `advisor`                                             | `false` | After a failed attempt, one read-only call diagnoses it for the next attempt.                        |
+| `loopDetect`                                          | `true`  | Stop an attempt that repeats itself.                                                                 |
+| `land`                                                | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
+| `maxCostUsd`, `maxAttemptCostUsd`                     | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
+| `batchQuestions`                                      | `true`  | A planner question that is not blocking and has a recommendation becomes an assumption.              |
+| `plannerRoute`, `tierRoutes`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                       |
 
 Only settings reachable through the app are listed with a control. A key
 missing from the list above but present in `crates/sushiai-orch/src/model.rs` is still

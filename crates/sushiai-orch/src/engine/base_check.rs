@@ -900,7 +900,7 @@ pub(super) async fn wait_on_broken_base(
         }
     }
     let wt = PathBuf::from(&task.worktree);
-    match carry_after_base_moves(app, task, &wt, pending_answer, cancel, permit).await {
+    match carry_after_base_moves(app, task, &wt, cancel, permit).await {
         BaseRetry::Ready => {}
         BaseRetry::Conflict(detail) => record_failure(task, idx, FailureKind::Conflict, detail),
         BaseRetry::Stopped => return BaseBreak::Stopped,

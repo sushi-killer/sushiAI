@@ -239,8 +239,8 @@ fn with_auto_answer_off_the_owner_gets_the_original_question() {
     remove_dir_retrying(worktree);
 }
 
-/// Fails verify on every attempt, so the attempts run out and the task waits
-/// on "attempts keep failing" with the overseer, never a triage turn.
+/// Fails verify on every attempt, so the attempts run out and "attempts keep
+/// failing" goes to the overseer, never a triage turn.
 #[test]
 fn attempts_keep_failing_waits_for_the_overseer_with_no_triage_turn() {
     let scripts_dir = tempfile::tempdir().unwrap();
@@ -271,16 +271,20 @@ fn attempts_keep_failing_waits_for_the_overseer_with_no_triage_turn() {
     let task_id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": task_id}));
 
-    let waiting = poll_until(&daemon, &task_id, |s| {
-        s == "done" || s == "waiting" || s == "failed" || s == "stopped"
-    });
-    assert_eq!(waiting["status"], "waiting", "task JSON: {waiting}");
+    // The overseer is woken once; its turn leaves the question open (the fake
+    // answers nothing), so the failure ladder ends the task and the owner is
+    // not asked.
+    let ended = poll_until(&daemon, &task_id, |s| s == "failed");
+    assert_eq!(ended["status"], "failed", "task JSON: {ended}");
     assert!(
-        waiting["question"]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("Attempts keep failing"),
-        "{waiting}"
+        ended.get("question").is_none() || ended["question"].is_null(),
+        "{ended}"
+    );
+    assert!(
+        ended["decisions"]
+            .to_string()
+            .contains("Ladder: stopped after"),
+        "{ended}"
     );
     let worktree = std::path::PathBuf::from(task["worktree"].as_str().unwrap());
     assert!(

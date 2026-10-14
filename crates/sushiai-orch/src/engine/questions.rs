@@ -185,7 +185,10 @@ pub(super) async fn park_for_answer(
         None => {
             if let Ok(Some(saved)) = app.store.load_task(task_id) {
                 *task = saved;
-                app.apply_cancellation(task);
+                // The failure ladder ended this task: it stays failed.
+                if task.status != TaskStatus::Failed {
+                    app.apply_cancellation(task);
+                }
                 if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(task);
                 }
@@ -244,6 +247,15 @@ pub(super) fn non_owner_refusal(
             "these checks already got a non-owner retry on this base: the owner decides now"
                 .to_string(),
         );
+    }
+    if caller == AnsweredBy::Overseer && question.kind == QuestionKind::AttemptsFailing {
+        let continues = answer.trim().to_ascii_lowercase().starts_with("continue");
+        if !continues && !is_option(answer, "change approach") {
+            return Some(
+                "the overseer may only continue or change approach on attempts keep failing: the failure ladder ends the task otherwise"
+                    .to_string(),
+            );
+        }
     }
     if caller == AnsweredBy::Overseer && !owner_only(question.kind) {
         if let Some(limit) =
@@ -452,12 +464,31 @@ impl App {
                 .as_ref()
                 .is_some_and(|q| q.held_at == Some(*at))
             {
+                if task
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing)
+                {
+                    self.end_unanswered_exhausted(&mut task);
+                    continue;
+                }
                 if let Some(q) = task.question.as_mut() {
                     q.release();
                 }
                 self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
+        }
+    }
+
+    /// An overseer turn ended on "attempts keep failing" and did not answer
+    /// it: the owner is not asked. The failure ladder ends the task (failed,
+    /// with its report and one notice) and the parked loop is cancelled.
+    fn end_unanswered_exhausted(&self, task: &mut Task) {
+        ladder::end_ladder(self, task);
+        self.notify_task_failed(task);
+        if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
+            control.cancel.cancel();
         }
     }
 
@@ -876,11 +907,120 @@ mod tests {
         .expect("the failure never parked for the overseer");
         // Parked: the only agent run was the overseer's, in the repository.
         assert!(!worktree.join(".overseer-calls").exists());
-        chat::wait_idle(&app, repo.to_str().unwrap()).await;
+        // Woken once for the question; the turn is left to end on its own.
+        for _ in 0..400 {
+            if chat::fake_overseer_calls(&repo) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         assert_eq!(chat::fake_overseer_calls(&repo), 1);
         cancel.cancel();
         let (stopped, _) = waiter.await.unwrap();
         assert!(stopped);
+    }
+
+    #[test]
+    fn the_overseer_may_only_continue_or_change_approach_on_attempts_failing() {
+        let settings = Settings::default();
+        let task = task_with_status(TaskStatus::Waiting);
+        let question = Question::new(
+            "Attempts keep failing with a verify failure: continue, change approach, or stop?",
+            vec!["continue".into(), "change approach".into(), "stop".into()],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        );
+        assert_eq!(
+            overseer_allowed_answers(&settings, &task, &question),
+            vec!["continue".to_string(), "change approach".to_string()]
+        );
+        for answer in ["ask the owner", "stop"] {
+            assert!(
+                non_owner_refusal(&settings, &task, &question, answer, AnsweredBy::Overseer)
+                    .is_some(),
+                "{answer}"
+            );
+        }
+        assert!(non_owner_refusal(
+            &settings,
+            &task,
+            &question,
+            "continue - create fixed.txt",
+            AnsweredBy::Overseer
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = worktree.to_string_lossy().to_string();
+        task.attempts
+            .push(super::super::test_support::attempt_with_failure(
+                1, "verify",
+            ));
+        let id = task.id.clone();
+        let mut budget = 1;
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        let waiter = {
+            let (app, pending, cancel, id) =
+                (app.clone(), pending.clone(), cancel.clone(), id.clone());
+            tokio::spawn(async move {
+                let signal = fail_and_continue(
+                    &app,
+                    &id,
+                    &mut task,
+                    0,
+                    FailureKind::Verify,
+                    "npm test failed".into(),
+                    &mut budget,
+                    &pending,
+                    &cancel,
+                    &mut None,
+                )
+                .await;
+                (matches!(signal, LoopSignal::Stop), task)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pending.lock().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the failure never parked for the overseer");
+        // The overseer's turn ends without an answer.
+        chat::wait_idle(&app, repo.to_str().unwrap()).await;
+        let (stopped, _) = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the ladder never ended the parked loop")
+            .unwrap();
+        assert!(stopped);
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task.question.is_none());
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Ladder: stopped")));
     }
 
     #[tokio::test]

@@ -408,14 +408,17 @@ fn a_write_tool_call_is_held_for_one_owner_question_and_the_answer_goes_on_in_th
     let (result, _) = env.held(
         &token,
         &id,
-        "WebFetch",
-        json!({"url": "https://example.invalid"}),
+        "mcp__fake__delete_item",
+        json!({"id": 7}),
         "Deny",
     );
     let (decision, reason) = verdict(&result);
     assert_eq!(decision, "deny");
-    assert!(reason.contains("The owner denied WebFetch"), "{reason}");
-    let (decision, _) = verdict(&env.hook(&token, "WebFetch", json!({})));
+    assert!(
+        reason.contains("The owner denied mcp__fake__delete_item"),
+        "{reason}"
+    );
+    let (decision, _) = verdict(&env.hook(&token, "mcp__fake__delete_item", json!({})));
     assert_eq!(decision, "deny");
     assert_eq!(env.get(&id)["status"], "running");
 
@@ -424,7 +427,7 @@ fn a_write_tool_call_is_held_for_one_owner_question_and_the_answer_goes_on_in_th
     let lines = decisions(&done);
     assert!(lines.contains("Permission: allowed once: mcp__fake__send_note"));
     assert!(lines.contains("Permission: allowed for this repo: mcp__fake__send_note"));
-    assert!(lines.contains("Permission: denied: WebFetch"));
+    assert!(lines.contains("Permission: denied: mcp__fake__delete_item"));
 
     // The rule Always stored is inherited by the next task of the repo.
     env.gate("hold", "");
@@ -434,11 +437,44 @@ fn a_write_tool_call_is_held_for_one_owner_question_and_the_answer_goes_on_in_th
     let (decision, _) = verdict(&env.hook(&env.token(2), "mcp__fake__send_note", json!({})));
     assert_eq!(decision, "allow");
     assert!(allow_list(&env, 2).contains(&"mcp__fake__send_note".to_string()));
-    // A denial is for that run: WebFetch asks again in the next task.
-    let (result, _) = env.held(&env.token(2), &next, "WebFetch", json!({}), "Allow once");
+    // A denial is for that run: delete_item asks again in the next task.
+    let (result, _) = env.held(
+        &env.token(2),
+        &next,
+        "mcp__fake__delete_item",
+        json!({}),
+        "Allow once",
+    );
     assert_eq!(verdict(&result).0, "allow");
     env.ungate("hold");
     env.until(&next, "done");
+    env.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_web_call_is_decided_by_the_allowed_domains_and_never_held_for_the_owner() {
+    let env = spawn();
+    env.gate("hold", "");
+    let id = env.create(&[]);
+    env.start(&id);
+    env.wait_run(1);
+    let token = env.token(1);
+    let (decision, _) = verdict(&env.hook(&token, "WebFetch", json!({"url": "https://docs.rs/x"})));
+    assert_eq!(decision, "allow");
+
+    let mut settings = env.daemon.request("settings.get", json!({}));
+    settings["allowedDomains"] = json!(["docs.rs"]);
+    env.daemon
+        .request("settings.set", json!({"settings": settings}));
+    let (decision, _) = verdict(&env.hook(&token, "WebFetch", json!({"url": "https://docs.rs/x"})));
+    assert_eq!(decision, "allow");
+    let (decision, reason) =
+        verdict(&env.hook(&token, "WebFetch", json!({"url": "https://other.test/x"})));
+    assert_eq!(decision, "deny");
+    assert!(reason.contains("allowed domains"), "{reason}");
+    assert_eq!(env.get(&id)["status"], "running", "no question was asked");
+    env.ungate("hold");
+    env.until(&id, "done");
     env.daemon.shutdown_and_wait();
 }
 
@@ -629,6 +665,45 @@ case "$input" in
     ;;
 esac
 "##;
+
+#[test]
+fn a_criterion_with_no_tool_to_enable_is_continued_without_a_question() {
+    let scripts = tempfile::tempdir().unwrap();
+    let gates = tempfile::tempdir().unwrap();
+    let body = CHECK_SCRIPT.replace(r#"\"toolId\": \"asana\""#, r#"\"toolId\": null"#);
+    assert_ne!(body, CHECK_SCRIPT);
+    let script = fake_harness_script(scripts.path(), "fake-check.sh", &body);
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("HOME", home.path().to_str().unwrap()),
+        ("GATES", gates.path().to_str().unwrap()),
+    ]);
+    let mut settings = daemon.request("settings.get", json!({}));
+    settings["review"] = json!("");
+    settings["tiers"]["mechanical"] = json!("claude-sonnet");
+    settings["briefCheckRoute"] = json!("claude-sonnet");
+    settings["planReview"] = serde_json::json!("");
+    daemon.request("settings.set", json!({"settings": settings}));
+    let repo = init_git_repo();
+    let created = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Move it",
+            "goal": "Ship the change",
+            "criteria": ["The code compiles", "The Asana task is moved to Done"],
+            "verify": ["true"],
+            "land": false,
+            "start": true,
+        }),
+    );
+    let id = created["id"].as_str().unwrap().to_string();
+    let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
+    assert_eq!(done["status"], "done", "{done}");
+    assert!(decisions(&done).contains("the owner let the task run without move the Asana task"));
+    daemon.shutdown_and_wait();
+}
 
 #[test]
 fn the_brief_check_flags_a_criterion_the_task_has_no_tool_for_before_the_first_attempt() {

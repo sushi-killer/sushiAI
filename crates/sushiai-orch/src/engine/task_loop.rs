@@ -485,22 +485,29 @@ pub(super) async fn run_task_loop(
             && !task.brief_check.missing_tool_asked
         {
             if let Some(missing) = task.brief_check.missing_tool.clone() {
-                task.question = Some(permissions::missing_tool_question(&task, &missing));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let Some(answer) = wait_for_answer(
-                    &app,
-                    &task_id,
-                    &mut task,
-                    &pending_answer,
-                    &cancel,
-                    &mut permit,
-                )
-                .await
-                else {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
+                // Only enabling a connected tool is the owner's to allow;
+                // without one the task goes on without the capability.
+                let answer = if missing.tool_id.is_none() {
+                    permissions::CONTINUE_ANYWAY.to_string()
+                } else {
+                    task.question = Some(permissions::missing_tool_question(&task, &missing));
+                    task.status = TaskStatus::Waiting;
+                    task.updated_at = now_ms();
+                    let Some(answer) = wait_for_answer(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    else {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    };
+                    answer
                 };
                 permissions::apply_missing_answer(&app, &mut task, &missing, &answer);
                 task.brief_check.missing_tool_asked = true;
@@ -1395,6 +1402,11 @@ pub(super) async fn run_task_loop(
             .iter()
             .flat_map(|m| m.keys().cloned())
             .collect();
+        for line in permissions::scratch_lines(&worktree, &outcome) {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
         let refused = permissions::unhandled_denials(&handled, &worktree, &outcome, &protected_now);
         if !refused.is_empty() {
             let (wt, base) = (worktree.clone(), task.work_base().to_string());
@@ -1621,22 +1633,30 @@ pub(super) async fn run_task_loop(
             // `No tool: <capability>`: a retry cannot give the agent a tool,
             // so the owner decides, and only the owner.
             if let Some(capability) = permissions::missing_tool_claim(&question_text) {
-                task.question = Some(permissions::no_tool_question(&app, &task, &capability));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let Some(answer) = wait_for_answer(
-                    &app,
-                    &task_id,
-                    &mut task,
-                    &pending_answer,
-                    &cancel,
-                    &mut permit,
-                )
-                .await
-                else {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
+                // Only enabling a connected tool is the owner's to allow;
+                // without one the owner takes that part and the task goes on.
+                let answer = match permissions::tool_to_enable(&app, &task, &capability) {
+                    None => permissions::OWNER_ACTION.to_string(),
+                    Some(enable) => {
+                        task.question = Some(permissions::no_tool_question(&capability, &enable));
+                        task.status = TaskStatus::Waiting;
+                        task.updated_at = now_ms();
+                        let Some(answer) = wait_for_answer(
+                            &app,
+                            &task_id,
+                            &mut task,
+                            &pending_answer,
+                            &cancel,
+                            &mut permit,
+                        )
+                        .await
+                        else {
+                            drop(permit);
+                            app.finish_task_loop(&task_id);
+                            return;
+                        };
+                        answer
+                    }
                 };
                 permissions::apply_no_tool_answer(&app, &mut task, &capability, &answer);
                 task.updated_at = now_ms();

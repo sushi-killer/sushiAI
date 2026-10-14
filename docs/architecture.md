@@ -43,7 +43,7 @@ flowchart TB
       conns["connections.cjs<br/>SSH profiles, exec, inspect, port forwards"]
       daemonMgr["daemon/manager.cjs, client.cjs, connectors.cjs, local.cjs<br/>one connection per host: local socket, ssh proxy or command;<br/>state, reconnect, session events"]
       sessionLaunch["session-launch.cjs<br/>host checkout + worktree, environment and accounts,<br/>then session.create with an idempotency key"]
-      terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, bounded output credit + xterm acknowledgements"]
+      terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, output batched per tick and per frame,<br/>bounded output credit + xterm acknowledgements"]
       hostInstall["host-install.cjs, host-setup.cjs<br/>install and update sushiai on a host"]
       projectStore[("sushiai.db<br/>projects, folders, safeStorage secrets")]
       vaultReader["vault.cjs + extensions/builtin-vault.cjs<br/>built-in Vault module: read-only KV v2 reader, token in safeStorage,<br/>per-project config in its own app-db store,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice"]

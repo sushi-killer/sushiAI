@@ -6,6 +6,9 @@ const {
 } = require("../electron/daemon/terminals.cjs");
 const { OUTPUT_CREDIT_BYTES } = require("../electron/terminal-flow.cjs");
 
+// Output leaves main once per event-loop turn.
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
 function setup(options = {}) {
   const sent = [];
   const requests = [];
@@ -63,6 +66,7 @@ test("snapshot is sent before bytes with the attach size", async () => {
   const t = setup();
   await t.handlers.attach(attachInput());
   t.attaches[0].onBytes(Buffer.from("hello"));
+  await turn();
   assert.deepEqual(
     t.sent.map(({ channel, ...rest }) => rest),
     [
@@ -149,11 +153,33 @@ test("exited event reaches only the matching panel", async () => {
   );
 });
 
+test("an exit does not overtake output queued in the same turn", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  await t.handlers.attach(attachInput({ panelId: "p2", host: "host-2" }));
+  t.attaches[0].onBytes(Buffer.from("bye"));
+  t.attaches[1].onBytes(Buffer.from("gone"));
+  t.emit({ host: "local", method: "session.exited", params: { id: "s1" } });
+  await t.handlers.closeHost("host-2");
+  assert.deepEqual(
+    t.sent
+      .filter((m) => m.data !== undefined || m.exited)
+      .map(({ channel, ...rest }) => rest),
+    [
+      { panelId: "p1", data: "bye" },
+      { panelId: "p1", exited: true },
+      { panelId: "p2", data: "gone" },
+      { panelId: "p2", exited: true },
+    ],
+  );
+});
+
 test("a resync snapshot drops queued bytes and resets the credit", async () => {
   const t = setup();
   await t.handlers.attach(attachInput());
   const { onBytes } = t.attaches[0];
   onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES * 2, "a")); // fills the credit
+  await turn();
   const dataBefore = t.sent.filter((m) => m.data !== undefined);
   assert.ok(dataBefore.length >= 1);
   onBytes(Buffer.from("fresh"), { snapshot: true, cols: 80, rows: 24 });
@@ -166,6 +192,7 @@ test("a resync snapshot drops queued bytes and resets the credit", async () => {
   t.handlers.ack("p1", 5); // old queue is gone, nothing more is released
   assert.equal(t.sent.length, count);
   onBytes(Buffer.from("next"));
+  await turn();
   assert.equal(t.sent.at(-1).data, "next");
 });
 
@@ -175,6 +202,7 @@ test("output is paced by acknowledged bytes and stays in order", async () => {
   t.handlers.ack("p1", 6); // the snapshot is written
   const total = OUTPUT_CREDIT_BYTES * 3;
   t.attaches[0].onBytes(Buffer.alloc(total, "b"));
+  await turn();
   const sentBytes = () =>
     t.sent.filter((m) => m.data).reduce((n, m) => n + m.data.length, 0);
   assert.equal(sentBytes(), OUTPUT_CREDIT_BYTES);
@@ -193,6 +221,7 @@ test("a multi-byte character split across chunks is rejoined", async () => {
   const bytes = Buffer.from("é");
   t.attaches[0].onBytes(bytes.subarray(0, 1));
   t.attaches[0].onBytes(bytes.subarray(1));
+  await turn();
   assert.deepEqual(
     t.sent.filter((m) => m.data).map((m) => m.data),
     ["é"],
@@ -317,6 +346,7 @@ test("a surrogate pair that does not fit the credit waits for an ack instead of 
   const { onBytes } = t.attaches[0];
   onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES - 2, "a"));
   onBytes(Buffer.from("\u{1F680}xyz"));
+  await turn();
   const text = () =>
     t.sent
       .filter((m) => m.data)
@@ -334,9 +364,11 @@ test("acks of bytes sent before a snapshot do not shrink the new window", async 
   const { onBytes } = t.attaches[0];
   t.handlers.ack("p1", 6);
   onBytes(Buffer.alloc(1000, "a"));
+  await turn();
   onBytes(Buffer.from("screen"), { snapshot: true });
   t.handlers.ack("p1", 1000); // the old 1000 bytes
   onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  await turn();
   const sent = t.sent
     .filter((m) => m.data)
     .reduce((n, m) => n + m.data.length, 0);
@@ -397,6 +429,7 @@ test("an overflow re-attach carries the unacked bytes into the stale window", as
   t.handlers.ack("p1", 6);
   const old = t.attaches[0].onBytes;
   old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  await turn();
   for (let i = 0; i < 5; i++) old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -406,6 +439,7 @@ test("an overflow re-attach carries the unacked bytes into the stale window", as
   t.handlers.ack("p1", 6); // the new snapshot is written
   const before = t.sent.length;
   t.attaches[1].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  await turn();
   const sent = t.sent
     .slice(before)
     .filter((m) => m.data)
@@ -413,18 +447,47 @@ test("an overflow re-attach carries the unacked bytes into the stale window", as
   assert.equal(sent, OUTPUT_CREDIT_BYTES);
 });
 
+test("a renderer still behind its last resync gets the next snapshot once it acks", async () => {
+  const t = setup();
+  await t.handlers.attach(attachInput());
+  t.handlers.ack("p1", 6);
+  const old = t.attaches[0].onBytes;
+  old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  await turn();
+  for (let i = 0; i < 6; i++) old(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  await turn();
+  await turn();
+  assert.equal(t.attaches.length, 2);
+  // The old window is not acked yet: a second flood is dropped, and the
+  // snapshot that would replace the one still on its way waits.
+  for (let i = 0; i < 6; i++)
+    t.attaches[1].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "b"));
+  await turn();
+  await turn();
+  assert.equal(t.attaches.length, 2);
+  assert.equal(t.sent.filter((m) => m.data?.includes("b")).length, 0);
+  t.handlers.ack("p1", OUTPUT_CREDIT_BYTES); // the old window, late
+  await turn();
+  await turn();
+  assert.equal(t.attaches.length, 3);
+  assert.equal(t.sent.filter((m) => m.snapshot !== undefined).length, 3);
+});
+
 test("a renderer attach after an unacked window starts with full credit", async () => {
   const t = setup();
   await t.handlers.attach(attachInput());
   t.attaches[0].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "a"));
+  await turn();
   // The renderer reloads: the old window is never acked, the panel attaches.
   await t.handlers.attach(attachInput());
   const before = t.sent.length;
   t.attaches[1].onBytes(Buffer.alloc(100, "b"));
+  await turn();
   // Only the new snapshot (6 bytes) is unacked, so data flows at once.
   assert.equal(t.sent.slice(before).filter((m) => m.data).length, 1);
   t.handlers.ack("p1", 6);
   t.attaches[1].onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "c"));
+  await turn();
   const sent = t.sent
     .slice(before)
     .filter((m) => m.data)

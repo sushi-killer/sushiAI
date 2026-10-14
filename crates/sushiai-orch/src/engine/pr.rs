@@ -154,6 +154,31 @@ fn ls_remote_sha(out: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The base a pull request targets: the branch the task started from when
+/// origin has it, else the repo's default branch.
+pub(super) async fn pr_base(
+    task: &Task,
+    repo: &Path,
+    default: Option<String>,
+) -> Result<String, String> {
+    if let Some(b) = task.base_ref.as_deref().filter(|b| !b.is_empty()) {
+        if check_branch_syntax(b).is_ok() {
+            let on_origin = run_cmd(
+                "git",
+                &["ls-remote", "--heads", "origin", &format!("refs/heads/{b}")],
+                repo,
+                GIT_TIMEOUT,
+            )
+            .await?;
+            if ls_remote_sha(&on_origin).is_some() {
+                return Ok(b.to_string());
+            }
+        }
+    }
+    default
+        .ok_or_else(|| "the repo has no default branch to open a pull request against".to_string())
+}
+
 impl App {
     pub(super) async fn handle_task_pr(
         &self,
@@ -252,32 +277,13 @@ impl App {
         .await
         .map_err(|_| format!("the task branch {} no longer exists", task.branch))?;
 
-        // The base: the branch the task started from when origin has it,
-        // else the repo's default branch.
         let default = {
             let repo = repo.clone();
             tokio::task::spawn_blocking(move || git::default_branch(&repo))
                 .await
                 .map_err(|e| e.to_string())?
         };
-        let mut base = None;
-        if let Some(b) = task.base_ref.as_deref().filter(|b| !b.is_empty()) {
-            if check_branch_syntax(b).is_ok() {
-                let on_origin = run_cmd(
-                    "git",
-                    &["ls-remote", "--heads", "origin", &format!("refs/heads/{b}")],
-                    &repo,
-                    GIT_TIMEOUT,
-                )
-                .await?;
-                if ls_remote_sha(&on_origin).is_some() {
-                    base = Some(b.to_string());
-                }
-            }
-        }
-        let base = base.or(default.clone()).ok_or_else(|| {
-            "the repo has no default branch to open a pull request against".to_string()
-        })?;
+        let base = pr_base(&task, &repo, default.clone()).await?;
         if [
             Some(base.as_str()),
             default.as_deref(),

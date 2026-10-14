@@ -725,3 +725,75 @@ fn the_overseer_cannot_open_a_pull_request_orchd_owns() {
     std::fs::write(s.tools.path().join("go"), "").unwrap();
     s.daemon.shutdown_and_wait();
 }
+
+#[test]
+fn a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[]);
+    // Origin's main moves on while the local main (the task's base) stays.
+    let other = tempfile::tempdir().unwrap();
+    let remote = s._remote.path().to_str().unwrap();
+    git_out(other.path(), &["clone", "-q", remote, "."]);
+    git_out(
+        other.path(),
+        &["config", "user.email", "other@example.invalid"],
+    );
+    git_out(other.path(), &["config", "user.name", "other"]);
+    std::fs::write(other.path().join("newer.txt"), "newer\n").unwrap();
+    git_out(other.path(), &["add", "."]);
+    git_out(other.path(), &["commit", "-q", "-m", "newer main"]);
+    git_out(other.path(), &["push", "-q", "origin", "main"]);
+    let newer = git_out(other.path(), &["rev-parse", "HEAD"]);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    let branch = format!("refs/heads/{}", task["branch"].as_str().unwrap());
+    let pushed = git_out(s._remote.path(), &["rev-parse", &branch]);
+    git_out(
+        s._remote.path(),
+        &["merge-base", "--is-ancestor", &newer, &pushed],
+    );
+    let files = git_out(s._remote.path(), &["ls-tree", "-r", "--name-only", &pushed]);
+    assert!(
+        files.contains("pr.txt") && files.contains("newer.txt"),
+        "{files}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_workflow_scope_rejection_is_permanent_with_one_try_and_one_note() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[FAST_RETRY]);
+    let hook = s._remote.path().join("hooks/pre-receive");
+    let log = s._remote.path().join("rejects.log");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho x >> '{}'\necho \"error: refusing to allow a Personal Access Token to create or update workflow \\`.github/workflows/ci.yml\\` without \\`workflow\\` scope\" >&2\nexit 1\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "PR: not opened: ");
+    assert!(
+        task["decisions"].to_string().contains("`workflow` scope"),
+        "{task}"
+    );
+    wait_notice(&s, &id);
+    settle();
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+    assert_eq!(notices(&s, &id), 1);
+    assert!(
+        note_texts(&s, &id)[0].contains("workflow"),
+        "{:?}",
+        note_texts(&s, &id)
+    );
+    s.daemon.shutdown_and_wait();
+}

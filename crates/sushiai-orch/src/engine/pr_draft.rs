@@ -67,7 +67,7 @@ fn is_permanent(error: &str) -> bool {
         "network is unreachable",
         "early eof",
     ];
-    const PERMANENT: [&str; 24] = [
+    const PERMANENT: [&str; 25] = [
         "not logged in",
         "gh auth login",
         "authentication failed",
@@ -92,12 +92,22 @@ fn is_permanent(error: &str) -> bool {
         "already landed",
         "is archived",
         "repository not found",
+        "refusing to allow",
     ];
     let e = error.to_lowercase();
     if TRANSIENT.iter().any(|t| e.contains(t)) {
         return false;
     }
     PERMANENT.iter().any(|p| e.contains(p)) || e.contains("http 401") || e.contains("http 404")
+}
+
+/// What the owner does about a push GitHub refused for the token's scope.
+fn scope_hint(error: &str) -> &'static str {
+    if error.to_lowercase().contains("refusing to allow") {
+        " The token needs the `workflow` scope, or the owner pushes the branch."
+    } else {
+        ""
+    }
 }
 
 /// `gh` found no GitHub host among the repo's remotes (GitLab, a bare path).
@@ -198,8 +208,118 @@ fn owed(app: &App, id: &str) -> Option<Task> {
         .then_some(task)
 }
 
+/// Carries the done task's work onto the newest `origin/<base>` before it is
+/// pushed, with the task's checks run again when the base moved, as landing
+/// does. A branch on an old base would show newer base files (a workflow, a
+/// signature) as the task's own change. The branch moves only when the carry
+/// and the checks pass; the decisions are saved either way.
+async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
+    let repo = PathBuf::from(&task.repo);
+    let default = {
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || git::default_branch(&repo))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let base = pr::pr_base(task, &repo, default).await?;
+    pr::run_cmd("git", &["fetch", "origin", &base], &repo, pr::GIT_TIMEOUT).await?;
+    let (upstream, local) = (
+        format!("origin/{base}"),
+        format!("refs/heads/{}", task.branch),
+    );
+    let contains = pr::run_cmd(
+        "git",
+        &["merge-base", "--is-ancestor", &upstream, &local],
+        &repo,
+        pr::GIT_TIMEOUT,
+    )
+    .await
+    .is_ok();
+    if contains {
+        return Ok(());
+    }
+    let old = pr::run_cmd("git", &["rev-parse", &local], &repo, pr::GIT_TIMEOUT).await?;
+    let path = git::worktree_path(&repo, &app.home, "", &format!("pr-carry-{}", task.id));
+    let (r, p, rev) = (repo.clone(), path.clone(), old.clone());
+    let temp = tokio::task::spawn_blocking(move || {
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| git::GitError(e.to_string()))?;
+        }
+        git::remove_worktree(&r, &p);
+        git::add_detached_worktree(&r, &p, &rev)?;
+        Ok::<_, git::GitError>(TempWorktree { repo: r, path: p })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("could not check out {}: {e}", task.branch))?;
+    let run_dir = app
+        .store
+        .claim_helper_run_dir(&task.id, "pr-carry", None)
+        .map_err(|e| e.to_string())?;
+    let finals = {
+        let settings = app.settings.read().unwrap();
+        split_deferred(app, &settings, task).0
+    };
+    let mut work = task.clone();
+    let before = work.decisions.len();
+    let outcome = carry_and_check(
+        app,
+        &mut work,
+        None,
+        &temp.path,
+        &run_dir,
+        &upstream,
+        "Another task",
+        &finals,
+        &CancelToken::new(),
+    )
+    .await;
+    let committed = match outcome {
+        Ok(false) => {
+            let (wt, title, tid, n) = (
+                temp.path.clone(),
+                task.title.clone(),
+                task.id.clone(),
+                task.attempts.len().max(1) as u32,
+            );
+            tokio::task::spawn_blocking(move || {
+                git::commit(&wt, &title, &tid, n)?;
+                git::head_sha(&wt)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("could not commit the carried work: {e}"))
+        }
+        Ok(true) => Err(format!("{upstream} already contains this work")),
+        Err(Landing::Failed { detail, .. }) => Err(detail),
+        Err(_) => Err("the carry was interrupted".to_string()),
+    };
+    let moved = match &committed {
+        Ok(sha) => {
+            pr::run_cmd(
+                "git",
+                &["update-ref", &local, sha, &old],
+                &repo,
+                pr::GIT_TIMEOUT,
+            )
+            .await
+        }
+        Err(e) => Err(e.clone()),
+    };
+    drop(temp);
+    let (lines, ok) = (work.decisions[before..].to_vec(), moved.is_ok());
+    let _ = app.update_task(&task.id, move |t| {
+        t.decisions.extend(lines);
+        if ok {
+            t.base_sha = work.base_sha;
+            t.planner_tests = work.planner_tests;
+        }
+    });
+    moved.map(|_| ())
+}
+
 pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
-    let Some(task) = owed(app, id) else {
+    let Some(mut task) = owed(app, id) else {
         return record(app, id, Vec::new(), 0.0, true);
     };
     let repo = PathBuf::from(&task.repo);
@@ -229,6 +349,31 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
         }
     }
+    // Never push from a stale base: carry onto the newest one first.
+    if let Err(e) = carry_for_pr(app, &task).await {
+        record(
+            app,
+            id,
+            vec![format!(
+                "PR: not opened: the work could not be carried onto the newest base ({e}); nothing was pushed"
+            )],
+            0.0,
+            true,
+        );
+        notify_owner(
+            app,
+            &task.repo,
+            format!(
+                "Task \"{}\" is done but its pull request was not opened: the work could not be carried onto the newest base ({e}). Nothing was pushed; the work is on branch {}. Carry it by hand, then open it with task_pr.",
+                task.title, task.branch
+            ),
+        );
+        return;
+    }
+    let Some(fresh) = owed(app, id) else {
+        return record(app, id, Vec::new(), 0.0, true);
+    };
+    task = fresh;
     // A restart reuses what the first run chose and drafts nothing again.
     let plan = match task.pr_plan.clone() {
         Some(plan) => plan,
@@ -324,10 +469,11 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             } else {
                 format!(" after {} tries", tries + 1)
             };
+            let hint = scope_hint(&e);
             record(
                 app,
                 id,
-                vec![format!("PR: not opened{tried}: {e}")],
+                vec![format!("PR: not opened{tried}: {e}.{hint}")],
                 0.0,
                 true,
             );
@@ -335,7 +481,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                 app,
                 &task.repo,
                 format!(
-                    "Task \"{}\" is done but its pull request was not opened{tried}: {e}. The work is on branch {}. Fix that, then open it with task_pr.",
+                    "Task \"{}\" is done but its pull request was not opened{tried}: {e}.{hint} The work is on branch {}. Fix that, then open it with task_pr.",
                     task.title, task.branch
                 ),
             );
@@ -547,6 +693,8 @@ mod tests {
             "git push failed: Permission denied (publickey)",
             "git push failed: remote: error: GH006: Protected branch update failed",
             "gh pr failed: HTTP 401: Bad credentials",
+            "remote: error: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
+            "remote: refusing to allow an OAuth App to create or update workflow `ci.yml` without `workflow` scope",
             "git fetch failed: fatal: 'origin' does not appear to be a git repository",
         ] {
             assert!(is_permanent(e), "{e}");

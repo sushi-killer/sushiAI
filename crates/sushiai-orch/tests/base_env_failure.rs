@@ -49,6 +49,20 @@ fn create(daemon: &Daemon, repo: &Path, check: &str) -> String {
     task["id"].as_str().unwrap().to_string()
 }
 
+/// Commits a worktree setup that logs every base checkout it runs in and
+/// fails (exit 4) when `fails` holds. Only a failed setup is an environment
+/// result: the command's own output never is.
+fn commit_setup(repo: &Path, log: &Path, fails: &str) {
+    let setup = json!({"setup": format!(
+        "case \"$PWD\" in */base-runs/*) echo \"$PWD\" >> {log}; if {fails}; then echo broken >&2; exit 4; fi;; esac; true",
+        log = log.display(),
+    )});
+    std::fs::create_dir_all(repo.join(".sushiai")).unwrap();
+    std::fs::write(repo.join(".sushiai/setup.json"), setup.to_string()).unwrap();
+    git_out(repo, &["add", ".sushiai/setup.json"]);
+    git_out(repo, &["commit", "-q", "-m", "add setup"]);
+}
+
 fn waiting(daemon: &Daemon, id: &str) -> Value {
     wait_until("the task to ask after its first attempt", || {
         let task = daemon.request("task.get", json!({"id": id}));
@@ -107,37 +121,31 @@ fn assert_unknown(daemon: &Daemon, task: &Value, check: &str) {
 }
 
 #[test]
-fn an_install_failure_is_retried_fresh_before_a_plain_base_failure_is_quoted() {
+fn a_failed_setup_is_retried_fresh_before_a_plain_base_failure_is_quoted() {
     let scripts = tempfile::tempdir().unwrap();
     let harness = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let log = scripts.path().join("base.log");
-    let check_script = fake_harness_script(
-        scripts.path(),
-        "check.sh",
-        &format!(
-            "#!/bin/sh\ncase \"$PWD\" in */base-runs/*)\n echo \"$PWD\" >> {log}\n if [ \"$(wc -l < {log})\" -eq 1 ]; then echo 'npm ERR! eExIsT'; exit 1; fi;;\nesac\ncase \"$PWD\" in */base-runs/*);; *) echo worktree;; esac\necho 'plain base failure'; exit 1\n",
-            log = log.display(),
-        ),
-    );
-    let check = format!("sh {}", check_script.display());
+    // The worktree prints one more line than the base: not the base's failure alone.
+    let check = "case \"$PWD\" in */base-runs/*);; *) echo worktree;; esac; echo 'plain base failure'; exit 1";
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", harness.to_str().unwrap())]);
     prepare(&daemon);
     let repo = init_git_repo();
-    let id = create(&daemon, repo.path(), &check);
+    commit_setup(
+        repo.path(),
+        &log,
+        &format!("[ \"$(wc -l < {})\" -eq 1 ]", log.display()),
+    );
+    let id = create(&daemon, repo.path(), check);
     let task = waiting(&daemon, &id);
     assert_eq!(task["question"]["kind"], "preexisting_failure", "{task}");
     let text = task["question"]["text"].as_str().unwrap();
     assert!(text.contains("plain base failure"), "{task}");
-    assert!(!text.to_ascii_lowercase().contains("eexist"), "{task}");
+    assert!(!text.contains("broken"), "{task}");
     let rows = cached(&daemon);
     assert!(rows.iter().any(|r| {
         r["outcome"]["command"] == check && r["outcome"]["tail"] == "plain base failure\n"
     }));
-    assert!(rows.iter().all(|r| !r["outcome"]["tail"]
-        .as_str()
-        .unwrap()
-        .to_ascii_lowercase()
-        .contains("eexist")));
+    assert!(rows.iter().all(|r| r["outcome"]["setupFailed"].is_null()));
     assert_fresh_and_removed(&log, 3);
     let wt = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
@@ -145,50 +153,38 @@ fn an_install_failure_is_retried_fresh_before_a_plain_base_failure_is_quoted() {
 }
 
 #[test]
-fn persistent_environment_failures_run_exactly_twice_and_remain_unknown() {
-    for marker in [
-        "npm ERR! EEXIST",
-        "FaIlEd To InStAlL dependencies",
-        "SETUP FAILED",
-    ] {
-        let scripts = tempfile::tempdir().unwrap();
-        let harness = fake_harness_script(scripts.path(), "fake.sh", FAKE);
-        let log = scripts.path().join("base.log");
-        let check_script = fake_harness_script(
-            scripts.path(),
-            "check.sh",
-            &format!(
-                "#!/bin/sh\ncase \"$PWD\" in */base-runs/*) echo \"$PWD\" >> {}; echo '{marker}'; exit 1;; esac\necho 'task failure'; exit 1\n",
-                log.display(),
-            ),
-        );
-        let check = format!("sh {}", check_script.display());
-        let daemon = Daemon::spawn(&[
-            ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
-            ("BASE_LOG", log.to_str().unwrap()),
-        ]);
-        prepare(&daemon);
-        let repo = init_git_repo();
-        let id = create(&daemon, repo.path(), &check);
-        let task = waiting(&daemon, &id);
-        assert_unknown(&daemon, &task, &check);
-        assert_fresh_and_removed(&log, 2);
-        // Another task may try the same pair again: the first task's
-        // completed job receipt is not a cached answer for this base.
-        let id2 = create(&daemon, repo.path(), &check);
-        let task2 = waiting(&daemon, &id2);
-        assert_unknown(&daemon, &task2, &check);
-        assert_fresh_and_removed(&log, 4);
-        let wt = task["worktree"].as_str().unwrap().to_string();
-        let wt2 = task2["worktree"].as_str().unwrap().to_string();
-        daemon.shutdown_and_wait();
-        remove_dir_retrying(wt);
-        remove_dir_retrying(wt2);
-    }
+fn a_persistent_setup_failure_runs_exactly_twice_and_remains_unknown() {
+    let scripts = tempfile::tempdir().unwrap();
+    let harness = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let log = scripts.path().join("base.log");
+    let check =
+        "case \"$PWD\" in */base-runs/*);; *) echo worktree;; esac; echo 'task failure'; exit 1";
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
+        ("BASE_LOG", log.to_str().unwrap()),
+    ]);
+    prepare(&daemon);
+    let repo = init_git_repo();
+    commit_setup(repo.path(), &log, "true");
+    let id = create(&daemon, repo.path(), check);
+    let task = waiting(&daemon, &id);
+    assert_unknown(&daemon, &task, check);
+    assert_fresh_and_removed(&log, 2);
+    // Another task may try the same pair again: the first task's
+    // completed job receipt is not a cached answer for this base.
+    let id2 = create(&daemon, repo.path(), check);
+    let task2 = waiting(&daemon, &id2);
+    assert_unknown(&daemon, &task2, check);
+    assert_fresh_and_removed(&log, 4);
+    let wt = task["worktree"].as_str().unwrap().to_string();
+    let wt2 = task2["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(wt);
+    remove_dir_retrying(wt2);
 }
 
 #[test]
-fn a_persisted_install_failure_is_discarded_after_a_restart() {
+fn a_persisted_setup_failure_is_discarded_after_a_restart() {
     let scripts = tempfile::tempdir().unwrap();
     let harness = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let env = [("ORCHD_CLAUDE_BIN", harness.to_str().unwrap())];
@@ -209,7 +205,7 @@ fn a_persisted_install_failure_is_discarded_after_a_restart() {
         .iter_mut()
         .find(|r| r["outcome"]["command"] == check)
         .unwrap();
-    row["outcome"]["tail"] = json!("npm ERR! EEXIST: failed to install");
+    row["outcome"]["setupFailed"] = json!(true);
     std::fs::write(
         daemon.data_dir().join("base-results.json"),
         serde_json::to_vec(&rows).unwrap(),
@@ -282,15 +278,13 @@ fn environment_and_flaky_reruns_have_separate_budgets() {
         let scripts = tempfile::tempdir().unwrap();
         let harness = fake_harness_script(scripts.path(), "fake.sh", FAKE);
         let log = scripts.path().join("base.log");
-        let check_script = fake_harness_script(
-            scripts.path(),
-            "check.sh",
-            &format!(
-                "#!/bin/sh\ncase \"$PWD\" in */base-runs/*) echo \"$PWD\" >> {log}; n=$(wc -l < {log}); if [ \"$n\" -eq 1 ]; then echo EEXIST; exit 1; fi; if {ordinary_failure} && [ \"$n\" -eq 2 ]; then echo 'ordinary failure'; exit 1; fi;; esac; true\n",
-                log = log.display(),
-            ),
+        let runs = scripts.path().join("check.log");
+        // The first base checkout fails its setup, so the command does not
+        // run there; its first run on a good checkout may fail once.
+        let check = format!(
+            "case \"$PWD\" in */base-runs/*) echo run >> {runs}; if {ordinary_failure} && [ \"$(wc -l < {runs})\" -eq 1 ]; then echo 'ordinary failure'; exit 1; fi;; esac; true",
+            runs = runs.display(),
         );
-        let check = format!("sh {}", check_script.display());
         let daemon = Daemon::spawn(&[
             ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
             ("BASE_LOG", log.to_str().unwrap()),
@@ -298,6 +292,11 @@ fn environment_and_flaky_reruns_have_separate_budgets() {
         ]);
         prepare(&daemon);
         let repo = init_git_repo();
+        commit_setup(
+            repo.path(),
+            &log,
+            &format!("[ \"$(wc -l < {})\" -eq 1 ]", log.display()),
+        );
         let id = create(&daemon, repo.path(), &check);
         let task = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
         assert_eq!(task["status"], "done", "{task}");

@@ -32,6 +32,7 @@ fn parse_task(text: &str) -> Result<Task, serde_json::Error> {
     migrate_loop_state(&mut task);
     migrate_base_and_permission_state(&mut task);
     migrate_final_check_failures(&mut task);
+    crate::engine::migrate_check_sources(&mut task);
     Ok(task)
 }
 
@@ -773,7 +774,64 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Attempt, AttemptStatus, Harness, Stage, Tier};
+    use crate::model::{Attempt, AttemptStatus, CheckSource, Harness, Stage, Tier};
+
+    #[test]
+    fn an_older_task_gets_the_source_of_each_planner_command() {
+        let mut task = sample_task("old", TaskStatus::Waiting, AttemptStatus::Passed);
+        task.criteria = vec!["a -- check: grep -q x f".into(), "b".into()];
+        task.request = Some("Please run `make owner` too".into());
+        task.verify = vec!["true".into(), "go test ./...".into(), "make owner".into()];
+        let mut value = serde_json::to_value(&task).unwrap();
+        value["plannerTests"] = serde_json::json!({
+            "commands": ["true", "grep -q x f", "make owner", "make other", "go test ./..."]
+        });
+        let task = parse_task(&value.to_string()).unwrap();
+        let source = |c: &str| {
+            task.planner_tests
+                .sources
+                .iter()
+                .find(|s| s.command == c)
+                .map(|s| s.source)
+        };
+        assert_eq!(source("true"), Some(CheckSource::Repo));
+        // A legacy command the plan no longer holds is not recorded: the repo's.
+        assert_eq!(source("make other"), None);
+        assert_eq!(source("go test ./..."), Some(CheckSource::Repo));
+        assert_eq!(source("grep -q x f"), Some(CheckSource::Planner));
+        assert_eq!(source("make owner"), Some(CheckSource::Owner));
+        assert!(task.planner_tests.legacy_commands.is_empty());
+    }
+
+    #[test]
+    fn a_plan_records_who_wrote_each_command_and_the_stricter_source_wins() {
+        let mut task = sample_task("new", TaskStatus::Waiting, AttemptStatus::Passed);
+        task.criteria = vec![
+            "a -- check: pytest".into(),
+            "b -- check: grep -q x f".into(),
+        ];
+        task.verify = vec!["pytest".into()];
+        task.final_verify = vec!["make owner".into()];
+        task.record_check_sources(|_, c, in_verify| match (c, in_verify) {
+            ("make owner", _) => CheckSource::Owner,
+            ("pytest", true) => CheckSource::Repo,
+            _ => CheckSource::Planner,
+        });
+        let got: Vec<_> = task
+            .planner_tests
+            .sources
+            .iter()
+            .map(|s| (s.command.as_str(), s.source))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("pytest", CheckSource::Repo),
+                ("make owner", CheckSource::Owner),
+                ("grep -q x f", CheckSource::Planner),
+            ]
+        );
+    }
 
     fn sample_task(id: &str, status: TaskStatus, attempt_status: AttemptStatus) -> Task {
         Task {

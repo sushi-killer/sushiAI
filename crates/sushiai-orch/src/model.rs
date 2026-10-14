@@ -1585,6 +1585,26 @@ pub struct PlannedTest {
     pub content: String,
 }
 
+/// Who wrote a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckSource {
+    /// The planner wrote it for this task.
+    Planner,
+    /// The repo's own verify, CI or preset command.
+    Repo,
+    /// The owner wrote it in the request or an answer.
+    Owner,
+}
+
+/// A command of the plan and who wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcedCheck {
+    pub command: String,
+    pub source: CheckSource,
+}
+
 /// The planner's tests and the files the implementer may not change.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1608,11 +1628,15 @@ pub struct PlannerTests {
     /// on; a claim is judged once per file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled: Vec<String>,
-    /// The commands the planner wrote into the plan (verify, finalVerify,
-    /// checks, the held-out check), recorded when the plan is stored. Only
-    /// these may be dropped without the owner.
+    /// Where each command of the plan came from, recorded when the plan is
+    /// stored. A command not listed is the repo's. Only a `Planner` command
+    /// may be dropped without the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub commands: Vec<String>,
+    pub sources: Vec<SourcedCheck>,
+    /// Older tasks stored the planner's commands as bare strings; the store
+    /// converts them once into `sources` (`store::migrate_check_sources`).
+    #[serde(default, rename = "commands", skip_serializing)]
+    pub legacy_commands: Vec<String>,
 }
 
 /// The implementer's own work: the diff from the task's base without the
@@ -1671,28 +1695,47 @@ impl Task {
 }
 
 impl Task {
-    /// Records the commands now in the plan as the planner's: verify,
-    /// finalVerify, the checks, the held-out check and the `-- check:` part
-    /// of each criterion.
-    pub fn record_planner_commands(&mut self) {
-        self.planner_tests.commands = self
-            .verify
+    /// The commands the planner wrote for this task, each with whether it
+    /// sits in verify or finalVerify: those, the checks, the held-out check
+    /// and the `-- check:` part of each criterion.
+    pub fn planner_check_commands(&self) -> Vec<(String, bool)> {
+        self.verify
             .iter()
             .chain(&self.final_verify)
+            .cloned()
+            .map(|c| (c, true))
             .chain(
                 self.checks
                     .iter()
                     .chain(self.held_out.as_ref())
-                    .map(|c| &c.run),
+                    .map(|c| (c.run.clone(), false)),
             )
-            .cloned()
             .chain(
                 self.criteria
                     .iter()
                     .filter_map(|c| c.split_once("-- check:"))
-                    .map(|(_, command)| command.trim().to_string()),
+                    .map(|(_, command)| (command.trim().to_string(), false)),
             )
-            .collect();
+            .collect()
+    }
+
+    /// Records the source of each command now in the plan. `classify` rules
+    /// on one command (and whether it sits in verify or finalVerify); a
+    /// command in several places gets the stricter source, the first that is
+    /// not `Planner`. A command from a setting or a preset is never
+    /// recorded, so it counts as the repo's.
+    pub fn record_check_sources(&mut self, classify: impl Fn(&Task, &str, bool) -> CheckSource) {
+        let mut sources: Vec<SourcedCheck> = Vec::new();
+        for (command, in_verify) in self.planner_check_commands() {
+            let source = classify(self, &command, in_verify);
+            match sources.iter_mut().find(|s| s.command == command) {
+                Some(known) if known.source == CheckSource::Planner => known.source = source,
+                Some(_) => {}
+                None => sources.push(SourcedCheck { command, source }),
+            }
+        }
+        self.planner_tests.sources = sources;
+        self.planner_tests.legacy_commands.clear();
     }
 }
 

@@ -702,7 +702,10 @@ mod tests {
             "Own -- check: test -f made.txt".into(),
         ];
         task.request = Some("Run `npm run ci`".into());
-        task.planner_tests.commands = vec!["test -f made.txt".into()];
+        task.planner_tests.sources = vec![crate::model::SourcedCheck {
+            command: "test -f made.txt".into(),
+            source: crate::model::CheckSource::Planner,
+        }];
         task.planner_tests.files = vec![crate::model::PlannedTest {
             path: "made.txt".into(),
             content: String::new(),

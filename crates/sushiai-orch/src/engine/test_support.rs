@@ -51,7 +51,10 @@ pub(crate) fn planner_made(task: &mut Task, command: &str, path: &str) {
         path: path.to_string(),
         content: String::new(),
     });
-    task.planner_tests.commands.push(command.to_string());
+    task.planner_tests.sources.push(crate::model::SourcedCheck {
+        command: command.to_string(),
+        source: crate::model::CheckSource::Planner,
+    });
 }
 
 pub(crate) fn task_with_status(status: TaskStatus) -> Task {

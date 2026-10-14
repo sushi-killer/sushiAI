@@ -565,7 +565,9 @@ pub(super) fn store_draft(
             "Orchestrator: verify entry {suite} is a whole-repo suite; moved to finalVerify"
         ));
     }
-    task.record_planner_commands();
+    task.record_check_sources(|t, c, in_verify| {
+        answer_policy::classify_check_source(t, worktree, c, in_verify)
+    });
     task.brief_check.screenshot = draft
         .screenshot
         .clone()
@@ -1664,7 +1666,10 @@ async fn split_into_subtasks(
             child.brief_check.check = (!check.is_empty()).then(|| check.to_string());
             child.planned_by_parent = drafted.complete;
             if drafted.complete {
-                child.record_planner_commands();
+                let repo = PathBuf::from(&child.repo);
+                child.record_check_sources(|t, c, in_verify| {
+                    answer_policy::classify_check_source(t, &repo, c, in_verify)
+                });
             }
         }
         if let Err(e) = app.store.save_task(&child) {

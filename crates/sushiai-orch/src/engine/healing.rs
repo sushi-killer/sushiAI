@@ -882,7 +882,7 @@ pub(super) async fn findings_old_on_base(
         let Some(run) = run.filter(|_| detail.caused_by_diff == Some(false)) else {
             continue;
         };
-        if task.planner_tests.commands.iter().any(|c| c == &run)
+        if task.planner_tests.sources.iter().any(|c| c.command == run)
             || !base_check::targets_absent_on_base(&task.repo, &task.base_sha, &run).is_empty()
         {
             continue;

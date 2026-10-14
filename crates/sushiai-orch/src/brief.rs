@@ -463,11 +463,11 @@ pub fn build_advisor_brief(task: &Task, diff: &str, failure_detail: &str) -> Str
 }
 
 /// What the pull request drafter is asked: read the repo's own contributor
-/// rules and draft the branch name, title and body of the pull request for
-/// the finished task. Read-only; the reply is one JSON object.
+/// rules and draft the title and body of the pull request for the finished
+/// task. Read-only; the reply is one JSON object.
 pub fn build_pr_draft_brief(task: &Task, diff: &str) -> String {
     let mut out = String::from(
-        "## Pull request draft\n\nThis task is finished on its own branch and will be opened as a pull request. Read-only: do not edit files. First read the repository's contributor rules if they exist: AGENTS.md, CLAUDE.md, CONTRIBUTING.md, .github/pull_request_template.md, and any document those name about pull request titles, branch names or release notes. Then draft the pull request exactly as those rules ask (branch name prefix, title format, body template, release note fragment mentions). Without rules, use a short branch name, a plain title and a body that says what changed and why.\n\nReply with ONLY one JSON object and nothing else: {\"branch\":\"...\",\"title\":\"...\",\"body\":\"...\"}. The branch is the name for the remote branch, never the repository's default branch.\n\n## Task\n\n",
+        "## Pull request draft\n\nThis task is finished on its own branch and will be opened as a pull request. Read-only: do not edit files. First read the repository's contributor rules if they exist: AGENTS.md, CLAUDE.md, CONTRIBUTING.md, .github/pull_request_template.md, and any document those name about pull request titles or release notes. Then draft the pull request exactly as those rules ask (title format, body template, release note fragment mentions). Without rules, use a plain title and a body that says what changed and why.\n\nReply with ONLY one JSON object and nothing else: {\"title\":\"...\",\"body\":\"...\"}.\n\n## Task\n\n",
     );
     out.push_str(&task.title);
     out.push_str("\n\n");
@@ -485,6 +485,39 @@ pub fn build_pr_draft_brief(task: &Task, diff: &str) -> String {
     }
     out.push_str("\n## Diff against the base\n\n");
     out.push_str(&untrusted_block("The task's diff", diff));
+    out
+}
+
+/// What the body check is asked: compare the drafted pull request body with
+/// the final diff and the check results, and name only what is false. Read-only;
+/// the reply is one JSON object.
+pub fn build_pr_truth_brief(task: &Task, body: &str, diff: &str) -> String {
+    let mut out = String::from(
+        "## Pull request body check\n\nThe pull request body below is about to be published for this finished task. Read-only: do not edit files. Check each claim in the body against the diff and the check results. A claim is false when the diff does not show it: a file, test, behaviour or result the diff does not contain, or a check that did not pass. Do not judge wording or style.\n\nReply with ONLY one JSON object and nothing else: {\"ok\":true,\"corrections\":[]} when every claim holds. Otherwise {\"ok\":false,\"corrections\":[\"...\"],\"body\":\"...\"}, where each correction names one false claim and body is the complete corrected body with those claims fixed or removed.\n\n## Check results\n\n",
+    );
+    out.push_str(&verify_results(task));
+    out.push_str("\n## The drafted body\n\n");
+    out.push_str(&untrusted_block("The drafted body", body));
+    out.push_str("\n## Diff against the base\n\n");
+    out.push_str(&untrusted_block("The task's diff", diff));
+    out
+}
+
+/// The commands the last passing attempt ran, with their exit codes.
+fn verify_results(task: &Task) -> String {
+    let passed = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
+    let mut out = String::new();
+    for v in passed.map_or(&[][..], |a| a.verify.as_slice()) {
+        let code = v.code.map_or_else(|| "none".to_string(), |c| c.to_string());
+        out.push_str(&format!("- `{}`: exit code {code}\n", v.command));
+    }
+    if out.is_empty() {
+        out.push_str("No check results were recorded.\n");
+    }
     out
 }
 

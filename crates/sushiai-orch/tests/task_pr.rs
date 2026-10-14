@@ -21,7 +21,14 @@ case "$1 $2" in
   "pr list") [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
   "pr create")
     if [ -f "$dir/fail" ]; then echo "boom from gh" >&2; exit 1; fi
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) printf '%s' "$2" > "$dir/head" ;; --title) printf '%s' "$2" > "$dir/title" ;; esac
+      shift
+    done
     touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr view")
+    sha=$(git ls-remote origin "refs/heads/$(cat "$dir/head")" | cut -f1)
+    printf '{"url":"https://github.example/acme/app/pull/7","headRefOid":"%s","title":"%s"}\n' "$sha" "$(cat "$dir/title")" ;;
 esac
 "#;
 

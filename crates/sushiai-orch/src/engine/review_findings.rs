@@ -94,7 +94,7 @@ pub(super) fn move_minor_findings(task: &mut Task, attempt_n: u32, r: &mut Revie
 /// and gives each its id: the registered finding it named, else a new one.
 /// The id is in the finding's `details` and marked in its text. A finding
 /// the registry holds as resolved and that comes back is kept as a repeat
-/// that is handled at once: its scenario is rerun, or the judge rules on it.
+/// that is handled at once: its scenario is rerun, or the next review rules on it.
 /// A finding open since an earlier review run, or
 /// reopened, is a repeat.
 pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: &mut ReviewResult) {
@@ -126,7 +126,7 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
                 rec.handled = false;
                 repeat = true;
                 task.decisions.push(format!(
-                    "Orchestrator: review finding {id} came back after it was resolved; kept, its scenario or the judge rules on it"
+                    "Orchestrator: review finding {id} came back after it was resolved; kept, its scenario or the next review rules on it"
                 ));
                 id
             }

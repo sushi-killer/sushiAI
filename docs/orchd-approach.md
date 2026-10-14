@@ -47,6 +47,21 @@ you change `crates/sushiai-orch`.
    turn. A point fix that adds a special case needs a note why an agent turn
    does not fit.
 
+10. **Determinism only after a named failure.** A new code guard names the
+    live failure that justified it (task id or test) in its commit message.
+    No guard "just in case".
+11. **One check at the boundary.** Check a fact once where it enters
+    (harness output, git, the owner), not again in every step that uses it.
+12. **A guard no test can reach is a comment.** Every gate and fast path has a
+    test that drives it. Each typed outcome (done, each question kind, each
+    failure kind) has one fixture with stubbed agent output.
+13. **Agent output has a schema.** Every agent turn runs with a JSON schema
+    (`claude --json-schema`, `codex exec --output-schema`). Output that does
+    not validate is a failed turn, never parsed leniently.
+14. **An agent verdict that lowers caution needs evidence code can check.**
+    "Inherited" or "environment" holds only when its named tests appear in the
+    base run; without evidence the failure is the task's.
+
 ## Before you add code to orchd
 
 - Is this a gate, bookkeeping, a fast path or API? If not, it is an agent turn.

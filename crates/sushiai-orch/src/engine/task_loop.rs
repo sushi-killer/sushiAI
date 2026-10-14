@@ -1912,7 +1912,7 @@ pub(super) async fn run_task_loop(
                     let wt = worktree.clone();
                     let now_base = task.base_sha.clone();
                     let diff = tokio::task::spawn_blocking(move || {
-                        crate::engine::healing::own_ui_changes_since(
+                        crate::engine::healing::own_changes_since(
                             &wt,
                             &old_tree,
                             old_base.as_deref(),
@@ -1926,7 +1926,7 @@ pub(super) async fn run_task_loop(
                             task.attempts[idx].evidence = old_evidence;
                             task.attempts[idx].evidence_from = Some(m);
                             task.decisions.push(format!(
-                                "Orchestrator: attempt {n} changed no UI file of its own since attempt {m} (artifacts, tests and carried-in base commits do not count); reused attempt {m}'s evidence"
+                                "Orchestrator: attempt {n} changed no file of its own since attempt {m} (artifacts, tests and carried-in base commits do not count); reused attempt {m}'s evidence"
                             ));
                             app.save_task_logged(&task);
                             app.broadcast_task(&task);

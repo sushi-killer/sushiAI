@@ -401,8 +401,8 @@ command counts as a failure. When review marks the same criterion unmet in two
 attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
 criterion is amended and the same attempt reviewed again). A planner-named
 screenshot command is run by the orchestrator itself; otherwise an earlier attempt's
-images count while no UI file it changed has changed. After the first attempt
-only P0/P1 findings about the task's own work block; the rest are report
+images count while no non-test file it changed has changed. After the first attempt
+only P0/P1 findings the reviewer marks `causedByDiff` (or leaves unmarked) block; the rest are report
 follow-ups. An owner or policy answer that contradicts a criterion amends it
 before the next attempt and review. A brief-check contradiction in a planner
 draft resumes the planner's own session once with the conflict (a short
@@ -446,7 +446,7 @@ flowchart TD
   evidence["Evidence gate<br/>visual criterion needs a saved image, or the images of an<br/>earlier attempt when only artifacts/ or tests changed since"]
   impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
-  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees only the open findings,<br/>the criteria not yet ruled met and the task's own changes since"]
+  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees the numbered criteria not yet ruled met,<br/>the findings registry (ids) and the task's own changes since"]
   final["Final checks<br/>task.finalVerify, alongside review after the fast gates<br/>passing results are kept through review questions"]
   join{"Review accepted and final checks pass"}
   baserun{"Same command on the base?<br/>base lookup: the cache, else the in-flight job,<br/>else one job in a throwaway worktree on base sha"}
@@ -498,7 +498,7 @@ flowchart TD
   judge["Tie-break judge<br/>read-only, cheapest route never weaker than the implementer, not the reviewer, once per finding"]
   judge -->|"invalid: drop the finding as an assumption, review the same attempt again"| review
   judge -->|"valid / no verdict / no route"| fail
-  fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage
+  fail -->|"review finding the registry holds open from an earlier run: first one runs the advisor and tiers up, second waits"| triage
   fail --> budget
   budget -->|yes| impl
   budget -->|no| triage --> ownerQ

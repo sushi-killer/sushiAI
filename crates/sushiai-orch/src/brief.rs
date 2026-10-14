@@ -2102,7 +2102,7 @@ fn review_brief(
     }
     if !screenshots.is_empty() {
         let carry_note = evidence_from
-            .map(|n| format!(" Earlier images from attempt {n} count because no UI file it changed has changed since."))
+            .map(|n| format!(" Earlier images from attempt {n} count because no file it changed (tests aside) has changed since."))
             .unwrap_or_default();
         out.push_str(&format!("\n## Screenshots\n\nOpen each one and check it against the criteria it is meant to prove; a screenshot that does not show what a criterion claims is a finding. Each is labelled with the attempt that saved it.{carry_note}\n\n"));
         for (shown, attempt) in screenshots {

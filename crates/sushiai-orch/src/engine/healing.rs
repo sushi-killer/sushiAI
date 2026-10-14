@@ -785,11 +785,11 @@ pub(super) async fn heal_repeated_unmet(
 // 3. Evidence
 // ---------------------------------------------------------------------------
 
-/// UI files (not tests) the task itself changed between an earlier attempt's
+/// Files (not tests) the task itself changed between an earlier attempt's
 /// evidence tree and the worktree now. Files that differ only because the base
 /// moved (carried-in commits, a conflict resolved onto a new base) are not the
 /// task's doing; without the earlier base every difference counts.
-pub(super) fn own_ui_changes_since(
+pub(super) fn own_changes_since(
     wt: &Path,
     old_tree: &str,
     old_base: Option<&str>,
@@ -800,31 +800,7 @@ pub(super) fn own_ui_changes_since(
         Some(old_base) => git::own_changes_between(wt, old_tree, old_base, &now, now_base)?,
         None => git::diff_trees_name_only(wt, old_tree, &now)?,
     };
-    Ok(paths
-        .into_iter()
-        .filter(|p| is_ui_path(p) && !is_test_path(p))
-        .collect())
-}
-
-/// Whether a repo-relative path is a UI file, by its extension or a UI-ish
-/// directory name.
-pub(super) fn is_ui_path(path: &str) -> bool {
-    const EXT: [&str; 12] = [
-        "tsx", "jsx", "vue", "svelte", "css", "scss", "sass", "less", "html", "htm", "svg", "xib",
-    ];
-    const DIRS: [&str; 8] = [
-        "components",
-        "ui",
-        "views",
-        "pages",
-        "screens",
-        "styles",
-        "renderer",
-        "frontend",
-    ];
-    let lower = path.to_ascii_lowercase();
-    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    EXT.contains(&ext) || lower.split('/').any(|seg| DIRS.contains(&seg))
+    Ok(paths.into_iter().filter(|p| !is_test_path(p)).collect())
 }
 
 /// Runs the planner's screenshot command in the worktree and saves the
@@ -1143,15 +1119,6 @@ mod tests {
         assert!(!heal_grep_dashes(&mut task));
     }
 
-    #[test]
-    fn ui_paths_are_told_by_extension_or_directory() {
-        assert!(is_ui_path("src/App.tsx"));
-        assert!(is_ui_path("web/styles/main.css"));
-        assert!(is_ui_path("app/components/x.js"));
-        assert!(!is_ui_path("orchd/src/engine/plan.rs"));
-        assert!(!is_ui_path("README.md"));
-    }
-
     fn scoped(findings: &[(&str, Option<bool>)], criteria: Vec<CriterionRuling>) -> ReviewResult {
         let mut findings_text: Vec<String> =
             findings.iter().map(|(text, _)| text.to_string()).collect();
@@ -1324,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_survives_carried_in_base_commits_but_not_the_tasks_own_ui_edit() {
+    fn evidence_survives_carried_in_base_commits_but_not_the_tasks_own_edit() {
         let (_tmp, repo, git) = evidence_repo();
         let base1 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-b", "task"]);
@@ -1342,24 +1309,24 @@ mod tests {
         std::fs::create_dir_all(repo.join("orchd")).unwrap();
         std::fs::write(repo.join("orchd/x.rs"), "r\n").unwrap();
         // Only carried-in commits changed files: reuse.
-        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+        assert!(own_changes_since(&repo, &old_tree, Some(&base1), &base2)
             .unwrap()
             .is_empty());
         // Without the earlier base the carried-in file looks like a change.
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, None, &base2).unwrap(),
-            vec!["Landed.tsx".to_string()]
+            own_changes_since(&repo, &old_tree, None, &base2).unwrap(),
+            vec!["Landed.tsx".to_string(), "orchd/x.rs".to_string()]
         );
-        // The task edits its own UI file: new evidence needed.
+        // The task edits its own file: new evidence needed.
         std::fs::write(repo.join("Button.tsx"), "v2\n").unwrap();
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            own_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
             vec!["Button.tsx".to_string()]
         );
     }
 
     #[test]
-    fn a_conflict_resolution_outside_the_ui_keeps_the_evidence() {
+    fn a_conflict_resolution_in_any_non_test_file_needs_fresh_evidence() {
         let (_tmp, repo, git) = evidence_repo();
         let base1 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-b", "task"]);
@@ -1373,14 +1340,27 @@ mod tests {
         let base2 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "task"]);
         std::fs::write(repo.join("notes.md"), "merged\n").unwrap();
-        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+        assert_eq!(
+            own_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            vec!["notes.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_non_ui_source_edit_reruns_the_screenshot_and_a_test_edit_does_not() {
+        let (_tmp, repo, git) = evidence_repo();
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        let old_tree = git::worktree_tree(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/render.rs"), "t\n").unwrap();
+        assert!(own_changes_since(&repo, &old_tree, Some(&base), &base)
             .unwrap()
             .is_empty());
-        // A resolution that rewrites a UI file needs fresh evidence.
-        std::fs::write(repo.join("Button.tsx"), "resolved\n").unwrap();
+        std::fs::write(repo.join("render.rs"), "fn draw() {}\n").unwrap();
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
-            vec!["Button.tsx".to_string()]
+            own_changes_since(&repo, &old_tree, Some(&base), &base).unwrap(),
+            vec!["render.rs".to_string()]
         );
     }
 }

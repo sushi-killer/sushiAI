@@ -293,6 +293,9 @@ pub struct Client {
     pub output: Vec<(u64, Vec<u8>)>,
     /// Notifications seen so far: `(method, params)`.
     pub notes: Vec<(String, Value)>,
+    /// Responses read while waiting for another one (or while pumping): a later `response`
+    /// call for their id takes them from here instead of waiting for a frame that was read.
+    pub unclaimed: Vec<sushiai_protocol::Response>,
 }
 
 impl Client {
@@ -307,6 +310,7 @@ impl Client {
             next_id: 1,
             output: Vec::new(),
             notes: Vec::new(),
+            unclaimed: Vec::new(),
         }
     }
 
@@ -348,16 +352,15 @@ impl Client {
     pub fn response(&mut self, method: &str, id: u64) -> Result<Value, RpcError> {
         let deadline = Instant::now() + self::deadline();
         while Instant::now() < deadline {
-            // File every frame of a read, so notifications that follow the response are kept.
-            let mut answer = None;
+            // File every frame of a read, so notifications that follow the response are kept,
+            // and keep the responses to other requests for their own `response` call.
             for frame in self.frames() {
                 if let Some(r) = self.file(frame) {
-                    if r.id == id {
-                        answer = Some(r);
-                    }
+                    self.unclaimed.push(r);
                 }
             }
-            if let Some(r) = answer {
+            if let Some(at) = self.unclaimed.iter().position(|r| r.id == id) {
+                let r = self.unclaimed.remove(at);
                 return match r.error {
                     Some(e) => Err(e),
                     None => Ok(r.result.unwrap_or_default()),
@@ -378,7 +381,9 @@ impl Client {
         while !done(self) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             for frame in self.frames() {
-                self.file(frame);
+                if let Some(r) = self.file(frame) {
+                    self.unclaimed.push(r);
+                }
             }
         }
     }

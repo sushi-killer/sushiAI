@@ -424,6 +424,11 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             } else {
                 draft.body.clone()
             };
+            let source = if task.unreviewed && !source.starts_with(super::pr::UNREVIEWED_LINE) {
+                format!("{}\n\n{source}", super::pr::UNREVIEWED_LINE)
+            } else {
+                source
+            };
             let body = truncate_chars(
                 &redact_pr_text(&source, &secrets, home.as_deref()),
                 MAX_BODY_CHARS,

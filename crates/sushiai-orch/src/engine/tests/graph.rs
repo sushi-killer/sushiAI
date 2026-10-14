@@ -147,3 +147,76 @@ async fn advance_graph_starts_no_part_of_a_parent_in_the_backlog() {
     app.advance_graph(&parent.repo);
     assert!(!app.controls.lock().unwrap().contains_key("c"));
 }
+
+/// A dependency that failed an hour ago with one check that exited `check_code`.
+fn failed_dependency(repo: &str, check_code: Option<i32>) -> Task {
+    let mut dep = graph_task("dep", TaskStatus::Failed, &[], None);
+    dep.repo = repo.into();
+    dep.updated_at = now_ms() - 3_600_000;
+    let mut attempt = attempt_with_failure(1, "verify:npm test failed");
+    attempt.verify = vec![VerifyOutcome {
+        command: "npm test".into(),
+        code: check_code,
+        tail: "no output".into(),
+        ms: 1,
+        load: 0.0,
+        cores: 1,
+        load_timeout: false,
+        decisions: vec![],
+        ..Default::default()
+    }];
+    dep.attempts = vec![attempt];
+    dep
+}
+
+#[tokio::test]
+async fn a_dependency_that_failed_on_a_timeout_is_restarted_once_by_itself() {
+    let (app, dir) = test_app();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repo = repo.to_string_lossy().to_string();
+    let dep = failed_dependency(&repo, None);
+    let mut task = graph_task("t", TaskStatus::Queued, &["dep"], None);
+    task.repo = repo.clone();
+    app.store.save_task(&dep).unwrap();
+    app.store.save_task(&task).unwrap();
+
+    app.ask_dependency_question(&task, &[dep.clone(), task.clone()], &["dep".to_string()]);
+
+    let dependent = app.store.load_task("t").unwrap().unwrap();
+    assert!(dependent.question.is_none(), "{:?}", dependent.question);
+    assert!(dependent
+        .decisions
+        .contains(&ladder::DEPENDENCY_RESTART_LINE.to_string()));
+    assert_ne!(
+        app.store.load_task("dep").unwrap().unwrap().status,
+        TaskStatus::Failed,
+        "the dependency was started again"
+    );
+
+    // Failing on the environment again: no second automatic restart.
+    assert!(!app.restart_environment_dependency(&dependent, &[dep], &["dep".to_string()]));
+}
+
+#[tokio::test]
+async fn a_dependency_that_failed_for_real_still_asks_the_owner() {
+    let (app, dir) = test_app();
+    app.settings.write().unwrap().answer_policy = false;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repo = repo.to_string_lossy().to_string();
+    let dep = failed_dependency(&repo, Some(1));
+    let mut task = graph_task("t", TaskStatus::Queued, &["dep"], None);
+    task.repo = repo.clone();
+    app.store.save_task(&dep).unwrap();
+    app.store.save_task(&task).unwrap();
+
+    app.ask_dependency_question(&task, &[dep, task.clone()], &["dep".to_string()]);
+
+    let dependent = app.store.load_task("t").unwrap().unwrap();
+    assert_eq!(dependent.status, TaskStatus::Waiting);
+    assert_eq!(
+        dependent.question.map(|q| q.kind),
+        Some(QuestionKind::DependencyEnded)
+    );
+}

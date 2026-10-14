@@ -717,6 +717,7 @@ fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> 
         method,
         "task.answer"
             | "task.amend"
+            | "task.start"
             | "task.stop"
             | "task.delete"
             | "repo.notes.add"
@@ -1352,7 +1353,7 @@ mod answer_source_tests {
         assert_eq!(task["source"], "mcp");
         let overseer = with_source("task.answer", json!({"id": "t"}), false, "overseer");
         assert_eq!(overseer["source"], "overseer");
-        let other = with_source("task.start", json!({"id": "t"}), true, "chat");
+        let other = with_source("task.get", json!({"id": "t"}), true, "chat");
         assert!(other.get("source").is_none());
         let create = with_source("task.create", json!({}), false, "overseer");
         assert_eq!(create["source"], "chat");

@@ -31,8 +31,9 @@ pub(super) const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 /// The "attempts keep failing" question: the orchestrator triages it first
 /// (it sees the last failure, e.g. the review findings, and can say what to
 /// fix or that a finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`]
-/// times per task; after that, or with auto-answer off, only the owner. The
-/// answer policy goes first: it continues once on its own.
+/// times per task; after that, or with auto-answer off, the failure ladder
+/// takes one changed approach and then fails the task (`ladder.rs`): the owner
+/// is never asked. The answer policy goes first: it continues once on its own.
 pub(super) async fn wait_for_exhausted_answer(
     app: &Arc<App>,
     task_id: &str,
@@ -46,135 +47,62 @@ pub(super) async fn wait_for_exhausted_answer(
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
-        wake_orchestrator_for_stuck(app, task);
         app.advance_queue(&task.repo);
         return None;
     }
-    let asked = task.question.clone();
     if let Some(text) = try_policy_answer(app, task, cancel).await {
-        return Some(Answered {
-            text,
-            by_owner: false,
-            shown: asked,
-        });
+        return Some(Answered { text });
     }
-    let continues = non_owner_continues(task);
-    if continues < MAX_ORCHESTRATOR_CONTINUES {
-        wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
-    } else {
-        let shown = task.question.clone();
-        park_for_answer(app, task_id, task, pending_answer, cancel, permit)
-            .await
-            .map(|text| Answered {
-                text,
-                by_owner: app.take_agent_answer(task_id).is_none(),
-                shown,
-            })
+    if non_owner_continues(task) < MAX_ORCHESTRATOR_CONTINUES {
+        if let Some(answered) = wait_for_triaged_answer(
+            app,
+            task_id,
+            task,
+            idx,
+            pending_answer,
+            cancel,
+            permit,
+            false,
+        )
+        .await
+        {
+            return Some(answered);
+        }
+        if cancel.is_cancelled() {
+            return None;
+        }
+    }
+    // The next rung is never an open question: one changed approach, then
+    // the task fails with a report (`ladder.rs`).
+    task.question = None;
+    if ladder::approach_changed(task) {
+        ladder::end_ladder(app, task);
+        return None;
+    }
+    task.status = TaskStatus::Queued;
+    Some(Answered {
+        text: "change approach".to_string(),
+    })
+}
+
+/// What an answer to "attempts keep failing" does besides extending the
+/// budget: `change approach` changes how the next attempt works.
+pub(super) fn settle_exhausted_answer(app: &App, task: &mut Task, idx: usize, answer: &str) {
+    if is_option(answer, "change approach") {
+        let settings = app.settings.read().unwrap().clone();
+        let attempt_n = task.attempts[idx].n;
+        ladder::change_approach(task, &settings, attempt_n);
+        task.queue.rate_pauses = 0;
+        // The loop reloads the task from disk before its next attempt.
+        task.updated_at = now_ms();
+        app.save_task_logged(task);
+        app.broadcast_task(task);
     }
 }
 
-/// An answer to a parked question and where it came from: only the owner's
-/// may accept an attempt. `shown` is the question the owner actually saw
-/// (triage may have replaced it on escalation), captured before parking
-/// clears `task.question`.
+/// An answer to a question that parked a loop.
 pub(super) struct Answered {
     pub text: String,
-    pub by_owner: bool,
-    pub shown: Option<Question>,
-}
-
-/// Whether the owner's free text tells orchd to accept the last attempt: one
-/// read-only session on the orchestrator route. No route, a harness error,
-/// a cancellation or a reply without a verdict all mean no.
-pub(super) async fn owner_accepts(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    question: &Question,
-    answer: &str,
-    cancel: &CancelToken,
-) -> bool {
-    let settings = app.settings.read().unwrap().clone();
-    let Some(route) = app.chat_route(&settings) else {
-        return false;
-    };
-    let attempt_n = task.attempts[idx].n;
-    let worktree = PathBuf::from(&task.worktree);
-    let Ok(run_dir) = app
-        .store
-        .claim_helper_run_dir(task_id, "accept-check", Some(attempt_n))
-    else {
-        return false;
-    };
-    let mcp_path = run_dir.join("mcp.json");
-    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-    let settings_path = run_dir.join("settings.json");
-    let key_path = run_dir.join("key");
-    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-    if matches!(route.harness, Harness::Claude) {
-        write_readonly_claude_settings_with_profile(
-            &route,
-            app,
-            &key_path,
-            &settings,
-            &deny_read,
-            &settings_path,
-        );
-    }
-    let req = harness::RunRequest {
-        harness: route.harness,
-        worktree: &worktree,
-        model: route.model.as_deref(),
-        effort: route.effort.as_deref(),
-        max_budget_usd: None,
-        review: true,
-        task_run: false,
-        task_sandbox: None,
-        mcp_config: Some(&mcp_path),
-        settings_path: Some(&settings_path),
-        network_allowed: false,
-        codex_mcp: &[],
-        images: &[],
-        repo_settings: true,
-        resume: None,
-    };
-    let brief_text = brief::build_accept_brief(task, &question.text, &question.options, answer);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-    let events_path = run_dir.join("events.jsonl");
-    let limit = app.helper_timeout();
-    let run_result = run_harness(
-        app,
-        task_id,
-        attempt_n,
-        RunTrack::No,
-        &worktree,
-        &req,
-        CostTag::task("triage", &route.id),
-        &brief_text,
-        &events_path,
-        cancel,
-        Guard::helper("accept-check", limit),
-    )
-    .await;
-    let _ = std::fs::remove_file(&key_path);
-    match run_result {
-        Ok(o) => {
-            if o.timed_out {
-                task.decisions
-                    .push(helper_timeout_message("accept-check", limit));
-            }
-            if let Some(cost) = o.cost_usd {
-                task.cost_usd += cost;
-            }
-            o.error.is_none()
-                && o.final_text
-                    .as_deref()
-                    .and_then(brief::parse_accept)
-                    .unwrap_or(false)
-        }
-        Err(_) => false,
-    }
 }
 
 /// [`park_for_answer`] after one shot at the answer policy: a rule or the
@@ -598,7 +526,9 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
 /// The wake prompt of a finished task: the one that tells the overseer to
 /// open the pull request, unless orchd owns that (`pr_pending`).
 fn done_prompt_key(task: &Task) -> &'static str {
-    if task.pr_pending {
+    if task.unreviewed && task.pr_pending {
+        "overseer_done_unreviewed"
+    } else if task.pr_pending {
         "overseer_done_pr_owned"
     } else {
         "overseer_done"
@@ -783,12 +713,23 @@ pub(super) async fn wait_for_answer_with_triage(
     if let Some(answer) = try_policy_answer(app, task, cancel).await {
         return Some(answer);
     }
-    wait_for_triaged_answer(app, task_id, task, idx, pending_answer, cancel, permit)
-        .await
-        .map(|a| a.text)
+    wait_for_triaged_answer(
+        app,
+        task_id,
+        task,
+        idx,
+        pending_answer,
+        cancel,
+        permit,
+        true,
+    )
+    .await
+    .map(|a| a.text)
 }
 
 /// [`wait_for_answer_with_triage`] once the answer policy has had its turn.
+/// With `park` false an unanswered question is not handed on: `None` comes
+/// back with the question untouched (the failure ladder has a next rung).
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_triaged_answer(
     app: &Arc<App>,
@@ -798,6 +739,7 @@ async fn wait_for_triaged_answer(
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
+    park: bool,
 ) -> Option<Answered> {
     let question = task.question.clone().unwrap_or_else(|| {
         Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
@@ -877,11 +819,9 @@ async fn wait_for_triaged_answer(
                 app.broadcast_task(task);
                 return Some(Answered {
                     text: decision.answer,
-                    by_owner: false,
-                    shown: Some(question),
                 });
             }
-            brief::TriageAction::Escalate if !auto_answer => {}
+            brief::TriageAction::Escalate if !auto_answer || !park => {}
             brief::TriageAction::Escalate => {
                 task.question = Some(Question {
                     text: decision.question,
@@ -899,14 +839,12 @@ async fn wait_for_triaged_answer(
             }
         }
     }
-    let shown = task.question.clone();
-    park_for_answer(app, task_id, task, pending_answer, cancel, permit)
-        .await
-        .map(|text| Answered {
-            text,
-            by_owner: app.take_agent_answer(task_id).is_none(),
-            shown,
-        })
+    if !park {
+        return None;
+    }
+    let text = park_for_answer(app, task_id, task, pending_answer, cancel, permit).await?;
+    app.take_agent_answer(task_id);
+    Some(Answered { text })
 }
 
 /// Wraps [`ask_plan_question`] with the same orchestrator-triage shot, for
@@ -1123,11 +1061,7 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.question = Some(Question::new(
             "Attempts keep failing with a review failure: continue, change approach, or stop?",
-            vec![
-                "continue".into(),
-                brief::ACCEPT_LAST_ATTEMPT.into(),
-                "stop".into(),
-            ],
+            vec!["continue".into(), "stop".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
         ));
@@ -1173,47 +1107,6 @@ mod tests {
                 .count(),
             1
         );
-    }
-
-    #[tokio::test]
-    async fn an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap() {
-        let (app, _dir) = test_app();
-        let mut task = exhausted_task();
-        app.store.save_task(&task).unwrap();
-        let accept = json!({"id": task.id, "answer": brief::ACCEPT_LAST_ATTEMPT, "source": "mcp"});
-        let err = app.handle_task_answer(accept).await.unwrap_err();
-        assert!(err.contains("owner's to pick"), "{err}");
-        for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
-            task.decisions
-                .push(format!("{EXHAUSTED_ANSWER_PREFIX} -> continue (r)"));
-        }
-        app.store.save_task(&task).unwrap();
-        let cont = json!({"id": task.id, "answer": "continue", "source": "mcp"});
-        let err = app.handle_task_answer(cont).await.unwrap_err();
-        assert!(err.contains("owner decides"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn an_escalated_exhausted_question_still_counts_toward_the_cap() {
-        let (app, _dir) = test_app();
-        let mut task = exhausted_task();
-        // Triage rewrote the text on escalation.
-        task.question.as_mut().unwrap().text = "Should I keep trying?".into();
-        app.store.save_task(&task).unwrap();
-        let q = task.question.clone();
-        for _ in 0..MAX_ORCHESTRATOR_CONTINUES {
-            record_answer(&mut task, q.as_ref(), "continue", AnsweredBy::Orchestrator);
-        }
-        assert_eq!(
-            task.decisions
-                .iter()
-                .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-                .count(),
-            MAX_ORCHESTRATOR_CONTINUES
-        );
-        app.store.save_task(&task).unwrap();
-        let cont = json!({"id": task.id, "answer": "continue", "source": "chat"});
-        assert!(app.handle_task_answer(cont).await.is_err());
     }
 
     #[tokio::test]
@@ -1403,31 +1296,6 @@ mod timeout_tests {
         ));
         assert_eq!(result.decision.question, "What now?");
         assert_helper_timeout(&task, "triage");
-    }
-
-    #[tokio::test]
-    async fn accept_check_timed_out_does_not_accept_the_attempt() {
-        let (app, _dir, mut task, _) = slow_helper_task();
-        let id = task.id.clone();
-        let question = Question::new(
-            "Accept?",
-            vec!["retry".into(), "stop".into()],
-            QuestionKind::AgentQuestion,
-            AskedBy::Implement,
-        );
-        assert!(
-            !owner_accepts(
-                &app,
-                &id,
-                &mut task,
-                0,
-                &question,
-                "ship it",
-                &CancelToken::new()
-            )
-            .await
-        );
-        assert_helper_timeout(&task, "accept-check");
     }
 }
 

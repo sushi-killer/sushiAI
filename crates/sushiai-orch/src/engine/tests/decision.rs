@@ -145,12 +145,12 @@ fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
     let mut task = task_with_status(TaskStatus::Running);
     task.tier_fallback = Some("no planner tier".into());
     task.attempts = vec![attempt_with_failure(1, "sig-a")];
-    assert!(advance_after_failure(&mut task, 4, &[]));
+    assert!(advance_after_failure(&mut task, 4));
     assert_eq!(task.tier, Tier::Standard);
     assert_eq!(task.tier_fallback.as_deref(), Some("no planner tier"));
     // The same failure again moves the task up a tier: the note goes.
     task.attempts.push(attempt_with_failure(2, "sig-a"));
-    assert!(advance_after_failure(&mut task, 4, &[]));
+    assert!(advance_after_failure(&mut task, 4));
     assert_eq!(task.tier, Tier::Hard);
     assert_eq!(task.tier_fallback, None);
 }
@@ -163,8 +163,8 @@ fn consecutive_same_signature_counts_trailing_run_only() {
         attempt_with_failure(3, "sig-b"),
         attempt_with_failure(4, "sig-b"),
     ];
-    assert_eq!(consecutive_same_signature(&attempts, "sig-b"), 3);
-    assert_eq!(consecutive_same_signature(&attempts, "sig-a"), 0);
+    assert_eq!(consecutive_same_signature(&attempts, "sig-b", |_| false), 3);
+    assert_eq!(consecutive_same_signature(&attempts, "sig-a", |_| false), 0);
 }
 
 #[test]
@@ -310,65 +310,16 @@ fn failed_with(kind: FailureKind, verify_codes: &[Option<i32>], changed: &[&str]
     task
 }
 
-fn options_after(task: &mut Task, protected: &[&str]) -> Vec<String> {
-    let protected: Vec<String> = protected.iter().map(|p| p.to_string()).collect();
-    assert!(!advance_after_failure(task, 1, &protected));
-    task.question.clone().unwrap().options
-}
-
 #[test]
-fn accepting_is_offered_before_stop_after_review_and_evidence_with_clean_verify() {
-    for kind in [FailureKind::Review, FailureKind::Evidence] {
+fn the_exhausted_question_offers_no_accept_option() {
+    for kind in [FailureKind::Review, FailureKind::Evidence, FailureKind::Verify] {
         let mut task = failed_with(kind, &[Some(0), Some(0)], &["src/a.ts"]);
+        assert!(!advance_after_failure(&mut task, 1));
         assert_eq!(
-            options_after(&mut task, &["src/app/**"]),
-            vec!["continue", "change approach", brief::ACCEPT_LAST_ATTEMPT, "stop"]
-        );
-    }
-    let mut task = failed_with(FailureKind::Review, &[], &[]);
-    assert!(options_after(&mut task, &[]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
-}
-
-#[test]
-fn accepting_is_not_offered_after_other_failures_or_a_bad_verify() {
-    for kind in [
-        FailureKind::Verify,
-        FailureKind::Heldout,
-        FailureKind::Error,
-        FailureKind::NoDeliverable,
-    ] {
-        let mut task = failed_with(kind, &[Some(0)], &["a.rs"]);
-        assert_eq!(
-            options_after(&mut task, &[]),
+            task.question.unwrap().options,
             vec!["continue", "change approach", "stop"]
         );
     }
-    for codes in [vec![Some(0), Some(1)], vec![None]] {
-        let mut task = failed_with(FailureKind::Review, &codes, &[]);
-        assert!(!options_after(&mut task, &[]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
-    }
-}
-
-#[test]
-fn accepting_is_not_offered_after_evidence_when_a_changed_file_is_protected() {
-    let mut task = failed_with(FailureKind::Evidence, &[Some(0)], &["src/x.ts", "src/app/Shell.tsx"]);
-    assert!(!options_after(&mut task, &["src/app/**"]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
-    // A review failure means the protected-path approval already happened.
-    let mut task = failed_with(FailureKind::Review, &[Some(0)], &["src/app/Shell.tsx"]);
-    assert!(options_after(&mut task, &["src/app/**"]).contains(&brief::ACCEPT_LAST_ATTEMPT.to_string()));
-}
-
-#[test]
-fn a_pending_acceptance_is_the_failed_review_attempt_with_the_accept_line_last() {
-    let mut task = failed_with(FailureKind::Review, &[Some(0)], &[]);
-    assert_eq!(pending_acceptance(&task), None);
-    task.decisions.push(accept_line(1));
-    assert_eq!(pending_acceptance(&task), Some(0));
-    task.decisions.push("Owner: continue".into());
-    assert_eq!(pending_acceptance(&task), None);
-    let mut task = failed_with(FailureKind::Verify, &[Some(0)], &[]);
-    task.decisions.push(accept_line(1));
-    assert_eq!(pending_acceptance(&task), None);
 }
 
 #[test]
@@ -463,7 +414,7 @@ fn failure_signature_without_a_named_failure_skips_boilerplate_and_clean_summari
 #[test]
 fn a_harness_error_that_changed_nothing_does_not_spend_the_attempt_budget() {
     let mut task = failed_with(FailureKind::Error, &[Some(0)], &[]);
-    assert!(advance_after_failure(&mut task, 1, &[]));
+    assert!(advance_after_failure(&mut task, 1));
     assert_eq!(task.status, TaskStatus::Queued);
     // The same error three times in a row still reaches the owner.
     let mut task = failed_with(FailureKind::Error, &[Some(0)], &[]);
@@ -474,7 +425,7 @@ fn a_harness_error_that_changed_nothing_does_not_spend_the_attempt_budget() {
             a
         })
         .collect();
-    assert!(!advance_after_failure(&mut task, 9, &[]));
+    assert!(!advance_after_failure(&mut task, 9));
 }
 
 fn error_attempt(n: u32, status: AttemptStatus) -> Attempt {
@@ -489,9 +440,9 @@ fn error_attempt(n: u32, status: AttemptStatus) -> Attempt {
 fn varying_id_errors_stop_at_twice_the_attempt_budget() {
     let mut task = task_with_status(TaskStatus::Running);
     task.attempts = (1..=7).map(|n| error_attempt(n, AttemptStatus::Failed)).collect();
-    assert!(advance_after_failure(&mut task, 4, &[]));
+    assert!(advance_after_failure(&mut task, 4));
     task.attempts.push(error_attempt(8, AttemptStatus::Failed));
-    assert!(!advance_after_failure(&mut task, 4, &[]));
+    assert!(!advance_after_failure(&mut task, 4));
 }
 
 #[test]
@@ -509,11 +460,11 @@ fn errors_alternating_with_pauses_still_stop_but_pauses_alone_do_not_count() {
     // Pauses that were real limit pauses stay out of the ceiling.
     task.queue.paused_attempts = 4;
     task.attempts = attempts.clone();
-    assert!(advance_after_failure(&mut task, 4, &[]));
+    assert!(advance_after_failure(&mut task, 4));
     // Interrupted attempts that were not limit pauses do count.
     task.queue.paused_attempts = 0;
     task.attempts = attempts;
-    assert!(!advance_after_failure(&mut task, 4, &[]));
+    assert!(!advance_after_failure(&mut task, 4));
 }
 
 #[test]
@@ -532,5 +483,28 @@ fn ids_and_hashes_do_not_change_a_signature_and_interrupted_attempts_do_not_brea
         interrupted,
         attempt_with_failure(3, "s"),
     ];
-    assert_eq!(consecutive_same_signature(&attempts, "s"), 2);
+    assert_eq!(consecutive_same_signature(&attempts, "s", |_| false), 2);
+}
+
+#[test]
+fn a_criterion_dropped_by_the_judge_is_not_credited_to_the_owner() {
+    let mut task = task_with_status(TaskStatus::Waiting);
+    task.criteria = vec!["zero".into(), "one".into()];
+    task.question_history.push(AnsweredQuestion {
+        question: "Criterion 1 cannot be met as written: one. Evidence: e".into(),
+        options: vec![],
+        kind: QuestionKind::Impossible,
+        asked_by: None,
+        asked_at: None,
+        answer: "drop criterion".into(),
+        answered_at: 0,
+        answered_by: AnsweredBy::Judge,
+        failure_signature: None,
+        commands: vec![],
+    });
+    let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Other);
+    assert_eq!(
+        task.decisions,
+        vec!["Orchestrator: dropped criterion 1 (one) as the answer judge answered"]
+    );
 }

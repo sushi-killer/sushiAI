@@ -797,3 +797,27 @@ fn a_workflow_scope_rejection_is_permanent_with_one_try_and_one_note() {
     );
     s.daemon.shutdown_and_wait();
 }
+
+#[test]
+fn an_unreviewed_task_is_not_landed_and_its_pull_request_opens_with_the_unreviewed_line() {
+    // The fake answers a review brief with a report and no verdict, so no
+    // route reads the attempt, even with landing on.
+    let reply = "{\"branch\":\"\",\"title\":\"\",\"body\":\"\"}";
+    let s = setup_with(reply, true, false, true);
+    let mut settings = s.daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("claude-opus");
+    s.daemon
+        .request("settings.set", serde_json::json!({"settings": settings}));
+    let id = s.create(serde_json::json!({}));
+    let task = done(&s, &id);
+    assert_eq!(task["unreviewed"], true, "{task}");
+    assert!(task.get("landedSha").is_none(), "{task}");
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let log = s.gh_log();
+    assert!(log.contains("pr create"), "{log}");
+    assert!(
+        log.contains("Unreviewed: no review route gave a verdict"),
+        "{log}"
+    );
+    s.daemon.shutdown_and_wait();
+}

@@ -17,6 +17,9 @@ if 'sushi-plan' in brief and (gates / 'relay_plan').exists():
     ]}
     print(json.dumps({'type': 'result', 'result': '```sushi-plan\n' + json.dumps(plan) + '\n```'}))
     sys.exit(0)
+if 'An implement attempt at this task failed' in brief:
+    print(json.dumps({'type': 'result', 'result': 'Try a different approach.', 'total_cost_usd': 0.01}))
+    sys.exit(0)
 name = re.search(r'CASE_([a-z]+)', brief).group(1)
 config = json.loads((gates / ('config_' + name)).read_text())
 count = gates / ('count_' + name)
@@ -33,7 +36,7 @@ if mode == 'conflict':
         (gates / 'conflict_markers').write_text(file.read_text())
         # Deliberately leave markers; a failed conflict attempt must not loop.
         pathlib.Path('health.txt').write_text('broken\n')
-elif mode != 'fail':
+elif mode not in ('fail', 'blocked'):
     file.write_text(name + '\n')
     if mode == 'retry':
         pathlib.Path('health.txt').write_text('broken\n' if n == 1 else 'ok\n')
@@ -43,6 +46,9 @@ while (gates / ('hold_' + name + '_' + str(n))).exists():
 print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'fake-' + name + '-' + str(n)}))
 if mode == 'fail':
     print(json.dumps({'type': 'result', 'is_error': True, 'result': 'same harness failure', 'total_cost_usd': 0.01}))
+elif mode == 'blocked':
+    report = {'outcome': 'blocked', 'summary': 'stuck', 'decisions': [], 'question': 'Which of the two should it be?'}
+    print(json.dumps({'type': 'result', 'total_cost_usd': 0.01, 'result': '```sushi-report\n' + json.dumps(report) + '\n```'}))
 else:
     report = {'outcome': 'complete', 'summary': 'done', 'decisions': [], 'question': ''}
     print(json.dumps({'type': 'result', 'total_cost_usd': 0.01, 'result': '```sushi-report\n' + json.dumps(report) + '\n```'}))
@@ -171,9 +177,8 @@ fn base_commit_outside_leases_reaches_a_live_part_before_its_next_attempt() {
     commit_file(repo.path(), "outside.txt", "base fix\n");
     let fix = git_out(repo.path(), &["rev-parse", "HEAD"]);
     std::fs::remove_file(gates.path().join("hold_part_1")).unwrap();
-    // maxAttempts=1 asks before the next boundary; the live loop keeps its lease.
-    waiting(&daemon, &part);
-    daemon.request("task.answer", json!({"id": part, "answer": "continue"}));
+    // maxAttempts=1 is spent; the live loop keeps its lease.
+    // The ladder starts the next attempt itself: nobody is asked.
     started(gates.path(), "part", 2);
     let task = get(&daemon, &part);
     assert_eq!(
@@ -219,8 +224,7 @@ fn base_commit_on_held_paths_waits_for_explicit_sync() {
     commit_file(repo.path(), "shared.txt", "base fix\n");
     let fix = git_out(repo.path(), &["rev-parse", "HEAD"]);
     std::fs::remove_file(gates.path().join("hold_part_1")).unwrap();
-    waiting(&daemon, &part);
-    daemon.request("task.answer", json!({"id": part, "answer": "continue"}));
+    // The ladder starts the next attempt itself: nobody is asked.
     started(gates.path(), "part", 2);
     let task = get(&daemon, &part);
     let wt = Path::new(task["worktree"].as_str().unwrap());
@@ -527,7 +531,7 @@ fn rpc_answers_are_labelled_with_their_source() {
             "orchestrator",
         ),
     ] {
-        configure(gates.path(), name, "fail", &format!("{name}.txt"), false);
+        configure(gates.path(), name, "blocked", &format!("{name}.txt"), false);
         let id = create(&daemon, repo.path(), name, &[], None, &[], "true");
         start(&daemon, &id);
         let task = waiting(&daemon, &id);
@@ -562,7 +566,7 @@ fn rpc_answers_are_labelled_with_their_source() {
         ("owner_answer_stop", None, "Owner: stop (UI)"),
         ("lead_answer_stop", Some("lead"), "Lead: stop (RPC)"),
     ] {
-        configure(gates.path(), name, "fail", &format!("{name}.txt"), false);
+        configure(gates.path(), name, "blocked", &format!("{name}.txt"), false);
         let id = create(&daemon, repo.path(), name, &[], None, &[], "true");
         start(&daemon, &id);
         waiting(&daemon, &id);
@@ -576,70 +580,10 @@ fn rpc_answers_are_labelled_with_their_source() {
 }
 
 #[test]
-fn a_third_retry_on_the_same_failure_pauses_twice_and_then_fails_instead_of_parking() {
-    let gates = tempfile::tempdir().unwrap();
-    configure(gates.path(), "failure", "fail", "failure.txt", false);
-    let (daemon, _scripts) = daemon(gates.path());
-    let repo = repo();
-    let id = create(&daemon, repo.path(), "failure", &[], None, &[], "true");
-    start(&daemon, &id);
-    let mut signature = Value::Null;
-    for (i, source) in [Some("lead"), Some("overseer"), None]
-        .into_iter()
-        .enumerate()
-    {
-        let task = waiting(&daemon, &id);
-        assert!(task["question"]["failureSignature"].is_string(), "{task}");
-        if i == 0 {
-            signature = task["question"]["failureSignature"].clone();
-        }
-        assert_eq!(task["question"]["failureSignature"], signature);
-        let mut params = json!({"id": id, "answer": "continue"});
-        if let Some(source) = source {
-            params["source"] = json!(source);
-        }
-        daemon.request("task.answer", params);
-        wait_until("the retry to be recorded", || {
-            let task = get(&daemon, &id);
-            (task["questionHistory"]
-                .as_array()
-                .is_some_and(|h| h.len() > i))
-            .then_some(())
-        });
-    }
-    // No eternal park: the task pauses, tries again twice, then fails with
-    // its reason.
-    let failed = wait_until("the repeated failure to end the task", || {
-        let task = get(&daemon, &id);
-        (task["status"] == "failed").then_some(task)
-    });
-    assert!(failed["park"].is_null(), "{failed}");
-    assert!(failed["question"].is_null());
-    let retries = failed["decisions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|d| d.as_str().unwrap().starts_with("Retry later: "))
-        .count();
-    assert_eq!(retries, 2, "{failed}");
-    assert!(
-        failed["decisions"].as_array().unwrap().iter().any(|d| {
-            let d = d.as_str().unwrap();
-            d.starts_with("Failed: ") && d.contains("failed again after 3 retries")
-        }),
-        "{failed}"
-    );
-    assert_eq!(failed["questionHistory"].as_array().unwrap().len(), 3);
-    for answer in failed["questionHistory"].as_array().unwrap() {
-        assert_eq!(answer["failureSignature"], signature);
-    }
-}
-
-#[test]
 fn stop_clears_the_question() {
     let gates = tempfile::tempdir().unwrap();
-    configure(gates.path(), "live", "fail", "live.txt", false);
-    configure(gates.path(), "idle", "fail", "idle.txt", false);
+    configure(gates.path(), "live", "blocked", "live.txt", false);
+    configure(gates.path(), "idle", "blocked", "idle.txt", false);
     let (mut daemon, scripts) = daemon(gates.path());
     let repo = repo();
     let live = create(&daemon, repo.path(), "live", &[], None, &[], "true");
@@ -698,8 +642,7 @@ fn base_sync_preserves_relay_work_between_attempts() {
     );
     commit_file(repo.path(), "outside.txt", "base fix\n");
     std::fs::remove_file(gates.path().join("hold_second_1")).unwrap();
-    waiting(&daemon, id);
-    daemon.request("task.answer", json!({"id": id, "answer": "continue"}));
+    // The ladder starts the next attempt itself: nobody is asked.
     started(gates.path(), "second", 2);
     assert_eq!(
         std::fs::read_to_string(worktree.join("outside.txt")).unwrap(),

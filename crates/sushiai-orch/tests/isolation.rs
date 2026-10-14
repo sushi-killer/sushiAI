@@ -229,7 +229,7 @@ fn a_stored_project_mismatch_fails_without_starting_the_harness() {
         }),
     );
     let settled = run(&daemon, &task);
-    assert_eq!(settled["status"], "waiting", "{settled}");
+    assert_eq!(settled["status"], "failed", "{settled}");
     assert_eq!(settled["attempts"][0]["status"], "failed", "{settled}");
     assert!(
         settled["decisions"]

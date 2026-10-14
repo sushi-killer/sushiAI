@@ -10,6 +10,7 @@ impl App {
         // No overseer turn survives a restart: nothing is held any more.
         // First, so a resumed loop never parks beside a stale hold.
         self.release_stale_holds();
+        self.retire_ladder_questions();
         let prices = self.settings.read().unwrap().prices.clone();
         match self.store.recover_interrupted_with(
             |task, idx| self.run_fate(task, idx),

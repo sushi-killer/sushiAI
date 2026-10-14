@@ -14,7 +14,10 @@ const PASS: &str = "#!/bin/sh\ncat > /dev/null\necho changed > CHANGED_MARKER.tx
 fn spawn(body: &str) -> (Daemon, tempfile::TempDir) {
     let scripts = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts.path(), "fake-claude.sh", body);
-    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    let daemon = Daemon::spawn(&[
+        ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
+        ("ORCHD_SETUP_RETRY_MS", "20"),
+    ]);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("");
     daemon.request("settings.set", json!({"settings": settings}));
@@ -117,12 +120,41 @@ fn a_failing_setup_fails_the_task_with_the_output_tail_and_no_attempt() {
             .contains("install-broke-here"),
         "{settled}"
     );
+    // Tried again twice before it failed.
+    assert!(
+        settled["decisions"]
+            .to_string()
+            .contains("trying again (2/2)"),
+        "{settled}"
+    );
     assert_eq!(
         settled["attempts"].as_array().unwrap().len(),
         0,
         "{settled}"
     );
     assert!(!harness_ran.exists(), "the harness never ran");
+    daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_setup_that_fails_once_is_tried_again_and_the_task_goes_on() {
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("first-try-made");
+    let (daemon, _scripts) = spawn(PASS);
+    let repo = init_git_repo();
+    let setup = json!({"setup": format!(
+        "test -f '{m}' || {{ touch '{m}'; echo registry-down >&2; exit 4; }}",
+        m = mark.display()
+    )});
+    commit_files(repo.path(), &[(".sushiai/setup.json", &setup.to_string())]);
+
+    let task = create(&daemon, repo.path(), json!({}));
+    let id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_until(&daemon, &id, |s| s == "done" || s == "failed");
+    assert_eq!(settled["status"], "done", "{settled}");
+    let decisions = settled["decisions"].to_string();
+    assert!(decisions.contains("registry-down"), "{decisions}");
+    assert!(decisions.contains("trying again (1/2)"), "{decisions}");
     daemon.shutdown_and_wait();
 }
 

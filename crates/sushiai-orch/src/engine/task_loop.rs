@@ -78,38 +78,76 @@ pub(super) async fn run_task_loop(
 
         // A worktree removed while the task was archived comes back before
         // anything touches it.
-        let recreated = match app.ensure_worktree(&mut task).await {
-            Ok(true) => {
-                task.updated_at = now_ms();
-                app.save_task_logged(&task);
-                app.broadcast_task(&task);
-                true
+        // A failing step is tried again after a growing pause (a busy disk,
+        // a registry that did not answer) before the task fails.
+        let mut tries = 0;
+        let recreated = loop {
+            match app.ensure_worktree(&mut task).await {
+                Ok(true) => {
+                    task.updated_at = now_ms();
+                    app.save_task_logged(&task);
+                    app.broadcast_task(&task);
+                    break true;
+                }
+                Ok(false) => break false,
+                Err(e) if tries < ladder::SETUP_RETRIES && !cancel.is_cancelled() => {
+                    tries += 1;
+                    task.decisions.push(format!(
+                        "Worktree: {e}; trying again ({tries}/{})",
+                        ladder::SETUP_RETRIES
+                    ));
+                    app.save_task_logged(&task);
+                    if !ladder::sleep_unless_cancelled(ladder::setup_retry_delay(tries), &cancel)
+                        .await
+                    {
+                        mark_stopped_if_not_already(&app, &task_id).await;
+                        app.finish_task_loop(&task_id);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    task.decisions.push(format!("Worktree: {e}"));
+                    task.mark_failed();
+                    task.updated_at = now_ms();
+                    app.save_task_logged(&task);
+                    app.broadcast_task(&task);
+                    app.finish_task_loop(&task_id);
+                    return;
+                }
             }
-            Ok(false) => false,
-            Err(e) => {
-                task.decisions.push(format!("Worktree: {e}"));
-                task.status = TaskStatus::Failed;
+        };
+        // A new (or recreated) worktree runs its setup before anything else
+        // uses it; a setup that keeps failing fails the task with no attempt.
+        let mut tries = 0;
+        loop {
+            let Err(e) = app.ensure_worktree_setup(&task, recreated, &cancel).await else {
+                break;
+            };
+            if cancel.is_cancelled() {
+                mark_stopped_if_not_already(&app, &task_id).await;
+                app.finish_task_loop(&task_id);
+                return;
+            }
+            if tries >= ladder::SETUP_RETRIES {
+                task.decisions.push(format!("Worktree setup: {e}"));
+                task.mark_failed();
                 task.updated_at = now_ms();
                 app.save_task_logged(&task);
                 app.broadcast_task(&task);
                 app.finish_task_loop(&task_id);
                 return;
             }
-        };
-        // A new (or recreated) worktree runs its setup before anything else
-        // uses it; a failing setup fails the task with no attempt.
-        if let Err(e) = app.ensure_worktree_setup(&task, recreated, &cancel).await {
-            if cancel.is_cancelled() {
+            tries += 1;
+            task.decisions.push(format!(
+                "Worktree setup: {e}; trying again ({tries}/{})",
+                ladder::SETUP_RETRIES
+            ));
+            app.save_task_logged(&task);
+            if !ladder::sleep_unless_cancelled(ladder::setup_retry_delay(tries), &cancel).await {
                 mark_stopped_if_not_already(&app, &task_id).await;
-            } else {
-                task.decisions.push(format!("Worktree setup: {e}"));
-                task.status = TaskStatus::Failed;
-                task.updated_at = now_ms();
-                app.save_task_logged(&task);
-                app.broadcast_task(&task);
+                app.finish_task_loop(&task_id);
+                return;
             }
-            app.finish_task_loop(&task_id);
-            return;
         }
 
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
@@ -296,9 +334,9 @@ pub(super) async fn run_task_loop(
             }
         }
 
-        // The owner accepted the last attempt while no loop was live: only
-        // its final checks and the commit are left.
-        if let Some(idx) = pending_acceptance(&task) {
+        // A retired "no verdict" question: only the final checks and the
+        // commit are left, and the work is not landed.
+        if let Some(idx) = ladder::pending_unreviewed(&task) {
             let attempt_n = task.attempts[idx].n;
             let run_dir = app.store.run_dir(&task_id, attempt_n);
             let _ = std::fs::create_dir_all(&run_dir);
@@ -743,7 +781,7 @@ pub(super) async fn run_task_loop(
 
             // A finding the reviewer says came back gets the advisor whether or
             // not the variant asks for it.
-            let repeated_finding = last_review_repeated(&task);
+            let repeated_finding = last_review_repeated(&task) || ladder::approach_pending(&task);
             if task.variant().advisor || repeated_finding {
                 if let Some(cost) = run_advisor_before_retry(
                     &app,
@@ -1545,8 +1583,8 @@ pub(super) async fn run_task_loop(
             // other failure (spec item 8), so a recurring "blocked"
             // question can't loop forever.
             record_failure(&mut task, idx, FailureKind::Blocked, question_text.clone());
-            let protected = app.settings.read().unwrap().protected_paths.clone();
-            let should_continue = advance_after_failure(&mut task, attempt_budget, &protected);
+            let base = ladder::base_tails(&app, &task.base_sha);
+            let should_continue = advance_after_failure_with(&mut task, attempt_budget, &base);
             if !should_continue {
                 // Same "attempts keep failing" escalation as
                 // `fail_and_continue`'s, inlined because a
@@ -1563,7 +1601,8 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    Some(_) => {
+                    Some(answered) => {
+                        settle_exhausted_answer(&app, &mut task, idx, &answered.text);
                         attempt_budget += 2;
                         drop(permit);
                         continue;
@@ -2253,7 +2292,7 @@ pub(super) async fn run_task_loop(
                     paths.join(", ")
                 ));
             }
-            match fail_or_accept(
+            match fail_and_continue(
                 &app,
                 &task_id,
                 &mut task,
@@ -2267,38 +2306,14 @@ pub(super) async fn run_task_loop(
             )
             .await
             {
-                FailSignal::Continue => {
+                LoopSignal::Continue => {
                     drop(permit);
                     continue;
                 }
-                FailSignal::Stop => {
+                LoopSignal::Stop => {
                     drop(permit);
                     app.finish_task_loop(&task_id);
                     return;
-                }
-                FailSignal::Accept => {
-                    match finish_after_review(
-                        &app,
-                        &task_id,
-                        &mut task,
-                        idx,
-                        attempt_n,
-                        &worktree,
-                        &run_dir,
-                        &settings,
-                        None,
-                        &mut attempt_budget,
-                        &pending_answer,
-                        &cancel,
-                        &mut permit,
-                    )
-                    .await
-                    {
-                        Tail::Continue => {
-                            continue;
-                        }
-                        Tail::Return => return,
-                    }
                 }
             }
         }
@@ -2377,6 +2392,8 @@ pub(super) async fn run_task_loop(
             return;
         }
         let mut review_result: Option<ReviewResult> = None;
+        task.unreviewed = false;
+        ladder::inherit_unreviewed(&app, &mut task);
         let mut final_task = None;
         let review_id = task.variant().review_route_id(&settings).to_string();
         if !review_id.is_empty() {
@@ -2447,6 +2464,12 @@ pub(super) async fn run_task_loop(
                 let mut round = 1u32;
                 let mut after_no_verdict = false;
                 let mut auto_rerun = true;
+                // The route a review that gave no verdict twice moves to, once.
+                let mut review_route_now = review_route.clone();
+                let mut fallback_tried = false;
+                // A review run that errored is tried again after a pause,
+                // twice, before it counts as no verdict.
+                let mut harness_retries = 0u32;
                 // Findings a judge dropped in this attempt.
                 let mut dropped: Vec<(String, String)> = Vec::new();
                 // After a narrow PASS that left files no open finding names,
@@ -2467,7 +2490,7 @@ pub(super) async fn run_task_loop(
                         &verify_results,
                         &implementer_note,
                         &agent_decisions,
-                        review_route,
+                        &review_route_now,
                         &deny_read,
                         &review_cancel,
                         &mut review_cost,
@@ -2539,7 +2562,7 @@ pub(super) async fn run_task_loop(
                                     &mut r,
                                     &implementer_note,
                                     &settings,
-                                    review_route,
+                                    &review_route_now,
                                     &route,
                                     &worktree,
                                     &cancel,
@@ -2622,7 +2645,31 @@ pub(super) async fn run_task_loop(
                             return;
                         }
                         Err(ReviewFailure::NoVerdict(why)) => (why, true),
-                        Err(ReviewFailure::Harness(why)) => (why, false),
+                        Err(ReviewFailure::Harness(why)) => {
+                            if harness_retries < ladder::SETUP_RETRIES && !cancel.is_cancelled() {
+                                harness_retries += 1;
+                                task.decisions.push(format!(
+                                    "Orchestrator: attempt {attempt_n} review run failed ({why}); trying again ({harness_retries}/{})",
+                                    ladder::SETUP_RETRIES
+                                ));
+                                if !ladder::sleep_unless_cancelled(
+                                    ladder::setup_retry_delay(harness_retries),
+                                    &cancel,
+                                )
+                                .await
+                                {
+                                    interrupt_attempt(&app, &mut task, idx);
+                                    if let Some(finals) = final_task.take() {
+                                        let _ = finals.finish().await;
+                                    }
+                                    drop(permit);
+                                    app.finish_task_loop(&task_id);
+                                    return;
+                                }
+                                continue;
+                            }
+                            (why, false)
+                        }
                     };
                     if no_verdict && auto_rerun && round < MAX_REVIEW_RUNS {
                         auto_rerun = false;
@@ -2636,70 +2683,54 @@ pub(super) async fn run_task_loop(
                     if review_cancel.is_cancelled() && !cancel.is_cancelled() {
                         break;
                     }
-                    // No verdict is never a PASS: the owner decides whether
-                    // to commit this attempt unreviewed.
-                    // The last run the attempt may have: no `retry` to offer.
-                    let may_retry = round < MAX_REVIEW_RUNS;
-                    if !may_retry {
-                        task.decisions.push(review_stopped_note(attempt_n));
-                    }
-                    task.attempts[idx].status = AttemptStatus::Blocked;
-                    task.attempts[idx].ended_at = Some(now_ms());
-                    task.question = Some(Question::new(
-                        format!(
-                            "The review gave no verdict ({why}). Commit this attempt unreviewed?"
-                        ),
-                        if may_retry {
-                            vec!["approve".into(), "retry".into()]
-                        } else {
-                            vec!["approve".into()]
-                        },
-                        QuestionKind::ReviewNoVerdict,
-                        AskedBy::Review,
-                    ));
-                    task.status = TaskStatus::Waiting;
-                    task.updated_at = now_ms();
-                    match wait_for_answer(
-                        &app,
-                        &task_id,
-                        &mut task,
-                        &pending_answer,
-                        &cancel,
-                        &mut permit,
-                    )
-                    .await
-                    {
-                        None => {
-                            drop(permit);
-                            app.finish_task_loop(&task_id);
-                            return;
-                        }
-                        Some(answer) if answer == "approve" => {
-                            task.decisions.push(format!(
-                                "Orchestrator: attempt {attempt_n} committed without a review verdict"
-                            ));
-                            break;
-                        }
-                        Some(answer) if answer == "retry" && may_retry => {
-                            // Review the same attempt again, not a new one.
-                            task.attempts[idx].status = AttemptStatus::Running;
-                            task.attempts[idx].ended_at = None;
+                    // No verdict is never a PASS: another route reads the
+                    // attempt once; if none does, it is committed marked
+                    // unreviewed. The owner is not asked.
+                    if !fallback_tried {
+                        fallback_tried = true;
+                        if let Some((alt, swap)) =
+                            ladder::fallback_review_route(&app, &settings, &review_route_now)
+                        {
+                            for line in swap.into_iter().chain([format!(
+                                "Orchestrator: attempt {attempt_n} review gave no verdict ({why}); reviewing on {}",
+                                alt.id
+                            )]) {
+                                task.decisions.push(line);
+                            }
+                            review_route_now = alt;
+                            // One run beyond the usual two, on the whole change.
+                            force_full = true;
                             round += 1;
                             after_no_verdict = no_verdict;
                             continue;
                         }
-                        Some(answer) => {
-                            review_result = Some(ReviewResult {
-                                verdict: Verdict::Fail,
-                                findings: vec![format!("Another attempt was asked for: {answer}")],
-                                repeated: Vec::new(),
-                                severities: Vec::new(),
-                                details: Vec::new(),
-                                criteria: Vec::new(),
-                            });
-                            break;
-                        }
                     }
+                    let question = Question::new(
+                        format!(
+                            "The review gave no verdict ({why}). Commit this attempt unreviewed?"
+                        ),
+                        vec!["approve".into()],
+                        QuestionKind::ReviewNoVerdict,
+                        AskedBy::Review,
+                    );
+                    record_policy_answer(
+                        &mut task,
+                        &question,
+                        "approve",
+                        "policy",
+                        "no review route gave a verdict; the attempt is committed unreviewed",
+                        attempt_n,
+                    );
+                    task.unreviewed = true;
+                    let after = if task.parent.is_some() {
+                        "it lands on the parent, which then becomes unreviewed"
+                    } else {
+                        "it is not landed, the owner gets a pull request"
+                    };
+                    task.decisions.push(format!(
+                        "Orchestrator: attempt {attempt_n} committed unreviewed: no review route gave a verdict; {after}"
+                    ));
+                    break;
                 }
             } else {
                 let note = format!(
@@ -2788,7 +2819,7 @@ pub(super) async fn run_task_loop(
 
         if let Some(r) = &review_result {
             if r.verdict == Verdict::Fail {
-                match fail_or_accept(
+                match fail_and_continue(
                     &app,
                     &task_id,
                     &mut task,
@@ -2802,38 +2833,14 @@ pub(super) async fn run_task_loop(
                 )
                 .await
                 {
-                    FailSignal::Continue => {
+                    LoopSignal::Continue => {
                         drop(permit);
                         continue;
                     }
-                    FailSignal::Stop => {
+                    LoopSignal::Stop => {
                         drop(permit);
                         app.finish_task_loop(&task_id);
                         return;
-                    }
-                    FailSignal::Accept => {
-                        match finish_after_review(
-                            &app,
-                            &task_id,
-                            &mut task,
-                            idx,
-                            attempt_n,
-                            &worktree,
-                            &run_dir,
-                            &settings,
-                            None,
-                            &mut attempt_budget,
-                            &pending_answer,
-                            &cancel,
-                            &mut permit,
-                        )
-                        .await
-                        {
-                            Tail::Continue => {
-                                continue;
-                            }
-                            Tail::Return => return,
-                        }
                     }
                 }
             }
@@ -3373,6 +3380,8 @@ impl App {
             self.spawn_task_loop(task_id.to_string(), true);
         }
         if let Ok(Some(task)) = self.store.load_task(task_id) {
+            self.notify_task_failed(&task);
+            self.notify_task_unreviewed(&task);
             self.drop_settled_output(&task);
             self.advance_queue(&task.repo);
             self.advance_graph(&task.repo);
@@ -3875,7 +3884,14 @@ pub(super) async fn finish_attempt(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Tail {
-    let landing = if let Some(parent_id) = task.parent.clone() {
+    // Top-level work no review read is never landed by itself: it waits on
+    // its branch and a pull request marked unreviewed goes to the owner. A
+    // subtask lands on its parent's branch, which is not the default branch;
+    // the parent then carries the flag.
+    ladder::inherit_unreviewed(app, task);
+    let landing = if task.unreviewed && task.parent.is_none() {
+        None
+    } else if let Some(parent_id) = task.parent.clone() {
         Some(
             land_on_parent(
                 app, task, idx, attempt_n, worktree, run_dir, &parent_id, cancel,
@@ -3994,7 +4010,7 @@ pub(super) async fn finish_attempt(
         }
         Ok(Err(e)) => {
             record_failure(task, idx, FailureKind::Error, e.to_string());
-            task.status = TaskStatus::Failed;
+            task.mark_failed();
         }
         Err(e) => {
             record_failure(
@@ -4003,7 +4019,7 @@ pub(super) async fn finish_attempt(
                 FailureKind::Error,
                 format!("commit task panicked: {e}"),
             );
-            task.status = TaskStatus::Failed;
+            task.mark_failed();
         }
     }
     if task.status == TaskStatus::Done {

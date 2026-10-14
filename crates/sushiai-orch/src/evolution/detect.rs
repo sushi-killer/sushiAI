@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn evolution_graph_conflict_failed_parent_and_sibling_question() {
         let mut parent = task("p", 1);
-        parent.status = TaskStatus::Failed;
+        parent.mark_failed();
         let mut a = task("a", 2);
         a.parent = Some("p".into());
         a.title = "Add login".into();

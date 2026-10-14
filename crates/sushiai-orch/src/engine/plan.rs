@@ -680,7 +680,7 @@ async fn correct_draft(
             FailureKind::Error,
             o.error.clone().unwrap_or_default(),
         );
-        task.status = TaskStatus::Failed;
+        task.mark_failed();
         task.updated_at = now_ms();
         app.save_task_logged(&task);
         app.broadcast_task(&task);
@@ -792,7 +792,7 @@ pub(super) async fn run_plan_stage(
             // "" -- never a silent fallback to some route the owner never
             // chose for this.
             if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-                t.status = TaskStatus::Failed;
+                t.mark_failed();
                 t.updated_at = now_ms();
                 app.save_task_logged(&t);
                 app.broadcast_task(&t);
@@ -830,7 +830,6 @@ pub(super) async fn run_plan_stage(
 
         let (mcp_path, settings_path, key_path) =
             write_planner_run_files(app, &route, &settings, &run_dir);
-        let req = review_request(&route, &worktree, &mcp_path, &settings_path, &[]);
 
         // Once per round: the retry brief carries the same section.
         let past_work = {
@@ -846,6 +845,10 @@ pub(super) async fn run_plan_stage(
         let mut draft: Option<brief::PlanDraft> = None;
         let mut hard_failure = false;
         let mut over_budget = false;
+        // A run that timed out or errored gets one resumed retry with twice
+        // the time before the task fails.
+        let mut resume_session: Option<String> = None;
+        let mut doubled = false;
         for retry in 0..2 {
             if cancel.is_cancelled() {
                 let _ = std::fs::remove_file(&key_path);
@@ -910,10 +913,20 @@ pub(super) async fn run_plan_stage(
                     &task.repo,
                 ),
             );
+            // A resumed session holds the request already: it continues.
+            let brief_text = if resume_session.is_some() {
+                brief::build_plan_continue_brief(&task.variant(), task.parent.is_none())
+            } else {
+                brief_text
+            };
             let file_stem = if retry == 0 { "" } else { "-retry" };
             let _ = std::fs::write(run_dir.join(format!("brief{file_stem}.md")), &brief_text);
             let events_path = run_dir.join(format!("events{file_stem}.jsonl"));
-            let limit = app.helper_timeout();
+            let limit = app.helper_timeout() * if doubled { 2 } else { 1 };
+            let req = harness::RunRequest {
+                resume: resume_session.as_deref(),
+                ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
+            };
             let run_result = run_harness(
                 app,
                 task_id,
@@ -958,8 +971,16 @@ pub(super) async fn run_plan_stage(
                     // spend a clarification round asking the owner "more
                     // detail" about something they can't fix by replying.
                     if let Some(err) = o.error {
+                        if retry == 0 && !cancel.is_cancelled() {
+                            task.decisions.push(format!(
+                                "Planner: {err}; trying once more, resumed, with twice the time"
+                            ));
+                            resume_session = o.session_id.clone();
+                            doubled = true;
+                            continue;
+                        }
                         record_failure(&mut task, idx, FailureKind::Error, err);
-                        task.status = TaskStatus::Failed;
+                        task.mark_failed();
                         task.updated_at = now_ms();
                         app.save_task_logged(&task);
                         app.broadcast_task(&task);
@@ -978,7 +999,7 @@ pub(super) async fn run_plan_stage(
                 }
                 Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
                     record_failure(&mut task, idx, FailureKind::Error, msg);
-                    task.status = TaskStatus::Failed;
+                    task.mark_failed();
                     task.updated_at = now_ms();
                     app.save_task_logged(&task);
                     app.broadcast_task(&task);
@@ -1020,7 +1041,7 @@ pub(super) async fn run_plan_stage(
             if clarify_rounds >= 2 {
                 // Already asked the owner twice for more detail; a third
                 // unparseable round in a row means this isn't going anywhere.
-                task.status = TaskStatus::Failed;
+                task.mark_failed();
                 task.updated_at = now_ms();
                 app.save_task_logged(&task);
                 app.broadcast_task(&task);
@@ -1624,7 +1645,7 @@ mod timeout_tests {
     use super::*;
 
     #[tokio::test]
-    async fn planner_timed_out_fails_the_task_with_an_error() {
+    async fn planner_timed_out_is_tried_once_more_with_twice_the_time_then_fails() {
         let (app, _dir, mut task, _) = slow_helper_task();
         task.status = TaskStatus::Drafting;
         task.attempts.clear();
@@ -1648,11 +1669,30 @@ mod timeout_tests {
             task.attempts[0].failure.as_ref().unwrap().kind,
             FailureKind::Error
         );
+        // The retry ran with twice the limit and timed out too.
         assert_eq!(
             task.attempts[0].failure.as_ref().unwrap().detail,
-            "planner timed out after 0.25s"
+            "planner timed out after 0.5s"
         );
-        assert_helper_timeout(&task, "planner");
+        let first = helper_timeout_message("planner", Duration::from_millis(250));
+        let second = helper_timeout_message("planner", Duration::from_millis(500));
+        for line in [first, second] {
+            assert_eq!(
+                task.decisions.iter().filter(|d| **d == line).count(),
+                1,
+                "{:?}",
+                task.decisions
+            );
+        }
+        assert!(
+            task.decisions
+                .iter()
+                .any(|d| d.contains("trying once more, resumed, with twice the time")),
+            "{:?}",
+            task.decisions
+        );
+        // Never a third run.
+        assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 2);
     }
 
     #[tokio::test]

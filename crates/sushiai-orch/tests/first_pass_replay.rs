@@ -461,8 +461,7 @@ mod reviewed {
             ),
         );
         let (id, settled) = rig.run("Write the marker");
-        assert_eq!(settled["status"], "waiting", "{settled}");
-        assert_eq!(settled["question"]["kind"], "attempts_failing", "{settled}");
+        assert_eq!(settled["status"], "failed", "{settled}");
         let attempts = settled["attempts"]
             .as_array()
             .unwrap()

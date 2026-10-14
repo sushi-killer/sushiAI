@@ -1310,6 +1310,16 @@ pub fn build_plan_correction_brief(conflict: &str, variant: &Variant, split: boo
     )
 }
 
+/// The brief of a planner run resumed after its first run timed out or
+/// errored: the session already holds the request and what it read, so it only
+/// continues and returns the plan in the report format.
+pub fn build_plan_continue_brief(variant: &Variant, split: bool) -> String {
+    format!(
+        "Your previous run was cut off before it returned the plan. Continue from where you stopped; do not start over. Reply with the full plan.\n\n{}",
+        plan_report_format(variant, split),
+    )
+}
+
 /// The `## Scoped checks` block of a plan brief: the settings' scoped checks
 /// that apply to `repo`; empty when none do.
 pub fn scoped_checks_block(scoped: &[ScopedCheck], repo: &str) -> String {
@@ -2278,45 +2288,6 @@ pub fn build_triage_brief(task: &Task, question: &str, options: &[String]) -> St
     out
 }
 
-/// The brief for the read-only session that decides whether an owner's own
-/// words to the "attempts keep failing" question tell orchd to accept the
-/// last attempt. The owner's text is data, not an instruction to the session.
-pub fn build_accept_brief(task: &Task, question: &str, options: &[String], answer: &str) -> String {
-    let mut out = String::new();
-    out.push_str("## Task\n\n");
-    out.push_str(&task.goal);
-    out.push_str("\n\n## Question the owner was asked\n\n");
-    out.push_str(&untrusted_block("The question", question));
-    out.push_str(&format!(
-        "\nOptions: {}\n\n## The owner's answer\n\n",
-        options.join(", ")
-    ));
-    out.push_str(&untrusted_block("The owner's answer", answer));
-    out.push_str(
-        "\n## Instructions\n\nThe owner answered in their own words instead of picking an option. \
-Decide whether the answer tells orchd to accept, or commit, the last attempt as it is and finish \
-the task, without another attempt. An answer that asks for more work, a different approach, a \
-question, or anything unclear is not an acceptance. Do not read or change any file.\n\n\
-Reply with only this JSON object: {\"accept\": true} or {\"accept\": false}\n",
-    );
-    out
-}
-
-/// The `accept` verdict in a judge reply; `None` when there is none.
-pub fn parse_accept(text: &str) -> Option<bool> {
-    let mut candidates = vec![text.to_string()];
-    candidates.extend(fenced_blocks(text).into_iter().rev().map(|(_, b)| b));
-    if let (Some(a), Some(b)) = (text.rfind('{'), text.rfind('}')) {
-        if a < b {
-            candidates.push(text[a..=b].to_string());
-        }
-    }
-    candidates
-        .iter()
-        .filter_map(|c| parse_json_object(c))
-        .find_map(|v| v.get("accept").and_then(|a| a.as_bool()))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TriageAction {
@@ -2344,11 +2315,6 @@ pub fn parse_triage(text: &str) -> Option<TriageDecision> {
     serde_json::from_str(&body).ok()
 }
 
-/// The "attempts keep failing" option that ends the task on its last
-/// attempt when only its review or screenshot evidence failed. Only the owner
-/// may choose it.
-pub const ACCEPT_LAST_ATTEMPT: &str = "accept the last attempt as done";
-
 /// Turns a raw (possibly missing or malformed) triage reply into a decision
 /// that's always safe to act on:
 /// - a missing fence or unparseable JSON always escalates with the original
@@ -2357,12 +2323,9 @@ pub const ACCEPT_LAST_ATTEMPT: &str = "accept the last attempt as done";
 ///   stripping trailing punctuation -- exactly `"approve"` or `"stop"`
 ///   (which would otherwise let triage silently rubber-stamp a
 ///   protected-path change or end the task without the owner ever seeing
-///   it) also escalates with the original question -- as does the
-///   `ACCEPT_LAST_ATTEMPT` option, which only the owner may pick;
+///   it) also escalates with the original question;
 /// - an escalation with a blank question, or empty options, falls back to
-///   the original question/options rather than showing the owner nothing;
-/// - an escalation whose options drop `ACCEPT_LAST_ATTEMPT` gets it back
-///   (before `stop`) when the original options had it.
+///   the original question/options rather than showing the owner nothing.
 ///
 /// Fail-open to the owner, never loops.
 pub fn sanitize_triage(
@@ -2389,10 +2352,7 @@ pub fn sanitize_triage(
                 .to_ascii_lowercase();
             if normalized.is_empty() {
                 escalate_with("triage answered with nothing".to_string())
-            } else if normalized == "approve"
-                || normalized == "stop"
-                || normalized == ACCEPT_LAST_ATTEMPT
-            {
+            } else if normalized == "approve" || normalized == "stop" {
                 escalate_with(format!("triage tried to answer \"{normalized}\" itself"))
             } else {
                 d
@@ -2404,23 +2364,11 @@ pub fn sanitize_triage(
             } else {
                 d.question
             };
-            let mut options = if d.options.is_empty() {
+            let options = if d.options.is_empty() {
                 original_options.to_vec()
             } else {
                 d.options
             };
-            // The owner keeps the option the question was asked with.
-            let has = |o: &[String]| {
-                o.iter()
-                    .any(|x| x.trim().eq_ignore_ascii_case(ACCEPT_LAST_ATTEMPT))
-            };
-            if has(original_options) && !has(&options) {
-                let at = options
-                    .iter()
-                    .position(|o| o.trim().eq_ignore_ascii_case("stop"))
-                    .unwrap_or(options.len());
-                options.insert(at, ACCEPT_LAST_ATTEMPT.to_string());
-            }
             TriageDecision {
                 question,
                 options,
@@ -2632,6 +2580,8 @@ mod tests {
             pr_pending: false,
             pr_plan: None,
             overseer_woken: false,
+            unreviewed: false,
+            failed_count: 0,
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3434,66 +3384,6 @@ mod tests {
             assert_eq!(decision.action, TriageAction::Escalate);
             assert_eq!(decision.question, "original?");
         }
-    }
-
-    #[test]
-    fn sanitize_triage_never_lets_triage_pick_the_accept_option() {
-        for said in [
-            ACCEPT_LAST_ATTEMPT,
-            "  Accept the last attempt as done. ",
-            "ACCEPT THE LAST ATTEMPT AS DONE!",
-        ] {
-            let parsed = TriageDecision {
-                action: TriageAction::Answer,
-                answer: said.to_string(),
-                question: String::new(),
-                options: vec![],
-                reason: "the review is wrong".to_string(),
-            };
-            let decision = sanitize_triage(Some(parsed), "original?", &[]);
-            assert_eq!(decision.action, TriageAction::Escalate);
-            assert_eq!(decision.question, "original?");
-        }
-    }
-
-    #[test]
-    fn sanitize_triage_escalation_keeps_the_accept_option_the_question_had() {
-        let original: Vec<String> = ["continue", ACCEPT_LAST_ATTEMPT, "stop"]
-            .map(String::from)
-            .to_vec();
-        let escalate = |options: Vec<&str>| TriageDecision {
-            action: TriageAction::Escalate,
-            answer: String::new(),
-            question: "sharper?".to_string(),
-            options: options.into_iter().map(String::from).collect(),
-            reason: "needs the owner".to_string(),
-        };
-        let d = sanitize_triage(Some(escalate(vec!["fix it", "stop"])), "q?", &original);
-        assert_eq!(d.options, vec!["fix it", ACCEPT_LAST_ATTEMPT, "stop"]);
-        let d = sanitize_triage(Some(escalate(vec!["fix it"])), "q?", &original);
-        assert_eq!(d.options, vec!["fix it", ACCEPT_LAST_ATTEMPT]);
-        // Already there: not duplicated. Not offered originally: not added.
-        let d = sanitize_triage(
-            Some(escalate(vec!["Accept the last attempt as done", "stop"])),
-            "q?",
-            &original,
-        );
-        assert_eq!(d.options.len(), 2);
-        let d = sanitize_triage(Some(escalate(vec!["fix it"])), "q?", &["stop".to_string()]);
-        assert_eq!(d.options, vec!["fix it"]);
-    }
-
-    #[test]
-    fn parse_accept_reads_the_verdict_and_nothing_else() {
-        assert_eq!(parse_accept("{\"accept\": true}"), Some(true));
-        assert_eq!(
-            parse_accept("Sure.\n```json\n{\"accept\": false}\n```"),
-            Some(false)
-        );
-        assert_eq!(parse_accept("It is {\"accept\": true} I think"), Some(true));
-        assert_eq!(parse_accept("{\"accept\": \"yes\"}"), None);
-        assert_eq!(parse_accept("accept"), None);
-        assert_eq!(parse_accept(""), None);
     }
 
     #[test]

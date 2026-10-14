@@ -44,29 +44,8 @@ pub(super) fn retry_or_fail(task: &mut Task, reason: &str) -> bool {
     task.decisions.push(format!(
         "Failed: {reason}; {MAX_RETRIES} later retries did not help"
     ));
-    task.status = TaskStatus::Failed;
+    task.mark_failed();
     false
-}
-
-/// Tells the orchestrator once that `task` failed here (when auto-answer is
-/// on): the owner hears of it from there, not from a silent board.
-pub(super) fn wake_orchestrator_for_stuck(app: &App, task: &mut Task) {
-    if task.status != TaskStatus::Failed
-        || task.parent.is_some()
-        || task.archived
-        || task.overseer_woken
-        || !app.settings.read().unwrap().auto_answer
-    {
-        return;
-    }
-    let why = task.decisions.last().cloned().unwrap_or_default();
-    let prompt = format!(
-        "Task {} ({}) failed and no rule can move it on: {why}. Tell the owner in one short note what failed and what to do.",
-        task.id, task.title
-    );
-    task.overseer_woken = true;
-    app.save_task_logged(task);
-    chat::wake_overseer(app, &task.repo, prompt, false, "failed", Some(&task.id));
 }
 
 #[cfg(test)]

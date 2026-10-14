@@ -1,6 +1,7 @@
 use super::*;
 
-/// Automatic answers per task; the next question goes to the owner.
+/// Automatic answers per kind of question and cause on one task; the next
+/// question of that kind and cause goes on to triage and the owner.
 pub(super) const MAX_POLICY_ANSWERS: usize = 3;
 
 const JUDGE_PROMPT: &str = "A coding agent claims that an acceptance criterion cannot be met, and gives evidence. You may read files in the working directory but change nothing. Check the evidence yourself. Answer verified true only when you confirmed the evidence is true and that it really makes the criterion impossible; otherwise false. Reply with only JSON: {\"verified\": true|false, \"reason\": \"<one sentence>\"}";
@@ -11,11 +12,38 @@ pub(super) fn policy_on(app: &App) -> bool {
     app.settings.read().unwrap().answer_policy
 }
 
-/// Questions answered so far by the policy (a rule or the judge).
-fn policy_answers(task: &Task) -> usize {
+/// The criterion number in the text of an impossible question.
+fn impossible_criterion(text: &str) -> Option<usize> {
+    text.strip_prefix("Criterion ")?
+        .split_once(" cannot be met as written")?
+        .0
+        .parse()
+        .ok()
+}
+
+/// Whether an earlier automatic answer was about the same cause as `question`:
+/// the same check commands, the same criterion; any other question of one
+/// kind shares its cause.
+fn same_cause(earlier: &Assumption, question: &Question) -> bool {
+    if !question.commands.is_empty() {
+        return earlier.commands == question.commands;
+    }
+    if question.kind == QuestionKind::Impossible {
+        return impossible_criterion(&earlier.question) == impossible_criterion(&question.text);
+    }
+    true
+}
+
+/// Questions of `question`'s kind and cause answered so far by the policy (a
+/// rule or the judge).
+fn policy_answers(task: &Task, question: &Question) -> usize {
     task.assumptions
         .iter()
-        .filter(|a| a.by == "policy" || a.by == "judge")
+        .filter(|a| {
+            (a.by == "policy" || a.by == "judge")
+                && a.kind == Some(question.kind)
+                && same_cause(a, question)
+        })
         .count()
 }
 
@@ -27,9 +55,11 @@ fn answered_before(task: &Task, kind: QuestionKind, attempt_n: Option<u32>) -> b
     })
 }
 
-/// Whether the policy may answer a `kind` question of `task` at all.
-pub(super) fn policy_open(app: &App, task: &Task, kind: QuestionKind) -> bool {
-    policy_on(app) && !owner_only(kind) && policy_answers(task) < MAX_POLICY_ANSWERS
+/// Whether the policy may answer `question` of `task` at all.
+pub(super) fn policy_open(app: &App, task: &Task, question: &Question) -> bool {
+    policy_on(app)
+        && !owner_only(question.kind)
+        && policy_answers(task, question) < MAX_POLICY_ANSWERS
 }
 
 fn quoted_base_tail(question: &Question, command: &str) -> String {
@@ -477,11 +507,6 @@ fn rule_answer_with_context(
             "a review that gave no verdict twice is reviewed again once per attempt",
             Some(attempt_n),
         ),
-        QuestionKind::AttemptsFailing => (
-            "continue",
-            "attempts keep failing: continue once before asking the owner",
-            None,
-        ),
         QuestionKind::DependencyEnded => (
             "retry the dependency",
             "a dependency that ended is retried once",
@@ -612,7 +637,7 @@ pub(super) async fn try_policy_answer(
         return None;
     }
     let question = task.question.clone()?;
-    if !policy_open(app, task, question.kind) {
+    if !policy_open(app, task, &question) {
         return None;
     }
     let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
@@ -656,13 +681,7 @@ pub(super) async fn try_policy_answer(
 
 /// The criterion number and the agent's evidence of an impossible question.
 fn impossible_parts(question: &Question) -> Option<(usize, String)> {
-    let n = question
-        .text
-        .strip_prefix("Criterion ")?
-        .split_once(" cannot be met as written")?
-        .0
-        .parse()
-        .ok()?;
+    let n = impossible_criterion(&question.text)?;
     let evidence = question.text.split_once(". Evidence: ")?.1.to_string();
     Some((n, evidence))
 }
@@ -794,7 +813,7 @@ pub(super) fn cautious_choice(app: &App, task: &Task, question: &Question) -> Op
     if !matches!(
         question.kind,
         QuestionKind::PlanQuestion | QuestionKind::AgentQuestion
-    ) || !policy_open(app, task, question.kind)
+    ) || !policy_open(app, task, question)
     {
         return None;
     }
@@ -989,17 +1008,18 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_never_answers_the_accept_option() {
+    fn attempts_keep_failing_has_no_blind_continue_rule() {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.attempts = vec![attempt_with_failure(1, "review:x")];
         let q = Question::new(
             "Attempts keep failing",
-            opts(&["continue", brief::ACCEPT_LAST_ATTEMPT, "stop"]),
+            opts(&["continue", "stop"]),
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
         );
-        let (answer, _) = rule_answer(&task, &q, 1).unwrap();
-        assert_eq!(answer, "continue");
+        // The failure ladder owns this kind: a changed approach, never a
+        // plain continue.
+        assert!(rule_answer(&task, &q, 1).is_none());
     }
 
     fn base_check_question(commands: &[&str], options: &[&str]) -> Question {
@@ -1328,5 +1348,46 @@ mod base_moves_tests {
         landing.status = TaskStatus::Landing;
         app.store.save_task(&landing).unwrap();
         assert!(moves(&app), "a landing task moves the base");
+    }
+
+    #[test]
+    fn the_policy_budget_is_per_kind_and_cause_not_per_task() {
+        let (app, _dir) = crate::engine::test_support::test_app();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        let spent = Question::new(
+            "make verify already fails on base",
+            vec![],
+            QuestionKind::PreexistingFailure,
+            AskedBy::Verify,
+        );
+        for _ in 0..MAX_POLICY_ANSWERS {
+            record_policy_answer(&mut task, &spent, "keep all", "policy", "e", 1);
+        }
+        assert!(!policy_open(&app, &task, &spent), "that kind is spent");
+
+        // Other kinds still have their own budget, the judge's included.
+        let impossible = |n: usize| {
+            Question::new(
+                format!("Criterion {n} cannot be met as written: x. Evidence: y"),
+                vec!["retry".into(), "drop criterion".into()],
+                QuestionKind::Impossible,
+                AskedBy::Implement,
+            )
+        };
+        assert!(policy_open(&app, &task, &impossible(0)));
+        let attempts = Question::new(
+            "Attempts keep failing",
+            vec![],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        );
+        assert!(policy_open(&app, &task, &attempts));
+
+        // One criterion that the judge refuted three times is spent; another is not.
+        for _ in 0..MAX_POLICY_ANSWERS {
+            record_policy_answer(&mut task, &impossible(0), "retry", "judge", "e", 1);
+        }
+        assert!(!policy_open(&app, &task, &impossible(0)));
+        assert!(policy_open(&app, &task, &impossible(1)));
     }
 }

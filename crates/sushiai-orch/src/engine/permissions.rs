@@ -1057,7 +1057,7 @@ pub(super) async fn stop_for_denials(
         task.decisions.push(format!(
             "Permission: {names} was refused again after the owner's answer; stopping instead of another attempt on the same cause"
         ));
-        task.status = TaskStatus::Failed;
+        task.mark_failed();
         task.updated_at = now_ms();
         app.save_task_logged(task);
         app.broadcast_task(task);

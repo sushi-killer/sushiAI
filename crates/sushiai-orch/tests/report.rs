@@ -101,7 +101,7 @@ fn a_done_graph_gets_a_report_with_children_assumption_dropped_criterion_and_cos
         "**Part A**",
         "**Part B**",
         "Which format for a.txt? -> plain text (answered by the cheap judge; overturnable",
-        "- a.txt has a man page - dropped",
+        "- a.txt has a man page - dropped, not done",
         "- a.txt exists - unchecked",
         "| plan |",
         "| implement |",

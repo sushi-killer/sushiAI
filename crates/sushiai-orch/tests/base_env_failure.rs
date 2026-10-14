@@ -51,7 +51,10 @@ fn create(daemon: &Daemon, repo: &Path, check: &str) -> String {
 fn waiting(daemon: &Daemon, id: &str) -> Value {
     wait_until("the task to ask after its first attempt", || {
         let task = daemon.request("task.get", json!({"id": id}));
-        (task["status"] == "waiting" && task["attempts"].as_array().unwrap().len() == 1)
+        // A base question waits after the first attempt; a task whose own
+        // check keeps failing ends `failed` once the ladder is spent.
+        (task["status"] == "failed"
+            || (task["status"] == "waiting" && task["attempts"].as_array().unwrap().len() == 1))
             .then_some(task)
     })
 }

@@ -273,7 +273,8 @@ fn verify_timeout_secs_bounds_a_verify_command_and_names_the_limit() {
     // The daemon samples real machine load. A high-load timeout adds its
     // environment detail and retries; the one-second execution budget stays.
     if verify["loadTimeout"] == true {
-        assert_eq!(load_retries.len(), 1, "{task}");
+        // One retry per attempt; the ladder runs more than one attempt.
+        assert!(!load_retries.is_empty(), "{task}");
         let detail = load_retries[0]
             .strip_prefix("Orchestrator: sleep 30: ")
             .and_then(|line| line.strip_suffix(" (environment); rerun once on the same tree"))
@@ -292,7 +293,7 @@ fn verify_timeout_secs_bounds_a_verify_command_and_names_the_limit() {
     assert!(verify["ms"].as_u64().unwrap() >= 1000, "{task}");
     assert!(verify["load"].as_f64().unwrap() >= 0.0, "{task}");
     assert!(verify["cores"].as_u64().unwrap() > 0, "{task}");
-    assert_eq!(task["attempts"].as_array().unwrap().len(), 1, "{task}");
+    assert!(!task["attempts"].as_array().unwrap().is_empty(), "{task}");
     assert!(verify["code"].is_null());
     s.daemon.shutdown_and_wait();
 }

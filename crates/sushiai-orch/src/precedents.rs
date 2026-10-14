@@ -226,7 +226,7 @@ fn failing_lines(tail: &str) -> Vec<&str> {
         .collect()
 }
 
-fn failing_tests(tail: &str) -> BTreeSet<String> {
+pub fn failing_tests(tail: &str) -> BTreeSet<String> {
     crate::test_failures::failing_tests(tail)
 }
 
@@ -252,10 +252,18 @@ fn failing_paths(tail: &str) -> Vec<String> {
 /// different test fails in each run of one command) and `outside_diff`
 /// (failing tests live in files the attempt did not change). Sorted.
 pub fn signals_of(task: &Task) -> Vec<String> {
+    match task.attempts.iter().rposition(|a| !a.verify.is_empty()) {
+        Some(at) => attempt_signals(task, at),
+        None => Vec::new(),
+    }
+}
+
+/// [`signals_of`] for the attempt at `at`; none when it ran no checks.
+pub fn attempt_signals(task: &Task, at: usize) -> Vec<String> {
     let mut signals = BTreeSet::new();
-    let Some(at) = task.attempts.iter().rposition(|a| !a.verify.is_empty()) else {
+    if task.attempts.get(at).is_none_or(|a| a.verify.is_empty()) {
         return Vec::new();
-    };
+    }
     let attempt = &task.attempts[at];
     for outcome in attempt.verify.iter().filter(|o| o.code != Some(0)) {
         if outcome.load_timeout || outcome.code.is_none() {

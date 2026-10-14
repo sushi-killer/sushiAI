@@ -503,7 +503,10 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     let task_id = task.id.clone();
     let worktree = PathBuf::from(&task.worktree);
     let mut landed = false;
-    if task.variant().land && task.parent.is_none() {
+    // A subtask no review read already landed on this branch: the parent
+    // is unreviewed too, is not landed by itself, and the owner gets a PR.
+    ladder::inherit_unreviewed(app, task);
+    if !task.unreviewed && task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
         match land_on_base(app, task, None, 0, &worktree, &run_dir, cancel).await {
@@ -583,6 +586,7 @@ async fn land_parent(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> P
     task.updated_at = now_ms();
     app.save_task_logged(task);
     app.broadcast_task(task);
+    app.notify_task_unreviewed(task);
     wake_orchestrator_for_done(app, task);
     super::pr_draft::spawn_pr_on_done(app, task);
     ParentEnd::Finished
@@ -1619,7 +1623,7 @@ impl App {
 
     /// Parks `task` `waiting` on the question of what to do about the
     /// dependencies in `ended`.
-    fn ask_dependency_question(&self, task: &Task, all: &[Task], ended: &[String]) {
+    pub(super) fn ask_dependency_question(&self, task: &Task, all: &[Task], ended: &[String]) {
         let names: Vec<String> = all
             .iter()
             .filter(|t| ended.contains(&t.id))
@@ -1641,13 +1645,16 @@ impl App {
         ));
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
+        if self.restart_environment_dependency(&task, all, ended) {
+            return;
+        }
         // The answer policy retries an ended dependency once before the owner
         // is asked.
         if let Some(question) = task.question.clone() {
             if !all
                 .iter()
                 .any(|t| ended.contains(&t.id) && t.queue.stopped_explicitly)
-                && policy_open(self, &task, question.kind)
+                && policy_open(self, &task, &question)
                 && !task
                     .assumptions
                     .iter()
@@ -1668,6 +1675,70 @@ impl App {
             fresh.status = TaskStatus::Waiting;
         }) {
             eprintln!("orch: updating task {} failed: {e}", task.id);
+        }
+    }
+
+    /// A dependency that failed on the environment (a timeout, a flaky or
+    /// outside-the-diff check, an install error) is restarted once more by
+    /// itself, after a pause; dropping a dependency stays the owner's.
+    /// `true` when this call handled `task` (restarted it or is waiting out
+    /// the pause); `task` carries the dependency question.
+    pub(super) fn restart_environment_dependency(
+        &self,
+        task: &Task,
+        all: &[Task],
+        ended: &[String],
+    ) -> bool {
+        let deps: Vec<&Task> = all.iter().filter(|t| ended.contains(&t.id)).collect();
+        if deps.is_empty()
+            || task
+                .decisions
+                .iter()
+                .any(|d| d == ladder::DEPENDENCY_RESTART_LINE)
+            || deps.iter().any(|d| {
+                d.status != TaskStatus::Failed
+                    || !ladder::agent_may_restart(d)
+                    || d.queue.stopped_explicitly
+                    || !ladder::failed_on_environment(d, &ladder::base_tails(self, &d.base_sha))
+            })
+        {
+            return false;
+        }
+        let pause = ladder::dependency_restart_delay().as_millis() as i64;
+        let left = pause - (now_ms() - deps.iter().map(|d| d.updated_at).max().unwrap_or(0));
+        if left > 0 {
+            // The graph comes back to this task when the pause is over.
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let (app, repo) = (self.arc(), task.repo.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(left as u64 + 20)).await;
+                    app.advance_graph(&repo);
+                });
+            }
+            return true;
+        }
+        if let Err(e) = self.update_task(&task.id, |t| {
+            t.decisions
+                .push(ladder::DEPENDENCY_RESTART_LINE.to_string())
+        }) {
+            eprintln!("orch: updating task {} failed: {e}", task.id);
+            return false;
+        }
+        match self.answer_dependency_question(
+            task.clone(),
+            "retry the dependency",
+            Some(AnsweredBy::Policy),
+            None,
+            None,
+        ) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "orch: restarting dependency of task {} failed: {e}",
+                    task.id
+                );
+                false
+            }
         }
     }
 
@@ -1722,6 +1793,10 @@ impl App {
             if !by_owner && ended.iter().any(|t| t.queue.stopped_explicitly) {
                 return Err("an explicitly stopped dependency needs the owner's restart".into());
             }
+            if !by_owner {
+                let ids: Vec<String> = ended.iter().map(|t| t.id.clone()).collect();
+                self.agent_restart_gate(&ids)?;
+            }
             for dep in ended.iter().filter(|t| !t.archived) {
                 let mut cancellations = self.cancellations.lock().unwrap();
                 if let Some(end) = cancellations.get_mut(&dep.id) {
@@ -1730,15 +1805,17 @@ impl App {
                 }
                 // Queued before its loop runs, so nothing reads it as
                 // ended again while it retries.
-                let mut dep = dep.clone();
-                dep.queue.restart_children = is_parent(&dep, &all);
-                dep.queue.stopped_explicitly = false;
-                dep.queue.park = None;
-                dep.question = None;
-                dep.status = TaskStatus::Queued;
-                dep.updated_at = now_ms();
-                self.save_task_logged(&dep);
-                self.broadcast_task(&dep);
+                // From the stored task: the restart gate just wrote its record there.
+                let restart_children = is_parent(dep, &all);
+                let Ok(dep) = self.update_task(&dep.id, |d| {
+                    d.queue.restart_children = restart_children;
+                    d.queue.stopped_explicitly = false;
+                    d.queue.park = None;
+                    d.question = None;
+                    d.status = TaskStatus::Queued;
+                }) else {
+                    continue;
+                };
                 drop(cancellations);
                 self.spawn_task_loop(dep.id.clone(), true);
             }

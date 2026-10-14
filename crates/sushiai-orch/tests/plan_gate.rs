@@ -48,6 +48,9 @@ const CLEAN_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark 
 
 const HANDOFF_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files -- check: pytest tests/test_handoff.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
+/// The report-only criterion has no check of its own, so a non-owner may drop it.
+const HANDOFF_NO_CHECK_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+
 const REPORT_LISTS_DRAFT: &str = r#"{\"title\":\"Report failures\",\"goal\":\"List the failing tests\",\"tier\":\"hard\",\"criteria\":[\"The report lists every failing test by name -- check: pytest tests/test_report.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
 const JVM_DOTNET_RUBY_DRAFT: &str = r#"{\"title\":\"Build the parts\",\"goal\":\"Build the parts\",\"tier\":\"hard\",\"criteria\":[\"Build passes -- check: mvn test\",\"Serialises -- check: dotnet test\",\"Renders -- check: bundle exec rspec spec/render_spec.rb\"],\"verify\":[\"true\"],\"questions\":[]}"#;
@@ -140,7 +143,12 @@ fn findings(task: &serde_json::Value) -> Vec<serde_json::Value> {
 fn a_typed_report_only_finding_removes_its_criterion_without_a_replan() {
     // The finding names criterion 1; criterion 0 must stay.
     let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
-    let r = run(HANDOFF_DRAFT, HANDOFF_DRAFT, "claude-sonnet", review);
+    let r = run(
+        HANDOFF_NO_CHECK_DRAFT,
+        HANDOFF_NO_CHECK_DRAFT,
+        "claude-sonnet",
+        review,
+    );
     assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
     assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
     let stored = criteria(&r.task);
@@ -158,6 +166,24 @@ fn a_typed_report_only_finding_removes_its_criterion_without_a_replan() {
     );
     assert_eq!(
         r.task["request"], "add dark mode to the settings screen",
+        "{}",
+        r.task
+    );
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_report_only_finding_keeps_a_criterion_whose_check_is_shared() {
+    // The check is not a planner test, so only the owner may drop it.
+    let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
+    let r = run(HANDOFF_DRAFT, HANDOFF_DRAFT, "claude-sonnet", review);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    let stored = criteria(&r.task);
+    assert_eq!(stored.len(), 2, "criteria: {stored:?}");
+    assert!(
+        !decisions(&r.task)
+            .iter()
+            .any(|l| l.contains("removed the report-only criterion")),
         "{}",
         r.task
     );

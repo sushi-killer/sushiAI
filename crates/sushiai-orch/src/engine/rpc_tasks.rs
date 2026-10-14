@@ -1539,9 +1539,32 @@ impl App {
         #[derive(Deserialize)]
         struct P {
             id: String,
+            /// Set by the MCP bridge; absent for the owner UI and daemon cleanup.
+            #[serde(default)]
+            source: Option<String>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
         validate_task_id(&self.store, &p.id)?;
+        if p.source.is_some() {
+            // An agent deletes only what is already stopped: ending a live
+            // task is task_stop's job.
+            if let Some(task) = self.store.load_task(&p.id).ok().flatten() {
+                if matches!(
+                    task.status,
+                    TaskStatus::Running
+                        | TaskStatus::Drafting
+                        | TaskStatus::Waiting
+                        | TaskStatus::Landing
+                ) {
+                    return Err("cannot delete a running, drafting, waiting or landing task; use task_stop first".to_string());
+                }
+            }
+            if self.controls.lock().unwrap().contains_key(&p.id) {
+                return Err(
+                    "cannot delete a task with a live loop; use task_stop first".to_string()
+                );
+            }
+        }
         let removed = self.controls.lock().unwrap().remove(&p.id);
         if let Some(ctrl) = removed {
             ctrl.cancel.cancel();
@@ -1595,10 +1618,13 @@ impl App {
             task.status,
             TaskStatus::Running | TaskStatus::Drafting | TaskStatus::Waiting | TaskStatus::Landing
         ) {
-            return Err("cannot archive a running, drafting, waiting or landing task".to_string());
+            return Err("cannot archive a running, drafting, waiting or landing task; use task_stop to end it first"
+                    .to_string());
         }
         if self.controls.lock().unwrap().contains_key(&p.id) {
-            return Err("cannot archive a task with a live loop".to_string());
+            return Err(
+                "cannot archive a task with a live loop; use task_stop to end it first".to_string(),
+            );
         }
         let decisions_before = task.decisions.len();
         self.release_worktree(&mut task, "archived").await;

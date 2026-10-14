@@ -35,7 +35,7 @@ pub const READ_ONLY_TOOLS: [&str; 5] = [
 ];
 
 /// What the orchestrator agent gets: every tool below.
-pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
+pub const ORCHESTRATOR_TOOLS: [&str; 27] = [
     "task_list",
     "task_get",
     "task_create",
@@ -49,6 +49,8 @@ pub const ORCHESTRATOR_TOOLS: [&str; 25] = [
     "settings_get",
     "task_archive",
     "task_unarchive",
+    "task_stop",
+    "task_delete",
     "peer_list",
     "peer_send",
     "inbox_read",
@@ -109,11 +111,12 @@ fn from_schema() -> Value {
 }
 
 /// name, orchd method, description, JSON Schema for `inputSchema`. No
-/// `task_delete` (destructive, and never the agent's call), no
 /// `settings_set` (would let an agent silently change parallelism/planner
 /// config the owner didn't ask to change), no `secrets_*` (an agent has no
-/// business reading or writing API keys) -- all three are deliberately left
-/// off this surface, not just forgotten.
+/// business reading or writing API keys) -- both deliberately left off this
+/// surface, not just forgotten. `task_stop` and `task_delete` are the
+/// owner's orchestrator only (never `--task` or `--read-only`); the daemon
+/// refuses a bridge delete of a live task, and an overseer turn never deletes.
 fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
     vec![
         (
@@ -283,6 +286,26 @@ fn tool_specs() -> Vec<(&'static str, &'static str, &'static str, Value)> {
             "task_unarchive",
             "task.unarchive",
             "Restore an archived task so it appears in the default task_list again.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_stop",
+            "task.stop",
+            "Stop a running, drafting, waiting or landing task. Use it when a live task must end; the task can be started again later.",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            }),
+        ),
+        (
+            "task_delete",
+            "task.delete",
+            "Delete a task with its worktree and branch. Refused while the task is running, drafting, waiting or landing: task_stop it first. Only when the owner asks.",
             json!({
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
@@ -554,6 +577,11 @@ fn tool_error(message: String) -> Value {
 }
 
 fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
+    let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
+    call_tool(bridge, params, declared_source.as_deref())
+}
+
+fn call_tool(bridge: &Bridge, params: &Value, declared_source: Option<&str>) -> Value {
     let p: ToolCallParams = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
         Err(e) => return tool_error(format!("invalid tools/call params: {e}")),
@@ -582,14 +610,16 @@ fn handle_tools_call(bridge: &Bridge, params: &Value) -> Value {
         .filter(|_| host.is_none())
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok());
-    let declared_source = std::env::var("ORCHD_BRIDGE_SOURCE").ok();
-    let source = bridge_source(declared_source.as_deref());
+    let source = bridge_source(declared_source);
     let args = with_task_mcp(
         method,
         args,
         task_mcp,
         bridge.task.is_none() && source == "chat",
     );
+    if method == "task.delete" && source == "overseer" {
+        return tool_error("an overseer turn never deletes tasks; ask the owner".to_string());
+    }
     let args = with_source(method, args, bridge.task.is_some(), source);
     let args = message_params(&p.name, args, bridge.task.as_deref());
     let reply = match host {
@@ -685,7 +715,12 @@ fn bridge_source(source: Option<&str>) -> &'static str {
 fn with_source(method: &str, mut args: Value, from_task: bool, source: &str) -> Value {
     if matches!(
         method,
-        "task.answer" | "task.amend" | "repo.notes.add" | "repo.notes.remove"
+        "task.answer"
+            | "task.amend"
+            | "task.stop"
+            | "task.delete"
+            | "repo.notes.add"
+            | "repo.notes.remove"
     ) {
         // Never trusted from the caller: it marks the answer as not the
         // owner's, so orchd refuses an allow on an owner-only question (and an
@@ -886,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_exactly_the_orchestrator_tools_and_no_delete_or_settings_set() {
+    fn tools_list_has_exactly_the_orchestrator_tools_and_no_settings_set() {
         let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -906,6 +941,8 @@ mod tests {
                 "settings_get",
                 "task_archive",
                 "task_unarchive",
+                "task_stop",
+                "task_delete",
                 "peer_list",
                 "peer_send",
                 "inbox_read",
@@ -1038,7 +1075,7 @@ mod tests {
         let result = dispatch(
             &orchestrator(),
             "tools/call",
-            &json!({"name": "task_delete", "arguments": {}}),
+            &json!({"name": "task_purge", "arguments": {}}),
         )
         .unwrap();
         assert_eq!(result["isError"], true);
@@ -1060,7 +1097,8 @@ mod tests {
         for (name, method, ..) in tool_specs() {
             assert_eq!(orch_method_for(&b, name), Some(method));
         }
-        assert_eq!(orch_method_for(&b, "task_delete"), None);
+        assert_eq!(orch_method_for(&b, "task_delete"), Some("task.delete"));
+        assert_eq!(orch_method_for(&b, "task_stop"), Some("task.stop"));
         assert_eq!(orch_method_for(&b, "settings_set"), None);
         assert_eq!(orch_method_for(&b, "secrets_set"), None);
     }
@@ -1261,6 +1299,44 @@ mod answer_source_tests {
                 assert_eq!(task["source"], "mcp");
             }
         }
+    }
+
+    #[test]
+    fn task_stop_and_task_delete_always_carry_the_bridges_source() {
+        for method in ["task.stop", "task.delete"] {
+            let chat = with_source(method, json!({"id": "t", "source": "owner"}), false, "chat");
+            assert_eq!(chat["source"], "chat", "{method}");
+            let task = with_source(method, json!({"id": "t"}), true, "chat");
+            assert_eq!(task["source"], "mcp", "{method}");
+        }
+    }
+
+    #[test]
+    fn an_overseer_task_delete_is_refused_before_the_backend_but_task_stop_goes_through() {
+        use std::sync::{Arc, Mutex};
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = calls.clone();
+        let bridge = Bridge {
+            call: Box::new(move |method, _| {
+                sink.lock().unwrap().push(method.to_string());
+                Ok(json!({}))
+            }),
+            task: None,
+            read_only: false,
+        };
+        let deleted = call_tool(
+            &bridge,
+            &json!({"name": "task_delete", "arguments": {"id": "t"}}),
+            Some("overseer"),
+        );
+        let stopped = call_tool(
+            &bridge,
+            &json!({"name": "task_stop", "arguments": {"id": "t"}}),
+            Some("overseer"),
+        );
+        assert_eq!(deleted["isError"], true);
+        assert!(stopped.get("isError").is_none());
+        assert_eq!(*calls.lock().unwrap(), ["task.stop"]);
     }
 
     #[test]

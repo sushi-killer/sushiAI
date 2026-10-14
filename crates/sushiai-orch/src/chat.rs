@@ -1893,7 +1893,7 @@ const MAX_TOOLS: usize = 8;
 const MAX_SUMMARY: usize = 120;
 
 /// Tools whose input names a task by `id`.
-const TASK_ID_TOOLS: [&str; 9] = [
+const TASK_ID_TOOLS: [&str; 11] = [
     "task_get",
     "task_backlog",
     "task_start",
@@ -1902,6 +1902,8 @@ const TASK_ID_TOOLS: [&str; 9] = [
     "task_amend",
     "task_archive",
     "task_unarchive",
+    "task_stop",
+    "task_delete",
     "task_lead_touch",
 ];
 
@@ -2618,7 +2620,7 @@ mod tests {
             crate::mcp::ORCHESTRATOR_TOOLS.len()
         );
         assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__orchestrator_reply"));
-        assert!(!at("--allowedTools").contains("task_delete"));
+        assert!(at("--allowedTools").contains("mcp__sushiai-orchestrator__task_delete"));
         assert_eq!(
             at("--append-system-prompt"),
             crate::prompts::default("chat")
@@ -3324,6 +3326,25 @@ mod tests {
             json!([{"name": "task_get", "summary": "Keep the tool calls"}])
         );
         assert!(!message.to_string().contains(TASK_ID));
+    }
+
+    #[test]
+    fn task_stop_and_task_delete_summaries_are_the_task_title() {
+        let (app, _dir, repo) = test_app();
+        app.store
+            .save_task(&stored_task(TASK_ID, "Stop or delete me"))
+            .unwrap();
+        for name in ["task_stop", "task_delete"] {
+            let line = json!({"type": "assistant", "parent_tool_use_id": null,
+                "message": {"content": [{"type": "tool_use",
+                    "name": format!("mcp__sushiai-orchestrator__{name}"),
+                    "input": {"id": TASK_ID}}]}})
+            .to_string();
+            assert_eq!(
+                tools_of(&app, &repo, Harness::Claude, &[&line]),
+                vec![tool(name, "Stop or delete me")]
+            );
+        }
     }
 
     #[test]

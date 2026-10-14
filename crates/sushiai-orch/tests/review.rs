@@ -136,12 +136,18 @@ esac
     daemon.request("settings.set", json!({"settings": settings}));
     let repo = init_git_repo();
     // Fail on the base, pass the fast check, and fail if run as a final.
-    let command = r#"if [ ! -f CHANGED_MARKER.txt ]; then echo broken on base; exit 3; fi
+    std::fs::write(
+        log.path().join("check.sh"),
+        r#"if [ ! -f CHANGED_MARKER.txt ]; then echo broken on base; exit 3; fi
 if [ -f "$LOG_DIR/fast-checked" ]; then
   echo ran >> "$LOG_DIR/final-runs"
   echo broken final; exit 3
 fi
-touch "$LOG_DIR/fast-checked""#;
+touch "$LOG_DIR/fast-checked"
+"#,
+    )
+    .unwrap();
+    let command = format!("sh {}/check.sh CHANGED_MARKER.txt", log.path().display());
     let plan = json!({
         "title": "Preflight before review", "goal": "Write the marker",
         "tier": "standard", "criteria": ["The marker exists"],

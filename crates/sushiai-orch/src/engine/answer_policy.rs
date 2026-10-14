@@ -203,22 +203,47 @@ fn segment_runs_ci(segment: &str) -> bool {
     CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
 }
 
-/// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
-pub(super) fn runs_ci_entry(command: &str) -> bool {
+/// The `&&`, `||`, `;`, `|` and newline separated parts of `command`.
+fn command_segments(command: &str) -> Vec<String> {
     command
         .replace("&&", "\n")
         .replace("||", "\n")
         .replace([';', '|'], "\n")
         .replace(['(', ')'], " ")
         .lines()
-        .any(segment_runs_ci)
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether any part of `command` runs a CI entry.
+pub(super) fn runs_ci_entry(command: &str) -> bool {
+    command_segments(command)
+        .iter()
+        .any(|segment| segment_runs_ci(segment))
+}
+
+/// A plain file name: no glob, and an extension after a non-empty name.
+fn is_plain_file(target: &str) -> bool {
+    !target.contains(['*', '?', '['])
+        && target
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(name, ext)| {
+                !name.is_empty()
+                    && !name.ends_with('.')
+                    && ext.chars().any(|c| c.is_ascii_alphabetic())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            })
 }
 
 /// Whether only the owner may drop `command`. An agent may drop a check only
 /// when the planner wrote it into the plan, no setting or request of the
-/// owner names it, and it targets nothing but planner test files and paths
-/// that do not exist on the base. Every other check is the repo's or the
-/// owner's.
+/// owner names it, it runs no CI entry, and every part of it names a planner
+/// test file or a plain file that does not exist on the base. Every other
+/// check is the repo's or the owner's.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
     let command = flat_command(command);
     if command.is_empty() {
@@ -240,14 +265,21 @@ pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -
         .commands
         .iter()
         .any(|c| flat_command(c) == command);
-    let targets = base_check::check_targets(&command);
+    if named_by_owner || !from_planner || runs_ci_entry(&command) {
+        return true;
+    }
     let absent = base_check::targets_absent_on_base(&task.repo, &task.base_sha, &command);
     let planner_made = |target: &String| {
         let target = target.strip_prefix("./").unwrap_or(target);
         task.planner_tests.files.iter().any(|f| f.path == target)
-            || absent.contains(&target.to_string())
+            || (is_plain_file(target) && absent.iter().any(|a| a == target))
     };
-    !(from_planner && !named_by_owner && !targets.is_empty() && targets.iter().all(planner_made))
+    let segments = command_segments(&command);
+    segments.is_empty()
+        || segments.iter().any(|segment| {
+            let targets = base_check::check_targets(segment);
+            targets.is_empty() || !targets.iter().all(planner_made)
+        })
 }
 
 /// The refusal for a non-owner who tries to drop `command`, a shared check.
@@ -853,11 +885,35 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.repo = repo.path().to_string_lossy().into_owned();
         task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        assert!(!task.base_sha.is_empty());
         let settings = Settings::default();
-        task.planner_tests.commands =
-            vec!["pytest new/test_x.py".into(), "pytest README.md".into()];
-        assert!(!is_shared_check(&settings, &task, "pytest new/test_x.py"));
-        assert!(is_shared_check(&settings, &task, "pytest README.md"));
+        let droppable = [
+            "pytest new/test_x.py",
+            "test -f new/a.txt && test -f new/b.txt",
+        ];
+        let owners = [
+            "pytest README.md",
+            "go test ./...",
+            "go test ./... -run X",
+            "pytest new",
+            "pytest new/*.py",
+            "npm run ci && node --test tests/new.test.cjs",
+            "npm test -- tests/new.test.cjs",
+            "cargo test --workspace 2>&1 | tee logs/ci.log",
+            "echo start && pytest new/test_x.py",
+            "pytest new/test_x.py; true",
+        ];
+        task.planner_tests.commands = droppable
+            .iter()
+            .chain(&owners)
+            .map(|c| c.to_string())
+            .collect();
+        for command in droppable {
+            assert!(!is_shared_check(&settings, &task, command), "{command}");
+        }
+        for command in owners {
+            assert!(is_shared_check(&settings, &task, command), "{command}");
+        }
     }
 
     #[test]

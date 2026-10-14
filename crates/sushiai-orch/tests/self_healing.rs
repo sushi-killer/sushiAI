@@ -241,8 +241,8 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
         &s,
         json!({
             "criteria": ["Lint is clean"],
-            "verify": ["echo broken lint tests/lint.rs; exit 3"],
-            "finalVerify": ["echo broken lint tests/lint.rs; exit 3"],
+            "verify": ["test -f tests/lint.rs"],
+            "finalVerify": ["test -f tests/lint.rs"],
         }),
     );
     let task = finished(&s, &id);
@@ -251,7 +251,7 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
     assert_eq!(task["finalVerify"], Value::Null, "{task}");
     assert_eq!(
         task["briefCheck"]["nonGating"],
-        json!(["echo broken lint tests/lint.rs; exit 3"]),
+        json!(["test -f tests/lint.rs"]),
         "{task}"
     );
     assert!(

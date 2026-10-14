@@ -891,17 +891,15 @@ fn scratch_file<'a>(worktree: &Path, denial: &'a harness::PermissionDenial) -> O
     let file = ["file_path", "notebook_path", "path"]
         .iter()
         .find_map(|k| denial.input.get(k).and_then(|v| v.as_str()))?;
-    let temp = std::env::temp_dir();
-    let in_temp = [
-        "/tmp/",
-        "/var/tmp/",
-        "/private/tmp/",
-        "/var/folders/",
-        "/private/var/folders/",
-    ]
-    .iter()
-    .any(|root| file.starts_with(root))
-        || Path::new(file).starts_with(&temp);
+    // The system temp dir and the POSIX ones, each also by its resolved path
+    // (a symlinked /tmp resolves elsewhere on some systems).
+    let roots = [std::env::temp_dir(), "/tmp".into(), "/var/tmp".into()];
+    let in_temp = roots.iter().any(|root| {
+        Path::new(file).starts_with(root)
+            || root
+                .canonicalize()
+                .is_ok_and(|real| Path::new(file).starts_with(real))
+    });
     (EDIT_TOOLS.contains(&denial.tool.as_str())
         && Path::new(file).is_absolute()
         && relative_to_worktree(worktree, file).is_none()

@@ -399,6 +399,7 @@ mod tests {
             cores: 1,
             load_timeout: false,
             decisions: vec![],
+            ..Default::default()
         }];
         a
     }
@@ -533,6 +534,7 @@ mod tests {
             cores: 1,
             load_timeout: false,
             decisions: vec![],
+            ..Default::default()
         }];
         a
     }

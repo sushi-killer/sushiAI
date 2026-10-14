@@ -163,6 +163,7 @@ fn failed_dependency(repo: &str, check_code: Option<i32>) -> Task {
         cores: 1,
         load_timeout: false,
         decisions: vec![],
+        ..Default::default()
     }];
     dep.attempts = vec![attempt];
     dep

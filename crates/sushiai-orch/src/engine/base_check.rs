@@ -1286,9 +1286,9 @@ pub(super) fn start_final_base_jobs(app: &Arc<App>, task: &Task) {
         .extend(jobs);
 }
 
-/// Baselines the checks that have none yet on the base commit, or on the
-/// planner's tests commit when the task has one (not in the
-/// task's worktree, which may hold the implementer's changes). `false` when
+/// Baselines the checks that have none yet on the base commit with the
+/// planner's tests written over it (not in the task's worktree, which may hold
+/// the implementer's changes). `false` when
 /// cancelled or the base could not be checked out; nothing is stored then.
 pub(super) async fn baseline_on_base(
     app: &Arc<App>,
@@ -1301,7 +1301,27 @@ pub(super) async fn baseline_on_base(
     }
     let commands: Vec<String> = todo.iter().map(|(_, _, run)| run.clone()).collect();
     let run_dir = app.store.task_dir(&task.id).join("baseline-base");
-    let rev = task.work_base().to_string();
+    // The base with the planner's tests: a commit no branch holds.
+    let (repo, base, files) = (
+        PathBuf::from(&task.repo),
+        task.base_sha.clone(),
+        task.planner_tests
+            .files
+            .iter()
+            .map(|t| (t.path.clone(), t.content.clone().into_bytes()))
+            .collect::<Vec<_>>(),
+    );
+    let rev = if files.is_empty() {
+        base
+    } else {
+        match tokio::task::spawn_blocking(move || git::commit_over(&repo, &base, &files))
+            .await
+            .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+        {
+            Ok(rev) => rev,
+            Err(_) => return false,
+        }
+    };
     match run_on_base(
         app,
         Some(&task.id),

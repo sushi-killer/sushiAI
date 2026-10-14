@@ -113,9 +113,7 @@ impl App {
                     self,
                     &task.repo,
                     self.with_precedents(
-                        crate::prompts::get("overseer_reminder")
-                            .replace("{id}", &task.id)
-                            .replace("{title}", &task.title),
+                        waiting_prompt(self, "overseer_reminder", &task),
                         &[&task],
                     ),
                     false,

@@ -173,7 +173,7 @@ pub struct Settings {
     #[serde(default = "default_plan_review")]
     pub plan_review: String,
     /// Route the orchestrator agent runs on: its chat with the owner and,
-    /// with `auto_answer`, its triage of stuck questions. `""` (or an id that
+    /// with `auto_answer`, its decisions on stuck questions. `""` (or an id that
     /// matches no route) means the standard tier's route.
     #[serde(default)]
     pub orchestrator: String,
@@ -941,7 +941,7 @@ pub struct Variant {
     /// The planner marks each question with a recommended option and whether
     /// it is blocking (irreversible or consequential). Non-blocking ones are
     /// not asked: each becomes an assumption on the task and the task goes
-    /// on; blocking ones go to triage and the owner as one question. On
+    /// on; blocking ones go to the overseer and the owner as one question. On
     /// unless explicitly disabled, including on tasks saved before this
     /// switch was on by default.
     #[serde(skip_serializing_if = "is_true")]

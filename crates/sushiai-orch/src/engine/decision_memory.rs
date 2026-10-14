@@ -839,10 +839,7 @@ mod tests {
         let (answer, task) = park(&app, task).await;
         assert_eq!(answer.as_deref(), Some("continue"));
         assert_eq!(non_owner_continues(&task), 2);
-        assert!(task
-            .decisions
-            .iter()
-            .any(|d| is_orchestrator_answer_decision(d)));
+        assert!(task.decisions.iter().any(|d| d.contains(" -> continue")));
         // One non-owner retry per base.
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);

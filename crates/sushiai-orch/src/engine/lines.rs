@@ -1,4 +1,4 @@
-/// Owner-visible `task.decisions` lines for a triage outcome, kept as pure
+/// Owner-visible `task.decisions` lines for an orchestrator outcome, kept as pure
 /// formatting helpers so they're unit-testable without a harness run.
 pub(super) fn orchestrator_answer_line(question: &str, answer: &str, reason: &str) -> String {
     format!("Orchestrator: {question} -> {answer} ({reason})")
@@ -17,20 +17,6 @@ pub(super) const LIKE_PREFIX: &str = "Overseer: answered like ";
 /// names the precedent or repo note it followed.
 pub(super) fn overseer_like_line(like: &str, question: &str, answer: &str) -> String {
     format!("{LIKE_PREFIX}{like} -- {question} -> {answer}")
-}
-
-pub(super) fn orchestrator_escalate_line(reason: &str) -> String {
-    format!("Orchestrator: escalated ({reason})")
-}
-
-/// An orchestrator or lead answer line, excluding escalations and owner/agent lines.
-/// Used to cap triage to one *answer* in a row (P1-2).
-pub(super) fn is_orchestrator_answer_decision(line: &str) -> bool {
-    (line.starts_with("Orchestrator: ")
-        || line.starts_with("Lead: ")
-        || line.starts_with(LIKE_PREFIX))
-        && line.contains(" -> ")
-        && !line.starts_with(NO_PLANNER_TIER_PREFIX)
 }
 
 /// Recorded once per task and stage/tier when a variant's route override

@@ -1558,7 +1558,7 @@ pub(super) async fn run_task_loop(
         }
 
         if let Some(claim) = brief::parse_impossible(&final_text, task.criteria.len()) {
-            // Straight to the owner: no retry, no triage.
+            // Straight to the owner: no retry.
             let question = impossible_question(&task, &claim);
             record_failure(&mut task, idx, FailureKind::Blocked, question.text.clone());
             task.attempts[idx].status = AttemptStatus::Blocked;
@@ -1620,7 +1620,6 @@ pub(super) async fn run_task_loop(
                     &app,
                     &task_id,
                     &mut task,
-                    idx,
                     &pending_answer,
                     &cancel,
                     &mut permit,
@@ -1684,11 +1683,10 @@ pub(super) async fn run_task_loop(
                 .map(|f| f.signature.clone());
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
-            match wait_for_answer_with_triage(
+            match wait_for_answer(
                 &app,
                 &task_id,
                 &mut task,
-                idx,
                 &pending_answer,
                 &cancel,
                 &mut permit,

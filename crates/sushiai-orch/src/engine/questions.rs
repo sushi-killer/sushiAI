@@ -553,6 +553,7 @@ struct TriageRun {
 /// A planner question the planner called routine: triage reads it and either
 /// settles it (`Some((answer, reason))`) or the caller asks the owner. Triage
 /// that fails or escalates settles nothing.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn triage_settles(
     app: &Arc<App>,
     task_id: &str,

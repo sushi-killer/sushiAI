@@ -365,8 +365,10 @@ fn exit_code_arrives_as_session_exited_and_the_session_is_then_not_running() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    let id = sandbox.create(&mut client, "sleep 1; exit 3");
+    // The session waits for a line, so it cannot exit before the attach.
+    let id = sandbox.create(&mut client, "read x; exit 3");
     client.attach(&id);
+    client.type_text(&id, "\n");
     let note = client.wait_note("session.exited");
     assert_eq!(note["id"], id.as_str());
     assert_eq!(note["code"], 3);

@@ -80,6 +80,26 @@ fn command_words(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// Commands that only look at a file's content.
+const PROBES: [&str; 6] = ["grep", "egrep", "fgrep", "rg", "test", "["];
+
+/// The path-like words of each simple command of `command`, with whether that
+/// command is a pure content probe.
+fn check_words(command: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for segment in command.split([';', '|', '&', '\n']) {
+        let words = command_words(segment);
+        let head = words
+            .iter()
+            .find(|w| *w != "!")
+            .cloned()
+            .unwrap_or_default();
+        let probe = PROBES.contains(&head.as_str());
+        out.extend(words.into_iter().map(|w| (w, probe)));
+    }
+    out
+}
+
 /// Whether `path` is a document: a check reads it, the task writes it.
 fn is_document(path: &str) -> bool {
     let ext = Path::new(path)
@@ -106,15 +126,23 @@ pub(super) fn protected_hashes(
         .iter()
         .map(|t| t.path.clone())
         .collect();
-    // A document a check names is not protected: the task is asked to write it.
+    // A document a check only probes (grep, test -s ...) is not protected: the
+    // task is asked to write it. A document a check compares against (a
+    // golden file) is the expected result and stays protected.
     let planned = paths.clone();
+    let mut named: BTreeMap<String, bool> = BTreeMap::new();
     for check in &task.checks {
-        paths.extend(
-            command_words(&check.run)
-                .into_iter()
-                .filter(|p| planned.contains(p) || !is_document(p)),
-        );
+        for (word, probe) in check_words(&check.run) {
+            let only_probed = named.entry(word).or_insert(true);
+            *only_probed &= probe;
+        }
     }
+    paths.extend(
+        named
+            .into_iter()
+            .filter(|(p, probe)| planned.contains(p) || !(*probe && is_document(p)))
+            .map(|(p, _)| p),
+    );
     paths.sort();
     paths.dedup();
     paths
@@ -761,6 +789,29 @@ mod tests {
         }];
         let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
         assert_eq!(kept, vec!["checks/t.test"]);
+    }
+
+    #[test]
+    fn a_document_a_check_compares_against_stays_protected() {
+        let (_dir, repo) = repo_with(&[
+            ("tests/golden/expected.md", "expected\n"),
+            ("docs/guide.md", "old\n"),
+        ]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.checks = vec![
+            Check {
+                criterion: 0,
+                run: "render-docs | diff - tests/golden/expected.md".into(),
+                baseline: None,
+            },
+            Check {
+                criterion: 0,
+                run: "grep -q parser docs/guide.md && cmp tests/golden/expected.md out.md".into(),
+                baseline: None,
+            },
+        ];
+        let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
+        assert_eq!(kept, vec!["tests/golden/expected.md"]);
     }
 
     #[tokio::test]

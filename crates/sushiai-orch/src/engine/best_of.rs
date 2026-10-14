@@ -138,6 +138,8 @@ pub(super) struct BestOfExtra {
     /// The route that produced the winning changes, when it is not the one
     /// the attempt started on.
     pub winner: Option<Route>,
+    /// Protected files the winning candidate changed and orchd restored.
+    pub discarded: Vec<String>,
 }
 
 /// The second candidate's route when best-of applies to this attempt (the
@@ -278,6 +280,25 @@ async fn evaluate(
         verify,
         tally,
     }
+}
+
+/// A candidate whose protected files had to be restored cannot have passed:
+/// its checks ran on the originals, not on what it wrote.
+fn disqualify_restored(
+    eval: &mut Eval,
+    restored: &[String],
+    label: &str,
+    decisions: &mut Vec<String>,
+) {
+    if restored.is_empty() {
+        return;
+    }
+    eval.passed = false;
+    eval.failing = eval.failing.max(1);
+    decisions.push(format!(
+        "Best-of: candidate {label} changed protected files ({}); they were put back and it does not count as passed",
+        restored.join(", ")
+    ));
 }
 
 /// Runs the first implement attempt twice at once: `a_run` in the task's
@@ -436,10 +457,20 @@ where
         return (Err(RunError::Cancelled), extra);
     }
 
+    // A candidate that touched a protected file has it put back before it is
+    // judged, and does not count as passed for the pick.
+    let (restored_a, restored_b) = tokio::join!(
+        guard_protected(task, worktree, &[]),
+        guard_protected(task, &wt_b, &[])
+    );
+    let (restored_a, restored_b) = (
+        restored_a.unwrap_or_default(),
+        restored_b.unwrap_or_default(),
+    );
     let scoped = scoped_checks_for(settings, task);
     let sandbox_a = app.task_sandbox(&task.repo, worktree, run_dir);
     let sandbox_b = app.task_sandbox(&task.repo, &wt_b, &run_dir_b);
-    let (eval_a, eval_b) = tokio::join!(
+    let (mut eval_a, mut eval_b) = tokio::join!(
         evaluate(
             app,
             task,
@@ -466,6 +497,8 @@ where
         ),
     );
 
+    disqualify_restored(&mut eval_a, &restored_a, "a", &mut extra.decisions);
+    disqualify_restored(&mut eval_b, &restored_b, "b", &mut extra.decisions);
     extra.decisions.extend(
         eval_a
             .verify
@@ -582,6 +615,7 @@ where
         }
     }
     cleanup(wt_b, branch_b, repo).await;
+    extra.discarded = if pick_b { restored_b } else { restored_a };
 
     extra.decisions.push(decision);
     extra.candidates = [
@@ -798,5 +832,38 @@ mod route_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod disqualify_tests {
+    use super::*;
+
+    fn passed_eval() -> Eval {
+        Eval {
+            passed: true,
+            verify_ok: true,
+            failing: 0,
+            verify: vec![],
+            tally: CheckTally::default(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_whose_protected_files_were_restored_does_not_count_as_passed() {
+        let mut clean = passed_eval();
+        let mut touched = passed_eval();
+        let mut decisions = Vec::new();
+        disqualify_restored(&mut clean, &[], "a", &mut decisions);
+        disqualify_restored(
+            &mut touched,
+            &["tests/t.test".to_string()],
+            "b",
+            &mut decisions,
+        );
+        assert!(clean.passed && clean.failing == 0);
+        assert!(!touched.passed && touched.failing >= 1);
+        assert_eq!(decisions.len(), 1);
+        assert!(decisions[0].contains("candidate b") && decisions[0].contains("tests/t.test"));
     }
 }

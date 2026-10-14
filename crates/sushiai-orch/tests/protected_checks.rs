@@ -499,3 +499,46 @@ fn a_rejected_wrong_test_claim_leaves_the_test_unchanged_and_the_agent_continues
     );
     cleanup(s, &done);
 }
+
+#[test]
+fn a_rewrite_that_passes_on_the_base_is_rejected_and_the_test_stays() {
+    let s = setup(
+        &format!(
+            "{CLAIM_REPORT}\necho 'exit 1' > tests/new_test.sh\necho ok > impl.txt\nemit \"$CLAIM\""
+        ),
+        false,
+    );
+    let mut plan = plan_json("true", json!([{"criterion": 0, "run": CHECK}]), Value::Null);
+    plan["tests"] = json!([{"path": TEST_FILE, "content": WRONG_BODY}]);
+    plan_with(&s, plan);
+    reply_file(
+        &s,
+        "ruling.json",
+        "sushi-test-ruling",
+        json!({"verdict": "confirmed", "why": "the test asks for the wrong file"}),
+    );
+    // A rewrite that would pass on the base proves nothing.
+    reply_file(
+        &s,
+        "rewrite.json",
+        "sushi-test",
+        json!({"content": "#!/bin/sh\ntrue\n# no assertion\n"}),
+    );
+    let repo = repo_with(&[]);
+    let done = run_task(&s, repo.path());
+    let decisions = done["decisions"].to_string();
+    assert!(
+        decisions.contains("rewriting tests/new_test.sh failed"),
+        "{decisions}"
+    );
+    assert!(
+        decisions.contains("no longer fails on the base"),
+        "{decisions}"
+    );
+    assert_eq!(
+        done["plannerTests"]["protected"][TEST_FILE],
+        sha256_hex(WRONG_BODY),
+        "{done}"
+    );
+    cleanup(s, &done);
+}

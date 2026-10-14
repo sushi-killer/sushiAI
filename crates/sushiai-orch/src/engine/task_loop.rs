@@ -1141,6 +1141,7 @@ pub(super) async fn run_task_loop(
         task.cost_usd += best_of.cost;
         task.attempts[idx].candidates = best_of.candidates;
         record_check_decisions(&mut task, best_of.decisions);
+        let best_of_discarded = best_of.discarded;
         let b_won = best_of.winner.is_some();
         let route = match best_of.winner {
             Some(winner) => {
@@ -1475,6 +1476,10 @@ pub(super) async fn run_task_loop(
             changed.retain(|f| !restored.contains(f));
             task.attempts[idx].changed_files = changed.clone();
         }
+        let mut restored = restored;
+        restored.extend(best_of_discarded);
+        restored.sort();
+        restored.dedup();
         task.planner_tests.discarded = restored;
         if let Some(r) = report.as_ref().filter(|r| !r.test_claims.is_empty()) {
             let claims = r.test_claims.clone();

@@ -152,7 +152,7 @@ pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
 }
 
 /// Leading tokens of a repo's own CI entry. A command segment that starts
-/// with one of these (after `cd <dir>` and `VAR=x`) is shared.
+/// with one of these (after `cd <dir>` and `VAR=x`) is a CI entry.
 const CI_ENTRIES: [&[&str]; 11] = [
     &["npm", "run", "ci"],
     &["npm", "test"],
@@ -167,8 +167,6 @@ const CI_ENTRIES: [&[&str]; 11] = [
     &["make", "ci"],
 ];
 
-const SHARED_CHECK_NAMES: [&str; 4] = ["ci", "test", "lint", "build"];
-
 pub(super) fn flat_command(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -181,8 +179,8 @@ pub(super) fn is_assignment(token: &str) -> bool {
     })
 }
 
-/// Whether one shell segment runs a CI entry or a declared repo check.
-fn segment_runs_ci(segment: &str, scripts: &[(String, String)], targets: &[String]) -> bool {
+/// Whether one shell segment runs a CI entry.
+fn segment_runs_ci(segment: &str) -> bool {
     let mut tokens: Vec<&str> = segment.split_whitespace().collect();
     loop {
         match tokens.as_slice() {
@@ -192,122 +190,60 @@ fn segment_runs_ci(segment: &str, scripts: &[(String, String)], targets: &[Strin
             _ => break,
         };
     }
-    if CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
-        || scripts
-            .iter()
-            .any(|(_, body)| !body.is_empty() && *body == tokens.join(" "))
-    {
-        return true;
-    }
-    let Some((runner, words)) = tokens.split_first() else {
-        return false;
-    };
-    match *runner {
-        "npm" | "pnpm" | "yarn" => {
-            let explicit_run = words
-                .first()
-                .is_some_and(|word| matches!(*word, "run" | "run-script"));
-            let words = if explicit_run { &words[1..] } else { words };
-            let name = words.iter().copied().find(|word| !word.starts_with('-'));
-            (*runner != "npm" || explicit_run || name == Some("test"))
-                && scripts
-                    .iter()
-                    .any(|(script, _)| Some(script.as_str()) == name)
-        }
-        "make" => {
-            let mut words = words.iter().copied();
-            while let Some(word) = words.next() {
-                if matches!(word, "-C" | "-f" | "-I" | "-o" | "-W") {
-                    words.next();
-                } else if !word.starts_with('-')
-                    && !is_assignment(word)
-                    && targets.iter().any(|target| target == word)
-                {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
+    CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
 }
 
 /// Whether any `&&`, `||`, `;` or `|` separated part of `command` runs a CI entry.
 pub(super) fn runs_ci_entry(command: &str) -> bool {
-    runs_repo_check(command, &[], &[])
+    command
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace([';', '|'], "\n")
+        .replace(['(', ')'], " ")
+        .lines()
+        .any(segment_runs_ci)
 }
 
-fn runs_repo_check(command: &str, scripts: &[(String, String)], targets: &[String]) -> bool {
-    scripts.iter().any(|(_, body)| body == command)
-        || command
-            .replace("&&", "\n")
-            .replace("||", "\n")
-            .replace([';', '|'], "\n")
-            .replace(['(', ')'], " ")
-            .lines()
-            .any(|segment| segment_runs_ci(segment, scripts, targets))
-}
-
-/// Whether `command` is a check the owner or the repo stands behind: the
-/// repo's CI entry, a `scopedChecks` or `afterLand` entry of the settings, or
-/// a command written in the owner's own task request. Only the owner may drop
-/// such a check; a planner-invented, task-specific one stays droppable.
+/// Whether only the owner may drop `command`. An agent may drop a check only
+/// when the planner wrote it into the plan, no setting or request of the
+/// owner names it, and it targets nothing but planner test files and paths
+/// that do not exist on the base. Every other check is the repo's or the
+/// owner's.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
     let command = flat_command(command);
     if command.is_empty() {
         return false;
     }
-    let repo = Path::new(&task.repo);
-    let scripts: Vec<(String, String)> = std::fs::read_to_string(repo.join("package.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|package| {
-            package.get("scripts")?.as_object().map(|scripts| {
-                scripts
-                    .iter()
-                    .filter(|(name, _)| SHARED_CHECK_NAMES.contains(&name.as_str()))
-                    .filter_map(|(name, body)| Some((name.clone(), flat_command(body.as_str()?))))
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
-    let mut targets = Vec::new();
-    if let Ok(makefile) = std::fs::read_to_string(repo.join("Makefile")) {
-        for line in makefile.lines().filter(|line| !line.starts_with('\t')) {
-            let line = line.split('#').next().unwrap_or_default();
-            if let Some((names, rest)) = line.split_once(':') {
-                if names.contains('=') || rest.trim_start_matches(':').starts_with('=') {
-                    continue;
-                }
-                targets.extend(
-                    names
-                        .split_whitespace()
-                        .filter(|name| SHARED_CHECK_NAMES.contains(name))
-                        .map(str::to_string),
-                );
-            }
-        }
-    }
-    runs_repo_check(&command, &scripts, &targets)
-        || scoped_checks_for(settings, task).iter().any(|e| {
-            e.repo
-                .as_deref()
-                .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
-                && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
-        })
-        || settings.after_land.iter().any(|a| {
-            crate::model::same_repo_path(&a.repo, &task.repo) && flat_command(&a.run) == command
-        })
-        || task
-            .request
+    let named_by_owner = scoped_checks_for(settings, task).iter().any(|e| {
+        e.repo
             .as_deref()
-            .is_some_and(|r| flat_command(r).contains(&command))
+            .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
+            && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
+    }) || settings.after_land.iter().any(|a| {
+        crate::model::same_repo_path(&a.repo, &task.repo) && flat_command(&a.run) == command
+    }) || task
+        .request
+        .as_deref()
+        .is_some_and(|r| flat_command(r).contains(&command));
+    let from_planner = task
+        .planner_tests
+        .commands
+        .iter()
+        .any(|c| flat_command(c) == command);
+    let targets = base_check::check_targets(&command);
+    let absent = base_check::targets_absent_on_base(&task.repo, &task.base_sha, &command);
+    let planner_made = |target: &String| {
+        let target = target.strip_prefix("./").unwrap_or(target);
+        task.planner_tests.files.iter().any(|f| f.path == target)
+            || absent.contains(&target.to_string())
+    };
+    !(from_planner && !named_by_owner && !targets.is_empty() && targets.iter().all(planner_made))
 }
 
 /// The refusal for a non-owner who tries to drop `command`, a shared check.
 fn shared_check_refusal(command: &str) -> String {
     format!(
-        "`{command}` is a shared check (the repo's CI entry, a repo setting or the owner's own): only the owner may drop it. An agent can answer \"{}\" or \"stop\", otherwise the owner decides",
+        "`{command}` is a shared check (not made by the planner for this task, or named by a setting or the owner): only the owner may drop it. An agent can answer \"{}\" or \"stop\", otherwise the owner decides",
         base_check::PRE_EXISTING_RETRY
     )
 }
@@ -837,127 +773,81 @@ mod tests {
     }
 
     #[test]
-    fn shared_check_recognizes_repo_scripts_and_make_targets() {
-        let repo = tempfile::tempdir().unwrap();
-        std::fs::write(
-            repo.path().join("package.json"),
-            json!({"scripts": {
-                "ci": "npm run lint && npm run test",
-                "test": "node --test",
-                "lint": "eslint   .",
-                "build": "vite build",
-                "dev": "vite"
-            }})
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            repo.path().join("Makefile"),
-            "lint:\n\teslint .\ndeploy:\n\t./deploy.sh\n",
-        )
-        .unwrap();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo.path().to_string_lossy().into_owned();
+    fn a_check_is_the_owners_unless_the_planner_wrote_it_for_a_file_of_its_own() {
         let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        planner_made(&mut task, "pytest tests/test_new.py", "tests/test_new.py");
+        planner_made(&mut task, "go test ./...", "tests/new_test.go");
+        planner_made(
+            &mut task,
+            "node --test tests/a.test.cjs README.md",
+            "tests/a.test.cjs",
+        );
         for command in [
-            "npm run --silent ci",
-            "pnpm run test",
-            "npm run lint",
-            "yarn lint",
-            "eslint .",
-            "make -j4 lint",
-            "npm run-script --silent build",
-            "pnpm --silent build",
-            "yarn run --silent lint",
-            "npm --silent test",
-            "vite build",
-            "npm run lint && npm run test",
-            "echo before; eslint .",
-            "cd /tmp && env CI=1 timeout 30 npm run --silent lint",
-            "env CI=1 timeout 30 eslint .",
-            "make -C /tmp -f checks.mk -I includes -o old -W changed MODE=ci -j4 lint",
+            "pytest",
+            "go test ./...",
+            "cargo nextest run",
+            "just ci",
+            "./gradlew test",
+            "npx vitest run",
+            "npm run test:daemon",
+            "pytest tests/test_other.py",
+            "node --test tests/a.test.cjs README.md",
+            "",
         ] {
-            assert!(is_shared_check(&settings, &task, command), "{command}");
+            assert_eq!(
+                is_shared_check(&settings, &task, command),
+                !command.is_empty(),
+                "{command}"
+            );
         }
-        for command in [
-            "npm run dev",
-            "npm ci",
-            "npm build",
-            "make deploy",
-            "vite",
-            "eslint . --fix",
-            "make -C lint deploy",
-            "make -f lint -I lint -o lint -W lint deploy",
-            "echo eslint .",
-        ] {
-            assert!(!is_shared_check(&settings, &task, command), "{command}");
-        }
+        assert!(!is_shared_check(
+            &settings,
+            &task,
+            "pytest   tests/test_new.py"
+        ));
     }
 
     #[test]
-    fn shared_check_ignores_missing_and_invalid_repo_entries() {
-        let repo = tempfile::tempdir().unwrap();
+    fn a_planner_command_that_the_owner_or_the_settings_name_stays_the_owners() {
+        let mut settings = Settings::default();
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo.path().to_string_lossy().into_owned();
-        let settings = Settings::default();
-        assert!(!is_shared_check(&settings, &task, "npm run lint"));
-        assert!(!is_shared_check(&settings, &task, "make lint"));
-        std::fs::write(
-            repo.path().join("Makefile"),
-            "lint := eslint .\nbuild ::= vite build\n# lint: ignored\n\techo lint:\nNAME = lint: ignored\n",
-        )
-        .unwrap();
-        for package in [
-            "invalid JSON",
-            r#"{"scripts": []}"#,
-            r#"{"scripts": {"lint": null, "build": 12, "dev": "eslint ."}}"#,
-            r#"{"scripts": {"lint": ""}}"#,
-        ] {
-            std::fs::write(repo.path().join("package.json"), package).unwrap();
-            for command in [
-                "npm run build",
-                "eslint .",
-                "make lint",
-                "make build",
-                "cd /tmp",
-            ] {
-                assert!(
-                    !is_shared_check(&settings, &task, command),
-                    "{package}: {command}"
-                );
-            }
-        }
-        std::fs::write(
-            repo.path().join("package.json"),
-            r#"{"scripts": {"dev": "vite"}}"#,
-        )
-        .unwrap();
-        assert!(!is_shared_check(&settings, &task, "npm run lint"));
-        std::fs::write(repo.path().join("Makefile"), b"\xfflint:\n").unwrap();
-        assert!(!is_shared_check(&settings, &task, "make lint"));
-        assert!(is_shared_check(&settings, &task, "cargo test"));
+        planner_made(&mut task, "pytest tests/test_new.py", "tests/test_new.py");
+        assert!(!is_shared_check(
+            &settings,
+            &task,
+            "pytest tests/test_new.py"
+        ));
+        task.request = Some("run pytest tests/test_new.py before you finish".into());
+        assert!(is_shared_check(
+            &settings,
+            &task,
+            "pytest tests/test_new.py"
+        ));
+        task.request = None;
+        settings.after_land.push(AfterLand {
+            repo: task.repo.clone(),
+            run: "pytest tests/test_new.py".into(),
+        });
+        assert!(is_shared_check(
+            &settings,
+            &task,
+            "pytest tests/test_new.py"
+        ));
     }
 
     #[test]
-    fn shared_check_recognizes_multiple_make_targets_and_skips_option_arguments() {
+    fn a_target_absent_on_the_base_makes_a_planner_command_droppable() {
         let repo = tempfile::tempdir().unwrap();
-        std::fs::write(
-            repo.path().join("Makefile"),
-            "lint build: inputs\n\t./check\n",
-        )
-        .unwrap();
+        init_git_repo(repo.path());
         let mut task = task_with_status(TaskStatus::Waiting);
         task.repo = repo.path().to_string_lossy().into_owned();
+        task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
         let settings = Settings::default();
-        assert!(is_shared_check(&settings, &task, "make -j4 build"));
-        assert!(is_shared_check(&settings, &task, "make deploy lint"));
-        for option in ["-C", "-f", "-I", "-o", "-W"] {
-            assert!(!is_shared_check(
-                &settings,
-                &task,
-                &format!("make {option} lint deploy")
-            ));
-        }
+        task.planner_tests.commands =
+            vec!["pytest new/test_x.py".into(), "pytest README.md".into()];
+        assert!(!is_shared_check(&settings, &task, "pytest new/test_x.py"));
+        assert!(is_shared_check(&settings, &task, "pytest README.md"));
     }
 
     #[test]
@@ -1046,6 +936,12 @@ mod tests {
             &["node --test tests/x.test.cjs", "npm run ci"],
             &["retry after the base is fixed", "drop all", "stop"],
         );
+        let mut task = task;
+        planner_made(
+            &mut task,
+            "node --test tests/x.test.cjs",
+            "tests/x.test.cjs",
+        );
         let why = shared_check_drop_refusal(&settings, &task, &q, "drop all").unwrap();
         assert!(
             why.contains("`npm run ci`") && why.contains("only the owner"),
@@ -1057,7 +953,6 @@ mod tests {
         let q = base_check_question(&["node --test tests/x.test.cjs"], &["drop all"]);
         assert!(shared_check_drop_refusal(&settings, &task, &q, "drop all").is_none());
         // Nothing is removed on a refusal: the owner's route is the only one.
-        let mut task = task;
         task.verify = vec!["npm run ci".into(), "node --test tests/x.test.cjs".into()];
         let q = base_check_question(
             &["npm run ci", "node --test tests/x.test.cjs"],

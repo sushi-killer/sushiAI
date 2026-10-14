@@ -1597,6 +1597,11 @@ pub struct PlannerTests {
     /// commit rebuilt when they were not clean (once per task).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub format_checked: bool,
+    /// The commands the planner wrote into the plan (verify, finalVerify,
+    /// checks, the held-out check), recorded when the plan is stored. Only
+    /// these may be dropped without the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 impl Task {
@@ -1607,6 +1612,32 @@ impl Task {
             .commit
             .as_deref()
             .unwrap_or(&self.base_sha)
+    }
+}
+
+impl Task {
+    /// Records the commands now in the plan as the planner's: verify,
+    /// finalVerify, the checks, the held-out check and the `-- check:` part
+    /// of each criterion.
+    pub fn record_planner_commands(&mut self) {
+        self.planner_tests.commands = self
+            .verify
+            .iter()
+            .chain(&self.final_verify)
+            .chain(
+                self.checks
+                    .iter()
+                    .chain(self.held_out.as_ref())
+                    .map(|c| &c.run),
+            )
+            .cloned()
+            .chain(
+                self.criteria
+                    .iter()
+                    .filter_map(|c| c.split_once("-- check:"))
+                    .map(|(_, command)| command.trim().to_string()),
+            )
+            .collect();
     }
 }
 

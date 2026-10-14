@@ -37,6 +37,10 @@ if head -c 9 "$B" | grep -q '## Review'; then
   emit "$reply"
   exit 0
 fi
+if grep -q 'sushi-plan' "$B"; then
+  emit "$(cat "$LOG_DIR/plan.json")"
+  exit 0
+fi
 if grep -q 'You judge' "$B"; then
   j=$(ls "$LOG_DIR"/judge.* 2>/dev/null | wc -l | tr -d ' ')
   touch "$LOG_DIR/judge.$j"
@@ -119,6 +123,28 @@ fn create(s: &Setup, extra: Value) -> String {
     id
 }
 
+/// A task the planner drafts from `plan`: its commands are the planner's.
+fn create_planned(s: &Setup, plan: Value) -> String {
+    let mut full = json!({"title": "Heal", "goal": "Make a change", "tier": "standard"});
+    for (k, v) in plan.as_object().unwrap() {
+        full[k] = v.clone();
+    }
+    std::fs::write(
+        s.log.path().join("plan.json"),
+        js(&format!("```sushi-plan\n{full}\n```")),
+    )
+    .unwrap();
+    let task = s.daemon.request(
+        "task.create",
+        json!({
+            "repo": s.repo.path().to_str().unwrap(),
+            "request": "make a change",
+            "start": true,
+        }),
+    );
+    task["id"].as_str().unwrap().to_string()
+}
+
 fn finished(s: &Setup, id: &str) -> Value {
     poll_until(&s.daemon, id, |st| {
         matches!(st, "done" | "failed" | "stopped" | "waiting")
@@ -168,10 +194,10 @@ fn a_check_that_needs_a_harness_the_repo_lacks_is_rewritten_and_recorded_as_an_a
         "{\"verdict\":\"rewrite\",\"command\":\"test -f CHANGED_MARKER.txt\",\"criterion\":0,\"criterionText\":\"Clicking opens the panel -- check: read the handler\",\"reason\":\"the repo has no DOM test runner\"}",
     );
     let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
-    let id = create(
+    let id = create_planned(
         &s,
         json!({
-            "criteria": ["Clicking opens the panel -- check: DOM click test"],
+            "criteria": ["Clicking opens the panel -- check: no-such-dom-test-runner tests/click.dom"],
             "verify": ["no-such-dom-test-runner tests/click.dom"],
         }),
     );
@@ -211,9 +237,13 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
     let feasibility =
         js("{\"verdict\":\"unrelated\",\"reason\":\"the lint config is broken on main\"}");
     let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
-    let id = create(
+    let id = create_planned(
         &s,
-        json!({"verify": ["echo broken lint; exit 3"], "finalVerify": ["echo broken lint; exit 3"]}),
+        json!({
+            "criteria": ["Lint is clean"],
+            "verify": ["echo broken lint tests/lint.rs; exit 3"],
+            "finalVerify": ["echo broken lint tests/lint.rs; exit 3"],
+        }),
     );
     let task = finished(&s, &id);
     assert_eq!(task["status"], "done", "{task}");
@@ -221,7 +251,7 @@ fn a_verify_command_failing_on_the_base_for_an_unrelated_reason_is_non_gating() 
     assert_eq!(task["finalVerify"], Value::Null, "{task}");
     assert_eq!(
         task["briefCheck"]["nonGating"],
-        json!(["echo broken lint; exit 3"]),
+        json!(["echo broken lint tests/lint.rs; exit 3"]),
         "{task}"
     );
     assert!(
@@ -342,9 +372,12 @@ fn the_same_unmet_criterion_twice_goes_to_the_judge_and_an_infeasible_one_is_ame
         ],
         "claude-sonnet",
     );
-    let id = create(
+    let id = create_planned(
         &s,
-        json!({"criteria": ["Clicking opens the panel -- check: DOM click test"]}),
+        json!({
+            "criteria": ["Clicking opens the panel -- check: no-such-dom-test-runner tests/click.dom"],
+            "verify": ["true"],
+        }),
     );
     let task = finished(&s, &id);
     assert_eq!(task["status"], "done", "{task}");

@@ -108,6 +108,8 @@ fn a_preflight_ruling_drops_a_failing_final_before_review_starts() {
         r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+*sushi-plan*)
+  cat "$LOG_DIR/plan.jsonl" ;;
 *"You check a coding task brief"*)
   printf '%s\n' '{"type":"result","result":"{\"contradiction\":false}"}' ;;
 *"You judge whether a check command"*)
@@ -140,18 +142,35 @@ if [ -f "$LOG_DIR/fast-checked" ]; then
   echo broken final; exit 3
 fi
 touch "$LOG_DIR/fast-checked""#;
+    let plan = json!({
+        "title": "Preflight before review", "goal": "Write the marker",
+        "tier": "standard", "criteria": ["The marker exists"],
+        "verify": [command], "finalVerify": [command],
+    });
+    let reply = json!({
+        "type": "result",
+        "result": format!("```sushi-plan\n{plan}\n```"),
+    });
+    std::fs::write(log.path().join("plan.jsonl"), format!("{reply}\n")).unwrap();
     let task = daemon.request(
         "task.create",
         json!({
-            "repo": repo.path().to_str().unwrap(), "title": "Preflight before review",
-            "goal": "Write the marker", "verify": [command],
-            "finalVerify": [command], "start": true,
+            "repo": repo.path().to_str().unwrap(),
+            "request": "write the marker", "start": true,
         }),
     );
-    let settled = poll_task_status(&daemon, task["id"].as_str().unwrap());
+    let settled = poll_until(&daemon, task["id"].as_str().unwrap(), |s| {
+        matches!(s, "done" | "failed" | "stopped" | "waiting")
+    });
     assert_eq!(settled["status"], "done", "{settled}");
-    assert_eq!(settled["attempts"].as_array().unwrap().len(), 1);
-    let attempt = &settled["attempts"][0];
+    let implements: Vec<&serde_json::Value> = settled["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["stage"] == "implement")
+        .collect();
+    assert_eq!(implements.len(), 1);
+    let attempt = implements[0];
     assert_eq!(attempt["verify"][0]["code"], 0, "{settled}");
     assert_eq!(attempt["review"]["verdict"], "PASS", "{settled}");
     assert_eq!(settled["briefCheck"]["nonGating"], json!([command]));

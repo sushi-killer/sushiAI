@@ -864,22 +864,26 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Queued);
         task.repo = dir.path().join("gone").to_string_lossy().to_string();
         task.worktree = dir.path().join("gone-wt").to_string_lossy().to_string();
-        task.queue.paused_until = Some(now_ms() + 700);
+        let until = now_ms() + 700;
+        task.queue.paused_until = Some(until);
         app.store.save_task(&task).unwrap();
-        let started = std::time::Instant::now();
         app.spawn_task_loop(task.id.clone(), true);
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let mid = app.store.load_task(&task.id).unwrap().unwrap();
-        assert!(mid.queue.paused_until.is_some(), "still paused");
-        for _ in 0..100 {
+        // The property is that the pause is served in full and then cleared. A wall-clock
+        // sample of "still paused" would race the loop on a loaded machine: check the
+        // moment of clearing against the pause's own end instead.
+        let end = std::time::Instant::now() + crate::procs::testing::deadline();
+        loop {
             let t = app.store.load_task(&task.id).unwrap().unwrap();
             if t.queue.paused_until.is_none() {
-                assert!(started.elapsed() >= Duration::from_millis(600));
+                assert!(now_ms() >= until, "the pause was cleared before it ended");
                 return;
             }
+            assert!(
+                std::time::Instant::now() < end,
+                "the pause was never cleared"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("the pause was never cleared");
     }
 
     /// A quiet window that holds the local minute of `at`, in any zone.

@@ -402,9 +402,14 @@ fn a_flooding_session_stays_running_and_its_screen_keeps_up() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     let mut client = sandbox.client();
+    // The flood only has to dwarf every buffer on the way (the holder's 2 MiB ring and the
+    // daemon's 4 MiB history budget). The emulator parses it at well under 1 MiB/s in a
+    // debug build, so a bigger flood only makes the test slower, not stronger.
     let id = sandbox.create(
         &mut client,
-        "yes | head -c 50000000; printf \"mark%s\\n\" er-end; sleep 30",
+        // After the marker the command waits on stdin: a fixed sleep would end the
+        // session mid-test whenever a loaded machine needs longer than the sleep.
+        "yes | head -c 16000000; printf \"mark%s\\n\" er-end; exec cat",
     );
     // An attached client that reads slowly, while the flood runs.
     client.attach(&id);

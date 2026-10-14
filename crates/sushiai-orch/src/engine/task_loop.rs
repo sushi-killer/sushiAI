@@ -1680,9 +1680,12 @@ pub(super) async fn run_task_loop(
         // A usage or rate limit is not a failed attempt: the task pauses and
         // resumes by itself.
         if changed.is_empty() {
-            if let Some((error, wait)) = outcome.error.as_deref().and_then(|e| {
-                rate_limit_wait_secs(e, task.queue.rate_pauses, now_ms() / 1000).map(|w| (e, w))
-            }) {
+            let failure = outcome.provider_failure(now_ms() / 1000);
+            if let Some((error, wait)) =
+                outcome.error.as_deref().zip(failure).and_then(|(e, f)| {
+                    rate_limit_wait_secs(f, task.queue.rate_pauses).map(|w| (e, w))
+                })
+            {
                 let resumed = pause_for_rate_limit(
                     &app,
                     &task_id,

@@ -514,6 +514,91 @@ impl RunOutcome {
     }
 }
 
+impl RunOutcome {
+    /// The provider failure behind `error`, `None` when the run had none. The
+    /// structured class wins; the error text is read only when the harness
+    /// reported no class. `now_secs` turns a stated reset into a wait.
+    pub fn provider_failure(&self, now_secs: i64) -> Option<ProviderFailure> {
+        let error = self.error.as_deref()?;
+        Some(
+            self.structured_failure
+                .unwrap_or_else(|| text_provider_failure(error, now_secs)),
+        )
+    }
+}
+
+/// The failure class in a raw error text. Only `provider_failure` calls it:
+/// a harness with no structured class (Codex), or a run that died with its
+/// stderr tail. Substrings only; no harness message shape is pinned here.
+fn text_provider_failure(error: &str, now_secs: i64) -> ProviderFailure {
+    let e = error.to_ascii_lowercase();
+    let any = |needles: &[&str]| needles.iter().any(|n| e.contains(n));
+    // A bare 429 is a line number or a port as often as a status.
+    let limit = any(&[
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "too many requests",
+        // The Claude CLI printed this 403 for minutes while the account was
+        // refused upstream; a logged-out CLI (401) still fails at once.
+        "403 request not allowed",
+        "429 too many",
+        "status 429",
+        "status code 429",
+        "\"status\":429",
+        "\"status\": 429",
+        "http 429",
+        "http/1.1 429",
+        "http/2 429",
+    ]);
+    let retry_after_ms = stated_reset(error)
+        .filter(|reset| *reset > now_secs)
+        .map(|reset| ((reset - now_secs + 30) * 1000) as u64);
+    if limit {
+        ProviderFailure::RateLimited { retry_after_ms }
+    } else if e.contains("overloaded_error") {
+        ProviderFailure::Overloaded { retry_after_ms }
+    } else if e.contains("credit balance is too low") {
+        ProviderFailure::QuotaExhausted { retry_after_ms }
+    } else if any(&["invalid x-api-key", "api error: 401"]) {
+        ProviderFailure::Auth
+    } else {
+        ProviderFailure::Other
+    }
+}
+
+/// The reset time (Unix seconds) a message states after a `|`, the shape the
+/// Claude CLI has printed ("... limit reached|1760000000").
+fn stated_reset(error: &str) -> Option<i64> {
+    let digits: String = error
+        .rsplit_once('|')?
+        .1
+        .trim()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (digits.len() == 10).then(|| digits.parse().ok()).flatten()
+}
+
+/// The failure class a Claude stream reports: the assistant message's `error`
+/// category, or the result's HTTP status. `None` when neither names one, so
+/// the text decides.
+fn claude_failure(category: Option<&str>, status: Option<u64>) -> Option<ProviderFailure> {
+    match (category, status) {
+        (Some("rate_limit"), _) | (_, Some(429)) => Some(ProviderFailure::RateLimited {
+            retry_after_ms: None,
+        }),
+        (Some("billing_error"), _) => Some(ProviderFailure::QuotaExhausted {
+            retry_after_ms: None,
+        }),
+        (Some("authentication_failed"), _) | (_, Some(401)) => Some(ProviderFailure::Auth),
+        (_, Some(529)) => Some(ProviderFailure::Overloaded {
+            retry_after_ms: None,
+        }),
+        _ => None,
+    }
+}
+
 // -- stream event parsing --------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -528,6 +613,9 @@ pub struct RunOutcome {
     /// `turn.failed`/`error`), used as the failure detail when the run
     /// produced nothing.
     pub error: Option<String>,
+    /// The failure class the harness reported in its structured output (Claude's
+    /// error category or HTTP status). Read through `provider_failure`.
+    pub structured_failure: Option<ProviderFailure>,
     /// The run printed nothing for its stall timeout and was killed.
     pub stalled: bool,
     /// A helper reached its wall-clock deadline and was stopped.
@@ -560,6 +648,17 @@ pub struct RunOutcome {
     /// Claude only: the calls the run was not allowed to make
     /// (`permission_denials` of its result).
     pub permission_denials: Vec<PermissionDenial>,
+}
+
+/// Why a run failed at the provider. Callers read this enum; `retry_after_ms`
+/// is the reset the run stated, when it stated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailure {
+    RateLimited { retry_after_ms: Option<u64> },
+    QuotaExhausted { retry_after_ms: Option<u64> },
+    Auth,
+    Overloaded { retry_after_ms: Option<u64> },
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -737,10 +836,18 @@ fn feed_claude_line(v: &serde_json::Value, outcome: &mut RunOutcome) -> Option<S
                     .final_text
                     .clone()
                     .or(Some("Claude reported an error.".into()));
+                let status = v.get("api_error_status").and_then(|x| x.as_u64());
+                if let Some(class) = claude_failure(None, status) {
+                    outcome.structured_failure = Some(class);
+                }
             }
             Some("session finished".to_string())
         }
         "assistant" => {
+            let category = v.get("error").and_then(|x| x.as_str());
+            if let Some(class) = claude_failure(category, None) {
+                outcome.structured_failure = Some(class);
+            }
             if outcome.first_turn_tokens.is_none() {
                 outcome.first_turn_tokens = first_turn_tokens(v);
             }
@@ -1248,11 +1355,129 @@ mod tests {
         );
     }
 
+    fn claude_stream(lines: &[&str]) -> RunOutcome {
+        replay_events(Harness::Claude, &lines.join("\n"))
+    }
+
+    fn claude_error(category: Option<&str>, status: Option<u64>, text: &str) -> RunOutcome {
+        let mut lines = Vec::new();
+        if let Some(category) = category {
+            lines.push(format!(
+                r#"{{"type":"assistant","error":"{category}","message":{{"content":[]}}}}"#
+            ));
+        }
+        let status = status.map_or(String::new(), |s| format!(r#","api_error_status":{s}"#));
+        lines.push(format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"result":"{text}"{status}}}"#
+        ));
+        claude_stream(&lines.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_claude_error_names_its_failure_class_from_the_stream() {
+        let now = 1_760_000_000;
+        let class = |o: RunOutcome| o.provider_failure(now);
+        let rate = ProviderFailure::RateLimited {
+            retry_after_ms: None,
+        };
+        assert_eq!(
+            class(claude_error(Some("rate_limit"), None, "x")),
+            Some(rate)
+        );
+        assert_eq!(class(claude_error(None, Some(429), "x")), Some(rate));
+        assert_eq!(
+            class(claude_error(None, Some(529), "x")),
+            Some(ProviderFailure::Overloaded {
+                retry_after_ms: None
+            })
+        );
+        assert_eq!(
+            class(claude_error(Some("billing_error"), None, "x")),
+            Some(ProviderFailure::QuotaExhausted {
+                retry_after_ms: None
+            })
+        );
+        assert_eq!(
+            class(claude_error(Some("authentication_failed"), None, "x")),
+            Some(ProviderFailure::Auth)
+        );
+        assert_eq!(
+            class(claude_error(None, Some(401), "x")),
+            Some(ProviderFailure::Auth)
+        );
+        assert_eq!(
+            class(claude_error(Some("server_error"), None, "boom")),
+            Some(ProviderFailure::Other)
+        );
+    }
+
+    #[test]
+    fn the_structured_class_wins_over_the_error_text() {
+        let now = 1_760_000_000;
+        let out = claude_error(None, Some(401), "rate limit exceeded");
+        assert_eq!(out.provider_failure(now), Some(ProviderFailure::Auth));
+        // A 403 the stream does not classify keeps the text's verdict.
+        let out = claude_error(None, Some(403), "403 Request not allowed");
+        assert_eq!(
+            out.provider_failure(now),
+            Some(ProviderFailure::RateLimited {
+                retry_after_ms: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_codex_error_is_classified_from_its_text_with_the_stated_reset() {
+        let now = 1_760_000_000;
+        let codex = |message: &str| {
+            let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
+            replay_events(Harness::Codex, &line.to_string())
+        };
+        assert_eq!(
+            codex("usage limit reached|1760003600").provider_failure(now),
+            Some(ProviderFailure::RateLimited {
+                retry_after_ms: Some(3630 * 1000)
+            })
+        );
+        assert_eq!(
+            codex("usage limit reached|1759999000").provider_failure(now),
+            Some(ProviderFailure::RateLimited {
+                retry_after_ms: None
+            })
+        );
+        assert_eq!(
+            codex("overloaded_error").provider_failure(now),
+            Some(ProviderFailure::Overloaded {
+                retry_after_ms: None
+            })
+        );
+        assert_eq!(
+            codex("Your credit balance is too low").provider_failure(now),
+            Some(ProviderFailure::QuotaExhausted {
+                retry_after_ms: None
+            })
+        );
+        assert_eq!(
+            codex("Failed to authenticate. API Error: 401 invalid x-api-key").provider_failure(now),
+            Some(ProviderFailure::Auth)
+        );
+        assert_eq!(
+            codex("model not supported").provider_failure(now),
+            Some(ProviderFailure::Other)
+        );
+        assert_eq!(RunOutcome::default().provider_failure(now), None);
+        // A TypeError at cli.js:429:15 is a line number, not a status.
+        assert_eq!(
+            codex("TypeError at cli.js:429:15").provider_failure(now),
+            Some(ProviderFailure::Other)
+        );
+    }
+
     #[test]
     fn a_structured_output_is_the_reply_and_replaces_the_prose_result() {
-        let out = replay_events(Harness::Claude, &[
+        let out = claude_stream(&[
             r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","structured_output":{"title":"t"}}"#,
-        ].join("\n"));
+        ]);
         assert_eq!(out.final_text.as_deref(), Some(r#"{"title":"t"}"#));
     }
 

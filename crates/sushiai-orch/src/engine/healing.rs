@@ -37,14 +37,6 @@ fn reason_of(v: &serde_json::Value) -> String {
     }
 }
 
-/// Lowercase alphanumerics only: findings quote criteria loosely.
-fn canon(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
-
 fn overturnable(task: &mut Task, question: String, answer: String, evidence: String) {
     task.assumptions.push(Assumption {
         question,
@@ -632,36 +624,6 @@ pub(super) enum Ruling {
     Infeasible { criterion: String, reason: String },
 }
 
-fn strip_evidence(finding: &str) -> &str {
-    finding
-        .strip_prefix("Unmet criterion:")
-        .unwrap_or(finding)
-        .trim()
-}
-
-/// The criterion an "Unmet criterion: ..." finding is about.
-fn criterion_of(task: &Task, finding: &str) -> Option<usize> {
-    criterion_index(task, finding.strip_prefix("Unmet criterion:")?)
-}
-
-/// The criterion a plain piece of text (a reviewer's ruling, the tail of an
-/// "Unmet criterion:" finding) names.
-pub(super) fn criterion_index(task: &Task, text: &str) -> Option<usize> {
-    let rest = canon(text);
-    if rest.is_empty() {
-        return None;
-    }
-    task.criteria.iter().position(|c| {
-        let head = canon(c.split("-- check:").next().unwrap_or(c));
-        let full = canon(c);
-        !head.is_empty()
-            && (rest.starts_with(&head)
-                || head.starts_with(&rest)
-                || rest.contains(&head)
-                || rest.contains(&full))
-    })
-}
-
 /// A criterion this review marks unmet that an earlier attempt's review
 /// marked unmet too and the judge has not ruled on yet: its index, the two
 /// attempts and both reasons.
@@ -677,8 +639,9 @@ pub(super) fn repeated_unmet(
     attempt_n: u32,
     review: &ReviewResult,
 ) -> Option<Repeated> {
-    for finding in &review.findings {
-        let Some(i) = criterion_of(task, finding) else {
+    let reason = |r: &CriterionRuling| r.evidence.clone().unwrap_or_else(|| r.criterion.clone());
+    for ruling in review.criteria.iter().filter(|r| r.met == Some(false)) {
+        let Some(i) = ruling.index.filter(|i| *i < task.criteria.len()) else {
             continue;
         };
         if task.brief_check.judged.contains(&task.criteria[i]) {
@@ -691,11 +654,15 @@ pub(super) fn repeated_unmet(
             let Some(r) = earlier.review.as_ref() else {
                 continue;
             };
-            if let Some(f) = r.findings.iter().find(|f| criterion_of(task, f) == Some(i)) {
+            if let Some(before) = r
+                .criteria
+                .iter()
+                .find(|r| r.met == Some(false) && r.index == Some(i))
+            {
                 return Some(Repeated {
                     criterion: i,
-                    earlier: (earlier.n, strip_evidence(f).to_string()),
-                    current: (attempt_n, strip_evidence(finding).to_string()),
+                    earlier: (earlier.n, reason(before)),
+                    current: (attempt_n, reason(ruling)),
                 });
             }
         }
@@ -818,11 +785,11 @@ pub(super) async fn heal_repeated_unmet(
 // 3. Evidence
 // ---------------------------------------------------------------------------
 
-/// UI files (not tests) the task itself changed between an earlier attempt's
+/// Files (not tests) the task itself changed between an earlier attempt's
 /// evidence tree and the worktree now. Files that differ only because the base
 /// moved (carried-in commits, a conflict resolved onto a new base) are not the
 /// task's doing; without the earlier base every difference counts.
-pub(super) fn own_ui_changes_since(
+pub(super) fn own_changes_since(
     wt: &Path,
     old_tree: &str,
     old_base: Option<&str>,
@@ -833,31 +800,7 @@ pub(super) fn own_ui_changes_since(
         Some(old_base) => git::own_changes_between(wt, old_tree, old_base, &now, now_base)?,
         None => git::diff_trees_name_only(wt, old_tree, &now)?,
     };
-    Ok(paths
-        .into_iter()
-        .filter(|p| is_ui_path(p) && !is_test_path(p))
-        .collect())
-}
-
-/// Whether a repo-relative path is a UI file, by its extension or a UI-ish
-/// directory name.
-pub(super) fn is_ui_path(path: &str) -> bool {
-    const EXT: [&str; 12] = [
-        "tsx", "jsx", "vue", "svelte", "css", "scss", "sass", "less", "html", "htm", "svg", "xib",
-    ];
-    const DIRS: [&str; 8] = [
-        "components",
-        "ui",
-        "views",
-        "pages",
-        "screens",
-        "styles",
-        "renderer",
-        "frontend",
-    ];
-    let lower = path.to_ascii_lowercase();
-    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    EXT.contains(&ext) || lower.split('/').any(|seg| DIRS.contains(&seg))
+    Ok(paths.into_iter().filter(|p| !is_test_path(p)).collect())
 }
 
 /// Runs the planner's screenshot command in the worktree and saves the
@@ -915,68 +858,96 @@ pub(super) async fn capture_screenshots(
 // 4. Review scope after the first attempt
 // ---------------------------------------------------------------------------
 
-fn is_path_like(token: &str) -> bool {
-    let t = token.trim_matches(|c: char| {
-        !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
-    });
-    let t = t.trim_end_matches('.');
-    let t = match t.rsplit_once(':') {
-        Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head,
-        _ => t,
-    };
-    if t.contains('/') {
-        return true;
-    }
-    match t.rsplit_once('.') {
-        Some((name, ext)) => {
-            name.len() >= 2
-                && (2..=5).contains(&ext.len())
-                && ext.chars().all(char::is_alphanumeric)
+/// The reviewer's own findings that the diff did not cause, shown by their
+/// scenario: the reviewer says `causedByDiff` is false and the scenario's
+/// `run` fails the same way on the base and on the task tree. A scenario whose
+/// target is absent on the base, a planner test or a bare failing command
+/// proves nothing about the base: the finding stays blocking.
+pub(super) async fn findings_old_on_base(
+    app: &Arc<App>,
+    task: &Task,
+    review: &ReviewResult,
+    worktree: &Path,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Vec<usize> {
+    let own = review.severities.len().min(review.findings.len());
+    let mut old = Vec::new();
+    for (i, detail) in review.details.iter().enumerate().take(own) {
+        let run = detail
+            .scenario
+            .as_ref()
+            .map(|s| s.run.trim().to_string())
+            .filter(|run| !run.is_empty());
+        let Some(run) = run.filter(|_| detail.caused_by_diff == Some(false)) else {
+            continue;
+        };
+        if task.planner_tests.commands.iter().any(|c| c == &run)
+            || !base_check::targets_absent_on_base(&task.repo, &task.base_sha, &run).is_empty()
+        {
+            continue;
         }
-        None => false,
+        let ran = base_check::run_on_base(
+            app,
+            Some(&task.id),
+            &task.repo,
+            &task.base_sha,
+            std::slice::from_ref(&run),
+            &run_dir.join("finding-base"),
+            cancel,
+        )
+        .await;
+        let Ok(results) = ran else { continue };
+        let Some(base) = results
+            .first()
+            .filter(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
+        else {
+            continue;
+        };
+        let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+        let here = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
+            worktree,
+            &run_dir.join("finding-task"),
+            std::slice::from_ref(&run),
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        if here
+            .first()
+            .is_some_and(|r| r.code.is_some_and(|c| c != 0) && same_failure(r, base))
+        {
+            old.push(i);
+        }
     }
+    old
 }
 
-/// The files a finding names, and whether one of them is among `changed`.
-fn names_changed_file(finding: &str, changed: &[String]) -> Option<bool> {
-    let paths: Vec<&str> = finding
-        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '`' | '\'' | '"'))
-        .filter(|t| is_path_like(t))
-        .collect();
-    if paths.is_empty() {
-        return None;
+/// Whether the task's run fails the same named tests as the base's run.
+fn same_failure(run: &VerifyOutcome, base: &VerifyOutcome) -> bool {
+    if matches!(baseline::compare(run, base), baseline::Compared::Covered(_)) {
+        return true;
     }
-    Some(paths.iter().any(|p| {
-        let p = p.trim_matches(|c: char| c == ':' || c == '.');
-        let p = match p.rsplit_once(':') {
-            Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head,
-            _ => p,
-        };
-        changed
-            .iter()
-            .any(|f| f == p || f.ends_with(p) || p.ends_with(f.as_str()))
-    }))
+    let (now, before): (
+        std::collections::BTreeSet<&String>,
+        std::collections::BTreeSet<&String>,
+    ) = (run.failing.iter().collect(), base.failing.iter().collect());
+    !now.is_empty() && now == before
 }
 
 /// After the first attempt only a P0/P1 finding about the task's own work
-/// blocks: an unmet criterion, a finding the reviewer says came back or an
-/// earlier review reported, or one about a file the task changed (or naming
-/// none). Everything else (P2/P3, a new P1 about files the task never
-/// touched) is moved out of `review.findings` and returned as follow-ups; a
-/// review left with no blocking finding becomes a PASS.
-pub(super) fn scope_review(
-    task: &Task,
-    idx: usize,
-    changed: &[String],
-    review: &mut ReviewResult,
-) -> Vec<String> {
-    let earlier: Vec<String> = task.attempts[..idx]
-        .iter()
-        .filter_map(|a| a.review.as_ref())
-        .flat_map(|r| r.findings.iter().map(|f| canon(f)))
-        .collect();
+/// blocks: an unmet criterion, a P0, a finding that came back, or a P1 that
+/// is not in `old_on_base`. Everything else (P2/P3, a P1 whose scenario also
+/// fails on the base) is moved out of `review.findings` and returned as
+/// follow-ups; a review left with no blocking finding becomes a PASS.
+pub(super) fn scope_review(review: &mut ReviewResult, old_on_base: &[usize]) -> Vec<String> {
+    let own = review.severities.len().min(review.findings.len());
+    let mut unmet = review.criteria.iter().filter(|r| r.met != Some(true));
     let mut keep_findings = Vec::new();
     let mut keep_severities = Vec::new();
+    let mut keep_details = Vec::new();
     let mut follow_ups = Vec::new();
     for (i, finding) in review.findings.iter().enumerate() {
         let severity = review
@@ -985,32 +956,31 @@ pub(super) fn scope_review(
             .copied()
             .flatten()
             .or_else(|| brief::severity_of(finding));
-        let blocks = if finding.starts_with("Unmet criterion:")
-            || finding.starts_with("Another attempt was asked for:")
-        {
+        let detail = review.details.get(i);
+        let blocks = if i >= own {
+            unmet.next().is_none_or(|r| r.met == Some(false))
+        } else if finding.starts_with("Another attempt was asked for:") {
             true
-        } else if finding.starts_with("Not checked by review:") {
-            false
         } else {
             match severity {
                 Some(0) => true,
-                Some(1) | None => {
-                    review.repeated.contains(finding)
-                        || earlier.contains(&canon(finding))
-                        || names_changed_file(finding, changed) != Some(false)
-                }
+                Some(1) | None => review.repeated.contains(finding) || !old_on_base.contains(&i),
                 Some(_) => false,
             }
         };
         if blocks {
             keep_findings.push(finding.clone());
             keep_severities.push(severity);
+            keep_details.extend(detail.cloned());
         } else {
             follow_ups.push(finding.clone());
         }
     }
     review.findings = keep_findings;
     review.severities = keep_severities;
+    if !review.details.is_empty() {
+        review.details = keep_details;
+    }
     if review.verdict == Verdict::Fail && review.findings.is_empty() {
         review.verdict = Verdict::Pass;
     }
@@ -1156,6 +1126,27 @@ pub(super) async fn heal_answers(
 mod tests {
     use super::*;
 
+    fn failed_run(failing: &[&str]) -> VerifyOutcome {
+        VerifyOutcome {
+            command: "cargo test".into(),
+            code: Some(1),
+            output_key: "key".into(),
+            failing: failing.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_finding_is_old_only_when_the_same_named_tests_fail_on_both_trees() {
+        let base = failed_run(&["a::bad"]);
+        assert!(same_failure(&failed_run(&["a::bad"]), &base));
+        // The task tree fails other tests, or the runs name none (`false`).
+        assert!(!same_failure(&failed_run(&["a::bad", "b::new"]), &base));
+        assert!(!same_failure(&failed_run(&["b::other"]), &base));
+        assert!(!same_failure(&failed_run(&[]), &failed_run(&[])));
+        assert!(!same_failure(&failed_run(&[]), &base));
+    }
+
     #[tokio::test]
     async fn a_rewritten_verify_starts_the_preflight_again_for_the_new_commands() {
         let (app, _dir) = test_app();
@@ -1224,30 +1215,117 @@ mod tests {
         assert!(!heal_grep_dashes(&mut task));
     }
 
-    #[test]
-    fn ui_paths_are_told_by_extension_or_directory() {
-        assert!(is_ui_path("src/App.tsx"));
-        assert!(is_ui_path("web/styles/main.css"));
-        assert!(is_ui_path("app/components/x.js"));
-        assert!(!is_ui_path("orchd/src/engine/plan.rs"));
-        assert!(!is_ui_path("README.md"));
+    fn scoped(findings: &[(&str, Option<bool>)], criteria: Vec<CriterionRuling>) -> ReviewResult {
+        let mut findings_text: Vec<String> =
+            findings.iter().map(|(text, _)| text.to_string()).collect();
+        findings_text.extend(
+            criteria
+                .iter()
+                .filter(|r| r.met != Some(true))
+                .map(|r| format!("criterion finding: {}", r.criterion)),
+        );
+        ReviewResult {
+            verdict: Verdict::Fail,
+            findings: findings_text,
+            repeated: Vec::new(),
+            severities: findings
+                .iter()
+                .map(|(t, _)| brief::severity_of(t))
+                .collect(),
+            details: findings
+                .iter()
+                .map(|(_, caused)| FindingDetail {
+                    caused_by_diff: *caused,
+                    ..Default::default()
+                })
+                .collect(),
+            criteria,
+        }
+    }
+
+    fn ruling(index: usize, met: Option<bool>) -> CriterionRuling {
+        CriterionRuling {
+            criterion: format!("c{index}"),
+            index: Some(index),
+            met,
+            evidence: None,
+        }
     }
 
     #[test]
-    fn a_finding_names_the_files_it_is_about() {
-        let changed = vec!["src/a.rs".to_string()];
-        assert_eq!(
-            names_changed_file("P1: src/a.rs:12 - bug", &changed),
-            Some(true)
+    fn only_a_p1_shown_old_on_the_base_is_demoted_and_the_rest_block() {
+        let mut review = scoped(
+            &[
+                (
+                    "P1: callers/untouched.rs:9 - breaks after the change",
+                    Some(true),
+                ),
+                ("P1: pre-existing.rs:2 - was already broken", Some(false)),
+                ("P1: claimed old, not shown", Some(false)),
+                ("P1: no mark at all", None),
+            ],
+            Vec::new(),
         );
+        let follow_ups = scope_review(&mut review, &[1]);
         assert_eq!(
-            names_changed_file("P1: other/b.rs:3 - bug", &changed),
-            Some(false)
+            review.findings,
+            [
+                "P1: callers/untouched.rs:9 - breaks after the change",
+                "P1: claimed old, not shown",
+                "P1: no mark at all"
+            ]
         );
-        assert_eq!(
-            names_changed_file("P1: something is wrong, e.g. here", &changed),
-            None
+        assert_eq!(follow_ups, ["P1: pre-existing.rs:2 - was already broken"]);
+        assert_eq!(review.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_p0_and_an_unmet_criterion_always_block_and_p2_never_does() {
+        let mut review = scoped(
+            &[("P0: crash", Some(false)), ("P2: smell", Some(true))],
+            vec![
+                ruling(0, Some(false)),
+                ruling(1, None),
+                ruling(2, Some(true)),
+            ],
         );
+        let follow_ups = scope_review(&mut review, &[]);
+        assert_eq!(review.findings, ["P0: crash", "criterion finding: c0"]);
+        assert_eq!(follow_ups, ["P2: smell", "criterion finding: c1"]);
+        assert_eq!(review.verdict, Verdict::Fail);
+        let mut only_pre_existing = scoped(&[("P1: old", Some(false))], Vec::new());
+        scope_review(&mut only_pre_existing, &[0]);
+        assert_eq!(only_pre_existing.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_finding_that_came_back_blocks_whoever_caused_it() {
+        let mut review = scoped(&[("P1: back [F-1]", Some(false))], Vec::new());
+        review.repeated = vec!["P1: back [F-1]".into()];
+        assert!(scope_review(&mut review, &[0]).is_empty());
+        assert_eq!(review.findings.len(), 1);
+    }
+
+    #[test]
+    fn two_criteria_where_one_text_prefixes_the_other_stay_distinct() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        task.criteria = vec!["Beta".into(), "Beta works -- check: read it".into()];
+        let review = |met: [Option<bool>; 2]| ReviewResult {
+            verdict: Verdict::Fail,
+            findings: Vec::new(),
+            repeated: Vec::new(),
+            severities: Vec::new(),
+            details: Vec::new(),
+            criteria: (0..2).map(|i| ruling(i, met[i])).collect(),
+        };
+        let mut first = attempt_with_failure(1, "x");
+        first.review = Some(review([Some(false), Some(true)]));
+        task.attempts = vec![first];
+        let now = review([Some(false), Some(true)]);
+        let rep = repeated_unmet(&task, 1, 2, &now).expect("criterion 0 repeats");
+        assert_eq!(rep.criterion, 0);
+        let only_longer = review([Some(true), Some(false)]);
+        assert!(repeated_unmet(&task, 1, 2, &only_longer).is_none());
     }
 
     #[test]
@@ -1311,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_survives_carried_in_base_commits_but_not_the_tasks_own_ui_edit() {
+    fn evidence_survives_carried_in_base_commits_but_not_the_tasks_own_edit() {
         let (_tmp, repo, git) = evidence_repo();
         let base1 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-b", "task"]);
@@ -1329,24 +1407,24 @@ mod tests {
         std::fs::create_dir_all(repo.join("orchd")).unwrap();
         std::fs::write(repo.join("orchd/x.rs"), "r\n").unwrap();
         // Only carried-in commits changed files: reuse.
-        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+        assert!(own_changes_since(&repo, &old_tree, Some(&base1), &base2)
             .unwrap()
             .is_empty());
         // Without the earlier base the carried-in file looks like a change.
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, None, &base2).unwrap(),
-            vec!["Landed.tsx".to_string()]
+            own_changes_since(&repo, &old_tree, None, &base2).unwrap(),
+            vec!["Landed.tsx".to_string(), "orchd/x.rs".to_string()]
         );
-        // The task edits its own UI file: new evidence needed.
+        // The task edits its own file: new evidence needed.
         std::fs::write(repo.join("Button.tsx"), "v2\n").unwrap();
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            own_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
             vec!["Button.tsx".to_string()]
         );
     }
 
     #[test]
-    fn a_conflict_resolution_outside_the_ui_keeps_the_evidence() {
+    fn a_conflict_resolution_in_any_non_test_file_needs_fresh_evidence() {
         let (_tmp, repo, git) = evidence_repo();
         let base1 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "-b", "task"]);
@@ -1360,14 +1438,27 @@ mod tests {
         let base2 = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "task"]);
         std::fs::write(repo.join("notes.md"), "merged\n").unwrap();
-        assert!(own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2)
+        assert_eq!(
+            own_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
+            vec!["notes.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_non_ui_source_edit_reruns_the_screenshot_and_a_test_edit_does_not() {
+        let (_tmp, repo, git) = evidence_repo();
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "task"]);
+        let old_tree = git::worktree_tree(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/render.rs"), "t\n").unwrap();
+        assert!(own_changes_since(&repo, &old_tree, Some(&base), &base)
             .unwrap()
             .is_empty());
-        // A resolution that rewrites a UI file needs fresh evidence.
-        std::fs::write(repo.join("Button.tsx"), "resolved\n").unwrap();
+        std::fs::write(repo.join("render.rs"), "fn draw() {}\n").unwrap();
         assert_eq!(
-            own_ui_changes_since(&repo, &old_tree, Some(&base1), &base2).unwrap(),
-            vec!["Button.tsx".to_string()]
+            own_changes_since(&repo, &old_tree, Some(&base), &base).unwrap(),
+            vec!["render.rs".to_string()]
         );
     }
 }
@@ -1426,7 +1517,7 @@ mod timeout_tests {
     async fn criterion_judge_timed_out_keeps_the_criterion() {
         let (app, _dir, mut task, _) = slow_helper_task();
         let review: ReviewResult = serde_json::from_value(
-            json!({"verdict":"FAIL", "findings":["Unmet criterion: Keep the API (missing)"]}),
+            json!({"verdict":"FAIL", "criteria":[{"criterion":"Keep the API","index":0,"met":false,"evidence":"missing"}]}),
         )
         .unwrap();
         task.attempts[0].review = Some(review.clone());

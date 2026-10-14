@@ -17,7 +17,16 @@ dir="$(dirname "$0")"
 printf '%s\n' "$*" >> "$dir/gh.log"
 case "$1 $2" in
   "pr list") [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
-  "pr create") touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr create")
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) printf '%s' "$2" > "$dir/head" ;; --title) printf '%s' "$2" > "$dir/title" ;; esac
+      shift
+    done
+    touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr view")
+    sha=$(git ls-remote origin "refs/heads/$(cat "$dir/head")" | cut -f1)
+    [ -f "$dir/stale-head" ] && sha=0000000000000000000000000000000000000000
+    printf '{"url":"https://github.example/acme/app/pull/7","headRefOid":"%s","title":"%s"}\n' "$sha" "$(cat "$dir/title")" ;;
 esac
 "#;
 
@@ -30,6 +39,9 @@ brief=$(cat)
 case "$brief" in
 "## Pull request draft"*)
 printf '%s\n' '{"type":"result","result":"{}"}'
+;;
+"## Pull request body check"*)
+printf '%s\n' '{"type":"result","result":"{\"ok\":true,\"corrections\":[]}"}'
 ;;
 *sushi-plan*)
 cat "$dir/plan.json"

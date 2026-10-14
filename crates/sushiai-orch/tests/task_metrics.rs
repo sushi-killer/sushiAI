@@ -20,6 +20,7 @@ case "$brief" in
   printf '%s\n' '{"type":"result","total_cost_usd":0.02,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-plan\n{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings\"],\"verify\":[\"true\"],\"questions\":[]}\n```"}' ;;
 "An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix it."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   cat "$LOG_DIR/review.line" ;;
 *)

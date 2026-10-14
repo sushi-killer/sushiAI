@@ -40,7 +40,7 @@ pub(super) fn criteria_results(task: &Task, attempt: &Attempt) -> Vec<CriterionR
     }
     if let Some(review) = &attempt.review {
         for ruling in &review.criteria {
-            let Some(i) = criterion_index(task, &ruling.criterion) else {
+            let Some(i) = ruling.index.filter(|i| *i < signals.len()) else {
                 continue;
             };
             let status = match ruling.met {
@@ -110,11 +110,12 @@ mod tests {
         }
     }
 
-    fn ruling(criterion: &str, met: Option<bool>) -> CriterionRuling {
+    fn ruling(index: Option<usize>, met: Option<bool>) -> CriterionRuling {
         CriterionRuling {
-            criterion: criterion.into(),
+            criterion: format!("criterion {index:?}"),
+            index,
             met,
-            evidence: Some(format!("because {criterion}")),
+            evidence: Some(format!("because {index:?}")),
         }
     }
 
@@ -177,15 +178,15 @@ mod tests {
             severities: vec![],
             details: Vec::new(),
             criteria: vec![
-                ruling("Alpha works", Some(false)),
-                ruling("Beta works", Some(true)),
-                ruling("Gamma works", None),
+                ruling(Some(0), Some(false)),
+                ruling(Some(1), Some(true)),
+                ruling(Some(2), None),
             ],
         });
         let results = criteria_results(&task, &attempt);
         let got: Vec<_> = results.iter().map(|r| r.status).collect();
         assert_eq!(got, vec![Failing, Failing, Met, Met]);
-        assert_eq!(results[0].evidence.as_deref(), Some("because Alpha works"));
+        assert_eq!(results[0].evidence.as_deref(), Some("because Some(0)"));
         assert!(!results[3].evidence.clone().unwrap().contains("secret"));
     }
 
@@ -200,15 +201,32 @@ mod tests {
             severities: vec![],
             details: Vec::new(),
             criteria: vec![
-                ruling("Alpha works -- check: read it", Some(true)),
-                ruling("Beta works", None),
-                ruling("Gamma works", Some(false)),
-                ruling("Not a criterion of this task", Some(false)),
+                ruling(Some(0), Some(true)),
+                ruling(Some(1), None),
+                ruling(Some(2), Some(false)),
+                ruling(None, Some(false)),
+                ruling(Some(9), Some(false)),
             ],
         });
         assert_eq!(
             statuses(&task, &attempt),
             vec![Met, Pending, Failing, Pending]
         );
+    }
+
+    #[test]
+    fn a_ruling_for_the_longer_of_two_prefixed_criteria_does_not_settle_the_shorter() {
+        use CriterionStatus::*;
+        let (mut task, mut attempt) = task_and_attempt();
+        task.criteria = vec!["Beta".into(), "Beta works -- check: read it".into()];
+        attempt.review = Some(ReviewResult {
+            verdict: Verdict::Pass,
+            findings: vec![],
+            repeated: vec![],
+            severities: vec![],
+            details: Vec::new(),
+            criteria: vec![ruling(Some(1), Some(true))],
+        });
+        assert_eq!(statuses(&task, &attempt), vec![Pending, Met]);
     }
 }

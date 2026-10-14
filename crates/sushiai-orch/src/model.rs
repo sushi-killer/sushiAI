@@ -166,14 +166,14 @@ pub struct Settings {
     /// attempt; `""` turns the check off.
     #[serde(default = "default_brief_check_route")]
     pub brief_check_route: String,
-    /// Route id of the plan review: one read-only run on another model
-    /// family that judges the planner's draft once per task; `""` turns it
-    /// off. A missing or unavailable route skips the review, with no
-    /// fallback.
+    /// Route id of the plan review: one read-only run that judges the
+    /// planner's draft once per task. The review always runs: a `""`, missing
+    /// or unavailable route falls back to the planner's route, with a
+    /// `Plan gate:` decision line that says why.
     #[serde(default = "default_plan_review")]
     pub plan_review: String,
     /// Route the orchestrator agent runs on: its chat with the owner and,
-    /// with `auto_answer`, its triage of stuck questions. `""` (or an id that
+    /// with `auto_answer`, its decisions on stuck questions. `""` (or an id that
     /// matches no route) means the standard tier's route.
     #[serde(default)]
     pub orchestrator: String,
@@ -524,6 +524,11 @@ pub struct BriefCheck {
     /// orchd runs it itself once verify has passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<String>,
+    /// The one targeted command the planner named for this subtask's part. A
+    /// subtask at its parent runs it in place of the full CI entry, which the
+    /// parent runs on the combined tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
     /// Every check command was run on the base once (see `base_check`).
     #[serde(default)]
     pub feasibility_done: bool,
@@ -585,7 +590,7 @@ pub struct PlanGate {
     /// The planner already ran again because of a critical finding.
     #[serde(default)]
     pub replanned: bool,
-    /// The cross-family plan review has run (or been skipped for good).
+    /// The plan review has run once; it never runs again for this task.
     #[serde(default)]
     pub reviewed: bool,
     /// Findings left after the gate; the implementer's brief lists them.
@@ -941,7 +946,7 @@ pub struct Variant {
     /// The planner marks each question with a recommended option and whether
     /// it is blocking (irreversible or consequential). Non-blocking ones are
     /// not asked: each becomes an assumption on the task and the task goes
-    /// on; blocking ones go to triage and the owner as one question. On
+    /// on; blocking ones go to the overseer and the owner as one question. On
     /// unless explicitly disabled, including on tasks saved before this
     /// switch was on by default.
     #[serde(skip_serializing_if = "is_true")]
@@ -1578,12 +1583,12 @@ pub struct PlannerTests {
     /// Files kept from the plan, written and committed before attempt 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<PlannedTest>,
-    /// The commit that holds them (`tests_sha`); the implementer's own work
-    /// is measured from it.
+    /// The commit an older build made of them. Only read to undo it once
+    /// (`protected::migrate_tests_commit`); the files live in `files`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// path -> sha256 of every protected file at that commit; `None` until
-    /// computed.
+    /// path -> sha256 of every protected file (the planner's files as stored,
+    /// the others as on the base); `None` until computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<std::collections::BTreeMap<String, String>>,
     /// Protected files the last attempt changed and orchd restored; the next
@@ -1594,10 +1599,6 @@ pub struct PlannerTests {
     /// on; a claim is judged once per file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled: Vec<String>,
-    /// The planner files were run through the repo's formatter and the tests
-    /// commit rebuilt when they were not clean (once per task).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub format_checked: bool,
     /// The commands the planner wrote into the plan (verify, finalVerify,
     /// checks, the held-out check), recorded when the plan is stored. Only
     /// these may be dropped without the owner.
@@ -1605,14 +1606,58 @@ pub struct PlannerTests {
     pub commands: Vec<String>,
 }
 
+/// The implementer's own work: the diff from the task's base without the
+/// planner's test files, which orchd writes into the worktree itself.
+#[derive(Debug, Clone)]
+pub struct OwnDiff {
+    base: String,
+    exclude: Vec<String>,
+}
+
+impl OwnDiff {
+    /// The changed files (committed, staged, unstaged, untracked), without the
+    /// planner's paths.
+    pub fn changed_files(
+        &self,
+        worktree: &std::path::Path,
+    ) -> Result<Vec<String>, crate::git::GitError> {
+        let mut files = crate::git::changed_files(worktree, &self.base)?;
+        files.retain(|f| !self.exclude.contains(f));
+        Ok(files)
+    }
+
+    /// `git diff` against the base, without the planner's paths, truncated to
+    /// `max_chars`.
+    pub fn diff(
+        &self,
+        worktree: &std::path::Path,
+        max_chars: usize,
+    ) -> Result<String, crate::git::GitError> {
+        crate::git::diff_full_without(worktree, &self.base, &self.exclude, max_chars)
+    }
+
+    /// The size of the worktree's content against the base, without the
+    /// planner's paths.
+    pub fn stat(&self, worktree: &std::path::Path) -> Result<DiffStat, crate::git::GitError> {
+        let tree = crate::git::worktree_tree(worktree)?;
+        let mut entries = crate::git::numstat(worktree, &self.base, &tree)?;
+        entries.retain(|(path, _, _)| !self.exclude.contains(path));
+        Ok(crate::git::fold_numstat(&entries))
+    }
+}
+
 impl Task {
-    /// Where the implementer's own work is measured from: the commit that
-    /// holds the planner's tests when there is one, else the base.
-    pub fn work_base(&self) -> &str {
-        self.planner_tests
-            .commit
-            .as_deref()
-            .unwrap_or(&self.base_sha)
+    /// The implementer's own work, measured from the base.
+    pub fn own_diff(&self) -> OwnDiff {
+        OwnDiff {
+            base: self.base_sha.clone(),
+            exclude: self
+                .planner_tests
+                .files
+                .iter()
+                .map(|t| t.path.clone())
+                .collect(),
+        }
     }
 }
 
@@ -1696,6 +1741,37 @@ pub struct Question {
     pub commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_signature: Option<String>,
+    /// What the asking agent says the answer commits the owner to. A tag only
+    /// adds caution: a tagged question is the owner's, whatever its words say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk: Vec<Risk>,
+    /// The option (an index into `options`) the asking agent would take when
+    /// nobody answers in time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_option: Option<usize>,
+    /// The criterion an impossible question is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<usize>,
+    /// The agent's evidence for an impossible question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// What each of `commands` printed on the base, in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_tails: Vec<String>,
+}
+
+/// A kind of commitment the asking agent can tag a question with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Risk {
+    Push,
+    Money,
+    Destructive,
+    Security,
+    Deploy,
+    Scope,
+    #[serde(rename = "public-api")]
+    PublicApi,
 }
 
 /// How long a question stays held for the overseer.
@@ -1731,6 +1807,11 @@ impl Question {
             held_at: None,
             commands: Vec::new(),
             failure_signature: None,
+            risk: Vec::new(),
+            default_option: None,
+            criterion: None,
+            evidence: None,
+            base_tails: Vec::new(),
         }
     }
 }
@@ -1796,7 +1877,7 @@ pub enum QuestionKind {
     /// A tool call or path write the run is not allowed to make; answered by
     /// the owner only.
     Permission,
-    /// A review finding the implementer disputed and a judge dropped.
+    /// A review finding the implementer declined and the review upheld.
     ReviewDispute,
     PlanQuestion,
     /// Today's spend reached `dailyBudgetUsd`; never answered by policy.
@@ -1807,14 +1888,31 @@ pub enum QuestionKind {
     AgentQuestion,
 }
 
-/// A review finding the implementer disputes, with its rebuttal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Dispute {
-    pub finding: String,
-    pub rebuttal: String,
-    #[serde(default)]
+/// Why the implementer declines a review finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclineReason {
+    Wrong,
+    AlreadySatisfied,
+    ChangesBehaviour,
+}
+
+/// A review finding the implementer declines, with its evidence. The next
+/// review rules on it by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decline {
+    pub id: String,
+    pub reason: DeclineReason,
     pub evidence: Vec<String>,
+}
+
+/// The next review's ruling on one decline: an upheld decline resolves its
+/// finding; otherwise the finding stays blocking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclineRuling {
+    pub id: String,
+    pub upheld: bool,
 }
 
 /// A choice the planner made itself instead of asking the owner
@@ -2095,10 +2193,6 @@ pub struct Task {
     /// Every answered question, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub question_history: Vec<AnsweredQuestion>,
-    /// Keys of the disputed review findings a judge already ruled on: each
-    /// is judged at most once per task.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub judged_findings: Vec<String>,
     /// Every review finding of the task by stable id, with whether the
     /// latest review still reports it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2148,8 +2242,83 @@ pub struct Task {
     /// on it, so a restart that fails again is told once more.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub failed_count: u32,
+    /// What the task loop remembers about itself. Decision lines are for the
+    /// owner to read; nothing parses them back into state.
+    #[serde(flatten)]
+    pub loop_state: LoopState,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// The `LoopState::state_version` a task written today carries; a task with a
+/// lower one is migrated once, when the store loads it (`store.rs`).
+pub const STATE_VERSION: u32 = 1;
+
+fn legacy_state_version() -> u32 {
+    0
+}
+
+impl Default for LoopState {
+    fn default() -> Self {
+        LoopState {
+            state_version: STATE_VERSION,
+            unreviewed_attempt: None,
+            agent_restarted: false,
+            approach_changed_after: None,
+            stuck_retries: 0,
+            rereviews: 0,
+            non_owner_continues: 0,
+            dependency_restarted: false,
+            unreviewed_parts: Vec::new(),
+            impossible_answers: Vec::new(),
+        }
+    }
+}
+
+/// A landed subtask that no review read, as its parent's pull request names it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnreviewedPart {
+    pub id: String,
+    pub title: String,
+}
+
+/// Typed task-loop state, flat in the task JSON. A task file without
+/// `stateVersion` predates it; a new task starts at [`STATE_VERSION`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LoopState {
+    #[serde(default = "legacy_state_version", skip_serializing_if = "is_zero_u32")]
+    pub state_version: u32,
+    /// The implement attempt committed unreviewed while its review question
+    /// was retired and the relaunched loop still has to finish it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreviewed_attempt: Option<u32>,
+    /// An agent already restarted this task after it failed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_restarted: bool,
+    /// The attempt after which the failure ladder changed the approach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approach_changed_after: Option<u32>,
+    /// Pauses a stuck task has taken since it was last started.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub stuck_retries: u32,
+    /// Times the landing in progress sent the work back to verify and the
+    /// review; reset when the landing completes.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub rereviews: u32,
+    /// Extensions of the attempt budget that a chat, the overseer or a lead
+    /// gave, not the owner.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub non_owner_continues: u32,
+    /// A dependency of this task already got its one automatic restart.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dependency_restarted: bool,
+    /// Landed subtasks that no review read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed_parts: Vec<UnreviewedPart>,
+    /// The criterion of each impossible question the answer policy answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub impossible_answers: Vec<usize>,
 }
 
 /// What `pr_pending` opens: the remote branch, the title (empty: the task's
@@ -2329,16 +2498,22 @@ pub struct VerifyOutcome {
     /// A high-load timeout occurred, even if its single retry exited non-zero.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub load_timeout: bool,
-    /// The failing tests the full output named (capped); empty for a passing
-    /// run or an output no known runner format matches.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The failing tests the full output named; empty for a passing
+    /// run or an output no known runner format matches. Kept in memory only:
+    /// the stored outcome has the counts and `tests_key`, and the lists are in
+    /// the `test-lists` file of that key.
+    #[serde(skip)]
     pub failing: Vec<String>,
-    /// The passing tests the full output named (capped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The passing tests the full output named; in memory only, like `failing`.
+    #[serde(skip)]
     pub passing: Vec<String>,
-    /// A test list was cut at its cap: the run cannot be compared.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub failing_count: usize,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub passing_count: usize,
+    /// Names the file with both lists; empty when the run named no test.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tests_key: String,
     /// The output shows a crash, an abort or a build that did not finish.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,
@@ -2351,6 +2526,14 @@ pub struct VerifyOutcome {
     /// Returned to the task owner as well as published while the check waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<String>,
+    /// The worktree setup failed, so the command never ran. Set by orchd,
+    /// never read from the command's output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub setup_failed: bool,
+    /// Git tree id of the worktree the command ran in. Two failing runs of one
+    /// command compare as flaky only when their trees are equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
 }
 
 /// How much of an attempt a review looked at: everything, or only the open
@@ -2409,10 +2592,15 @@ pub struct FindingScenario {
     pub fails: String,
 }
 
-/// The optional `kind` and `scenario` of one finding.
+/// The optional marks of one finding: `id` of a registered finding it is
+/// about, `caused_by_diff` (missing counts as true), `kind` and `scenario`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindingDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by_diff: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2425,8 +2613,8 @@ pub struct ReviewResult {
     pub verdict: Verdict,
     #[serde(default)]
     pub findings: Vec<String>,
-    /// The findings the reviewer marked `repeat: true`: still present after
-    /// the previous attempt's review reported them.
+    /// The findings the registry already held open from an earlier attempt:
+    /// still present after that attempt's review reported them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repeated: Vec<String>,
     /// The severity (0-3) of each finding by position, `None` when it named
@@ -2443,11 +2631,14 @@ pub struct ReviewResult {
 }
 
 /// One criterion ruling of a review: `met` is `None` when the reviewer could
-/// not check it.
+/// not check it. `index` is the criterion's position in the task, `None`
+/// when the reviewer named none the task has; `criterion` is its text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CriterionRuling {
     pub criterion: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     #[serde(default)]
     pub met: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2670,9 +2861,9 @@ pub struct Attempt {
     /// what was tried, what to do next.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
-    /// Review findings the agent disputed in its report.
+    /// Review findings the agent declined in its report, with evidence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disputes: Vec<Dispute>,
+    pub declines: Vec<Decline>,
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
@@ -2761,9 +2952,23 @@ pub struct Attempt {
     /// entry per criterion, recomputed after its checks and each review.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria_results: Vec<CriterionResult>,
+    /// Whose failure the attribution turn found when this attempt's final
+    /// check was red on the base too; `None` when no turn ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Blame>,
     /// The worktree against the task's base when the attempt ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<DiffStat>,
+}
+
+/// Whose failure a red check is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Blame {
+    Introduced,
+    Inherited,
+    Environment,
+    Incomplete,
 }
 
 /// Files changed and lines added and removed; a binary file counts as a
@@ -3192,7 +3397,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -3202,6 +3406,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3461,7 +3666,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -3471,6 +3675,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3546,6 +3751,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3555,7 +3761,6 @@ mod tests {
             eval_check_cmd: None,
             eval_check: None,
             source: None,
-            judged_findings: vec![],
             findings: vec![],
             brief_check: Default::default(),
             plan_gate: Default::default(),
@@ -3641,7 +3846,6 @@ mod tests {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: true,
             pr_url: None,
@@ -3651,6 +3855,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,

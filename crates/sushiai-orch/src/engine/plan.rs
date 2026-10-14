@@ -264,11 +264,13 @@ fn batched_question_text(questions: &[&brief::PlanQuestion]) -> String {
 /// -> <answer>"` (spec step 5) instead of the generic attempt-failure
 /// phrasing. `"stop"` is still handled centrally by `handle_task_answer`
 /// before it ever reaches here.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ask_plan_question(
     app: &Arc<App>,
     task_id: &str,
     question_text: &str,
     options: Vec<String>,
+    tags: (Vec<Risk>, Option<usize>),
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
@@ -283,12 +285,17 @@ pub(super) async fn ask_plan_question(
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
     if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        task.question = Some(Question::new(
-            question_text,
-            options,
-            QuestionKind::PlanQuestion,
-            AskedBy::Plan,
-        ));
+        let (risk, default_option) = tags;
+        task.question = Some(Question {
+            risk,
+            default_option,
+            ..Question::new(
+                question_text,
+                options,
+                QuestionKind::PlanQuestion,
+                AskedBy::Plan,
+            )
+        });
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         app.save_task_logged(&task);
@@ -427,7 +434,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         status: AttemptStatus::Running,
         summary: None,
         handoff: None,
-        disputes: vec![],
+        declines: vec![],
         changed_files: vec![],
         verify: vec![],
         gate_blocks: 0,
@@ -453,6 +460,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         advisor_fingerprint: None,
         candidates: vec![],
         criteria_results: vec![],
+        cause: None,
         diff_stat: None,
     }
 }
@@ -1058,6 +1066,7 @@ pub(super) async fn run_plan_stage(
                 task_id,
                 question,
                 vec![],
+                (Vec::new(), None),
                 pending_answer,
                 cancel,
                 permit,
@@ -1144,8 +1153,8 @@ pub(super) async fn run_plan_stage(
             }
         }
 
-        // The plan gate: code checks and one plan review by another model
-        // family. A critical finding replans once.
+        // The plan gate: one typed plan review, then the code checks. A
+        // critical finding replans once.
         match plan_gate::run(app, task_id, attempt_n, &draft, cancel).await {
             plan_gate::GateAction::Replan => continue,
             plan_gate::GateAction::Cancelled => {
@@ -1159,9 +1168,10 @@ pub(super) async fn run_plan_stage(
 
         let mut asked: Vec<&brief::PlanQuestion> = draft.questions.iter().take(3).collect();
         if task.variant().batch_questions {
-            // A non-blocking question with a usable recommendation goes to
-            // triage first; only one triage settles becomes an assumption,
-            // the rest are asked with the blocking ones.
+            // A non-blocking question with a usable recommendation goes to the
+            // overseer first, one at a time; only its answer becomes an
+            // assumption. Without auto-answer, or when the owner has to answer
+            // it, the question joins the blocking ones.
             let (routine, mut blocking): (Vec<_>, Vec<_>) = asked
                 .into_iter()
                 .partition(|q| !q.blocking && q.usable_recommendation().is_some());
@@ -1180,21 +1190,50 @@ pub(super) async fn run_plan_stage(
                     QuestionKind::PlanQuestion,
                     AskedBy::Plan,
                 );
-                let Some((answer, reason)) = triage_settles(
-                    app, task_id, attempt_n, &mut task, &worktree, &asked_q, cancel,
+                // The overseer settles it only while the answer policy and
+                // auto-answer allow; otherwise it joins the owner's batch.
+                let auto_answer = app.settings.read().unwrap().auto_answer;
+                if !auto_answer || !policy_open(app, &task, &asked_q) {
+                    blocking.push(q);
+                    continue;
+                }
+                let Some(answer) = ask_plan_question(
+                    app,
+                    task_id,
+                    &q.text,
+                    q.options.clone(),
+                    (q.risk.clone(), q.default_option),
+                    pending_answer,
+                    cancel,
+                    permit,
                 )
                 .await
                 else {
-                    blocking.push(q);
-                    continue;
+                    return end_plan_stage(app, task_id, Some(idx)).await;
                 };
-                let evidence = format!("{} Triage: {reason}", q.evidence);
-                record_policy_answer(&mut task, &asked_q, &answer, "policy", &evidence, attempt_n);
+                let overseer = app.take_agent_answer(task_id) == Some(AnsweredBy::Overseer);
+                if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
+                    task = reloaded;
+                }
+                if !overseer {
+                    continue;
+                }
+                record_policy_answer(
+                    &mut task,
+                    &asked_q,
+                    &answer,
+                    "policy",
+                    &q.evidence,
+                    attempt_n,
+                );
                 app.broadcast_log(
                     task_id,
                     attempt_n,
                     task.decisions.last().cloned().unwrap_or_default(),
                 );
+                // Saved before the next question reloads the task from the store.
+                app.save_task_logged(&task);
+                app.broadcast_task(&task);
             }
             task.updated_at = now_ms();
             app.save_task_logged(&task);
@@ -1206,15 +1245,13 @@ pub(super) async fn run_plan_stage(
                 if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
                     task = reloaded;
                 }
-                match ask_plan_question_with_triage(
+                let risk = blocking.iter().flat_map(|q| q.risk.clone()).collect();
+                match ask_plan_question(
                     app,
                     task_id,
-                    &mut task,
-                    attempt_n,
-                    &worktree,
                     &text,
                     vec![],
-                    true,
+                    (risk, None),
                     pending_answer,
                     cancel,
                     permit,
@@ -1229,20 +1266,17 @@ pub(super) async fn run_plan_stage(
         for q in asked {
             // P2: reload before each question -- an earlier question in
             // this same loop may have gone to the owner and back (or been
-            // triage-answered) since `task` was last captured, and triage's
-            // brief for this one must see that, not a stale snapshot.
+            // answered by the overseer) since `task` was last captured, so
+            // this one is asked from the state those answers left.
             if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
                 task = reloaded;
             }
-            match ask_plan_question_with_triage(
+            match ask_plan_question(
                 app,
                 task_id,
-                &mut task,
-                attempt_n,
-                &worktree,
                 &q.text,
                 q.options.clone(),
-                false,
+                (q.risk.clone(), q.default_option),
                 pending_answer,
                 cancel,
                 permit,
@@ -1300,6 +1334,7 @@ pub(super) async fn run_plan_stage(
                     task_id,
                     "No verification command was found. Which command proves this task?",
                     options,
+                    (Vec::new(), None),
                     pending_answer,
                     cancel,
                     permit,
@@ -1532,7 +1567,16 @@ async fn split_into_subtasks(
             (text, plan_gate::checklist_of(parts, &unit.members), paths)
         } else {
             let part = &parts[unit.members[0]];
-            let drafted_verify = non_empty(&part.verify);
+            let mut drafted_verify = non_empty(&part.verify);
+            // A complete draft leads with the part's targeted check, so the
+            // subtask runs that check (the full CI entry is the parent's).
+            let check = part.check.trim();
+            if part.is_complete()
+                && !check.is_empty()
+                && !drafted_verify.iter().any(|c| c.trim() == check)
+            {
+                drafted_verify.insert(0, check.to_string());
+            }
             let (verify, judged) = if review_on {
                 split_verify_commands(&parent_worktree, &drafted_verify)
             } else {
@@ -1554,12 +1598,7 @@ async fn split_into_subtasks(
             drafted.verify = verify;
             drafted.final_verify = non_empty(&part.final_verify);
             drafted.part = Some(part);
-            let request = if part.check.trim().is_empty() {
-                part.request.trim().to_string()
-            } else {
-                format!("{}\n\nCheck: {}", part.request.trim(), part.check_command())
-            };
-            (request, vec![], part.paths.clone())
+            (part.request.trim().to_string(), vec![], part.paths.clone())
         };
         let relay_of = links[unit.members[0]].and_then(|at| {
             let id = id_of_key[parts[at].key.trim()];
@@ -1621,6 +1660,8 @@ async fn split_into_subtasks(
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
                 .map(str::to_string);
+            let check = part.check.trim();
+            child.brief_check.check = (!check.is_empty()).then(|| check.to_string());
             child.planned_by_parent = drafted.complete;
             if drafted.complete {
                 child.record_planner_commands();

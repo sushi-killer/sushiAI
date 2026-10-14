@@ -14,9 +14,23 @@ dir="$(dirname "$0")"
 printf '%s\n' "$*" >> "$dir/gh.log"
 case "$1 $2" in
   "pr list") [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
-  "pr create") touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr create")
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) printf '%s' "$2" > "$dir/head" ;; --title) printf '%s' "$2" > "$dir/title" ;; esac
+      shift
+    done
+    touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr view")
+    sha=$(git ls-remote origin "refs/heads/$(cat "$dir/head")" | cut -f1)
+    [ -f "$dir/stale-head" ] && sha=0000000000000000000000000000000000000000
+    printf '{"url":"https://github.example/acme/app/pull/7","headRefOid":"%s","title":"%s"}\n' "$sha" "$(cat "$dir/title")" ;;
 esac
 "#;
+
+/// The body check's reply, as the fake harness prints it.
+fn truth_reply(verdict: serde_json::Value) -> String {
+    serde_json::json!({"type": "result", "result": verdict.to_string()}).to_string()
+}
 
 /// One fake claude for both roles: the drafter (brief opens with "## Pull
 /// request draft") replies with `reply`, every other run implements the task.
@@ -39,6 +53,10 @@ echo draft >> "$(dirname "$0")/drafts.log"
 cat <<'JSON'
 {result}
 JSON
+;;
+"## Pull request body check"*)
+echo check >> "$(dirname "$0")/checks.log"
+cat "$(dirname "$0")/truth-reply"; echo
 ;;
 *)
 echo pr.txt > pr.txt
@@ -130,6 +148,8 @@ fn setup_full(
     let tools = tempfile::tempdir().unwrap();
     let harness = fake_harness_script(tools.path(), "fake-claude.sh", &script(reply, hold));
     let gh = fake_harness_script(tools.path(), "fake-gh.sh", gh_body);
+    let ok = truth_reply(serde_json::json!({"ok": true, "corrections": []}));
+    std::fs::write(tools.path().join("truth-reply"), ok).unwrap();
     let mut vars = vec![
         ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
         ("ORCHD_GH_BIN", gh.to_str().unwrap()),
@@ -183,16 +203,19 @@ fn settle() {
 
 #[test]
 fn a_done_task_refused_on_the_default_branch_opens_the_drafted_pull_request() {
-    let reply = "```json\n{\"branch\":\"feature/drafted-pr\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}\n```";
+    let reply = "{\"branch\":\"feature/ignored\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}";
     let s = setup(reply, true);
     let id = s.create(serde_json::json!({}));
-    done(&s, &id);
+    let task = done(&s, &id);
+    let branch = task["branch"].as_str().unwrap().to_string();
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    // The draft names no branch: the pull request is always the task's own.
     let log = s.gh_log();
     assert!(
-        log.contains("pr create --base main --head feature/drafted-pr --title feat: drafted title --body Drafted body for the owner"),
+        log.contains(&format!("pr create --base main --head {branch} --title feat: drafted title --body Drafted body for the owner")),
         "{log}"
     );
+    assert!(!log.contains("feature/ignored"), "{log}");
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(task["status"], "done");
     let decisions = task["decisions"].to_string();
@@ -322,24 +345,54 @@ fn a_task_that_lands_opens_no_pull_request() {
 }
 
 #[test]
-fn a_drafted_base_branch_is_refused_and_the_tasks_own_branch_is_used() {
-    let s = setup("{\"branch\":\"main\",\"title\":\"t\",\"body\":\"b\"}", true);
+fn a_body_claim_the_diff_contradicts_is_corrected_before_the_push() {
+    let reply = "{\"title\":\"t\",\"body\":\"Adds tests for the toggle\"}";
+    let s = setup(reply, true);
+    std::fs::write(
+        s.tools.path().join("truth-reply"),
+        truth_reply(serde_json::json!({
+            "ok": false,
+            "corrections": ["The diff adds no tests."],
+            "body": "Corrected body"
+        })),
+    )
+    .unwrap();
     let id = s.create(serde_json::json!({}));
-    let task = done(&s, &id);
-    let branch = task["branch"].as_str().unwrap().to_string();
-    assert_eq!(s.pr_url(&id).as_deref(), Some(URL));
-    let task = wait_decision(&s, &id, "PR: drafted branch main refused");
+    done(&s, &id);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let log = s.gh_log();
+    assert!(log.contains("--body Corrected body"), "{log}");
+    assert!(!log.contains("Adds tests for the toggle"), "{log}");
+    assert!(
+        s.tools.path().join("checks.log").exists(),
+        "no body check ran"
+    );
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert!(
         task["decisions"]
             .to_string()
-            .contains(&format!("using {branch}")),
+            .contains("PR: body check: The diff adds no tests."),
         "{task}"
     );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_pull_request_whose_head_is_not_the_pushed_commit_is_not_recorded_as_opened() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[FAST_RETRY]);
+    std::fs::write(s.tools.path().join("stale-head"), "").unwrap();
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "PR: not opened after 5 tries");
+    assert!(task.get("prUrl").is_none(), "{task}");
     assert!(
-        s.gh_log().contains(&format!("--head {branch} --title t")),
-        "{}",
-        s.gh_log()
+        task["decisions"].to_string().contains("not the pushed"),
+        "{task}"
     );
+    wait_notice(&s, &id);
+    settle();
+    assert_eq!(s.gh_log().matches("pr view").count(), 5, "{}", s.gh_log());
+    assert_eq!(notices(&s, &id), 1);
     s.daemon.shutdown_and_wait();
 }
 
@@ -371,13 +424,14 @@ fn a_pull_request_opened_while_the_draft_runs_is_not_opened_twice() {
 
 #[test]
 fn a_restart_resumes_the_pull_request_of_a_done_task() {
-    let reply = "{\"branch\":\"feature/resumed\",\"title\":\"t\",\"body\":\"b\"}";
+    let reply = "{\"title\":\"t\",\"body\":\"b\"}";
     let mut s = setup_with(reply, true, true, false);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
     wait_for(&s.tools.path().join("draft-started"));
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(task["prPending"], true, "{task}");
+    let branch = task["branch"].as_str().unwrap().to_string();
     let fresh = fake_harness_script(s.tools.path(), "fake-claude-2.sh", &script(reply, false));
     let gh = s.tools.path().join("fake-gh.sh");
     s.daemon.restart(&[
@@ -387,7 +441,7 @@ fn a_restart_resumes_the_pull_request_of_a_done_task() {
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
     std::fs::write(s.tools.path().join("go"), "").unwrap();
     assert!(
-        s.gh_log().contains("--head feature/resumed"),
+        s.gh_log().contains(&format!("--head {branch}")),
         "{}",
         s.gh_log()
     );
@@ -411,7 +465,16 @@ case "$1 $2" in
       exit 1
     fi
     [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
-  "pr create") touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr create")
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) printf '%s' "$2" > "$dir/head" ;; --title) printf '%s' "$2" > "$dir/title" ;; esac
+      shift
+    done
+    touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr view")
+    sha=$(git ls-remote origin "refs/heads/$(cat "$dir/head")" | cut -f1)
+    [ -f "$dir/stale-head" ] && sha=0000000000000000000000000000000000000000
+    printf '{"url":"https://github.example/acme/app/pull/7","headRefOid":"%s","title":"%s"}\n' "$sha" "$(cat "$dir/title")" ;;
 esac
 "#;
 
@@ -459,10 +522,7 @@ fn default_settings_and_no_overseer_open_the_pull_request_of_a_refused_landing()
     done(&s, &id);
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
     let log = s.gh_log();
-    assert!(
-        log.contains("--head feature/by-default --title feat: by default"),
-        "{log}"
-    );
+    assert!(log.contains("--title feat: by default"), "{log}");
     s.daemon.shutdown_and_wait();
 }
 
@@ -636,7 +696,7 @@ fn landing_a_done_task_while_its_pull_request_is_drafted_cancels_the_pull_reques
 
 #[test]
 fn a_restart_reuses_the_saved_draft_instead_of_drafting_again() {
-    let reply = "{\"branch\":\"feature/kept\",\"title\":\"t\",\"body\":\"b\"}";
+    let reply = "{\"title\":\"t\",\"body\":\"b\"}";
     let mut s = setup_full(reply, Pr::Default, false, false, GH_FAILING, &[]);
     std::fs::write(s.tools.path().join("fail-first"), "1").unwrap();
     let id = s.create(serde_json::json!({}));
@@ -659,7 +719,13 @@ fn a_restart_reuses_the_saved_draft_instead_of_drafting_again() {
     ]);
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
     assert_eq!(drafts(&s), 1, "drafted again after the restart");
-    assert!(s.gh_log().contains("--head feature/kept"), "{}", s.gh_log());
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    let branch = task["branch"].as_str().unwrap().to_string();
+    assert!(
+        s.gh_log().contains(&format!("--head {branch}")),
+        "{}",
+        s.gh_log()
+    );
     s.daemon.shutdown_and_wait();
 }
 

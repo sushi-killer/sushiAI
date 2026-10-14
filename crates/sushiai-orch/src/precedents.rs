@@ -249,7 +249,7 @@ fn failing_paths(tail: &str) -> Vec<String> {
 
 /// Signals read from the check results of the task's latest attempt that ran
 /// checks: `timeout`, `install` (the environment, not the code), `flaky` (a
-/// different test fails in each run of one command) and `outside_diff`
+/// different test fails in each run of one command on the same tree) and `outside_diff`
 /// (failing tests live in files the attempt did not change). Sorted.
 pub fn signals_of(task: &Task) -> Vec<String> {
     match task.attempts.iter().rposition(|a| !a.verify.is_empty()) {
@@ -277,10 +277,12 @@ pub fn attempt_signals(task: &Task, at: usize) -> Vec<String> {
             .iter()
             .rev()
             .flat_map(|a| a.verify.iter())
-            .find(|o| o.command == outcome.command && o.code != Some(0))
-            .map(|o| failing_tests(&o.tail));
+            .find(|o| o.command == outcome.command && o.code != Some(0));
         if let Some(before) = before {
-            if !now.is_empty() && !before.is_empty() && now != before {
+            // Another tree is other code: its different failures are a change, not a flake.
+            let same_tree = outcome.tree.is_some() && outcome.tree == before.tree;
+            let before = failing_tests(&before.tail);
+            if same_tree && !now.is_empty() && !before.is_empty() && now != before {
                 signals.insert("flaky");
             }
         }

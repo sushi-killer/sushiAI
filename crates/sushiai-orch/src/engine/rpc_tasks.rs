@@ -666,7 +666,6 @@ impl App {
             daily_budget_ok_day: None,
             assumptions: vec![],
             question_history: vec![],
-            judged_findings: vec![],
             findings: vec![],
             archived: false,
             pr_url: None,
@@ -676,6 +675,7 @@ impl App {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -1023,53 +1023,12 @@ impl App {
         }
         let like = checked_like(p.like.as_deref(), p.source.as_deref(), &task, &p.answer)?;
         self.verify_like(like.as_deref(), &task, &p.answer)?;
-        if caller != AnsweredBy::Owner {
-            if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
-                if !is_refusal(q, &p.answer) && !is_recheck(q, &p.answer) {
-                    return Err(format!(
-                        "this {:?} question is the owner's to allow: an agent can only stop or deny it",
-                        q.kind
-                    ));
-                }
-            }
-        }
-
         let by_agent = caller != AnsweredBy::Owner;
         if by_agent {
             if let Some(q) = task.question.as_ref() {
                 let settings = self.settings.read().unwrap();
-                if let Some(why) = shared_check_drop_refusal(&settings, &task, q, &p.answer) {
+                if let Some(why) = non_owner_refusal(&settings, &task, q, &p.answer, caller) {
                     return Err(why);
-                }
-            }
-            if let Some(q) = task.question.as_ref().filter(|q| {
-                q.kind == QuestionKind::PreexistingFailure
-                    && !q.commands.is_empty()
-                    && is_option(&p.answer, PRE_EXISTING_RETRY)
-            }) {
-                if q.commands
-                    .iter()
-                    .all(|command| non_owner_base_retry(&task, command, Some(&task.base_sha)))
-                {
-                    return Err("these checks already got a non-owner retry on this base: the owner decides now".to_string());
-                }
-            }
-            // The overseer never decides what a hard limit keeps for the owner,
-            // with or without a `like`. An owner-only kind and a shared-check drop
-            // are handled above (a refusal stays open to the first, an agent may
-            // drop a task-specific check). The lead and the chat orchestrator are
-            // not bound here: they relay what the owner said in a conversation.
-            if caller == AnsweredBy::Overseer {
-                if let Some(limit) = task
-                    .question
-                    .as_ref()
-                    .filter(|q| !owner_only(q.kind))
-                    .and_then(|q| hard_limit(q, &p.answer))
-                    .filter(|limit| *limit != HardLimit::SharedCheckDrop)
-                {
-                    return Err(format!(
-                        "this question is under a hard limit ({limit:?}): the owner decides, not the overseer"
-                    ));
                 }
             }
             self.agent_answers
@@ -1930,12 +1889,14 @@ mod answer_caller_tests {
             run: "npm test".into(),
             baseline: None,
         }];
-        task.question = Some(Question::new(
+        let mut question = Question::new(
             "Criterion 0 cannot be met as written: x. Evidence: y",
             vec!["drop criterion".into(), "retry".into(), "stop".into()],
             QuestionKind::Impossible,
             AskedBy::Implement,
-        ));
+        );
+        question.criterion = Some(0);
+        task.question = Some(question);
         app.store.save_task(&task).unwrap();
         task.id
     }

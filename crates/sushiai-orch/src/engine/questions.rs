@@ -28,17 +28,16 @@ impl From<&str> for Reply {
 /// budget in a loop.
 pub(super) const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 
-/// The "attempts keep failing" question: the orchestrator triages it first
-/// (it sees the last failure, e.g. the review findings, and can say what to
-/// fix or that a finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`]
-/// times per task; after that, or with auto-answer off, the failure ladder
-/// takes one changed approach and then fails the task (`ladder.rs`): the owner
-/// is never asked. The answer policy goes first: it continues once on its own.
+/// The "attempts keep failing" question: the overseer decides it (it sees the
+/// last failure, e.g. the review findings, and can say what to fix or that a
+/// finding is wrong), up to [`MAX_ORCHESTRATOR_CONTINUES`] times per task;
+/// after that, or with auto-answer off, the failure ladder takes one changed
+/// approach and then fails the task (`ladder.rs`): the owner is never asked by
+/// the ladder. The answer policy goes first: it continues once on its own.
 pub(super) async fn wait_for_exhausted_answer(
     app: &Arc<App>,
     task_id: &str,
     task: &mut Task,
-    idx: usize,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
@@ -53,23 +52,17 @@ pub(super) async fn wait_for_exhausted_answer(
     if let Some(text) = try_policy_answer(app, task, cancel).await {
         return Some(Answered { text });
     }
-    if non_owner_continues(task) < MAX_ORCHESTRATOR_CONTINUES {
-        if let Some(answered) = wait_for_triaged_answer(
-            app,
-            task_id,
-            task,
-            idx,
-            pending_answer,
-            cancel,
-            permit,
-            false,
-        )
-        .await
-        {
-            return Some(answered);
-        }
-        if cancel.is_cancelled() {
-            return None;
+    let auto_answer = app.settings.read().unwrap().auto_answer;
+    if (task.loop_state.non_owner_continues as usize) < MAX_ORCHESTRATOR_CONTINUES && auto_answer {
+        match park(app, task_id, task, pending_answer, cancel, permit, true).await {
+            Parked::Answer(text) => {
+                let text = text?;
+                app.take_agent_answer(task_id);
+                return Some(Answered { text });
+            }
+            // No overseer turn started: the ladder decides, not a wait with
+            // nobody to answer.
+            Parked::NoOverseer => {}
         }
     }
     // The next rung is never an open question: one changed approach, then
@@ -139,13 +132,36 @@ pub(super) async fn park_for_answer(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
+    match park(app, task_id, task, pending_answer, cancel, permit, false).await {
+        Parked::Answer(answer) => answer,
+        Parked::NoOverseer => None,
+    }
+}
+
+/// How a park ended.
+enum Parked {
+    Answer(Option<String>),
+    /// `need_overseer` was set and the wake neither started a turn nor held
+    /// the question: nobody will answer it. The question is still open.
+    NoOverseer,
+}
+
+async fn park(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<SlotPermit>,
+    need_overseer: bool,
+) -> Parked {
     if cancel.is_cancelled() {
         app.apply_cancellation(task);
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
         app.advance_queue(&task.repo);
-        return None;
+        return Parked::Answer(None);
     }
     // A task waiting for its owner holds no slot: parallel limits running
     // agents, not open questions.
@@ -160,6 +176,10 @@ pub(super) async fn park_for_answer(
         if let Some(s) = saved.question {
             (q.held_for_overseer, q.held_at) = (s.held_for_overseer, s.held_at);
         }
+    }
+    if need_overseer && !task.question.as_ref().is_some_and(|q| q.held_for_overseer) {
+        *pending_answer.lock().unwrap() = None;
+        return Parked::NoOverseer;
     }
     app.broadcast_task(task);
     let reply = tokio::select! {
@@ -199,7 +219,10 @@ pub(super) async fn park_for_answer(
         None => {
             if let Ok(Some(saved)) = app.store.load_task(task_id) {
                 *task = saved;
-                app.apply_cancellation(task);
+                // The failure ladder ended this task: it stays failed.
+                if task.status != TaskStatus::Failed {
+                    app.apply_cancellation(task);
+                }
                 if task.status == TaskStatus::Stopped {
                     app.close_stopped_task(task);
                 }
@@ -210,12 +233,12 @@ pub(super) async fn park_for_answer(
             }
         }
     }
-    result
+    Parked::Answer(result)
 }
 
-/// The question text an orchestrator answer line carries. Triage may
-/// rewrite an "Attempts keep failing" question when it escalates, so that
-/// kind always uses the fixed text the continue cap counts by.
+/// The question text an orchestrator answer line carries. An "Attempts keep
+/// failing" question always uses the fixed text the continue cap counts by,
+/// not its own text, which names the failure.
 pub(super) fn answer_line_question(q: &Question) -> &str {
     if q.kind == QuestionKind::AttemptsFailing {
         EXHAUSTED_QUESTION
@@ -224,36 +247,91 @@ pub(super) fn answer_line_question(q: &Question) -> &str {
     }
 }
 
-/// Counts chat, overseer and lead extensions of the attempt budget,
-/// including legacy orchestrator lines.
-pub(super) fn non_owner_continues(task: &Task) -> usize {
-    let orchestrator = task
-        .decisions
+/// Why `answer` to the waiting `question` of `task` is refused for a caller
+/// that is not the owner: the gate that refuses it, with the reason the caller
+/// is told. Owner-only kinds keep only refusals, a shared check is not dropped
+/// by an agent, and the overseer and the answer policy stay under
+/// the hard limits (`decision_memory.rs`); a lead or chat caller relays what the owner said,
+/// so the hard limits do not bind it.
+pub(super) fn non_owner_refusal(
+    settings: &Settings,
+    task: &Task,
+    question: &Question,
+    answer: &str,
+    caller: AnsweredBy,
+) -> Option<String> {
+    if owner_only(question.kind) && !is_refusal(question, answer) && !is_recheck(question, answer) {
+        return Some(format!(
+            "this {:?} question is the owner's to allow: an agent can only stop or deny it",
+            question.kind
+        ));
+    }
+    if let Some(why) = shared_check_drop_refusal(settings, task, question, answer) {
+        return Some(why);
+    }
+    if question.kind == QuestionKind::PreexistingFailure
+        && !question.commands.is_empty()
+        && is_option(answer, PRE_EXISTING_RETRY)
+        && question
+            .commands
+            .iter()
+            .all(|command| non_owner_base_retry(task, command, Some(&task.base_sha)))
+    {
+        return Some(
+            "these checks already got a non-owner retry on this base: the owner decides now"
+                .to_string(),
+        );
+    }
+    if caller == AnsweredBy::Overseer && question.kind == QuestionKind::AttemptsFailing {
+        let continues = answer.trim().to_ascii_lowercase().starts_with("continue");
+        if !continues && !is_option(answer, "change approach") {
+            return Some(
+                "the overseer may only continue or change approach on attempts keep failing: the failure ladder ends the task otherwise"
+                    .to_string(),
+            );
+        }
+    }
+    if matches!(caller, AnsweredBy::Overseer | AnsweredBy::Policy) && !owner_only(question.kind) {
+        if let Some(limit) =
+            hard_limit(question, answer).filter(|l| *l != HardLimit::SharedCheckDrop)
+        {
+            return Some(format!(
+                "this question is under a hard limit ({limit:?}): the owner decides, not an agent"
+            ));
+        }
+    }
+    None
+}
+
+/// The options of the waiting `question` an overseer may answer with: the
+/// ones [`non_owner_refusal`] lets through. Free text meets the same gates
+/// when it is sent.
+fn overseer_allowed_answers(settings: &Settings, task: &Task, question: &Question) -> Vec<String> {
+    question
+        .options
         .iter()
-        .filter(|d| d.starts_with(EXHAUSTED_ANSWER_PREFIX))
-        .count();
-    let like = task
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.starts_with(LIKE_PREFIX) && d.contains(&format!(" -- {EXHAUSTED_QUESTION} -> "))
+        .filter(|option| {
+            non_owner_refusal(settings, task, question, option, AnsweredBy::Overseer).is_none()
         })
-        .count();
-    let legacy_lead = task
-        .decisions
-        .iter()
-        .filter(|d| d.starts_with("Lead: Attempts keep failing -> "))
-        .count();
-    let lead = task
-        .question_history
-        .iter()
-        .filter(|q| {
-            q.kind == QuestionKind::AttemptsFailing
-                && q.answered_by == AnsweredBy::Lead
-                && !is_option(&q.answer, "stop")
-        })
-        .count();
-    orchestrator + like + lead.max(legacy_lead)
+        .cloned()
+        .collect()
+}
+
+/// The waiting question as an overseer turn gets it: its typed fields and the
+/// answers its gates allow (`allowedAnswers`), after the wake prompt.
+pub(super) fn waiting_prompt(app: &App, key: &str, task: &Task) -> String {
+    let prompt = overseer_prompt(key, task);
+    let Some(question) = task.question.as_ref() else {
+        return prompt;
+    };
+    let allowed = overseer_allowed_answers(&app.settings.read().unwrap(), task, question);
+    let typed = json!({
+        "kind": question.kind,
+        "text": question.text,
+        "options": question.options,
+        "allowedAnswers": allowed,
+    });
+    format!("{prompt}\n\nThe waiting question: {typed}")
 }
 
 /// Records a parked question's answer and its caller.
@@ -388,6 +466,16 @@ impl App {
                 .as_ref()
                 .is_some_and(|q| q.held_at == Some(*at))
             {
+                if task
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing)
+                {
+                    if self.step_unanswered_exhausted(&mut task) {
+                        self.advance_queue(&task.repo);
+                    }
+                    continue;
+                }
                 if let Some(q) = task.question.as_mut() {
                     q.release();
                 }
@@ -397,24 +485,102 @@ impl App {
         }
     }
 
+    /// An overseer turn ended on "attempts keep failing" and did not answer
+    /// it: the owner is not asked. The failure ladder takes its next rung, as
+    /// when no overseer turn starts: one changed approach (the parked loop
+    /// gets `change approach` as the answer; with no loop it is applied here
+    /// and the task queued), then the end (failed, with its report and one
+    /// notice) with the parked loop cancelled.
+    /// Returns whether it queued the task for a new loop.
+    pub(super) fn step_unanswered_exhausted(&self, task: &mut Task) -> bool {
+        if !ladder::approach_changed(task) {
+            let attempt_n = task
+                .attempts
+                .iter()
+                .rfind(|a| a.stage == Stage::Implement)
+                .map(|a| a.n);
+            let live = self.controls.lock().unwrap().get(&task.id).map(|c| {
+                c.pending_answer.lock().unwrap().take().is_some_and(|tx| {
+                    tx.send(Reply {
+                        text: "change approach".to_string(),
+                        default_evidence: None,
+                        like: None,
+                    })
+                    .is_ok()
+                })
+            });
+            match (live, attempt_n) {
+                // The parked loop settles the answer and saves.
+                (Some(true), _) => return false,
+                // A loop between two waits: its own copy decides next.
+                (Some(false), _) => {
+                    if let Some(q) = task.question.as_mut() {
+                        q.release();
+                    }
+                    self.save_task_logged(task);
+                    self.broadcast_task(task);
+                    return false;
+                }
+                (None, Some(n)) => {
+                    let settings = self.settings.read().unwrap().clone();
+                    ladder::change_approach(task, &settings, n);
+                    task.question = None;
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    self.save_task_logged(task);
+                    self.broadcast_task(task);
+                    return true;
+                }
+                (None, None) => {}
+            }
+        }
+        ladder::end_ladder(self, task);
+        self.notify_task_failed(task);
+        if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
+            control.cancel.cancel();
+        }
+        false
+    }
+
     /// Releases every hold that `keep` does not keep.
     fn release_holds_where(&self, keep: impl Fn(&Question) -> bool) {
         for mut task in self.store.list_tasks().unwrap_or_default() {
-            if let Some(q) = task
+            let Some(q) = task
                 .question
                 .as_mut()
                 .filter(|q| q.held_for_overseer && !keep(q))
+            else {
+                continue;
+            };
+            // An "attempts keep failing" question is never left open: with
+            // the hold gone and no queued wake to answer it, the ladder takes
+            // its next rung. A queued wake keeps the question for its turn.
+            if q.kind == QuestionKind::AttemptsFailing
+                && !chat::wake_queued_for(self, &task.repo, &task.id)
             {
+                if self.step_unanswered_exhausted(&mut task) {
+                    self.advance_queue(&task.repo);
+                }
+                continue;
+            }
+            q.release();
+            self.save_task_logged(&task);
+            self.broadcast_task(&task);
+        }
+    }
+
+    /// A daemon that stopped mid-turn left its holds behind: no turn runs now.
+    /// An "attempts keep failing" question stays open: the restart wake asks
+    /// the overseer again, and `retire_ladder_questions` steps the ladder when
+    /// nobody will.
+    pub(crate) fn release_stale_holds(&self) {
+        for mut task in self.store.list_tasks().unwrap_or_default() {
+            if let Some(q) = task.question.as_mut().filter(|q| q.held_for_overseer) {
                 q.release();
                 self.save_task_logged(&task);
                 self.broadcast_task(&task);
             }
         }
-    }
-
-    /// A daemon that stopped mid-turn left its holds behind: no turn runs now.
-    pub(crate) fn release_stale_holds(&self) {
-        self.release_holds_where(|_| false);
     }
 
     /// Holds older than [`HOLD_TTL_MS`] end, whatever the turn is doing.
@@ -424,7 +590,7 @@ impl App {
 }
 
 /// Wakes the orchestrator chat (an overseer turn) for a task that just parked
-/// on a question nobody answered (triage escalated or was off), when
+/// on a question nobody answered by rule or precedent, when
 /// `auto_answer` is on. Parking happens once per question, so this never wakes
 /// twice for the same one. An owner-only kind never wakes it: the owner
 /// answers those, and `task_answer` would refuse the agent anyway.
@@ -463,7 +629,7 @@ pub(super) fn wake_orchestrator_for_parked(app: &App) {
 }
 
 fn wake_for_waiting(app: &App, task: &Task) {
-    let prompt = app.with_precedents(overseer_prompt("overseer_waiting", task), &[task]);
+    let prompt = app.with_precedents(waiting_prompt(app, "overseer_waiting", task), &[task]);
     chat::wake_overseer(app, &task.repo, prompt, false, "waiting", Some(&task.id));
 }
 
@@ -515,24 +681,11 @@ pub(super) fn wake_orchestrator_for_done(app: &App, task: &mut Task) {
     {
         return;
     }
-    // orchd opens the pull request itself while `pr_pending`: one owner.
-    let prompt = overseer_prompt(done_prompt_key(task), task);
+    let prompt = overseer_prompt("overseer_done", task);
     // Marked either way: this is the one transition, not a retry loop.
     task.overseer_woken = true;
     app.save_task_logged(task);
     chat::wake_overseer(app, &task.repo, prompt, false, "done", Some(&task.id));
-}
-
-/// The wake prompt of a finished task: the one that tells the overseer to
-/// open the pull request, unless orchd owns that (`pr_pending`).
-fn done_prompt_key(task: &Task) -> &'static str {
-    if task.unreviewed && task.pr_pending {
-        "overseer_done_unreviewed"
-    } else if task.pr_pending {
-        "overseer_done_pr_owned"
-    } else {
-        "overseer_done"
-    }
 }
 
 /// A server-built overseer prompt (`prompts/orchestrator.yaml`) naming the task.
@@ -540,465 +693,6 @@ fn overseer_prompt(key: &str, task: &Task) -> String {
     crate::prompts::get(key)
         .replace("{id}", &task.id)
         .replace("{title}", &task.title)
-}
-
-/// A completed triage session: the decision, plus whatever it cost (the
-/// caller adds this to `task.cost_usd` itself, same as an implement/plan
-/// attempt would).
-struct TriageRun {
-    decision: brief::TriageDecision,
-    cost_usd: Option<f64>,
-}
-
-/// A planner question the planner called routine: triage reads it and either
-/// settles it (`Some((answer, reason))`) or the caller asks the owner. Triage
-/// that fails or escalates settles nothing, and so does a closed or spent
-/// answer policy.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn triage_settles(
-    app: &Arc<App>,
-    task_id: &str,
-    attempt_n: u32,
-    task: &mut Task,
-    worktree: &Path,
-    asked: &Question,
-    cancel: &CancelToken,
-) -> Option<(String, String)> {
-    if !policy_open(app, task, asked) {
-        return None;
-    }
-    let (question, options) = (asked.text.as_str(), asked.options.as_slice());
-    let TriageRun { decision, cost_usd } = run_triage(
-        app, task_id, attempt_n, task, worktree, question, options, true, cancel,
-    )
-    .await?;
-    if let Some(cost) = cost_usd {
-        task.cost_usd += cost;
-    }
-    matches!(decision.action, brief::TriageAction::Answer)
-        .then(|| (decision.answer, decision.reason))
-}
-
-/// One fresh, read-only session on the `orchestrator` route, asked to
-/// answer or escalate a question that would otherwise go straight to the
-/// owner. `None` means "don't triage this one" -- the route is off or names
-/// no configured route (same semantics as `planner`'s unknown-id case,
-/// except a triage failure never fails the task, it just falls through to
-/// asking the owner as before). A harness error or an unparseable reply
-/// still produces `Some`, escalating with the original question untouched
-/// (`sanitize_triage`) -- fail-open to the owner, never loops.
-#[allow(clippy::too_many_arguments)]
-async fn run_triage(
-    app: &Arc<App>,
-    task_id: &str,
-    attempt_n: u32,
-    task: &mut Task,
-    worktree: &Path,
-    question: &str,
-    options: &[String],
-    force: bool,
-    cancel: &CancelToken,
-) -> Option<TriageRun> {
-    // P1-2: at most one consecutive triage *answer* per task -- if the
-    // previous decision recorded is already an orchestrator answer, this
-    // question goes straight to the owner. Without this, a recurring
-    // blocked question (or a planner that keeps re-asking) could let
-    // triage answer every single time with no bound at all.
-    // "Attempts keep failing" has its own bound (MAX_ORCHESTRATOR_CONTINUES).
-    if !question.starts_with(EXHAUSTED_QUESTION)
-        && task
-            .decisions
-            .last()
-            .map(|d| {
-                is_orchestrator_answer_decision(d)
-                    || task.question_history.last().is_some_and(|q| {
-                        q.answered_by == AnsweredBy::Lead
-                            && !is_option(&q.answer, "stop")
-                            && *d == format!("Lead: {}", q.answer)
-                    })
-            })
-            .unwrap_or(false)
-    {
-        return None;
-    }
-    let settings = app.settings.read().unwrap().clone();
-    // `force`: the answer policy asks triage to confirm a cautious option even
-    // with auto-answer off.
-    if !settings.auto_answer && !force {
-        return None;
-    }
-    let route = app.chat_route(&settings)?;
-
-    let run_dir = app
-        .store
-        .claim_helper_run_dir(task_id, "triage", Some(attempt_n))
-        .ok()?;
-    let mcp_path = run_dir.join("mcp.json");
-    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-    let settings_path = run_dir.join("settings.json");
-    let key_path = run_dir.join("key");
-    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-    if matches!(route.harness, Harness::Claude) {
-        write_readonly_claude_settings_with_profile(
-            &route,
-            app,
-            &key_path,
-            &settings,
-            &deny_read,
-            &settings_path,
-        );
-    }
-    let req = harness::RunRequest {
-        harness: route.harness,
-        worktree,
-        model: route.model.as_deref(),
-        effort: route.effort.as_deref(),
-        max_budget_usd: None,
-        review: true,
-        task_run: false,
-        task_sandbox: None,
-        mcp_config: Some(&mcp_path),
-        settings_path: Some(&settings_path),
-        network_allowed: false,
-        codex_mcp: &[],
-        images: &[],
-        repo_settings: true,
-        resume: None,
-    };
-    let brief_text = brief::build_triage_brief(task, question, options);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-    let events_path = run_dir.join("events.jsonl");
-    let limit = app.helper_timeout();
-    let run_result = run_harness(
-        app,
-        task_id,
-        attempt_n,
-        RunTrack::No,
-        worktree,
-        &req,
-        CostTag::task("triage", &route.id),
-        &brief_text,
-        &events_path,
-        cancel,
-        Guard::helper("triage", limit),
-    )
-    .await;
-    let _ = std::fs::remove_file(&key_path);
-
-    if run_result.as_ref().is_ok_and(|o| o.timed_out) {
-        task.decisions.push(helper_timeout_message("triage", limit));
-    }
-    match run_result {
-        // The task was stopped mid-triage: don't manufacture an escalation
-        // for it, just skip triage and let the normal wait pick up the
-        // cancellation itself (its own `cancel.cancelled()` branch).
-        Err(RunError::Cancelled) => None,
-        Ok(o) if o.error.is_none() => {
-            let cost_usd = o.cost_usd;
-            let text = o.final_text.unwrap_or_default();
-            Some(TriageRun {
-                decision: brief::sanitize_triage(brief::parse_triage(&text), question, options),
-                cost_usd,
-            })
-        }
-        Ok(o) => Some(TriageRun {
-            decision: brief::sanitize_triage(None, question, options),
-            cost_usd: o.cost_usd,
-        }),
-        Err(RunError::Io(_) | RunError::NotFound(_)) => Some(TriageRun {
-            decision: brief::sanitize_triage(None, question, options),
-            cost_usd: None,
-        }),
-    }
-}
-
-/// Wraps [`wait_for_answer`] with one shot at orchestrator triage first --
-/// for the agent's own blocked question, and for "attempts keep failing"
-/// through [`wait_for_exhausted_answer`], which bounds how often the
-/// orchestrator may extend the budget. `run_triage` caps any other question
-/// to one *answer* in a row. `task.question` must already be set by the
-/// caller, exactly as for a plain `wait_for_answer` -- an escalation only
-/// ever sharpens it, it never invents a question from nothing. Never use
-/// this for the protected-path approval question: only the owner may
-/// approve that.
-///
-/// P1-1: on `Answer`, mutates and saves the caller's own `task` in place
-/// (exactly like `wait_for_answer`'s own post-answer step) instead of
-/// reloading from disk -- `task` is this iteration's accumulated attempt
-/// state (failure, cost, usage, summary, changed files, decisions), most of
-/// which is never persisted anywhere until this call's `save_task`; an
-/// independent reload would silently discard all of it and leave the
-/// attempt stuck `running`.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn wait_for_answer_with_triage(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> Option<String> {
-    if let Some(answer) = try_policy_answer(app, task, cancel).await {
-        return Some(answer);
-    }
-    wait_for_triaged_answer(
-        app,
-        task_id,
-        task,
-        idx,
-        pending_answer,
-        cancel,
-        permit,
-        true,
-    )
-    .await
-    .map(|a| a.text)
-}
-
-/// [`wait_for_answer_with_triage`] once the answer policy has had its turn.
-/// With `park` false an unanswered question is not handed on: `None` comes
-/// back with the question untouched (the failure ladder has a next rung).
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_triaged_answer(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-    park: bool,
-) -> Option<Answered> {
-    let question = task.question.clone().unwrap_or_else(|| {
-        Question::new("", vec![], QuestionKind::AgentQuestion, AskedBy::Implement)
-    });
-    let attempt_n = task.attempts[idx].n;
-    let worktree = PathBuf::from(&task.worktree);
-    let cautious = cautious_choice(app, task, &question);
-    let auto_answer = app.settings.read().unwrap().auto_answer;
-    if let Some(TriageRun { decision, cost_usd }) = run_triage(
-        app,
-        task_id,
-        attempt_n,
-        task,
-        &worktree,
-        &question.text,
-        &question.options,
-        cautious.is_some(),
-        cancel,
-    )
-    .await
-    {
-        if let Some(cost) = cost_usd {
-            task.cost_usd += cost;
-        }
-        let agrees = agrees_with(&decision, cautious.as_deref());
-        // An answer that removes a shared check is the owner's: triage hands
-        // the question on instead.
-        let owner_only_removal = matches!(decision.action, brief::TriageAction::Answer)
-            && shared_check_drop_refusal(
-                &app.settings.read().unwrap(),
-                task,
-                &question,
-                &decision.answer,
-            )
-            .is_some();
-        match decision.action {
-            brief::TriageAction::Answer if owner_only_removal => {}
-            brief::TriageAction::Answer if !agrees && !auto_answer => {}
-            brief::TriageAction::Answer => {
-                if agrees {
-                    let evidence = format!(
-                        "the cautious option, and triage agrees: {}",
-                        decision.reason
-                    );
-                    record_policy_answer(
-                        task,
-                        &question,
-                        &decision.answer,
-                        "policy",
-                        &evidence,
-                        attempt_n,
-                    );
-                    app.broadcast_log(
-                        task_id,
-                        attempt_n,
-                        task.decisions.last().cloned().unwrap_or_default(),
-                    );
-                } else {
-                    let line = orchestrator_answer_line(
-                        answer_line_question(&question),
-                        &decision.answer,
-                        &decision.reason,
-                    );
-                    app.broadcast_log(task_id, attempt_n, line.clone());
-                    task.decisions.push(line);
-                    record_answered_question(
-                        task,
-                        &question,
-                        &decision.answer,
-                        AnsweredBy::Orchestrator,
-                    );
-                }
-                task.question = None;
-                task.status = TaskStatus::Queued;
-                task.updated_at = now_ms();
-                app.save_task_logged(task);
-                app.broadcast_task(task);
-                return Some(Answered {
-                    text: decision.answer,
-                });
-            }
-            brief::TriageAction::Escalate if !auto_answer || !park => {}
-            brief::TriageAction::Escalate => {
-                task.question = Some(Question {
-                    text: decision.question,
-                    options: decision.options,
-                    kind: question.kind,
-                    asked_by: question.asked_by,
-                    asked_at: question.asked_at,
-                    held_for_overseer: false,
-                    held_at: None,
-                    commands: question.commands.clone(),
-                    failure_signature: question.failure_signature.clone(),
-                });
-                task.decisions
-                    .push(orchestrator_escalate_line(&decision.reason));
-            }
-        }
-    }
-    if !park {
-        return None;
-    }
-    let text = park_for_answer(app, task_id, task, pending_answer, cancel, permit).await?;
-    app.take_agent_answer(task_id);
-    Some(Answered { text })
-}
-
-/// Wraps [`ask_plan_question`] with the same orchestrator-triage shot, for
-/// the planner's own draft questions specifically -- not the "no
-/// verification command" synthesized question or the retry-clarification
-/// question, which still go straight to the owner unchanged. Same P1-1 fix
-/// as [`wait_for_answer_with_triage`]: mutates and saves the caller's own
-/// `task` in place rather than an independent reload. With `keep_text` an
-/// escalation asks the owner `question_text` and `options` as given instead
-/// of triage's sharpened version (a batched question lists several
-/// questions, which a single sharpened one would drop).
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn ask_plan_question_with_triage(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    attempt_n: u32,
-    worktree: &Path,
-    question_text: &str,
-    options: Vec<String>,
-    keep_text: bool,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> Option<String> {
-    let asked = Question::new(
-        question_text,
-        options.clone(),
-        QuestionKind::PlanQuestion,
-        AskedBy::Plan,
-    );
-    let cautious = cautious_choice(app, task, &asked);
-    let auto_answer = app.settings.read().unwrap().auto_answer;
-    if let Some(TriageRun { decision, cost_usd }) = run_triage(
-        app,
-        task_id,
-        attempt_n,
-        task,
-        worktree,
-        question_text,
-        &options,
-        cautious.is_some(),
-        cancel,
-    )
-    .await
-    {
-        if let Some(cost) = cost_usd {
-            task.cost_usd += cost;
-        }
-        let agrees = agrees_with(&decision, cautious.as_deref());
-        match decision.action {
-            brief::TriageAction::Answer if !agrees && !auto_answer => {}
-            brief::TriageAction::Escalate if !auto_answer => {}
-            brief::TriageAction::Answer => {
-                if agrees {
-                    let evidence = format!(
-                        "the cautious option, and triage agrees: {}",
-                        decision.reason
-                    );
-                    record_policy_answer(
-                        task,
-                        &asked,
-                        &decision.answer,
-                        "policy",
-                        &evidence,
-                        attempt_n,
-                    );
-                    app.broadcast_log(
-                        task_id,
-                        attempt_n,
-                        task.decisions.last().cloned().unwrap_or_default(),
-                    );
-                } else {
-                    let line =
-                        orchestrator_answer_line(question_text, &decision.answer, &decision.reason);
-                    app.broadcast_log(task_id, attempt_n, line.clone());
-                    task.decisions.push(line);
-                    record_answered_question(
-                        task,
-                        &asked,
-                        &decision.answer,
-                        AnsweredBy::Orchestrator,
-                    );
-                }
-                task.question = None;
-                task.status = TaskStatus::Drafting;
-                task.updated_at = now_ms();
-                app.save_task_logged(task);
-                app.broadcast_task(task);
-                return Some(decision.answer);
-            }
-            brief::TriageAction::Escalate => {
-                task.decisions
-                    .push(orchestrator_escalate_line(&decision.reason));
-                task.updated_at = now_ms();
-                app.save_task_logged(task);
-                app.broadcast_task(task);
-                let (text, options) = if keep_text {
-                    (question_text.to_string(), options)
-                } else {
-                    (decision.question, decision.options)
-                };
-                return ask_plan_question(
-                    app,
-                    task_id,
-                    &text,
-                    options,
-                    pending_answer,
-                    cancel,
-                    permit,
-                )
-                .await;
-            }
-        }
-    }
-    ask_plan_question(
-        app,
-        task_id,
-        question_text,
-        options,
-        pending_answer,
-        cancel,
-        permit,
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -1138,6 +832,393 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_overseer_is_only_offered_answers_the_gates_let_it_give() {
+        let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        let permission = Question::new(
+            "Allow the write?",
+            vec![
+                permissions::ALLOW_ONCE.into(),
+                permissions::ALLOW_ALWAYS.into(),
+                permissions::DENY.into(),
+            ],
+            QuestionKind::Permission,
+            AskedBy::Implement,
+        );
+        task.question = Some(permission.clone());
+        assert_eq!(
+            overseer_allowed_answers(&settings, &task, &permission),
+            vec![permissions::DENY.to_string()]
+        );
+        let deploy = Question::new(
+            "Deploy to production now?",
+            vec!["yes".into(), "no".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        assert!(overseer_allowed_answers(&settings, &task, &deploy).is_empty());
+        let mut tagged = Question::new(
+            "Which approach?",
+            vec!["A".into(), "B".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        tagged.risk = vec![Risk::Security];
+        assert!(overseer_allowed_answers(&settings, &task, &tagged).is_empty());
+        let plain = Question::new(
+            "Which way?",
+            vec!["A".into(), "B".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        assert_eq!(
+            overseer_allowed_answers(&settings, &task, &plain),
+            vec!["A".to_string(), "B".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_overseer_wake_carries_the_typed_question_and_its_allowed_answers() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.repo = repo.to_string_lossy().to_string();
+        task.question = Some(Question::new(
+            "Which way?",
+            vec!["A".into(), "B".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        ));
+        app.store.save_task(&task).unwrap();
+        let cancel = CancelToken::new();
+        let pending = Arc::new(StdMutex::new(None));
+        let id = task.id.clone();
+        let parked = {
+            let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
+            tokio::spawn(async move {
+                park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+            })
+        };
+        while pending.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cancel.cancel();
+        parked.await.unwrap();
+        chat::wait_idle(&app, repo.to_str().unwrap()).await;
+        let calls = std::fs::read_to_string(repo.join(".overseer-calls")).unwrap();
+        assert!(
+            calls.contains(r#""allowedAnswers":["A","B"]"#),
+            "the overseer must be handed its allowed answers: {calls}"
+        );
+        assert!(calls.contains(r#""kind":"agent_question""#), "{calls}");
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_failure_goes_to_the_overseer_with_no_extra_turn() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = worktree.to_string_lossy().to_string();
+        task.attempts
+            .push(super::super::test_support::attempt_with_failure(
+                1, "verify",
+            ));
+        let id = task.id.clone();
+        let mut budget = 1;
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let waiter = {
+            let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
+            tokio::spawn(async move {
+                let signal = fail_and_continue(
+                    &app,
+                    &id,
+                    &mut task,
+                    0,
+                    FailureKind::Verify,
+                    "npm test failed".into(),
+                    &mut budget,
+                    &pending,
+                    &cancel,
+                    &mut None,
+                )
+                .await;
+                (matches!(signal, LoopSignal::Stop), task)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pending.lock().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the failure never parked for the overseer");
+        // Parked: the only agent run was the overseer's, in the repository.
+        assert!(!worktree.join(".overseer-calls").exists());
+        // Woken once for the question; the turn is left to end on its own.
+        for _ in 0..400 {
+            if chat::fake_overseer_calls(&repo) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+        cancel.cancel();
+        let (stopped, _) = waiter.await.unwrap();
+        assert!(stopped);
+    }
+
+    #[test]
+    fn the_overseer_may_only_continue_or_change_approach_on_attempts_failing() {
+        let settings = Settings::default();
+        let task = task_with_status(TaskStatus::Waiting);
+        let question = Question::new(
+            "Attempts keep failing with a verify failure: continue, change approach, or stop?",
+            vec!["continue".into(), "change approach".into(), "stop".into()],
+            QuestionKind::AttemptsFailing,
+            AskedBy::Implement,
+        );
+        assert_eq!(
+            overseer_allowed_answers(&settings, &task, &question),
+            vec!["continue".to_string(), "change approach".to_string()]
+        );
+        for answer in ["ask the owner", "stop"] {
+            assert!(
+                non_owner_refusal(&settings, &task, &question, answer, AnsweredBy::Overseer)
+                    .is_some(),
+                "{answer}"
+            );
+        }
+        assert!(non_owner_refusal(
+            &settings,
+            &task,
+            &question,
+            "continue - create fixed.txt",
+            AnsweredBy::Overseer
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
+        let _harness = chat::fake_overseer_harness();
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = worktree.to_string_lossy().to_string();
+        task.attempts
+            .push(super::super::test_support::attempt_with_failure(
+                1, "verify",
+            ));
+        task.loop_state.approach_changed_after = Some(1);
+        let id = task.id.clone();
+        let mut budget = 1;
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        let waiter = {
+            let (app, pending, cancel, id) =
+                (app.clone(), pending.clone(), cancel.clone(), id.clone());
+            tokio::spawn(async move {
+                let signal = fail_and_continue(
+                    &app,
+                    &id,
+                    &mut task,
+                    0,
+                    FailureKind::Verify,
+                    "npm test failed".into(),
+                    &mut budget,
+                    &pending,
+                    &cancel,
+                    &mut None,
+                )
+                .await;
+                (matches!(signal, LoopSignal::Stop), task)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pending.lock().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the failure never parked for the overseer");
+        // The overseer's turn ends without an answer.
+        chat::wait_idle(&app, repo.to_str().unwrap()).await;
+        let (stopped, _) = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the ladder never ended the parked loop")
+            .unwrap();
+        assert!(stopped);
+        let task = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task.question.is_none());
+        assert!(task
+            .decisions
+            .iter()
+            .any(|d| d.starts_with("Ladder: stopped")));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_failure_never_waits_when_no_overseer_turn_starts() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        // The repository is not a directory: the wake does not start.
+        task.repo = dir.path().join("missing").to_string_lossy().to_string();
+        task.worktree = worktree.to_string_lossy().to_string();
+        task.attempts
+            .push(super::super::test_support::attempt_with_failure(
+                1, "verify",
+            ));
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        let mut budget = 1;
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let (app2, pending2, cancel2) = (app.clone(), pending.clone(), cancel.clone());
+        let waiter = tokio::spawn(async move {
+            fail_and_continue(
+                &app2,
+                &id,
+                &mut task,
+                0,
+                FailureKind::Verify,
+                "npm test failed".into(),
+                &mut budget,
+                &pending2,
+                &cancel2,
+                &mut None,
+            )
+            .await;
+            task
+        });
+        let task = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the failure waited for an overseer that never started")
+            .unwrap();
+        assert_ne!(task.status, TaskStatus::Waiting);
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    fn held_exhausted(app: &App, approach_changed: bool) -> Task {
+        let mut task = exhausted_task();
+        task.attempts = vec![super::super::test_support::attempt_with_failure(
+            1, "verify",
+        )];
+        if approach_changed {
+            task.loop_state.approach_changed_after = Some(1);
+        }
+        if let Some(q) = task.question.as_mut() {
+            q.held_for_overseer = true;
+            q.held_at = Some(1_000);
+        }
+        app.store.save_task(&task).unwrap();
+        task
+    }
+
+    #[tokio::test]
+    async fn a_hold_that_expires_on_an_exhausted_question_takes_the_next_ladder_rung() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, true);
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Failed);
+        assert!(saved.question.is_none());
+
+        // Before the changed approach, the rung is the change, not the end.
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, false);
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Queued);
+        assert!(saved.question.is_none());
+        assert!(ladder::approach_changed(&saved));
+    }
+
+    #[tokio::test]
+    async fn a_hold_that_expires_while_an_overseer_wake_is_queued_keeps_the_question() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, true);
+        app.deferred_wakes.lock().unwrap().insert(
+            task.repo.clone(),
+            vec![chat::test_deferred_wake("waiting", &task.id)],
+        );
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        let q = saved.question.expect("the question stays open");
+        assert!(!q.held_for_overseer);
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_a_held_exhausted_question_for_the_restart_wake() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, false);
+        app.release_stale_holds();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        assert!(!saved.question.unwrap().held_for_overseer);
+        // With nobody to ask again, the start takes the changed approach.
+        app.retire_ladder_questions();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Queued);
+        assert!(ladder::approach_changed(&saved));
+    }
+
+    #[test]
+    fn the_answer_policy_stays_under_the_hard_limits_like_the_overseer() {
+        let settings = Settings::default();
+        let task = task_with_status(TaskStatus::Waiting);
+        let mut question = Question::new(
+            "How should the old data go?",
+            vec!["delete the old data".into(), "keep the old data".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        question.risk = vec![Risk::Destructive];
+        for caller in [AnsweredBy::Policy, AnsweredBy::Overseer] {
+            assert!(
+                non_owner_refusal(&settings, &task, &question, "keep the old data", caller)
+                    .is_some(),
+                "{caller:?}"
+            );
+        }
+        assert!(non_owner_refusal(
+            &settings,
+            &task,
+            &question,
+            "keep the old data",
+            AnsweredBy::Lead
+        )
+        .is_none());
+    }
+
     #[tokio::test]
     async fn an_agent_stop_is_an_orchestrator_line_and_pr_refuses_a_branch() {
         let (app, _dir) = test_app();
@@ -1266,6 +1347,7 @@ mod answer_caller_tests {
                 &loop_id,
                 "Which plan?",
                 vec!["B".into()],
+                (Vec::new(), None),
                 &pending,
                 &cancel,
                 &mut None,
@@ -1284,48 +1366,6 @@ mod answer_caller_tests {
         assert_eq!(app.take_agent_answer(&id), Some(AnsweredBy::Lead));
         app.shutdown();
     }
-
-    #[test]
-    fn lead_answers_trigger_the_triage_guard_but_stop_and_owner_lines_do_not() {
-        assert!(is_orchestrator_answer_decision(
-            "Lead: q -> a (answered by a lead session)"
-        ));
-        assert!(!is_orchestrator_answer_decision("Lead: stop"));
-        assert!(!is_orchestrator_answer_decision("Owner: q -> a"));
-        assert!(!is_orchestrator_answer_decision(&no_planner_tier_line("r")));
-    }
-}
-
-#[cfg(test)]
-mod timeout_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn triage_timed_out_escalates_to_the_owner() {
-        let (app, _dir, mut task, _) = slow_helper_task();
-        let id = task.id.clone();
-        let worktree = PathBuf::from(&task.worktree);
-        let options = vec!["retry".into(), "stop".into()];
-        let result = run_triage(
-            &app,
-            &id,
-            1,
-            &mut task,
-            &worktree,
-            "What now?",
-            &options,
-            false,
-            &CancelToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            result.decision.action,
-            brief::TriageAction::Escalate
-        ));
-        assert_eq!(result.decision.question, "What now?");
-        assert_helper_timeout(&task, "triage");
-    }
 }
 
 #[cfg(test)]
@@ -1333,13 +1373,9 @@ mod done_prompt_tests {
     use super::*;
 
     #[test]
-    fn the_overseer_is_not_told_to_open_a_pull_request_orchd_opens_itself() {
-        let mut task = super::super::test_support::task_with_status(TaskStatus::Done);
-        assert_eq!(done_prompt_key(&task), "overseer_done");
-        assert!(overseer_prompt("overseer_done", &task).contains("task_pr"));
-        task.pr_pending = true;
-        let prompt = overseer_prompt(done_prompt_key(&task), &task);
-        assert!(prompt.contains("do not call task_pr"), "{prompt}");
-        assert!(!prompt.contains("open one with task_pr"), "{prompt}");
+    fn the_overseer_reports_a_done_task_and_never_opens_its_pull_request() {
+        let task = super::super::test_support::task_with_status(TaskStatus::Done);
+        let prompt = overseer_prompt("overseer_done", &task);
+        assert!(!prompt.contains("task_pr"), "{prompt}");
     }
 }

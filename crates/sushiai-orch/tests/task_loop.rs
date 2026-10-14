@@ -760,12 +760,13 @@ fn a_repeated_review_finding_starts_a_fresh_implement_session() {
         r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   n=$(cat "$LOG_DIR/implements")
   if [ "$n" = 1 ]; then
     json='{"verdict":"FAIL","findings":["[P1] marker.txt:1 is wrong"]}'
   elif [ "$n" = 2 ]; then
-    json='{"verdict":"FAIL","findings":[{"finding":"[P1] marker.txt:1 is wrong","repeat":true}]}'
+    json='{"verdict":"FAIL","findings":[{"finding":"[P1] marker.txt:1 is wrong","id":"F-1"}]}'
   else json='{"verdict":"PASS","findings":[]}'; fi
   escaped=$(printf '%s' "$json" | sed 's/"/\\"/g')
   printf '%s\n' "{\"type\":\"result\",\"result\":\"\`\`\`sushi-review\n$escaped\n\`\`\`\"}" ;;

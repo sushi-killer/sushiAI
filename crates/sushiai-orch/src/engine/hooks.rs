@@ -21,10 +21,9 @@ impl App {
         // What the owner let the agent stage at a protected path is in place
         // before the diff is read and verified.
         permissions::apply_staged(&ctx);
-        let wt = worktree.clone();
-        let base = base_sha.clone();
+        let (wt, own) = (worktree.clone(), ctx.own.clone());
         let changed =
-            tokio::task::spawn_blocking(move || git::changed_files(&wt, &base).unwrap_or_default())
+            tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())
                 .await
                 .unwrap_or_default();
         let has_changed = !changed.is_empty();

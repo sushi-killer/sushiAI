@@ -125,6 +125,7 @@ $HANG_ON)
   fi ;;
 esac
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo review >> "$LOG_DIR/runs.log"
   printf '%s\n' '{{"type":"result","total_cost_usd":0.05,"result":"```sushi-review\n{{\"verdict\":\"PASS\",\"findings\":[]}}\n```"}}' ;;
@@ -384,6 +385,7 @@ fn a_task_over_its_dollar_budget_waits_before_the_next_attempt_and_raise_continu
 const UNPARSEABLE_FIRST_PLAN_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     if [ -f "$MSG_DIR/plan-runs" ]; then
@@ -490,6 +492,7 @@ fn a_plan_run_that_reaches_the_budget_waits_before_its_retry() {
 const FAKE_PRICED_REVIEWER_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.05,"result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *)
@@ -593,6 +596,7 @@ fn an_attempt_streaming_past_its_cap_is_stopped_as_budget_and_retried() {
 const DAILY_FAKE: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo review >> "$LOG_DIR/runs.log"
   if [ -f "$LOG_DIR/reviewed" ]; then

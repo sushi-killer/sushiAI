@@ -17,6 +17,7 @@ fn review_by_claude(daemon: &Daemon) {
 const FAKE_OVERLAP_REVIEW: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.04,"result":"Review in progress"}'
   echo "$ORCHD_TASK" > "$LOG_DIR/review-start"
@@ -108,6 +109,7 @@ fn a_preflight_ruling_drops_a_failing_final_before_review_starts() {
         r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+*"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
 *sushi-plan*)
   cat "$LOG_DIR/plan.jsonl" ;;
 *"You check a coding task brief"*)
@@ -115,6 +117,7 @@ case "$brief" in
 *"You judge whether a check command"*)
   while [ ! -f "$LOG_DIR/implemented" ]; do sleep 0.02; done
   printf '%s\n' '{"type":"result","result":"{\"verdict\":\"unrelated\",\"reason\":\"broken on the base\"}"}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo reviewed >> "$LOG_DIR/review-runs"
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
@@ -253,7 +256,7 @@ fn a_review_without_a_verdict_is_committed_marked_unreviewed_and_nobody_is_asked
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n'## Route the review'*) exit 0 ;;\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     let final_runs = scripts_dir.path().join("final-runs");
@@ -417,10 +420,11 @@ fn the_advisor_runs_once_before_a_retry_and_its_advice_reaches_the_next_brief() 
 const FAKE_CONTRACT_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   case "$brief" in
   *"Rule on every acceptance criterion"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Marker exists\",\"met\":false,\"evidence\":\"wrong file\"}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"wrong file\"}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
   esac
@@ -462,7 +466,8 @@ fn the_reviewer_s_unmet_criterion_fails_the_attempt() {
     let attempt = &settled["attempts"][0];
     assert_eq!(attempt["failure"]["kind"], "review", "{settled}");
     assert_eq!(
-        attempt["review"]["findings"][0], "Unmet criterion: Marker exists (wrong file)",
+        attempt["review"]["findings"][0],
+        "Unmet criterion: Marker exists -- check: CHANGED_MARKER.txt (wrong file)",
         "{settled}"
     );
 
@@ -705,6 +710,7 @@ fn a_failed_final_check_shows_the_failing_test_not_the_bundler_noise() {
 const FAKE_SCREENSHOT_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
 *)
@@ -794,6 +800,7 @@ const FAKE_RETRY_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 d=$(dirname "$0")
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   echo x >> "$d/review.count"
   if [ "$(wc -l < "$d/review.count" | tr -d ' ')" = 1 ]; then
@@ -915,23 +922,33 @@ fn a_retry_that_changed_the_same_ui_file_still_needs_new_evidence() {
 }
 
 #[test]
-fn a_retry_that_changed_other_source_carries_the_earlier_images_once() {
+fn a_retry_that_changed_other_source_does_not_reuse_the_earlier_images() {
     let (daemon, settled, _task_id) = run_retry_task("src/other.txt");
-    assert_eq!(settled["status"], "done", "{settled}");
+    // Any non-test change since the earlier screenshots reruns the screenshot
+    // command; the fake saves no new image, so the attempt fails on evidence.
+    assert_eq!(settled["status"], "failed", "{settled}");
     let implement: Vec<_> = settled["attempts"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|a| a["stage"] == "implement")
         .collect();
-    assert_eq!(implement.len(), 2, "{settled}");
-    let paths: Vec<&str> = implement[1]["evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|e| e.as_str())
-        .collect();
-    assert_eq!(paths.len(), 1, "{settled}");
+    assert!(implement.len() >= 2, "{settled}");
+    assert!(implement[1].get("evidenceFrom").is_none(), "{settled}");
+    assert!(
+        implement[1]["evidence"]
+            .as_array()
+            .is_none_or(|e| e.is_empty()),
+        "{settled}"
+    );
+    assert_eq!(implement[1]["failure"]["kind"], "evidence", "{settled}");
+    let detail = implement[1]["failure"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "Attempt 1's images were not reused because these files changed since: src/other.txt"
+        ),
+        "{detail}"
+    );
     daemon.shutdown_and_wait();
 }
 
@@ -992,11 +1009,12 @@ case "$brief" in
 *"An implement attempt at this task failed"*)
   echo advisor >> "$LOG_DIR/advisor.log"
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   printf '%s' "$brief" > "$LOG_DIR/review.$$"
   case "$brief" in
   *"## Previous review"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"id\":\"F-1\"}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
   esac
@@ -1043,7 +1061,7 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_h
         .collect();
     // Attempt 1: a first finding. Attempt 2: the same finding, marked as a
     // repeat -> advisor and a tier up. Attempt 3: repeated a second time ->
-    // handled (the judge), not the owner; the budget of 6 and one changed approach (two more) end the task.
+    // handled, not the owner; the budget of 6 and one changed approach (two more) end the task.
     assert_eq!(implements.len(), 8, "{settled}");
     assert!(
         implements[0]["review"].get("repeated").is_none(),
@@ -1097,21 +1115,20 @@ fn a_repeated_review_finding_calls_the_advisor_and_tiers_up_then_the_second_is_h
     remove_dir_retrying(worktree);
 }
 
-/// Implements (appending), answers the advisor, and reviews: FAIL with a
-/// plain finding first, FAIL with it marked `repeat` once the review brief
-/// carries the previous review, PASS once it names a dropped finding. An
-/// implement brief that shows a review failure gets a report disputing it.
-const FAKE_DISPUTE_SCRIPT: &str = r###"#!/bin/sh
+/// Implements (appending), and reviews: a first FAIL with a plain finding; a
+/// review that has declined findings to rule on answers `UPHELD` for the
+/// declined F-1. An implement brief that shows a review failure gets a report
+/// declining F-1 with evidence.
+const FAKE_DECLINE_SCRIPT: &str = r###"#!/bin/sh
 brief=$(cat)
 case "$brief" in
 *"An implement attempt at this task failed"*)
   printf '%s\n' '{"type":"result","total_cost_usd":0.03,"usage":{"input_tokens":1,"output_tokens":1},"result":"Fix the null check."}' ;;
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   case "$brief" in
-  *"## Findings dropped by a tie-break judge"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
-  *"## Previous review"*)
-    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: a.rs:1 - null check missing\",\"repeat\":true}]}\n```"}' ;;
+  *"## Declined findings"*)
+    json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"declineRulings\":[{\"id\":\"F-1\",\"upheld\":UPHELD}]}\n```"}' ;;
   *)
     json='{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"P1: a.rs:1 - null check missing\"]}\n```"}' ;;
   esac
@@ -1121,7 +1138,7 @@ case "$brief" in
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   case "$brief" in
   *"The last attempt failed review"*)
-    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"disputes\":[{\"finding\":\"a.rs:1 - null check missing\",\"rebuttal\":\"the check is at a.rs:1\",\"evidence\":[\"a.rs:1\"]}]}\n```' ;;
+    report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\",\"declines\":[{\"id\":\"F-1\",\"reason\":\"wrong\",\"evidence\":[\"a.rs:1\"]}]}\n```' ;;
   *)
     report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```' ;;
   esac
@@ -1129,48 +1146,32 @@ case "$brief" in
 esac
 "###;
 
-fn judge_script(finding_valid: bool) -> String {
-    format!(
-        "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo codex-cli 0.1; exit 0; }}\ncat > /dev/null\necho judge >> \"$LOG_DIR/judge.log\"\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"```sushi-judge\\n{{\\\"finding_valid\\\": {finding_valid}, \\\"why\\\": \\\"the ruling\\\"}}\\n```\"}}}}'\n"
-    )
+/// The decline script with the review's ruling on F-1 filled in.
+fn decline_script(upheld: bool) -> String {
+    FAKE_DECLINE_SCRIPT.replace("UPHELD", if upheld { "true" } else { "false" })
 }
 
-/// Runs the dispute flow with a judge answering `finding_valid`; returns the
-/// settled task and the number of judge runs.
-fn run_dispute_task(finding_valid: bool) -> (serde_json::Value, usize) {
+/// Runs the decline flow with the review ruling `upheld` on the declined
+/// finding; returns the settled task.
+fn run_decline_task(upheld: bool) -> serde_json::Value {
     let scripts_dir = tempfile::tempdir().unwrap();
-    let claude = fake_harness_script(scripts_dir.path(), "fake-dispute.sh", FAKE_DISPUTE_SCRIPT);
-    let codex = fake_harness_script(
+    let claude = fake_harness_script(
         scripts_dir.path(),
-        "fake-judge.sh",
-        &judge_script(finding_valid),
+        "fake-decline.sh",
+        &decline_script(upheld),
     );
-    let daemon = Daemon::spawn(&[
-        ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
-        ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
-        ("LOG_DIR", scripts_dir.path().to_str().unwrap()),
-    ]);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", claude.to_str().unwrap())]);
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["maxAttempts"] = serde_json::json!(6);
     settings["answerPolicy"] = serde_json::json!(false);
     settings["review"] = serde_json::json!("claude-opus");
-    // Sonnet stays the implementer but is too weak to judge, so the judge is
-    // Codex; a route with no model has no known strength until one is set.
-    for route in settings["routes"].as_array_mut().unwrap() {
-        if route["id"] == "claude-sonnet" {
-            route["strength"] = serde_json::json!(1);
-        }
-        if route["id"] == "codex" {
-            route["strength"] = serde_json::json!(3);
-        }
-    }
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
-            "title": "Dispute",
+            "title": "Decline",
             "goal": "Write the marker",
             "verify": ["true"],
             "start": true,
@@ -1178,13 +1179,10 @@ fn run_dispute_task(finding_valid: bool) -> (serde_json::Value, usize) {
     );
     let task_id = task["id"].as_str().unwrap().to_string();
     let settled = poll_task_status(&daemon, &task_id);
-    let runs = std::fs::read_to_string(scripts_dir.path().join("judge.log"))
-        .map(|t| t.lines().count())
-        .unwrap_or(0);
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);
-    (settled, runs)
+    settled
 }
 
 fn decision_lines(task: &serde_json::Value) -> Vec<String> {
@@ -1197,61 +1195,103 @@ fn decision_lines(task: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-fn a_disputed_repeated_finding_judged_invalid_is_dropped_and_the_task_commits() {
-    let (settled, runs) = run_dispute_task(false);
+fn a_declined_finding_the_review_upholds_is_resolved_and_the_task_commits() {
+    let settled = run_decline_task(true);
     assert_eq!(settled["status"], "done", "{settled}");
-    assert_eq!(runs, 1, "{settled}");
     let assumption = settled["assumptions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["by"] == "review-judge")
-        .unwrap_or_else(|| panic!("no review-judge assumption: {settled}"));
+        .find(|a| a["by"] == "review")
+        .unwrap_or_else(|| panic!("no review assumption: {settled}"));
     assert_eq!(assumption["answer"], "finding dropped", "{settled}");
     assert_eq!(assumption["kind"], "review_dispute", "{settled}");
     assert_eq!(assumption["attempt"], 2, "{settled}");
-    assert_eq!(assumption["evidence"], "the ruling", "{settled}");
+    assert_eq!(assumption["evidence"], "a.rs:1", "{settled}");
     assert!(
-        decision_lines(&settled).iter().any(|d| d
-            .starts_with("Orchestrator: disputed review finding dropped by the judge (")
-            && d.contains("null check missing")),
+        decision_lines(&settled).iter().any(|d| d.starts_with(
+            "Orchestrator: review finding F-1 declined by the implementer and upheld by the review; resolved:"
+        ) && d.contains("null check missing")),
         "{settled}"
     );
 }
 
 #[test]
-fn a_disputed_finding_judged_valid_goes_on_to_the_existing_escalation() {
-    let (settled, runs) = run_dispute_task(true);
+fn a_declined_finding_the_review_does_not_uphold_stays_blocking() {
+    let settled = run_decline_task(false);
     assert_eq!(settled["status"], "failed", "{settled}");
-    assert_eq!(runs, 1, "the finding is judged once: {settled}");
-    let implements: Vec<&serde_json::Value> = settled["attempts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["stage"] == "implement")
-        .collect();
-    // The second repeat (attempt 3) is handled, not escalated: the judge
-    // already ruled, so the attempts run until the budget of 6 and one changed approach are spent.
-    assert_eq!(implements.len(), 8, "{settled}");
-    assert_eq!(implements[1]["failure"]["kind"], "review", "{settled}");
-    assert_eq!(implements[2]["routeId"], "claude-opus", "{settled}");
-    let decisions = decision_lines(&settled);
+    let lines = decision_lines(&settled);
     assert!(
-        decisions
-            .iter()
-            .any(|d| d.contains("a review finding repeated -> advisor, tier hard")),
+        lines.iter().any(|d| d.starts_with(
+            "Orchestrator: review finding F-1 declined by the implementer but not upheld; it stays open:"
+        )),
         "{settled}"
     );
     assert!(
-        decisions
-            .iter()
-            .any(|d| d.starts_with("Orchestrator: disputed review finding kept by the judge (")),
+        !lines.iter().any(|d| d.contains("upheld by the review")),
         "{settled}"
     );
     assert!(settled["assumptions"]
         .as_array()
-        .map(|a| a.iter().all(|x| x["by"] != "review-judge"))
+        .map(|a| a.iter().all(|x| x["by"] != "review"))
         .unwrap_or(true));
+}
+
+/// The route turn answers with the areas a change can break; the full review
+/// is briefed with those areas and no others.
+const FAKE_ROUTE_SCRIPT: &str = r###"#!/bin/sh
+brief=$(cat)
+case "$brief" in
+"## Route the review"*)
+  printf '%s\n' '{"type":"result","result":"```sushi-route\n{\"lenses\":{\"seams\":false,\"code\":true,\"tests\":false,\"errors\":false,\"docs\":false},\"reason\":\"one function\"}\n```"}' ;;
+"## Review"*)
+  printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"}' ;;
+*)
+  echo changed >> CHANGED_MARKER.txt
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
+  printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}' ;;
+esac
+"###;
+
+#[test]
+fn the_route_turn_chooses_the_areas_the_full_review_is_briefed_with() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts_dir.path(), "fake-route.sh", FAKE_ROUTE_SCRIPT);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    review_by_claude(&daemon);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Route",
+            "goal": "Change one function",
+            "criteria": [],
+            "verify": ["true"],
+            "start": true,
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let settled = poll_task_status(&daemon, &task_id);
+    assert_eq!(settled["status"], "done", "{settled}");
+    let brief = std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(&task_id)
+            .join("helpers/review-1/brief.md"),
+    )
+    .unwrap();
+    assert!(brief.contains("## Review areas"), "{brief}");
+    assert!(brief.contains("Code: read the changed logic"), "{brief}");
+    assert!(!brief.contains("Docs: check the documentation"), "{brief}");
+    assert!(
+        decision_lines(&settled)
+            .iter()
+            .any(|d| d == "Orchestrator: attempt 1 review areas: code (one function)"),
+        "{settled}"
+    );
+    daemon.shutdown_and_wait();
 }
 
 #[test]
@@ -1260,7 +1300,7 @@ fn an_unreviewed_subtask_lands_on_its_parent_and_the_parent_completes_unreviewed
     let script = fake_harness_script(
         scripts_dir.path(),
         "fake-claude.sh",
-        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
+        "#!/bin/sh\nbrief=$(cat)\ncase \"$brief\" in\n'## Route the review'*) exit 0 ;;\n\"## Review\"*) echo '{\"type\":\"result\",\"result\":\"Looks fine to me.\"}' ;;\n*) echo changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}' ;;\nesac\n",
     );
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     review_by_claude(&daemon);

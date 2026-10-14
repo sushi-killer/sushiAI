@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const DEFAULTS: &str = include_str!("../prompts/orchestrator.yaml");
+const ATTRIBUTION: &str = include_str!("../prompts/attribution.yaml");
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -42,6 +43,11 @@ pub fn default(key: &str) -> String {
     parse(DEFAULTS)
         .expect("prompts/orchestrator.yaml parses")
         .remove(key)
+        .or_else(|| {
+            parse(ATTRIBUTION)
+                .expect("prompts/attribution.yaml parses")
+                .remove(key)
+        })
         .unwrap_or_else(|| panic!("prompts/orchestrator.yaml has no {key}"))
 }
 
@@ -108,6 +114,13 @@ mod tests {
             assert!(all[key].len() > 100, "{key}");
             assert!(!all[key].ends_with('\n'), "{key}");
         }
+    }
+
+    #[test]
+    fn the_attribution_prompt_is_generic_and_ships() {
+        let prompt = default("attribution");
+        assert!(prompt.contains("sushi-attribution"));
+        assert!(!prompt.ends_with('\n'));
     }
 
     #[test]

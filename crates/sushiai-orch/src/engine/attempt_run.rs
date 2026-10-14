@@ -474,7 +474,40 @@ pub(super) async fn run_harness(
     brief_text: &str,
     events_path: &Path,
     cancel: &CancelToken,
+    guard: Guard,
+) -> Result<harness::RunOutcome, RunError> {
+    run_harness_schema(
+        app,
+        task_id,
+        attempt_n,
+        track,
+        worktree,
+        req,
+        tag,
+        brief_text,
+        events_path,
+        cancel,
+        guard,
+        None,
+    )
+    .await
+}
+
+/// [`run_harness`] for a turn whose reply must match `schema`.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_harness_schema(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    track: RunTrack,
+    worktree: &Path,
+    req: &harness::RunRequest<'_>,
+    tag: CostTag,
+    brief_text: &str,
+    events_path: &Path,
+    cancel: &CancelToken,
     mut guard: Guard,
+    schema: Option<&harness::OutputSchema<'_>>,
 ) -> Result<harness::RunOutcome, RunError> {
     wait_for_app_secrets(app, task_id, cancel).await;
     let RunSecrets {
@@ -489,7 +522,7 @@ pub(super) async fn run_harness(
     })?;
     let track_attempt = track != RunTrack::No;
     let started_at = now_ms();
-    let mut argv = harness::build_argv(req);
+    let mut argv = harness::build_argv_with_schema(req, schema);
     let mut bin = resolve_binary(req.harness);
     #[cfg(unix)]
     if req.harness == Harness::Claude {

@@ -26,6 +26,7 @@ emit() {
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
+if head -c 19 "$B" | grep -q 'Route the review'; then exit 0; fi
 if head -c 9 "$B" | grep -q '## Review'; then
   r=$(ls "$LOG_DIR"/review.* 2>/dev/null | wc -l | tr -d ' ')
   touch "$LOG_DIR/review.$r"
@@ -357,7 +358,7 @@ fn a_check_that_fails_on_the_base_as_it_should_stays_as_written() {
 #[test]
 fn the_same_unmet_criterion_twice_goes_to_the_judge_and_an_infeasible_one_is_amended() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Clicking opens the panel\",\"met\":false,\"evidence\":\"there is no DOM click test\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"there is no DOM click test\"}]}",
     );
     let pass = review_reply("{\"verdict\":\"PASS\",\"findings\":[]}");
     let ruling = js(
@@ -403,7 +404,7 @@ fn the_same_unmet_criterion_twice_goes_to_the_judge_and_an_infeasible_one_is_ame
 #[test]
 fn a_code_gap_ruling_leaves_the_criterion_and_the_retries_go_on() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Clicking opens the panel\",\"met\":false,\"evidence\":\"the handler is missing\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"the handler is missing\"}]}",
     );
     let ruling = js("{\"verdict\":\"code gap\",\"reason\":\"the handler is not written\"}");
     let s = setup(
@@ -490,7 +491,7 @@ fn earlier_images(impl_rest: &str, review: &str) -> (Setup, String) {
         &s,
         json!({
             "criteria": ["The panel is open -- check: screenshot under artifacts/"],
-            "verify": ["test -f SECOND"],
+            "verify": ["test -f tests/SECOND"],
             "screenshot": "true",
         }),
     );
@@ -543,8 +544,8 @@ fn a_visual_criterion_without_any_screenshot_command_does_not_fail_the_attempt()
 }
 
 #[test]
-fn images_of_an_earlier_attempt_count_when_no_ui_file_it_changed_has_changed() {
-    let (s, id) = earlier_images("echo x > SECOND", "claude-sonnet");
+fn images_of_an_earlier_attempt_count_when_no_non_test_file_it_changed_has_changed() {
+    let (s, id) = earlier_images("mkdir -p tests && echo x > tests/SECOND", "claude-sonnet");
     let task = finished(&s, &id);
     assert_eq!(task["status"], "done", "{task}");
     let attempts = implements(&task);
@@ -564,8 +565,11 @@ fn images_of_an_earlier_attempt_count_when_no_ui_file_it_changed_has_changed() {
 }
 
 #[test]
-fn images_of_an_earlier_attempt_do_not_count_once_a_ui_file_it_changed_changed_again() {
-    let (s, id) = earlier_images("echo x > SECOND; echo b > ui.css", "");
+fn images_of_an_earlier_attempt_do_not_count_once_a_non_test_file_it_changed_changed_again() {
+    let (s, id) = earlier_images(
+        "mkdir -p tests && echo x > tests/SECOND; echo b > ui.css",
+        "",
+    );
     let task = finished(&s, &id);
     assert_eq!(task["status"], "failed", "{task}");
     let attempts = implements(&task);
@@ -581,7 +585,7 @@ fn after_the_first_attempt_p2_and_unrelated_findings_do_not_cost_an_attempt_and_
         "{\"verdict\":\"FAIL\",\"findings\":[\"P1: CHANGED_MARKER.txt:1 - wrong content\"]}",
     );
     let second = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",\"P1: legacy/other.rs:9 - an old bug\"]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",{\"finding\":\"P1: legacy/other.rs:9 - an old bug\",\"causedByDiff\":false,\"scenario\":{\"run\":\"echo 'test legacy::old_bug ... FAILED'; exit 1\",\"fails\":\"exit 1\"}}]}",
     );
     let s = setup(
         &[("REVIEW_0", &first), ("REVIEW_REST", &second)],
@@ -598,6 +602,21 @@ fn after_the_first_attempt_p2_and_unrelated_findings_do_not_cost_an_attempt_and_
     let follow_ups = report.split("## Follow-ups").nth(1).unwrap();
     assert!(follow_ups.contains("naming"), "{report}");
     assert!(follow_ups.contains("legacy/other.rs:9"), "{report}");
+    cleanup(s, &task);
+}
+
+#[test]
+fn a_p1_marked_not_caused_by_the_diff_still_blocks_when_its_scenario_passes_on_the_base() {
+    let blocking = review_reply(
+        "{\"verdict\":\"FAIL\",\"findings\":[{\"finding\":\"P1: legacy/other.rs:9 - an old bug\",\"causedByDiff\":false,\"scenario\":{\"run\":\"true\",\"fails\":\"none\"}},{\"finding\":\"P1: legacy/two.rs:1 - no scenario\",\"causedByDiff\":false}]}",
+    );
+    let s = setup(&[("REVIEW_REST", &blocking)], "claude-sonnet");
+    let id = create(&s, json!({}));
+    let task = poll_until(&s.daemon, &id, |st| {
+        matches!(st, "done" | "failed" | "stopped" | "waiting")
+    });
+    assert_ne!(task["status"], "done", "{task}");
+    assert!(implements(&task).len() >= 3, "{task}");
     cleanup(s, &task);
 }
 
@@ -626,7 +645,7 @@ fn after_the_first_attempt_a_p1_about_the_tasks_own_work_still_blocks() {
 #[test]
 fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review() {
     let unmet = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"The button is blue\",\"met\":false,\"evidence\":\"it is not blue\"}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"it is not blue\"}]}",
     );
     let pass = review_reply("{\"verdict\":\"PASS\",\"findings\":[]}");
     let answer_judge = js(
@@ -671,7 +690,7 @@ fn an_owner_answer_that_contradicts_a_criterion_amends_it_before_the_next_review
         .unwrap()
         .flatten()
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .any(|b| b.starts_with("## Review") && b.contains("- The button is green"));
+        .any(|b| b.starts_with("## Review") && b.contains("0. The button is green"));
     assert!(saw_green);
     cleanup(s, &task);
 }

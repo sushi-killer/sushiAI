@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Every stage a record can name. `brief_check` and `eval_check` are for
 /// runs that use a model; today those checks run shell commands only.
-pub const STAGES: [&str; 17] = [
+pub const STAGES: [&str; 18] = [
     "plan",
     "implement",
     "review",
@@ -28,6 +28,7 @@ pub const STAGES: [&str; 17] = [
     "pr_draft",
     "audit",
     "evolution",
+    "attribution",
     "chat",
     "other",
 ];

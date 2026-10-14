@@ -102,18 +102,13 @@ fn last_review(task: &Task) -> Option<&crate::model::ReviewResult> {
 /// Statuses of criterion `i`, in the words the report uses.
 fn criterion_status(task: &Task, i: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let text = &task.criteria[i];
     let review = last_review(task);
-    let mentions = |prefix: &str| {
-        review.is_some_and(|r| {
-            r.findings
-                .iter()
-                .any(|f| f.starts_with(prefix) && f.contains(text.as_str()))
-        })
-    };
+    let ruling = review.and_then(|r| r.criteria.iter().find(|c| c.index == Some(i)));
     match review {
-        Some(_) if mentions("Unmet criterion") => out.push("unmet (review)".to_string()),
-        Some(_) if mentions("Not checked by review") => out.push("unchecked".to_string()),
+        Some(_) if ruling.is_some_and(|c| c.met == Some(false)) => {
+            out.push("unmet (review)".to_string())
+        }
+        Some(_) if ruling.is_some_and(|c| c.met.is_none()) => out.push("unchecked".to_string()),
         Some(r) if r.verdict == Verdict::Pass => out.push("met by review".to_string()),
         Some(_) => out.push("not met at the last review".to_string()),
         None => out.push("unchecked".to_string()),
@@ -437,6 +432,29 @@ mod tests {
         assert!(is_image("artifacts/a.PNG"));
         assert!(!is_image("src/a.rs"));
         assert!(!is_image("png"));
+    }
+
+    #[test]
+    fn a_criterion_status_follows_its_ruling_by_index() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
+        task.criteria = vec!["Beta".into(), "Beta works".into()];
+        let mut attempt = crate::engine::test_support::attempt_with_failure(1, "x");
+        attempt.review = Some(crate::model::ReviewResult {
+            verdict: Verdict::Fail,
+            findings: Vec::new(),
+            repeated: Vec::new(),
+            severities: Vec::new(),
+            details: Vec::new(),
+            criteria: vec![crate::model::CriterionRuling {
+                criterion: "Beta works".into(),
+                index: Some(1),
+                met: Some(false),
+                evidence: None,
+            }],
+        });
+        task.attempts = vec![attempt];
+        assert_eq!(criterion_status(&task, 1)[0], "unmet (review)");
+        assert_eq!(criterion_status(&task, 0)[0], "not met at the last review");
     }
 
     #[test]

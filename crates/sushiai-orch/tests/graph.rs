@@ -34,6 +34,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;
@@ -1003,6 +1004,7 @@ out() {{
   printf '%s\n' "{{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"result\":$1}}"
 }}
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{{"type":"result","result":"{{\"findings\": []}}"}}' ;;
   *sushi-plan*)
     out '"```sushi-plan\n{{\"title\":\"Child\",\"goal\":\"MAKE_CHILD: create child.txt\",\"verify\":[\"test -f child.txt\"]}}\n```"' ;;
   *MAKE_CHILD*)
@@ -1227,6 +1229,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_ONE*) out '"```sushi-plan\n{\"title\":\"Part One\",\"goal\":\"PART_ONE: create one.txt\",\"verify\":[\"test -f one.txt\"]}\n```"' ;;
@@ -2024,6 +2027,7 @@ report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decis
 case "$input" in
   *"You check a coding task brief"*) out '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
   *"A coding task was drafted before"*) echo refresh >> "$CALLS_LOG"; out '"{\"paths\": [\"src/shared.txt\", \"src/extra.txt\"]}"' ;;
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*) out '"```sushi-plan\n{\"title\":\"All parts\",\"goal\":\"Create the files\",\"verify\":[\"true\"],\"subtasks\":[{\"key\":\"a\",\"title\":\"Part A\",\"goal\":\"MAKE_A: create a.txt and src/shared.txt\",\"criteria\":[\"a.txt exists\"],\"verify\":[\"test -f a.txt\"],\"paths\":[\"a.txt\"],\"check\":\"test -f a.txt\",\"request\":\"REQ_A\"},{\"key\":\"b\",\"title\":\"Part B\",\"goal\":\"MAKE_B: create b.txt\",\"criteria\":[\"b.txt exists\"],\"verify\":[\"test -f b.txt\"],\"paths\":[\"src/shared.txt\"],\"check\":\"test -f b.txt\",\"dependsOn\":[\"a\"],\"request\":\"REQ_B\"},{\"key\":\"c\",\"title\":\"Part C\",\"goal\":\"MAKE_C: create c.txt\",\"criteria\":[\"c.txt exists\"],\"verify\":[\"test -f c.txt\"],\"paths\":[\"c.txt\"],\"check\":\"test -f c.txt\",\"dependsOn\":[\"a\"],\"request\":\"REQ_C\"}]}\n```"' ;;
   *MAKE_A*) mkdir -p src; echo a > a.txt; echo s > src/shared.txt; out "$report" ;;
   *MAKE_B*) echo b > b.txt; out "$report" ;;

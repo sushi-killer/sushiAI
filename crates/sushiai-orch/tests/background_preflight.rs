@@ -18,10 +18,13 @@ emit() {
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
 *"You check a coding task brief"*)
   emit '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+*"sushi-attribution"*)
+  emit '"```sushi-attribution\n{\"cause\":\"environment\",\"evidence\":\"the base fails the same way\"}\n```"' ;;
 *"You judge"*)
   emit '"{\"verdict\": \"feasible\", \"reason\": \"ok\"}"' ;;
 *)
@@ -217,6 +220,7 @@ emit() {
   printf '%s\n' "{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":$1}"
 }
 case "$brief" in
+'## Route the review'*) exit 0 ;;
 "## Review"*)
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
 *"You check a coding task brief"*)

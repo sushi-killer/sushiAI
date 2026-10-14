@@ -46,7 +46,14 @@ const NO_FINDINGS: &str = r#"{\"findings\": []}"#;
 
 const CLEAN_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
-const REPORT_ONLY_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"The implementer's handoff lists the changed files\",\"Toggle visible in settings -- check: sh -c true\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+const HANDOFF_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files -- check: pytest tests/test_handoff.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+
+/// The report-only criterion has no check of its own, so a non-owner may drop it.
+const HANDOFF_NO_CHECK_DRAFT: &str = r#"{\"title\":\"Add dark mode\",\"goal\":\"Add a dark theme toggle\",\"tier\":\"hard\",\"criteria\":[\"Toggle visible in settings -- check: sh -c true\",\"The implementer's handoff lists the changed files\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+
+const REPORT_LISTS_DRAFT: &str = r#"{\"title\":\"Report failures\",\"goal\":\"List the failing tests\",\"tier\":\"hard\",\"criteria\":[\"The report lists every failing test by name -- check: pytest tests/test_report.py::test_lists\"],\"verify\":[\"true\"],\"questions\":[]}"#;
+
+const JVM_DOTNET_RUBY_DRAFT: &str = r#"{\"title\":\"Build the parts\",\"goal\":\"Build the parts\",\"tier\":\"hard\",\"criteria\":[\"Build passes -- check: mvn test\",\"Serialises -- check: dotnet test\",\"Renders -- check: bundle exec rspec spec/render_spec.rb\"],\"verify\":[\"true\"],\"questions\":[]}"#;
 
 struct Run {
     task: serde_json::Value,
@@ -125,39 +132,38 @@ fn criteria(task: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+fn findings(task: &serde_json::Value) -> Vec<serde_json::Value> {
+    task["planGate"]["findings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[test]
-fn a_report_only_criterion_triggers_one_replan_and_is_gone_after_it() {
-    // The second draft still carries it: the replan is the only one.
-    let r = run(REPORT_ONLY_DRAFT, REPORT_ONLY_DRAFT, "", NO_FINDINGS);
-    assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
-    assert_eq!(
-        count(&r.calls, "plan") + count(&r.calls, "replan"),
-        2,
-        "calls: {:?}",
-        r.calls
+fn a_typed_report_only_finding_removes_its_criterion_without_a_replan() {
+    // The finding names criterion 1; criterion 0 must stay.
+    let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
+    let r = run(
+        HANDOFF_NO_CHECK_DRAFT,
+        HANDOFF_NO_CHECK_DRAFT,
+        "claude-sonnet",
+        review,
     );
-    assert_eq!(count(&r.calls, "replan"), 1, "calls: {:?}", r.calls);
-    let brief = std::fs::read_to_string(format!("{}.replan", r.log.display())).unwrap();
-    assert!(brief.contains("## Plan gate findings"), "{brief}");
-    assert!(brief.contains("report-only"), "{brief}");
+    assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
     let stored = criteria(&r.task);
+    assert_eq!(stored.len(), 1, "criteria: {stored:?}");
     assert!(
-        !stored.iter().any(|c| c.contains("handoff")),
+        stored[0].starts_with("Toggle visible"),
         "criteria: {stored:?}"
     );
-    assert_eq!(stored.len(), 1, "criteria: {stored:?}");
     let lines = decisions(&r.task);
     assert!(
-        lines.iter().any(|l| l.starts_with("Plan gate:")),
+        lines.iter().any(|l| {
+            l.starts_with("Plan gate: removed the report-only criterion") && l.contains("handoff")
+        }),
         "{lines:?}"
     );
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("Plan gate: removed the report-only criterion")),
-        "{lines:?}"
-    );
-    // The request is never edited by the replan.
     assert_eq!(
         r.task["request"], "add dark mode to the settings screen",
         "{}",
@@ -167,8 +173,82 @@ fn a_report_only_criterion_triggers_one_replan_and_is_gone_after_it() {
 }
 
 #[test]
+fn a_report_only_finding_keeps_a_criterion_whose_check_is_shared() {
+    // The check is not a planner test, so only the owner may drop it.
+    let review = r#"{\"findings\": [{\"kind\": \"report-only\", \"criterion\": 1, \"severity\": \"high\", \"text\": \"Only the agent's own handoff proves it\"}]}"#;
+    let r = run(HANDOFF_DRAFT, HANDOFF_DRAFT, "claude-sonnet", review);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    let stored = criteria(&r.task);
+    assert_eq!(stored.len(), 2, "criteria: {stored:?}");
+    assert!(
+        !decisions(&r.task)
+            .iter()
+            .any(|l| l.contains("removed the report-only criterion")),
+        "{}",
+        r.task
+    );
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_report_named_criterion_with_a_real_check_is_kept_without_a_report_only_finding() {
+    let r = run(
+        REPORT_LISTS_DRAFT,
+        REPORT_LISTS_DRAFT,
+        "claude-sonnet",
+        NO_FINDINGS,
+    );
+    assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    let stored = criteria(&r.task);
+    assert!(
+        stored.iter().any(|c| c.starts_with("The report lists")),
+        "criteria: {stored:?}"
+    );
+    assert!(
+        !decisions(&r.task)
+            .iter()
+            .any(|l| l.contains("removed the report-only criterion")),
+        "{}",
+        r.task
+    );
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn commands_of_mvn_dotnet_and_rspec_are_not_flagged_by_code() {
+    let r = run(
+        JVM_DOTNET_RUBY_DRAFT,
+        JVM_DOTNET_RUBY_DRAFT,
+        "claude-sonnet",
+        NO_FINDINGS,
+    );
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    assert!(findings(&r.task).is_empty(), "{}", r.task);
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_unusable_review_reply_takes_the_invalid_review_path() {
+    // `Wrong split` is not one of the five kinds: the reply does not deserialize.
+    let review = r#"{\"findings\": [{\"kind\": \"Wrong split\", \"severity\": \"critical\", \"text\": \"Two parts edit one file\"}]}"#;
+    let r = run(CLEAN_DRAFT, CLEAN_DRAFT, "claude-sonnet", review);
+    assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
+    assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
+    assert!(findings(&r.task).is_empty(), "{}", r.task);
+    let lines = decisions(&r.task);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Plan gate:") && l.contains("gave no usable answer")),
+        "{lines:?}"
+    );
+    r.daemon.shutdown_and_wait();
+}
+
+#[test]
 fn a_critical_plan_review_finding_triggers_one_replan_and_no_second_review() {
-    let review = r#"{\"findings\": [{\"severity\": \"CRITICAL\", \"kind\": \"missing requirement\", \"text\": \"Nothing persists the choice\"}]}"#;
+    let review = r#"{\"findings\": [{\"severity\": \"critical\", \"kind\": \"missing-requirement\", \"requestItem\": \"persist the choice\", \"text\": \"Nothing persists the choice\"}]}"#;
     let r = run(CLEAN_DRAFT, CLEAN_DRAFT, "claude-sonnet", review);
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
     assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
@@ -182,16 +262,15 @@ fn a_critical_plan_review_finding_triggers_one_replan_and_no_second_review() {
 }
 
 #[test]
-fn a_low_finding_reaches_the_implementer_brief() {
-    let review = r#"{\"findings\": [{\"severity\": \"low\", \"kind\": \"wrong approach\", \"text\": \"Prefer the existing theme hook\"}]}"#;
+fn a_medium_finding_reaches_the_implementer_brief() {
+    let review = r#"{\"findings\": [{\"severity\": \"medium\", \"kind\": \"wrong-approach\", \"text\": \"Prefer the existing theme hook\"}]}"#;
     let r = run(CLEAN_DRAFT, CLEAN_DRAFT, "claude-sonnet", review);
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
     assert_eq!(count(&r.calls, "replan"), 0, "calls: {:?}", r.calls);
-    let findings = r.task["planGate"]["findings"].as_array().unwrap();
     assert!(
-        findings
+        findings(&r.task)
             .iter()
-            .any(|f| f["text"] == "Prefer the existing theme hook" && f["severity"] == "LOW"),
+            .any(|f| f["text"] == "Prefer the existing theme hook" && f["severity"] == "MEDIUM"),
         "{}",
         r.task
     );
@@ -202,30 +281,33 @@ fn a_low_finding_reaches_the_implementer_brief() {
 }
 
 #[test]
-fn an_empty_plan_review_setting_skips_the_review() {
+fn an_empty_plan_review_setting_runs_the_review_on_the_planner_route() {
     let r = run(CLEAN_DRAFT, CLEAN_DRAFT, "", NO_FINDINGS);
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
-    assert_eq!(count(&r.calls, "review"), 0, "calls: {:?}", r.calls);
+    assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
     let lines = decisions(&r.task);
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("Plan gate:") && l.contains("review is off")),
+        lines.iter().any(|l| {
+            l.starts_with("Plan gate: plan review by claude-sonnet")
+                && l.contains("the planner's route")
+        }),
         "{lines:?}"
     );
     r.daemon.shutdown_and_wait();
 }
 
 #[test]
-fn a_review_route_that_does_not_exist_is_skipped_without_a_fallback() {
+fn a_review_route_that_does_not_exist_falls_back_to_the_planner_route_and_says_so() {
     let r = run(CLEAN_DRAFT, CLEAN_DRAFT, "no-such-route", NO_FINDINGS);
     assert_eq!(r.task["status"], "done", "task JSON: {}", r.task);
-    assert_eq!(count(&r.calls, "review"), 0, "calls: {:?}", r.calls);
+    assert_eq!(count(&r.calls, "review"), 1, "calls: {:?}", r.calls);
     let lines = decisions(&r.task);
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("Plan gate:") && l.contains("no-such-route")),
+        lines.iter().any(|l| {
+            l.starts_with("Plan gate:")
+                && l.contains("no-such-route")
+                && l.contains("the planner's route")
+        }),
         "{lines:?}"
     );
     r.daemon.shutdown_and_wait();

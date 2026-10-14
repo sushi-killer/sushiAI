@@ -1,7 +1,7 @@
 use super::*;
 
 /// Automatic answers per kind of question and cause on one task; the next
-/// question of that kind and cause goes on to triage and the owner.
+/// question of that kind and cause goes on to the overseer and the owner.
 pub(super) const MAX_POLICY_ANSWERS: usize = 3;
 
 const JUDGE_PROMPT: &str = "A coding agent claims that an acceptance criterion cannot be met, and gives evidence. You may read files in the working directory but change nothing. Check the evidence yourself. Answer verified true only when you confirmed the evidence is true and that it really makes the criterion impossible; otherwise false. Reply with only JSON: {\"verified\": true|false, \"reason\": \"<one sentence>\"}";
@@ -12,31 +12,23 @@ pub(super) fn policy_on(app: &App) -> bool {
     app.settings.read().unwrap().answer_policy
 }
 
-/// The criterion number in the text of an impossible question.
-fn impossible_criterion(text: &str) -> Option<usize> {
-    text.strip_prefix("Criterion ")?
-        .split_once(" cannot be met as written")?
-        .0
-        .parse()
-        .ok()
-}
-
-/// Whether an earlier automatic answer was about the same cause as `question`:
-/// the same check commands, the same criterion; any other question of one
-/// kind shares its cause.
+/// Whether an earlier automatic answer was about the same check commands as
+/// `question`; any other question of one kind shares its cause.
 fn same_cause(earlier: &Assumption, question: &Question) -> bool {
-    if !question.commands.is_empty() {
-        return earlier.commands == question.commands;
-    }
-    if question.kind == QuestionKind::Impossible {
-        return impossible_criterion(&earlier.question) == impossible_criterion(&question.text);
-    }
-    true
+    question.commands.is_empty() || earlier.commands == question.commands
 }
 
 /// Questions of `question`'s kind and cause answered so far by the policy (a
-/// rule or the judge).
+/// rule or the judge); an impossible question's cause is its criterion.
 fn policy_answers(task: &Task, question: &Question) -> usize {
+    if question.kind == QuestionKind::Impossible {
+        return task
+            .loop_state
+            .impossible_answers
+            .iter()
+            .filter(|c| Some(**c) == question.criterion)
+            .count();
+    }
     task.assumptions
         .iter()
         .filter(|a| {
@@ -62,37 +54,18 @@ pub(super) fn policy_open(app: &App, task: &Task, question: &Question) -> bool {
         && policy_answers(task, question) < MAX_POLICY_ANSWERS
 }
 
-fn quoted_base_tail(question: &Question, command: &str) -> String {
-    let listed = format!("- {command}: ");
-    question
-        .text
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix(&listed).map(str::to_string).or_else(|| {
-                line.strip_prefix(&format!("{command} already fails on base "))
-                    .and_then(|rest| rest.split_once(": ").map(|(_, tail)| tail.to_string()))
-            })
-        })
-        .unwrap_or_default()
-}
-
 /// Context needed by the pre-existing-failure policy. Keep filesystem and
 /// store reads here so the answer rule itself remains deterministic.
 fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool>, bool) {
     let changed = git::changed_files(Path::new(&task.worktree), &task.base_sha).unwrap_or_default();
-    let base_runs = app.base_runs.lock().unwrap();
     let targeted = question
         .commands
         .iter()
         .map(|command| {
-            let output = base_runs
-                .get(&(task.base_sha.clone(), command.clone()))
-                .map(|run| run.tail.clone())
-                .unwrap_or_else(|| quoted_base_tail(question, command));
-            base_check::is_task_target(task, command, &output, &changed)
+            base_check::is_task_target(task, command, &changed)
+                || attributed_target(app, task, command)
         })
         .collect();
-    drop(base_runs);
     let may_land_on_default = app.settings.read().unwrap().may_land_on_default(&task.repo);
     let base_moves = task.base_ref.as_ref().is_some_and(|base_ref| {
         // Nothing lands on a default branch that landing may not move, so a
@@ -398,7 +371,7 @@ pub(super) fn remove_check_command(
 /// a shared check: "drop all" on a base-check question, or "drop
 /// criterion" on an impossible one whose criterion carries one. Only the
 /// owner may; others may retry or stop. Callers that answer by rule, judge or
-/// triage escalate to the owner instead.
+/// the overseer escalates to the owner instead.
 pub(super) fn shared_check_drop_refusal(
     settings: &Settings,
     task: &Task,
@@ -578,6 +551,11 @@ pub(super) fn record_policy_answer(
         overturned: false,
         owner_answer: None,
     });
+    if question.kind == QuestionKind::Impossible {
+        task.loop_state
+            .impossible_answers
+            .extend(question.criterion);
+    }
     task.decisions
         .push(policy_answer_line(&question.text, answer, by, evidence));
     let answered_by = if by == "judge" {
@@ -600,6 +578,16 @@ pub(super) fn record_answered_question(
         let base_sha = task.base_sha.clone();
         base_check::record_base_retry(task, &question.commands, &base_sha, answer);
     }
+    // The owner's answers do not count against the orchestrator's continues.
+    if question.kind == QuestionKind::AttemptsFailing
+        && matches!(
+            answered_by,
+            AnsweredBy::Orchestrator | AnsweredBy::Overseer | AnsweredBy::Lead
+        )
+        && !is_option(answer, "stop")
+    {
+        task.loop_state.non_owner_continues += 1;
+    }
     task.question_history.push(AnsweredQuestion {
         question: question.text.clone(),
         options: question.options.clone(),
@@ -615,9 +603,9 @@ pub(super) fn record_answered_question(
 }
 
 /// Answers `task`'s waiting question by rule or judge, when the policy is on
-/// and allows it; `None` sends the question on (triage, then the owner). The
-/// question and waiting state are cleared and persisted on an answer. Plan and
-/// agent questions are left to the triage wrappers, which need triage's view.
+/// and allows it; `None` sends the question on (the overseer, then the owner).
+/// The question and waiting state are cleared and persisted on an answer. Plan
+/// and agent questions have no rule: the overseer decides them.
 pub(super) async fn try_policy_answer(
     app: &Arc<App>,
     task: &mut Task,
@@ -671,9 +659,7 @@ pub(super) async fn try_policy_answer(
 
 /// The criterion number and the agent's evidence of an impossible question.
 fn impossible_parts(question: &Question) -> Option<(usize, String)> {
-    let n = impossible_criterion(&question.text)?;
-    let evidence = question.text.split_once(". Evidence: ")?.1.to_string();
-    Some((n, evidence))
+    Some((question.criterion?, question.evidence.clone()?))
 }
 
 enum Judgement {
@@ -796,26 +782,31 @@ pub(super) fn cautious_option(options: &[String]) -> Option<&String> {
     })
 }
 
-/// The cautious option to take for a plan or agent question if triage agrees:
-/// `None` when the policy is off or spent, the kind is not one of those two, or
-/// no option is marked cautious.
-pub(super) fn cautious_choice(app: &App, task: &Task, question: &Question) -> Option<String> {
+/// The option taken for a waiting question nobody answers in time: the
+/// `default_option` the asking agent named, else the option marked cautious on
+/// a plan or agent question. `None` when the policy is off or spent, or the
+/// question names neither.
+pub(super) fn default_choice(app: &App, task: &Task, question: &Question) -> Option<String> {
+    if !policy_open(app, task, question) {
+        return None;
+    }
+    let under_limit = |option: &String| hard_limit(question, option).is_some();
+    if let Some(index) = question.default_option {
+        return question
+            .options
+            .get(index)
+            .filter(|o| !under_limit(o))
+            .cloned();
+    }
     if !matches!(
         question.kind,
         QuestionKind::PlanQuestion | QuestionKind::AgentQuestion
-    ) || !policy_open(app, task, question)
-    {
+    ) {
         return None;
     }
-    cautious_option(&question.options).cloned()
-}
-
-/// Whether triage's answer is `cautious`.
-pub(super) fn agrees_with(decision: &brief::TriageDecision, cautious: Option<&str>) -> bool {
-    cautious.is_some_and(|c| {
-        matches!(decision.action, brief::TriageAction::Answer)
-            && decision.answer.trim().eq_ignore_ascii_case(c.trim())
-    })
+    cautious_option(&question.options)
+        .filter(|o| !under_limit(o))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -824,6 +815,34 @@ mod tests {
 
     fn opts(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_wait_default_never_takes_an_option_under_a_hard_limit() {
+        let (app, _dir) = crate::engine::test_support::test_app();
+        app.settings.write().unwrap().answer_policy = true;
+        let task = task_with_status(TaskStatus::Waiting);
+        let mut question = Question::new(
+            "Which layout?",
+            opts(&["wide", "narrow"]),
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        question.default_option = Some(1);
+        assert_eq!(
+            default_choice(&app, &task, &question).as_deref(),
+            Some("narrow")
+        );
+        question.text = "Clean up the old data?".into();
+        question.options = opts(&["delete the old data", "keep the old data"]);
+        assert_eq!(default_choice(&app, &task, &question), None);
+        question.default_option = Some(0);
+        assert_eq!(default_choice(&app, &task, &question), None);
+        // The agent's own tag limits an option the words do not.
+        question.options = opts(&["go ahead", "wait"]);
+        question.text = "How should it go?".into();
+        question.risk = vec![Risk::Destructive];
+        assert_eq!(default_choice(&app, &task, &question), None);
     }
 
     #[test]
@@ -955,16 +974,16 @@ mod tests {
 
     #[test]
     fn the_impossible_question_yields_its_criterion_and_evidence() {
-        let q = Question::new(
-            "Criterion 1 cannot be met as written: x. Evidence: the file is gone",
-            vec![],
-            QuestionKind::Impossible,
-            AskedBy::Implement,
-        );
-        assert_eq!(
-            impossible_parts(&q),
-            Some((1, "the file is gone".to_string()))
-        );
+        let mut task = task_with_status(TaskStatus::Running);
+        task.criteria = vec!["zero".into(), "one. Evidence: nope".into()];
+        // The criterion and the evidence hold the old separator: nothing is parsed back.
+        let evidence = "see a. Evidence: b";
+        let claim = brief::Impossible {
+            criterion: 1,
+            evidence: evidence.into(),
+        };
+        let q = impossible_question(&task, &claim);
+        assert_eq!(impossible_parts(&q), Some((1, evidence.to_string())));
     }
 
     #[test]
@@ -1076,8 +1095,8 @@ mod tests {
     #[test]
     fn preexisting_policy_keeps_targets_retries_only_moving_bases_and_otherwise_defers() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.request = Some("Fix a_base_retry_carries_the_planner_test_commit".into());
-        let command = "cargo test -p sushiai-orch --test base_retry";
+        let command = "node --test tests/focus.test.cjs";
+        task.request = Some(format!("Make {command} pass"));
         let question = base_check::pre_existing_question(
             &[VerifyOutcome {
                 command: command.into(),
@@ -1087,24 +1106,18 @@ mod tests {
             }],
             &task.base_sha,
         );
-        let targeted = base_check::is_task_target(
-            &task,
-            command,
-            "test a_base_retry_carries_the_planner_test_commit ... FAILED",
-            &[],
-        );
+        let targeted = base_check::is_task_target(&task, command, &[]);
         let (answer, evidence) =
             rule_answer_with_context(&task, &question, 1, &[targeted], false).unwrap();
         assert_eq!(answer, base_check::KEEP_ALL);
         assert!(evidence.contains("task is meant to make the check pass"));
 
         task.request = None;
-        let path_command = "cargo test -p sushiai-orch --test base_retry";
+        let path_command = "node --test crates/sushiai-orch/tests/base_retry.rs";
         let path_output = "error in crates/sushiai-orch/tests/base_retry.rs:17:2";
         let path_target = base_check::is_task_target(
             &task,
             path_command,
-            path_output,
             &["crates/sushiai-orch/tests/base_retry.rs".into()],
         );
         assert!(path_target);
@@ -1213,12 +1226,11 @@ mod timeout_tests {
     async fn answer_judge_timed_out_leaves_the_decision_to_the_owner() {
         let (app, _dir, mut task, _) = slow_helper_task();
         let criteria = task.criteria.clone();
-        let question = Question::new(
-            "Criterion 0 cannot be met as written: Keep the API. Evidence: the file is gone",
-            vec!["retry".into(), "drop criterion".into()],
-            QuestionKind::Impossible,
-            AskedBy::Implement,
-        );
+        let claim = brief::Impossible {
+            criterion: 0,
+            evidence: "the file is gone".into(),
+        };
+        let question = impossible_question(&task, &claim);
         assert!(
             judge_impossible(&app, &mut task, &question, 1, &CancelToken::new())
                 .await
@@ -1345,12 +1357,14 @@ mod base_moves_tests {
 
         // Other kinds still have their own budget, the judge's included.
         let impossible = |n: usize| {
-            Question::new(
+            let mut q = Question::new(
                 format!("Criterion {n} cannot be met as written: x. Evidence: y"),
                 vec!["retry".into(), "drop criterion".into()],
                 QuestionKind::Impossible,
                 AskedBy::Implement,
-            )
+            );
+            q.criterion = Some(n);
+            q
         };
         assert!(policy_open(&app, &task, &impossible(0)));
         let attempts = Question::new(

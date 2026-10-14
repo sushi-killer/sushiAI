@@ -17,6 +17,7 @@ fn fake(implement: &str, first_review: &str, next_review: &str) -> String {
         r###"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  '## Route the review'*) exit 0 ;;
   "## Review"*)
     r=$(ls "$LOG_DIR"/review.* 2>/dev/null | wc -l | tr -d ' ')
     touch "$LOG_DIR/review.$r"
@@ -26,6 +27,7 @@ case "$input" in
       printf '%s\n' '{{"type":"result","result":"```sushi-review\n{next_review}\n```"}}'
     fi
     exit 0 ;;
+  *"You review a coding task plan"*) printf '%s\n' '{{"type":"result","result":"{{\"findings\": []}}"}}' ;;
   *sushi-plan*)
     printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-plan"}}'
     printf '%s\n' '{{"type":"result","result":"```sushi-plan\n{{\"title\":\"Planned\",\"goal\":\"Add lines\",\"criteria\":[\"Lines added\"],\"verify\":[\"true\"]}}\n```"}}'
@@ -133,8 +135,8 @@ fn attempt(n: u32, stage: &str, status: &str) -> Value {
 
 #[test]
 fn criteria_results_follow_checks_and_review_rulings_and_diff_stats_are_exact() {
-    let rulings_first = r#"{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":\"Alpha file exists\",\"met\":false,\"evidence\":\"not in the diff\"},{\"criterion\":\"Gamma is documented\",\"met\":true,\"evidence\":\"README\"},{\"criterion\":\"Delta is fast\",\"met\":null},{\"criterion\":\"Epsilon is safe\",\"met\":false}]}"#;
-    let rulings_next = r#"{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Alpha file exists\",\"met\":true},{\"criterion\":\"Gamma is documented\",\"met\":true},{\"criterion\":\"Delta is fast\",\"met\":null},{\"criterion\":\"Epsilon is safe\",\"met\":true}]}"#;
+    let rulings_first = r#"{\"verdict\":\"FAIL\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":false,\"evidence\":\"not in the diff\"},{\"criterion\":2,\"met\":true,\"evidence\":\"README\"},{\"criterion\":3,\"met\":null},{\"criterion\":4,\"met\":false}]}"#;
+    let rulings_next = r#"{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":0,\"met\":true},{\"criterion\":2,\"met\":true},{\"criterion\":3,\"met\":null},{\"criterion\":4,\"met\":true}]}"#;
     let s = setup(&fake(IMPLEMENT, rulings_first, rulings_next), true);
     let repo = init_git_repo();
     let task = s.daemon.request(
@@ -414,6 +416,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;

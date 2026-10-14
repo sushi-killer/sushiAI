@@ -21,7 +21,14 @@ case "$1 $2" in
   "pr list") [ -f "$dir/created" ] && echo https://github.example/acme/app/pull/7; exit 0 ;;
   "pr create")
     if [ -f "$dir/fail" ]; then echo "boom from gh" >&2; exit 1; fi
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) printf '%s' "$2" > "$dir/head" ;; --title) printf '%s' "$2" > "$dir/title" ;; esac
+      shift
+    done
     touch "$dir/created"; echo https://github.example/acme/app/pull/7 ;;
+  "pr view")
+    sha=$(git ls-remote origin "refs/heads/$(cat "$dir/head")" | cut -f1)
+    printf '{"url":"https://github.example/acme/app/pull/7","headRefOid":"%s","title":"%s"}\n' "$sha" "$(cat "$dir/title")" ;;
 esac
 "#;
 
@@ -211,6 +218,11 @@ fn pr_entries(log: &serde_json::Value) -> Vec<&serde_json::Value> {
 #[test]
 fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
     let s = setup();
+    // An overseer call opens a pull request only where automatic ones are on; the test daemon has them off.
+    let mut settings = s.daemon.request("settings.get", serde_json::json!({}));
+    settings["prOnDoneOff"] = serde_json::json!(false);
+    s.daemon
+        .request("settings.set", serde_json::json!({"settings": settings}));
     let task = s
         .daemon
         .request("task.get", serde_json::json!({"id": s.id}));
@@ -241,4 +253,38 @@ fn only_an_overseer_task_pr_lands_in_the_overseer_log() {
         .daemon
         .request("overseer.log", serde_json::json!({"repo": "/elsewhere"}));
     assert_eq!(other.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn an_agent_task_pr_is_refused_when_automatic_pull_requests_are_off() {
+    let s = setup();
+    let mut settings = s.daemon.request("settings.get", serde_json::json!({}));
+    settings["prOnDoneOff"] = serde_json::json!(true);
+    s.daemon
+        .request("settings.set", serde_json::json!({"settings": settings}));
+    // A task that finishes with the setting already off: orchd opens nothing by itself.
+    let id = create(&s.daemon, s.repo.path(), true)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let done = poll_until(&s.daemon, &id, |st| {
+        matches!(st, "done" | "failed" | "stopped")
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    assert!(done.get("prUrl").is_none(), "{done}");
+
+    for source in ["overseer", "mcp", "lead"] {
+        let err = s
+            .daemon
+            .request_error("task.pr", serde_json::json!({"id": id, "source": source}));
+        assert!(
+            err.contains("automatic pull requests are off"),
+            "{source}: {err}"
+        );
+    }
+    let stored = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(stored.get("prUrl").is_none(), "{stored}");
+
+    let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
+    assert_eq!(opened["prUrl"], URL, "{opened}");
 }

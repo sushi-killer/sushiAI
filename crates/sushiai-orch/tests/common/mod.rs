@@ -176,6 +176,13 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
         .env("RUSTC_WRAPPER", "")
         .stdout(log.try_clone().unwrap())
         .stderr(log);
+    // No test daemon reaches the real codex binary: a review routed to codex
+    // (a no-verdict review is retried there) gets this prose stub, unless the
+    // test names its own codex in `extra_env`, which is set after this.
+    cmd.env("ORCHD_CODEX_BIN", fake_codex_script(home));
+    // The same for claude: a test that reaches the claude harness without naming
+    // its own stub fails loudly instead of calling the real model.
+    cmd.env("ORCHD_CLAUDE_BIN", unstubbed_claude_script(home));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -527,6 +534,21 @@ pub fn is_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A stand-in codex that answers in prose, so a review routed to codex gives
+/// no verdict, written into `dir` as `fake-codex.sh`.
+pub fn fake_codex_script(dir: &Path) -> PathBuf {
+    let body = "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Looks fine to me.\"}}'\n";
+    fake_harness_script(dir, "fake-codex.sh", body)
+}
+
+/// The claude binary of a test that did not name one: it fails at once, so the
+/// test shows the mistake instead of calling a real model. Written into `dir`
+/// as `unstubbed-claude.sh`.
+pub fn unstubbed_claude_script(dir: &Path) -> PathBuf {
+    let body = "#!/bin/sh\ncat > /dev/null\necho 'test reached the claude harness without a stub' >&2\nexit 1\n";
+    fake_harness_script(dir, "unstubbed-claude.sh", body)
+}
+
 pub fn fake_harness_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
@@ -619,6 +641,8 @@ console.log(JSON.stringify({
 pub const FAKE_PLANNER_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*)
+    printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     if [ -n "$PLAN_ASK_QUESTION" ]; then
@@ -747,6 +771,7 @@ pub fn cheap_route_on_claude(daemon: &Daemon) {
 pub const FAKE_FAILING_REVIEW_SCRIPT: &str = r###"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  '## Route the review'*) exit 0 ;;
   "## Review"*)
     printf '%s\n' '{"type":"result","result":"```sushi-review\n{\"verdict\":\"FAIL\",\"findings\":[\"needs work\"]}\n```"}' ;;
   *'"accept": true'*)

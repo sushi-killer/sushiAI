@@ -33,13 +33,14 @@ Root cause: JS tests on a base without the step 5 isolation changed the real hom
 Rule: merge the isolation fix into every lane base before JS tests run.
 Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
 
-## 2026-10-14 — a done task on an old main failed against the current main
+## 2026-10-14 — lanes green alone, 49 integration tests red together
 
-Root cause: a branch built alone, but GitHub saw main's newer `ci.yml` as the task's workflow edit and refused the push; the same stale base also breaks on changed signatures.
-Rule: carry a PR branch onto the newest base and recheck it before the push; a "refusing to allow" rejection is permanent. `a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push`.
+Root cause: lanes added agent turns the shared fakes in `tests/common` did not answer.
+Rule: run the full suite on the integration tip after each merge; a new turn ships with its fake.
 
 ## Promoted
 
+- 2026-10-14 A done task on an old main failed against the current main → a PR branch is carried onto the newest base and rechecked before the push. `a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push`.
 - 2026-10-14 A fail-fast `cargo test` hid a regression in a later binary from the baseline diff → rerun with `--no-fail-fast`. `tests/baseline_cargo.rs`.
 - 2026-10-13 An agent host's own git identity reached PR commits and main → PR commits need a noreply author. `check-conventions.mjs`.
 - 2026-10-13 Planner tests that failed the repo formatter stalled tasks → a repo `format` command runs before they are committed. `protected.rs`.

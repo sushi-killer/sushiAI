@@ -19,6 +19,7 @@ emit() {
 }
 report='```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_X*) emit '```sushi-plan\n{\"title\":\"Part X\",\"goal\":\"PART_X: x.txt\",\"verify\":[\"test -f x.txt\"]}\n```' ;;
@@ -148,7 +149,14 @@ fn two_disjoint_parts_stay_two_children() {
     for kid in &kids {
         assert_eq!(kid["status"], "done", "{kid}");
         assert!(
-            kid["request"].as_str().unwrap().contains("Check: test -f"),
+            !kid["request"].as_str().unwrap().contains("Check:"),
+            "{kid}"
+        );
+        assert!(
+            kid["briefCheck"]["check"]
+                .as_str()
+                .unwrap()
+                .starts_with("test -f"),
             "{kid}"
         );
     }

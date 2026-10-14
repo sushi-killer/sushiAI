@@ -21,6 +21,7 @@ fn fake(implement: &str) -> String {
     format!(
         r#"#!/bin/sh
 cat > "$LOG_DIR/brief.$$"
+if head -c 19 "$LOG_DIR/brief.$$" | grep -q 'Route the review'; then exit 0; fi
 if head -c 9 "$LOG_DIR/brief.$$" | grep -q '## Review'; then
   echo review >> "$LOG_DIR/order.log"
   printf '%s\n' '{{"type":"result","result":"```sushi-review\n{{\"verdict\":\"PASS\",\"findings\":[]}}\n```"}}'
@@ -32,6 +33,10 @@ if grep -q 'An implementer says one of the task' "$LOG_DIR/brief.$$"; then
 fi
 if grep -q 'Rewrite one acceptance test' "$LOG_DIR/brief.$$"; then
   cat "$LOG_DIR/rewrite.json"
+  exit 0
+fi
+if head -c 40 "$LOG_DIR/brief.$$" | grep -q 'You review a coding task plan'; then
+  printf '%s\n' '{{"type":"result","result":"{{\"findings\": []}}"}}'
   exit 0
 fi
 if grep -q 'sushi-plan' "$LOG_DIR/brief.$$"; then
@@ -153,11 +158,11 @@ fn cleanup(s: Setup, task: &Value) {
 const CHECK: &str = "sh tests/new_test.sh";
 
 #[test]
-fn planner_tests_are_committed_before_attempt_one_baselined_and_hashed() {
+fn planner_tests_are_written_before_attempt_one_baselined_hashed_and_committed_only_at_the_end() {
     let s = setup(
         r#"git status --porcelain > "$LOG_DIR/status.$n"
 git ls-files -- tests/new_test.sh > "$LOG_DIR/tracked.$n"
-git log -1 --format=%B > "$LOG_DIR/message.$n"
+git rev-parse HEAD > "$LOG_DIR/head.$n"
 echo ok > impl.txt
 emit "$REPORT""#,
         false,
@@ -170,30 +175,38 @@ emit "$REPORT""#,
     let done = run_task(&s, repo.path());
     assert_eq!(done["status"], "done", "task JSON: {done}");
 
+    // The first run saw the test file in the tree, untracked, on the base.
+    assert_eq!(read_log(&s, "status.0").trim(), "?? tests/");
+    assert_eq!(read_log(&s, "tracked.0").trim(), "");
     assert_eq!(
-        read_log(&s, "status.0"),
-        "",
-        "the first run saw a dirty tree"
+        read_log(&s, "head.0").trim(),
+        done["baseSha"].as_str().unwrap()
     );
-    assert_eq!(read_log(&s, "tracked.0").trim(), TEST_FILE);
-    assert!(
-        read_log(&s, "message.0").contains(&format!("Task-Id: {}", done["id"].as_str().unwrap()))
-    );
-
-    let commit = done["plannerTests"]["commit"].as_str().unwrap().to_string();
-    assert_eq!(commit.len(), 40, "{done}");
-    assert_ne!(commit, done["baseSha"].as_str().unwrap());
-    let branch = done["branch"].as_str().unwrap();
-    git_out(
-        repo.path(),
-        &["merge-base", "--is-ancestor", &commit, branch],
-    );
+    assert!(done["plannerTests"]["commit"].is_null(), "{done}");
     assert_eq!(
         done["plannerTests"]["files"],
         json!([{"path": TEST_FILE, "content": TEST_BODY}])
     );
 
-    // The visible check failed on the tests commit, so it gates; the task
+    // The final task commit holds the tests and the work.
+    let branch = done["branch"].as_str().unwrap();
+    let in_branch = git_out(repo.path(), &["show", &format!("{branch}:{TEST_FILE}")]);
+    assert_eq!(in_branch, TEST_BODY.trim());
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..{branch}", done["baseSha"].as_str().unwrap())
+            ]
+        )
+        .trim(),
+        "1",
+        "one commit, no separate tests commit"
+    );
+
+    // The visible check failed with the tests in place, so it gates; the task
     // keeps one sha256 per protected file.
     assert_eq!(done["checks"][0]["baseline"], "fail", "{done}");
     assert_eq!(

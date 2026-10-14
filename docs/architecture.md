@@ -289,20 +289,22 @@ drop it, or stop.
 ### Plan gate
 
 `engine/plan_gate.rs` runs after the planner's draft is stored and before any
-plan question or split. Code checks produce findings with a severity: a
-criterion about the agent's report or process (CRITICAL `report-only`), a
-request item no criterion proves with a runnable check (CRITICAL `coverage`),
-a shared check named in the request but dropped from verify (CRITICAL
-`shared-check`), a check that names no command (HIGH `untestable`), a verify
-command whose script, test target or file does not exist (HIGH
-`verify-missing`), a whole-repo command in `verify` (MEDIUM `verify-cost`,
-moved to `finalVerify`) and overlapping subtask paths (LOW `overlap`). One
-read-only review by another model family (`planReview`, default `codex`;
-skipped with a decision line when its route is missing, never a fallback) adds
-findings once per task, and the brief check's contradiction counts as a
-critical finding. Any critical finding replans once: the planner runs again
-with a `## Plan gate findings` block and the request is never edited. A
-report-only criterion that survives is removed. Other findings are stored in
+plan question or split. One read-only plan review always runs, once per task:
+on `planReview` when that route is configured and its CLI is available, else on
+the planner's route, with a decision line that names the route and why. The
+review is an agent turn. It returns typed findings: `kind` is
+`missing-requirement`, `report-only`, `untestable`, `wrong-split` or
+`wrong-approach`; `severity` is `critical`, `high` or `medium`. A reply that
+does not match that schema is an unusable reply: the decision line says so and
+the gate goes on without review findings. Code keeps only the checks that are
+certain: a shared check named in the request but dropped from verify and
+finalVerify (CRITICAL `shared-check`), a criterion index the draft does not
+have (the reply is then unusable), and the dependency-cycle and overlapping-path
+rules of the merge. A typed `report-only` finding removes the criterion it
+names, with a decision line; nothing else removes a criterion. The brief
+check's contradiction counts as a critical finding. Any critical finding other
+than `report-only` replans once: the planner runs again with a
+`## Plan gate findings` block and the request is never edited. Other findings are stored in
 `planGate.findings` and reach the implementer as `## Plan notes`.
 
 Incomplete overlapping subtasks and parts with no paths or targeted check
@@ -401,8 +403,8 @@ command counts as a failure. When review marks the same criterion unmet in two
 attempts, the judge rules `code gap` (retry) or `infeasible as written` (the
 criterion is amended and the same attempt reviewed again). A planner-named
 screenshot command is run by the orchestrator itself; otherwise an earlier attempt's
-images count while no UI file it changed has changed. After the first attempt
-only P0/P1 findings about the task's own work block; the rest are report
+images count while no non-test file it changed has changed. After the first attempt
+only P0/P1 findings the reviewer marks `causedByDiff` (or leaves unmarked) block; the rest are report
 follow-ups. An owner or policy answer that contradicts a criterion amends it
 before the next attempt and review. A brief-check contradiction in a planner
 draft resumes the planner's own session once with the conflict (a short
@@ -429,7 +431,7 @@ flowchart LR
 ```mermaid
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
-  plangate["Plan gate<br/>code checks, one plan review by another model family,<br/>brief check; a critical finding replans once"]
+  plangate["Plan gate<br/>one typed plan review (planReview, else planner route),<br/>brief check; a critical finding replans once"]
   split["Plan lint: a whole-repo suite in verify (npm run ci,<br/>cargo test --workspace, ...) moves to finalVerify;<br/>verify entries that are not shell commands become review criteria"]
   baseline["Baseline, before attempt 1<br/>planner's tests are committed first; planner's checks and held-out check run on that commit;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]
@@ -446,7 +448,7 @@ flowchart TD
   evidence["Evidence gate<br/>visual criterion needs a saved image, or the images of an<br/>earlier attempt when only artifacts/ or tests changed since"]
   impossible["sushi-impossible block in the reply<br/>criterion cannot be met as written"]
   protect["Protected paths<br/>owner approves"]
-  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees only the open findings,<br/>the criteria not yet ruled met and the task's own changes since"]
+  review["Review<br/>hard-tier route, sees diff, verify tails,<br/>implementer report.<br/>After a failed review: narrow, sees the numbered criteria not yet ruled met,<br/>the findings registry (ids) and the task's own changes since"]
   final["Final checks<br/>task.finalVerify, alongside review after the fast gates<br/>passing results are kept through review questions"]
   join{"Review accepted and final checks pass"}
   baserun{"Same command on the base?<br/>base lookup: the cache, else the in-flight job,<br/>else one job in a throwaway worktree on base sha"}
@@ -455,7 +457,7 @@ flowchart TD
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
   ab[["sushiai orch ab<br/>metrics per variant"]]
-  triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
+  overseer["Overseer decides, max 2 continues per task<br/>continue / change approach / escalate"]
   ownerQ(["Owner question"])
 
   plan --> plangate --> split --> baseline --> tier --> impl --> rebase --> checklist --> verify
@@ -498,11 +500,11 @@ flowchart TD
   judge["Tie-break judge<br/>read-only, cheapest route never weaker than the implementer, not the reviewer, once per finding"]
   judge -->|"invalid: drop the finding as an assumption, review the same attempt again"| review
   judge -->|"valid / no verdict / no route"| fail
-  fail -->|"review finding marked repeat: first one runs the advisor and tiers up, second waits"| triage
+  fail -->|"review finding the registry holds open from an earlier run: first one runs the advisor and tiers up, second waits"| overseer
   fail --> budget
   budget -->|yes| impl
-  budget -->|no| triage --> ownerQ
-  triage -->|continue| impl
+  budget -->|no| overseer --> ownerQ
+  overseer -->|continue| impl
   commit -.-> ab
 
   classDef planned stroke-dasharray: 5 5

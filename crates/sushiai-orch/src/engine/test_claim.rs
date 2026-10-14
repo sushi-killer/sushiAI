@@ -154,13 +154,6 @@ fn scratch_path(task: &Task, name: &str) -> PathBuf {
     PathBuf::from(format!("{}-{name}", task.worktree))
 }
 
-/// Whether `new` drops most of the lines that carry `old`'s checking: fewer
-/// than half of its non-blank lines are left.
-fn weakens(old: &str, new: &str) -> bool {
-    let lines = |t: &str| t.lines().filter(|l| !l.trim().is_empty()).count();
-    lines(new) * 2 < lines(old)
-}
-
 /// The tests-first rule for a rewrite: on a clean checkout of the base with
 /// `files` written, every check that gated the task before must still fail.
 async fn still_fails_on_base(
@@ -224,9 +217,28 @@ async fn still_fails_on_base(
     result
 }
 
-/// Rewrites `path` through the planner and rebuilds the planner tests commit
-/// with it; the decision line says what changed and why. `scratch` is a
-/// checkout of the tests commit, not the agent's worktree.
+/// The only gate a planner rewrite passes: it must change the file and the
+/// checks that gated the task must still fail on the base. Returns the test
+/// files with the rewrite in place.
+async fn accept_rewrite(
+    app: &Arc<App>,
+    task: &Task,
+    idx: usize,
+    new: String,
+    cancel: &CancelToken,
+) -> Result<Vec<PlannedTest>, String> {
+    if new == task.planner_tests.files[idx].content {
+        return Err("the planner returned the test unchanged".into());
+    }
+    let mut files = task.planner_tests.files.clone();
+    files[idx].content = new;
+    still_fails_on_base(app, task, &files, cancel).await?;
+    Ok(files)
+}
+
+/// Rewrites `path` through the planner and stores the new file with the task
+/// and in the worktree; the decision line says what changed and why. `scratch`
+/// is a checkout of the base with the tests, not the agent's worktree.
 #[allow(clippy::too_many_arguments)]
 async fn rewrite_test(
     app: &Arc<App>,
@@ -261,25 +273,13 @@ async fn rewrite_test(
     )
     .await?;
     let new = parse_rewrite(&text).ok_or("the planner gave no usable file")?;
-    if new == old {
-        return Err("the planner returned the test unchanged".into());
-    }
-    if weakens(&old, &new) {
-        return Err("the rewrite drops most of the test's lines".into());
-    }
-    let mut files = task.planner_tests.files.clone();
-    files[idx].content = new.clone();
-    still_fails_on_base(app, task, &files, cancel).await?;
-    let (wt, base, rebuilt) = (worktree.to_path_buf(), task.base_sha.clone(), files.clone());
-    let (id, title) = (task.id.clone(), task.title.clone());
-    let sha = tokio::task::spawn_blocking(move || {
-        rebuild_tests_commit(&wt, &base, &rebuilt, &title, &id)
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()))?;
+    let files = accept_rewrite(app, task, idx, new.clone(), cancel).await?;
+    let (wt, written) = (worktree.to_path_buf(), files.clone());
+    tokio::task::spawn_blocking(move || write_files(&wt, &written))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))?;
     task.planner_tests.files = files;
-    task.planner_tests.commit = Some(sha.clone());
-    task.planner_tests.protected = Some(protected_hashes(worktree, &sha, task));
+    task.planner_tests.protected = Some(protected_hashes(worktree, &task.base_sha, task));
     task.decisions.push(format!(
         "Orchestrator: the planner rewrote protected test {path} ({} -> {} lines) after the agent's claim ({}); judge: {why}",
         old.lines().count(),
@@ -303,7 +303,7 @@ pub(super) async fn rule_on_claims(
 ) {
     let attempt_n = task.attempts[idx].n;
     let task_id = task.id.clone();
-    // The judge and the planner read a checkout of the tests commit, never
+    // The judge and the planner read a checkout of the base with the planner tests, never
     // the agent's worktree: what the agent wrote there is not an instruction.
     let scratch = scratch_path(task, "claim-tests");
     let mut scratch_made = false;
@@ -330,14 +330,16 @@ pub(super) async fn rule_on_claims(
         task.updated_at = now_ms();
         app.save_task_logged(task);
         if !scratch_made {
-            let (r, p, sha) = (
+            let (r, p, sha, files) = (
                 PathBuf::from(&task.repo),
                 scratch.clone(),
-                task.work_base().to_string(),
+                task.base_sha.clone(),
+                task.planner_tests.files.clone(),
             );
             let made = tokio::task::spawn_blocking(move || {
                 git::remove_worktree(&r, &p);
-                git::add_detached_worktree(&r, &p, &sha)
+                git::add_detached_worktree(&r, &p, &sha).map_err(|e| e.to_string())?;
+                write_files(&p, &files).map(|_| ())
             })
             .await;
             if !matches!(made, Ok(Ok(()))) {
@@ -454,91 +456,56 @@ mod tests {
             .starts_with(&deny_read));
     }
 
-    #[test]
-    fn a_rewrite_that_drops_most_lines_is_weaker() {
-        let old = "a\nb\nc\nd\n";
-        assert!(weakens(old, "a\n"));
-        assert!(!weakens(old, "a\nb\nx\n"));
-    }
-
-    #[test]
-    fn the_rebuilt_tests_commit_sits_on_the_base_without_the_agents_commits_and_still_carries() {
-        let (_app, dir) = test_app();
+    /// A task gated by `sh t/a.test`, which fails on the base: the base has
+    /// no `answer.txt`. `old` is the planner's test file as committed.
+    fn gated_task(dir: &tempfile::TempDir, old: &str) -> Task {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
-        std::fs::write(repo.join("check.sh"), "real\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "check"]);
-        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
-        let wt = dir.path().join("task");
-        let created = git::create_worktree(&repo, "task/rewrite", &wt, "HEAD").unwrap();
-        let base = created.base_sha;
         let mut task = task_with_status(TaskStatus::Running);
         task.repo = repo.to_string_lossy().to_string();
-        task.worktree = wt.to_string_lossy().to_string();
-        task.base_sha = base.clone();
-        task.base_ref = Some(base_ref.clone());
-        let old = vec![PlannedTest {
-            path: "t/a.test".into(),
-            content: "old\nline\n".into(),
+        task.worktree = dir.path().join("task").to_string_lossy().to_string();
+        task.base_sha = git::head_sha(&repo).unwrap();
+        task.criteria = vec!["the answer is written".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "sh t/a.test".into(),
+            baseline: Some(Baseline::Fail),
         }];
-        std::fs::create_dir_all(wt.join("t")).unwrap();
-        std::fs::write(wt.join("t/a.test"), "old\nline\n").unwrap();
-        let tests =
-            git::commit_paths(&wt, &["t/a.test".to_string()], "test: planner", "id").unwrap();
-        task.planner_tests.files = old;
-        task.planner_tests.commit = Some(tests);
-        // The agent commits a weakened check file and some work of its own.
-        std::fs::write(wt.join("check.sh"), "weakened\n").unwrap();
-        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
-        git::commit_paths(
-            &wt,
-            &["check.sh".to_string(), "work.txt".to_string()],
-            "agent",
-            "id",
-        )
-        .unwrap();
-        // The guard has put the original check file back in the tree.
-        std::fs::write(wt.join("check.sh"), "real\n").unwrap();
-
-        let files = vec![PlannedTest {
+        task.planner_tests.files = vec![PlannedTest {
             path: "t/a.test".into(),
-            content: "new\nline\n".into(),
+            content: old.into(),
         }];
-        let sha = rebuild_tests_commit(&wt, &base, &files, "Planned", "id").unwrap();
-        assert_eq!(git::head_sha(&wt).unwrap(), sha);
-        assert_eq!(git_in(&wt, &["rev-parse", &format!("{sha}^")]), base);
-        assert_eq!(
-            git_in(&wt, &["show", "--name-only", "--format=", &sha]),
-            "t/a.test"
-        );
-        assert_eq!(
-            git_in(&wt, &["rev-list", "--count", &format!("{base}..HEAD")]),
-            "1"
-        );
-        // The agent's work is still in the tree, uncommitted; its weakened
-        // check file is not part of the tests.
-        assert_eq!(
-            std::fs::read_to_string(wt.join("work.txt")).unwrap(),
-            "work\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("check.sh")).unwrap(),
-            "real\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(wt.join("t/a.test")).unwrap(),
-            "new\nline\n"
-        );
+        task
+    }
 
-        // The base moves: the carry accepts the rebuilt commit.
-        std::fs::write(repo.join("moved.txt"), "moved\n").unwrap();
-        git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "base moved"]);
-        task.planner_tests.files = files;
-        task.planner_tests.commit = Some(sha);
-        let carried = carry_with_planner_tests(&mut task, &wt, &base_ref).unwrap();
-        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
+    #[tokio::test]
+    async fn a_shorter_rewrite_that_still_fails_on_the_base_is_accepted() {
+        let (app, dir) = test_app_fitting_sandbox();
+        let old = "#!/bin/sh\nset -e\n# the file must exist and hold the answer\ntest -f answer.txt\ntest -s answer.txt\ngrep -q 42 answer.txt\necho checked\n";
+        let task = gated_task(&dir, old);
+        // Well under half of the original's lines, and it fails on the base.
+        let new = "test -f answer.txt\n".to_string();
+        let files = accept_rewrite(&app, &task, 0, new.clone(), &CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(files[0].content, new);
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_passes_on_the_base_is_refused_whatever_its_length() {
+        let (app, dir) = test_app_fitting_sandbox();
+        let old = "#!/bin/sh\nset -e\n# the file must exist and hold the answer\ntest -f answer.txt\ntest -s answer.txt\ngrep -q 42 answer.txt\necho checked\n";
+        let task = gated_task(&dir, old);
+        // Same number of lines as the original, and it passes on the base.
+        let same_length =
+            "#!/bin/sh\nset -e\n# nothing is checked here\ntrue\ntrue\ntrue\necho checked\n";
+        let shorter = "true\n";
+        for new in [same_length, shorter] {
+            let err = accept_rewrite(&app, &task, 0, new.to_string(), &CancelToken::new())
+                .await
+                .unwrap_err();
+            assert!(err.contains("no longer fails on the base"), "{err}");
+        }
     }
 }

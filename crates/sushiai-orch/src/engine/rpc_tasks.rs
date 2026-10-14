@@ -2074,8 +2074,8 @@ mod answer_caller_tests {
             .iter()
             .any(|d| d.contains("only the owner may drop")));
         // A task-specific criterion can be reworded.
-        task.criteria[1] = "Docs -- check: grep -q docs d.md".into();
-        planner_made(&mut task, "grep -q docs d.md", "d.md");
+        task.criteria[1] = "Docs -- check: grep -q d.md".into();
+        planner_made(&mut task, "grep -q d.md", "d.md");
         assert!(healing::amend_criterion_for_test(
             &settings,
             &mut task,

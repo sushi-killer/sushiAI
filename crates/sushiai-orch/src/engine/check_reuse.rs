@@ -52,18 +52,7 @@ pub(super) fn is_interrupted(outcome: &VerifyOutcome) -> bool {
     {
         return true;
     }
-    if matches!(outcome.code, Some(124 | 137 | 143)) {
-        return true;
-    }
-    let mut failures = false;
-    outcome.tail.lines().any(|line| {
-        if line.starts_with("--- ") {
-            failures = line.trim() == "--- failures ---";
-            return false;
-        }
-        let line = line.to_ascii_lowercase();
-        failures && (line.contains("timed out") || line.contains("timeout"))
-    })
+    matches!(outcome.code, Some(124 | 137 | 143))
 }
 
 pub(super) async fn check_tree(cwd: &Path) -> Option<String> {
@@ -213,21 +202,23 @@ mod tests {
     }
 
     #[test]
-    fn an_outcome_is_interrupted_by_a_timeout_a_signal_or_its_failure_lines() {
+    fn an_outcome_is_interrupted_by_a_timeout_or_a_signal_not_by_a_test_name() {
         for result in [
             outcome(None, &timed_out_tail(Duration::from_secs(1))),
             outcome(None, ""),
             outcome(Some(124), ""),
             outcome(Some(137), ""),
             outcome(Some(143), ""),
-            outcome(Some(1), "output\n--- failures ---\nTest TIMED OUT"),
-            outcome(Some(1), "--- failures ---\nTimeout in test"),
         ] {
             assert!(is_interrupted(&result), "{result:?}");
         }
         for result in [
             outcome(Some(0), ""),
             outcome(Some(1), "Timeout is the test's name"),
+            outcome(
+                Some(1),
+                "--- failures ---\nfailures:\n    cache::times_out_after_timeout\nTest TIMED OUT",
+            ),
             outcome(
                 Some(1),
                 "--- failures ---\nassertion failed\n--- stdout (tail) ---\ntimeout",

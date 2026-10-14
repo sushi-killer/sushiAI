@@ -180,6 +180,9 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
     // (a no-verdict review is retried there) gets this prose stub, unless the
     // test names its own codex in `extra_env`, which is set after this.
     cmd.env("ORCHD_CODEX_BIN", fake_codex_script(home));
+    // The same for claude: a test that reaches the claude harness without naming
+    // its own stub fails loudly instead of calling the real model.
+    cmd.env("ORCHD_CLAUDE_BIN", unstubbed_claude_script(home));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -536,6 +539,14 @@ pub fn is_alive(pid: i32) -> bool {
 pub fn fake_codex_script(dir: &Path) -> PathBuf {
     let body = "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Looks fine to me.\"}}'\n";
     fake_harness_script(dir, "fake-codex.sh", body)
+}
+
+/// The claude binary of a test that did not name one: it fails at once, so the
+/// test shows the mistake instead of calling a real model. Written into `dir`
+/// as `unstubbed-claude.sh`.
+pub fn unstubbed_claude_script(dir: &Path) -> PathBuf {
+    let body = "#!/bin/sh\ncat > /dev/null\necho 'test reached the claude harness without a stub' >&2\nexit 1\n";
+    fake_harness_script(dir, "unstubbed-claude.sh", body)
 }
 
 pub fn fake_harness_script(dir: &Path, name: &str, body: &str) -> PathBuf {

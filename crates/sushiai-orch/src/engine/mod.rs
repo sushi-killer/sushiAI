@@ -12,6 +12,7 @@ use crate::hook;
 use crate::loop_detect::LoopDetector;
 use crate::model::*;
 use crate::overseer;
+use crate::prompts::{engine_text, fill};
 use crate::sandbox::{Inputs as SandboxInputs, TaskSandbox};
 use crate::store::{self, Store};
 use serde::Deserialize;
@@ -1110,6 +1111,7 @@ mod tests {
     include!("tests/lines.rs");
     include!("tests/core.rs");
     include!("tests/plan.rs");
+    include!("tests/prompt_snapshots.rs");
     include!("tests/recovery.rs");
     include!("tests/review.rs");
     include!("tests/routing.rs");

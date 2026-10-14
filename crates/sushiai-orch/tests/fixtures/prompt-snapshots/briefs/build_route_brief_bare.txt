@@ -1,0 +1,27 @@
+## Route the review
+
+Add a Save button to the settings dialog that writes the settings file.
+
+## Acceptance criteria
+
+
+## Changed files
+
+
+Decide which review areas this change can break. Depth follows what a change can break, not its size: a large mechanical rename inside one module can break little, while a one-line change to a shared contract can break a great deal. Set an area true only when this change can break something in it.
+
+- seams: callers, consumers or contracts outside the diff that the change touches.
+- code: the logic it changes, against the criteria.
+- tests: whether the checks prove the criteria.
+- errors: failure, timeout and empty-input paths.
+- docs: documentation and user-facing text.
+
+You may read files in the working directory but change nothing. Read the repository where the file list is not enough.
+
+## Report format
+
+Reply with:
+
+```sushi-route
+{"lenses":{"seams":true|false,"code":true|false,"tests":true|false,"errors":true|false,"docs":true|false},"reason":"<one sentence>"}
+```

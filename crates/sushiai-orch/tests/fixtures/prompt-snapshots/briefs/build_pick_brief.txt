@@ -1,0 +1,39 @@
+## Pick
+
+Two implementers did the same task independently. Both passed verify and the checks. Choose the change that better meets the goal and criteria: correct, minimal, in the repository's own style. You cannot edit anything.
+
+Add a Save button to the settings dialog that writes the settings file.
+
+## Acceptance criteria
+
+- The settings dialog shows a Save button -- check: `npm test -- settings`
+- Clicking Save writes settings.json -- check: `npm test -- save`
+
+## Candidate a
+
+- `npm test -- settings` -> exit Some(0)
+
+```diff
+--- a/src/settings.ts
++++ b/src/settings.ts
+@@ -1 +1 @@
+-old
++new
+```
+
+## Candidate b
+
+- `npm test -- settings` -> exit Some(0)
+- `npm run lint` -> exit Some(1)
+
+```diff
++other
+```
+
+## Report format
+
+Reply with:
+
+```sushi-pick
+{"pick":"a|b","why":"one sentence"}
+```

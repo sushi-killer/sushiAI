@@ -1,0 +1,4 @@
+## Your edits to protected files were discarded
+
+Your edits to tests/a.test.ts, tests/b.test.ts (acceptance tests / files the checks run) were discarded; checks run on the originals. If a test is wrong, say so in your report (`"testClaims":[{"path":"<file>","reason":"<why it is wrong>"}]`) with the reason instead of editing it.
+

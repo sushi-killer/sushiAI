@@ -1,6 +1,6 @@
 //! `repo.audit`: one read-only harness run in a repository's own checkout
 //! that grades it against the fixed agent-readiness rubric in
-//! `brief::AUDIT_RUBRIC` and hands back a ```sushi-audit report. The
+//! `brief::audit_rubric` and hands back a ```sushi-audit report. The
 //! judgement is the model's; this module only starts the run, under the
 //! same restrictions as a review, and stores what came back. Nothing here
 //! knows anything about the repository being audited.

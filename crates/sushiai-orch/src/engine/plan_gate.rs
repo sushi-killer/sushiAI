@@ -5,8 +5,6 @@
 use super::*;
 use serde::Deserialize;
 
-const REVIEW_PROMPT: &str = "You review a coding task plan before an agent works on it. Another model drafted it from the owner's request. Check:\n- missing-requirement: an item of the request that no criterion proves; name the item in requestItem\n- report-only: a criterion about the implementing agent's own report, handoff, summary, decisions or process rather than the product's behaviour; name it by criterion\n- untestable: a criterion whose check cannot be run, or proves nothing about the product's behaviour; name it by criterion\n- wrong-split: subtasks that edit the same files, depend on each other unseen, or leave work out\n- wrong-approach: the plan would not achieve the goal, or breaks something in the repository\nYou may read files in the working directory but change nothing. Report only real problems, most serious first.\nReply with only JSON: {\"findings\": [{\"kind\": \"missing-requirement|report-only|untestable|wrong-split|wrong-approach\", \"criterion\": <0-based index of the criterion, when one is named>, \"requestItem\": \"<the request item, when one is named>\", \"severity\": \"critical|high|medium\", \"text\": \"<the problem and the fix, one or two sentences>\"}]}. critical means the plan fails the request as written; use it sparingly. An empty list means the plan is sound.";
-
 const MAX_FINDING_CHARS: usize = 400;
 const MAX_ITEM_CHARS: usize = 300;
 
@@ -234,7 +232,11 @@ fn split_review(
     (removals, review)
 }
 
-fn build_review_prompt(task: &Task, request: &str, subtasks: &[brief::PlanSubtask]) -> String {
+pub(super) fn build_review_prompt(
+    task: &Task,
+    request: &str,
+    subtasks: &[brief::PlanSubtask],
+) -> String {
     let parts: Vec<serde_json::Value> = subtasks
         .iter()
         .map(|s| {
@@ -248,7 +250,8 @@ fn build_review_prompt(task: &Task, request: &str, subtasks: &[brief::PlanSubtas
         })
         .collect();
     format!(
-        "{REVIEW_PROMPT}\n\n{}\n",
+        "{}\n\n{}\n",
+        engine_text("plan_gate_review"),
         json!({
             "request": request,
             "goal": task.goal,
@@ -269,9 +272,7 @@ pub(super) fn findings_block(findings: &[PlanFinding]) -> String {
     if findings.is_empty() {
         return String::new();
     }
-    let mut out = String::from(
-        "## Plan gate findings\n\nThe previous draft of this plan was checked and these problems were found. Draft the plan again so that every CRITICAL one is resolved; the request itself does not change.\n\n",
-    );
+    let mut out = format!("{}\n\n", engine_text("plan_gate_findings"));
     for f in findings {
         out.push_str(&format!(
             "- {} ({}): {}\n",
@@ -788,8 +789,13 @@ mod tests {
             baseline: None,
         });
         let prompt = build_review_prompt(&task, "Build the child", &[child]);
-        let json: serde_json::Value =
-            serde_json::from_str(prompt.strip_prefix(REVIEW_PROMPT).unwrap().trim()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            prompt
+                .strip_prefix(engine_text("plan_gate_review"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
         let child = &json["subtasks"][0];
         assert!(!prompt.contains("secret-hidden-check"));
         assert_eq!(child["heldOutCriterion"], 0);

@@ -1,0 +1,7 @@
+Please ship it.
+
+---
+
+Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.
+
+Task "Add a Save button" asks: retry or stop?

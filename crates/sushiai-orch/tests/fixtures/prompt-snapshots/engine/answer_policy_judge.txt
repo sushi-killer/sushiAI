@@ -1,0 +1,3 @@
+A coding agent claims that an acceptance criterion cannot be met, and gives evidence. You may read files in the working directory but change nothing. Check the evidence yourself. Answer verified true only when you confirmed the evidence is true and that it really makes the criterion impossible; otherwise false. Reply with only JSON: {"verified": true|false, "reason": "<one sentence>"}
+
+{"criterion":"The settings dialog shows a Save button -- check: `npm test -- settings`","evidence":"There is no settings dialog in this repository; src/settings.ts does not exist."}

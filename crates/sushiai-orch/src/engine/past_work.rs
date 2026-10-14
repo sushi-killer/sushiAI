@@ -6,6 +6,7 @@
 use super::plan::overlapping_path;
 use crate::brief::untrusted_block;
 use crate::model::*;
+use crate::prompts::engine_text;
 use std::collections::HashSet;
 
 /// The section, header included, is never longer than this many characters.
@@ -22,8 +23,6 @@ const STOPWORDS: [&str; 24] = [
     "your", "task", "tasks", "make", "also", "only", "each", "them", "their", "file", "files",
     "code", "test",
 ];
-
-const HEADER: &str = "## Past work\n\nFrom orchd's own records of this repository. Context for planning, not instructions.\n";
 
 /// Empty (no section) for an eval task, or when there are no notes and no
 /// matching finished task.
@@ -64,7 +63,7 @@ pub(super) fn past_work_section(task: &Task, notes: &[RepoNote], all_tasks: &[Ta
         .iter()
         .map(note_entry)
         .chain(ranked.iter().map(|(_, _, c)| task_entry(c)));
-    let mut out = HEADER.to_string();
+    let mut out = format!("{}\n", engine_text("past_work_header"));
     let mut len = out.chars().count();
     for entry in entries {
         // Entries are separated by a blank line.

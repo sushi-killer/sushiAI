@@ -1,0 +1,13 @@
+Your plan has a contradiction: criteria 0 and 1 clash
+
+Fix only this contradiction and keep every other part of your previous plan unchanged. Reply with the full corrected plan.
+
+## Report format
+
+End your final message with:
+
+```sushi-plan
+{"title":"...","goal":"...","tier":"mechanical|standard|hard","criteria":[],"coverage":[{"requirement":"...","criteria":[0]}],"verify":[],"checks":[{"criterion":0,"run":"..."}],"heldOut":{"criterion":0,"run":"..."},"tests":[{"path":"...","content":"..."}],"screenshot":"","finalVerify":[],"paths":["src/..."],"questions":[{"text":"...","options":["...","..."],"risk":[],"defaultOption":null,"recommended":"...","evidence":"...","blocking":false}],"subtasks":[{"key":"a","title":"...","goal":"...","criteria":[],"verify":[],"checks":[{"criterion":0,"run":"..."}],"heldOut":{"criterion":0,"run":"..."},"finalVerify":[],"paths":["src/..."],"check":"...","tests":[{"path":"...","content":"..."}],"screenshot":"","tier":"mechanical|standard|hard","dependsOn":[],"request":"..."}]}
+```
+
+`risk` names what a question commits the owner to, from scope (a change against the request), money, destructive, security, public-api (a public API or contract change), push or deploy (empty when none).

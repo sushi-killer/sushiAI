@@ -1,0 +1,7 @@
+## Plan gate findings
+
+The previous draft of this plan was checked and these problems were found. Draft the plan again so that every CRITICAL one is resolved; the request itself does not change.
+
+- CRITICAL (missing requirement): Nothing proves the file is written.
+- LOW (wrong split): Two subtasks edit src/settings.ts.
+

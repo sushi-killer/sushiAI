@@ -1,0 +1,1 @@
+(Brief check: the previous draft's requirements contradict each other: "It saves" and "It never writes a file". Draft again so that no two requirements conflict.)

@@ -1079,25 +1079,38 @@ pub(super) fn missing_tool_claim(question: &str) -> Option<String> {
 
 /// The block the implement and plan briefs carry.
 pub(super) fn tools_block(tools: &TaskTools, planning: bool) -> String {
-    let lines = tools.lines();
-    let mut text = String::from(
-        "## Tools for this task\n\nBesides the file and shell tools, the task agent has these MCP servers:\n",
-    );
+    tools_block_text(&tools.lines(), &tools.off, planning)
+}
+
+/// [`tools_block`] over the server `lines` and the connected tools that are
+/// `off` as `(id, label)`.
+pub(super) fn tools_block_text(
+    lines: &[String],
+    off: &[(String, String)],
+    planning: bool,
+) -> String {
+    let mut text = format!("{}\n", engine_text("permissions_tools_header"));
     if lines.is_empty() {
         text.push_str("- none\n");
     }
-    for line in &lines {
+    for line in lines {
         text.push_str(&format!("- {line}\n"));
     }
-    for (id, label) in &tools.off {
+    for (id, label) in off {
         text.push_str(&format!(
             "- {id} ({label}): connected but off for this repo\n"
         ));
     }
     if planning {
-        text.push_str("\nCriteria may only ask for what these tools can do. A step that needs a service with no tool here belongs to the owner: say so in the criterion instead of asking the agent to do it.\n\n");
+        text.push_str(&format!(
+            "\n{}\n\n",
+            engine_text("permissions_tools_planning")
+        ));
     } else {
-        text.push_str("\nA call the run may not make (a write to an outside service, a path Claude Code protects) waits for the owner's answer and then goes on or is denied: do not retry it or work around it. If a criterion needs a tool that is not listed here, do not improvise: end with outcome `blocked` and start the report's `question` with `No tool: ` and the capability you lack.\n\n");
+        text.push_str(&format!(
+            "\n{}\n\n",
+            engine_text("permissions_tools_implementing")
+        ));
     }
     text
 }

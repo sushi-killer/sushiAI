@@ -1,0 +1,6 @@
+You check a coding task brief before an agent works on it. Two checks.
+1. Decide whether any two requirements below (the goal and the acceptance criteria) contradict each other, so that satisfying one makes another impossible. Ordinary tension or extra work is not a contradiction.
+2. The agent will have only the capabilities listed under `tools`. Decide whether a criterion can only be met with a capability none of them provides, such as moving an Asana task when no Asana tool is listed. Work on files, shell commands and the repository needs no extra tool, and neither does a criterion that only asks the agent to report something.
+Reply with only JSON: {"contradiction": true|false, "conflict": "<which two requirements, quoted briefly, or empty>", "missingTool": null or {"criterion": <0-based index of the criterion>, "capability": "<what is missing, in a few words>", "toolId": "<id of a listed connected tool that is off for this task and would provide it, or empty>"}}
+
+{"goal":"Add a Save button.","criteria":["It shows a Save button","It saves"],"tools":{"builtIn":"read files","mcp":["asana: read tools none; write tools none"]}}

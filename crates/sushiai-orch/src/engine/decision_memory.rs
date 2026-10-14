@@ -235,6 +235,23 @@ fn claims_owner_precedent(like: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case("owner precedent"))
 }
 
+/// `prompt` followed by the owner precedents `notes` and the standing
+/// instruction to answer with `like`.
+pub(super) fn precedents_prompt(prompt: &str, notes: &str) -> String {
+    format!(
+        "{prompt}\n\n{}\n{notes}",
+        engine_text("decision_memory_precedents")
+    )
+}
+
+/// The digest prompt `base` followed by the open proposed `rules`.
+pub(super) fn rules_prompt(base: &str, rules: &str) -> String {
+    format!(
+        "{base}\n\n{}\n{rules}",
+        engine_text("decision_memory_rules")
+    )
+}
+
 impl App {
     /// Refuses a `like` that names an owner precedent no owner record backs: a
     /// decision line must not claim a precedent that does not exist.
@@ -326,9 +343,7 @@ impl App {
         if notes.is_empty() {
             return prompt;
         }
-        format!(
-            "{prompt}\n\nOwner precedents for matching questions. When one covers the question and no hard limit applies, answer with task_answer {{like}} naming it. Never write a repo note yourself.\n{notes}"
-        )
+        precedents_prompt(&prompt, &notes)
     }
 
     /// The digest prompt with the repo's open proposed rules.
@@ -339,9 +354,7 @@ impl App {
             return base;
         }
         let rules: String = open.iter().map(|p| format!("- {}\n", p.rule)).collect();
-        format!(
-            "{base}\n\nProposed rules learned from the owner's repeated answers. They are proposals only: the owner accepts or dismisses each in the Orchestrator panel. Mention them briefly; never add them as repo notes yourself.\n{rules}"
-        )
+        rules_prompt(&base, &rules)
     }
 
     /// `precedents.list {repo}`: the repo's precedents (newest first) and open

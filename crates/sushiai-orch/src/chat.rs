@@ -1210,10 +1210,6 @@ pub(super) fn wake_queued_for(app: &App, repo: &str, id: &str) -> bool {
         })
 }
 
-const QUESTIONS_INTRO: &str = "Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.";
-const QUESTION_TURN_REPLY: &str =
-    "Your final message is sent back to each task you did not answer that way.";
-
 /// Claims the repo's turn slot and loads the current session, starting a fresh harness session when the orchestrator's route
 /// changed since the session's last turn.
 fn begin_turn(app: &App, repo: &str) -> Result<(ChatSession, Route, CancelToken), String> {
@@ -1268,7 +1264,7 @@ pub async fn handle_send(
         _ => None,
     };
     let prompt = match waiting {
-        Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
+        Some((_, questions)) => with_questions(&text, &questions),
         None => text,
     };
     let prompt = format!("{notes}{prompt}");
@@ -1288,7 +1284,24 @@ pub async fn handle_send(
     Ok(json!({}))
 }
 
-const HISTORY_INTRO: &str = "This conversation was edited: the owner changed an earlier message, so the replies that followed it are gone. Here is what was said before it, for context only (do not answer it again):";
+/// The owner's `text` followed by the questions tasks asked while it was typed.
+fn with_questions(text: &str, questions: &str) -> String {
+    format!(
+        "{text}\n\n---\n\n{}\n\n{questions}",
+        engine_text("chat_questions_intro")
+    )
+}
+
+/// The prompt of a turn that only answers task `questions`.
+fn wake_questions_prompt(state: &str, questions: &str) -> String {
+    format!(
+        "{}{} {}\n\n{questions}",
+        state_header(state),
+        engine_text("chat_questions_intro"),
+        engine_text("chat_question_turn_reply")
+    )
+}
+
 const MAX_HISTORY_TEXT: usize = 1500;
 
 /// The kept part of an edited conversation, compact, for a fresh harness
@@ -1309,7 +1322,10 @@ fn history_prompt(kept: &[ChatMessage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("{HISTORY_INTRO}\n\n{lines}\n\n---\n\nThe owner's edited message:\n\n")
+    format!(
+        "{}\n\n{lines}\n\n---\n\nThe owner's edited message:\n\n",
+        engine_text("chat_history_intro")
+    )
 }
 
 /// Replaces one of the owner's messages, drops everything after it (with its
@@ -1369,7 +1385,7 @@ pub async fn handle_edit(
         _ => None,
     };
     let prompt = match waiting {
-        Some((_, questions)) => format!("{text}\n\n---\n\n{QUESTIONS_INTRO}\n\n{questions}"),
+        Some((_, questions)) => with_questions(&text, &questions),
         None => text,
     };
     let prompt = format!("{notes}{history}{prompt}");
@@ -1453,10 +1469,7 @@ pub(super) fn wake(app: &App, repo: &str) {
         &app.store.list_tasks().unwrap_or_default(),
         &senders,
     );
-    let prompt = format!(
-        "{}{QUESTIONS_INTRO} {QUESTION_TURN_REPLY}\n\n{questions}",
-        state_header(&state)
-    );
+    let prompt = wake_questions_prompt(&state, &questions);
     let app = app.arc();
     let repo = repo.to_string();
     tokio::spawn(async move {
@@ -1476,9 +1489,7 @@ pub(super) fn wake(app: &App, repo: &str) {
 /// The top of a wake prompt: the overseer's state file, which stands in for the
 /// chat history a wake does not resume.
 fn state_header(state: &str) -> String {
-    format!(
-        "Overseer state for this repo, kept by orchd between wakes. Your earlier turns are not resumed; this file is what you remember.\n\n{state}\n---\n\n"
-    )
+    format!("{}\n\n{state}\n---\n\n", engine_text("chat_overseer_state"))
 }
 
 /// An overseer wake skipped because the chat was busy.
@@ -3689,5 +3700,57 @@ mod answer_caller_tests {
                 "overseer"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_snapshot_tests {
+    use super::*;
+    use crate::prompts::assert_engine_snapshot as snapshot;
+
+    fn message(role: &str, text: &str) -> ChatMessage {
+        serde_json::from_value(json!({
+            "id": "m", "role": role, "text": text, "ts": 1_000
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn prompt_snapshot_chat_questions_with_the_owners_message() {
+        snapshot(
+            "chat_questions_owner",
+            &with_questions(
+                "Please ship it.",
+                "Task \"Add a Save button\" asks: retry or stop?",
+            ),
+        );
+    }
+
+    #[test]
+    fn prompt_snapshot_chat_questions_wake() {
+        snapshot(
+            "chat_questions_wake",
+            &wake_questions_prompt(
+                "## State\n- decided: retry",
+                "Task \"Add a Save button\" asks: retry or stop?",
+            ),
+        );
+    }
+
+    #[test]
+    fn prompt_snapshot_chat_overseer_state() {
+        snapshot(
+            "chat_overseer_state",
+            &state_header("## State\n- decided: retry\n"),
+        );
+    }
+
+    #[test]
+    fn prompt_snapshot_chat_history() {
+        let kept = vec![
+            message("user", "Plan the settings work."),
+            message("assistant", "Two tasks: the dialog, then the save."),
+        ];
+        snapshot("chat_history", &history_prompt(&kept));
     }
 }

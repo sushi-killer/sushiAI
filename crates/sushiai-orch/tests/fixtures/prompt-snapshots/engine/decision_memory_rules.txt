@@ -1,0 +1,5 @@
+Digest the repo's tasks.
+
+Proposed rules learned from the owner's repeated answers. They are proposals only: the owner accepts or dismisses each in the Orchestrator panel. Mention them briefly; never add them as repo notes yourself.
+- retry when the base check is flaky
+- never touch generated files

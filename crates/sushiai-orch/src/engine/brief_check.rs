@@ -1,9 +1,5 @@
 use super::*;
 
-const CHECK_PROMPT: &str = "You check a coding task brief before an agent works on it. Two checks.\n1. Decide whether any two requirements below (the goal and the acceptance criteria) contradict each other, so that satisfying one makes another impossible. Ordinary tension or extra work is not a contradiction.\n2. The agent will have only the capabilities listed under `tools`. Decide whether a criterion can only be met with a capability none of them provides, such as moving an Asana task when no Asana tool is listed. Work on files, shell commands and the repository needs no extra tool, and neither does a criterion that only asks the agent to report something.\nReply with only JSON: {\"contradiction\": true|false, \"conflict\": \"<which two requirements, quoted briefly, or empty>\", \"missingTool\": null or {\"criterion\": <0-based index of the criterion>, \"capability\": \"<what is missing, in a few words>\", \"toolId\": \"<id of a listed connected tool that is off for this task and would provide it, or empty>\"}}";
-
-const REFRESH_PROMPT: &str = "A coding task was drafted before the tasks it builds on landed. Those tasks have landed and changed the files under `changedFiles`. Decide whether this task's `paths`, `verify` commands or `finalVerify` commands still name the right files and commands now that those files changed (a moved or renamed file, a new test file, a command whose target changed). Change only what is wrong and keep every other entry exactly as it is; never remove a check unless its target no longer exists, and never add a check that is not needed. Reply with only JSON: {\"verify\": [...], \"finalVerify\": [...], \"paths\": [...]}, each the complete list to use, or leave a field out to keep it.";
-
 const MAX_CONFLICT_CHARS: usize = 400;
 
 /// What the caller does after a check.
@@ -28,7 +24,8 @@ pub(super) fn build_check_brief(
     tools: &serde_json::Value,
 ) -> String {
     format!(
-        "{CHECK_PROMPT}\n\n{}\n",
+        "{}\n\n{}\n",
+        engine_text("brief_check_check"),
         json!({"goal": goal, "criteria": criteria, "tools": tools})
     )
 }
@@ -276,11 +273,25 @@ pub(super) fn check_route_for(
     Some((route_id, cheapest, note))
 }
 
+pub(super) fn refresh_brief(task: &Task, changed: &[String]) -> String {
+    format!(
+        "{}\n\n{}\n",
+        engine_text("brief_check_refresh"),
+        json!({
+            "changedFiles": changed,
+            "paths": task.paths,
+            "verify": task.verify,
+            "finalVerify": task.final_verify,
+        })
+    )
+}
+
 /// The line a fresh redraft appends to the request so the new planner
 /// session knows what the previous draft got wrong.
 pub(super) fn redraft_request_note(conflict: &str) -> String {
-    format!(
-        "(Brief check: the previous draft's requirements contradict each other: {conflict}. Draft again so that no two requirements conflict.)"
+    fill(
+        engine_text("brief_check_redraft_note"),
+        &[("conflict", conflict)],
     )
 }
 
@@ -470,15 +481,7 @@ pub(super) async fn refresh_after_dependencies(
         );
         return false;
     };
-    let prompt = format!(
-        "{REFRESH_PROMPT}\n\n{}\n",
-        json!({
-            "changedFiles": changed,
-            "paths": task.paths,
-            "verify": task.verify,
-            "finalVerify": task.final_verify,
-        })
-    );
+    let prompt = refresh_brief(&task, &changed);
     let (reply, timeout_note) = match run_judge(
         app, &task, &route, None, "refresh", "refresh", &prompt, cancel,
     )

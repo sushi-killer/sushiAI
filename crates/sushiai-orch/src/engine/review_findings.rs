@@ -109,8 +109,9 @@ pub(super) fn move_minor_findings(task: &mut Task, attempt_n: u32, r: &mut Revie
 /// Puts the reviewer's own findings of one review into the task's registry
 /// and gives each its id: the registered finding it named, else a new one.
 /// The id is in the finding's `details` and marked in its text. A finding
-/// the registry holds as resolved and that comes back without a new failing
-/// scenario is dropped. A finding open since an earlier review run, or
+/// the registry holds as resolved and that comes back is kept as a repeat
+/// that is handled at once: its scenario is rerun, or the judge rules on it.
+/// A finding open since an earlier review run, or
 /// reopened, is a repeat.
 pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: &mut ReviewResult) {
     let own = r.severities.len().min(r.findings.len());
@@ -119,7 +120,6 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
     }
     r.repeated.clear();
     let mut present: Vec<String> = Vec::new();
-    let mut dropped: Vec<usize> = Vec::new();
     for i in 0..own {
         let raw = strip_finding_id(&r.findings[i]).to_string();
         let run = r.details[i].scenario.as_ref().map(|s| s.run.clone());
@@ -132,21 +132,17 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
             Some(pos) if task.findings[pos].status == FindingStatus::Resolved => {
                 let rec = &mut task.findings[pos];
                 let id = rec.id.clone();
-                let new_run = run.as_ref().filter(|run| !rec.scenarios.contains(run));
-                let Some(new_run) = new_run else {
-                    task.decisions.push(format!(
-                        "Orchestrator: review finding {id} came back after it was resolved, with no new failing scenario; dropped: {raw}"
-                    ));
-                    dropped.push(i);
-                    continue;
-                };
-                rec.scenarios.push(new_run.clone());
+                if let Some(run) = run.filter(|run| !rec.scenarios.contains(run)) {
+                    rec.scenarios.push(run);
+                }
                 rec.status = FindingStatus::Open;
                 rec.attempt = attempt_n;
                 rec.round = round;
+                rec.repeats = rec.repeats.max(HANDLE_AT_REPEATS);
+                rec.handled = false;
                 repeat = true;
                 task.decisions.push(format!(
-                    "Orchestrator: review finding {id} came back with a new failing scenario ({new_run}); kept"
+                    "Orchestrator: review finding {id} came back after it was resolved; kept, its scenario or the judge rules on it"
                 ));
                 id
             }
@@ -190,7 +186,6 @@ pub(super) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
             rec.status = FindingStatus::Resolved;
         }
     }
-    remove_findings(r, &dropped);
 }
 
 /// What the loop does about the findings that repeated for the second time:
@@ -385,19 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn a_named_resolved_finding_needs_a_new_scenario_to_come_back() {
+    fn a_named_resolved_finding_is_never_dropped_by_its_id_alone() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
         let mut r = review(&["P1: first"]);
         register_findings(&mut task, 1, 1, &mut r);
         let mut next = review(&["P1: second"]);
         register_findings(&mut task, 2, 1, &mut next);
+        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+
         let mut back = review(&["P1: first, reworded"]);
         named(&mut back, &[Some("F-1")]);
         register_findings(&mut task, 3, 1, &mut back);
-        assert!(back.findings.is_empty());
-        assert_eq!(back.verdict, Verdict::Pass);
-        assert_eq!(task.findings[0].status, FindingStatus::Resolved);
+        assert_eq!(back.findings, ["P1: first, reworded [F-1]"]);
+        assert_eq!(back.repeated, back.findings);
+        assert_eq!(back.verdict, Verdict::Fail);
+        assert_eq!(task.findings[0].status, FindingStatus::Open);
+        assert_eq!(task.findings[0].repeats, HANDLE_AT_REPEATS);
 
+        let mut next = review(&["P1: second"]);
+        named(&mut next, &[Some("F-2")]);
+        register_findings(&mut task, 4, 1, &mut next);
         let mut with_run = review(&["P1: first, reworded"]);
         with_run.details = vec![FindingDetail {
             id: Some("F-1".into()),
@@ -407,10 +409,9 @@ mod tests {
             }),
             ..Default::default()
         }];
-        register_findings(&mut task, 4, 1, &mut with_run);
-        assert_eq!(with_run.findings, ["P1: first, reworded [F-1]"]);
-        assert_eq!(with_run.repeated, with_run.findings);
-        assert_eq!(task.findings[0].status, FindingStatus::Open);
+        register_findings(&mut task, 5, 1, &mut with_run);
+        assert_eq!(task.findings[0].scenarios, ["cargo test first"]);
+        assert_eq!(with_run.findings.len(), 1);
     }
 
     #[test]

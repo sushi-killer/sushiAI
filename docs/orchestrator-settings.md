@@ -1,13 +1,48 @@
 # Orchestrator settings
 
-Every orchestrator setting lives in one settings object, read and written as a
-whole (`settings.get` / `settings.set`). Change it in **Settings →
-Orchestration**. A key with no control there is edited under **Advanced — all
-settings as JSON**, the same object saved through the same call. The source of
-truth is the `Settings` struct in `crates/sushiai-orch/src/model.rs`; the defaults below are
-the ones a fresh install gets.
+Each host daemon stores its orchestrator settings in one settings object, read
+and written as a whole (`settings.get` / `settings.set`). In **Settings →
+Orchestration**, Host scope edits that object directly; a key with no control
+there is edited under **Advanced — all settings as JSON**. Project scope layers
+project defaults and host overrides over those daemon settings; see below. The
+source of truth for the settings object is the `Settings` struct in
+`crates/sushiai-orch/src/model.rs`; the defaults below are the ones a fresh
+install gets.
 
 Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
+
+## The Orchestration tab and hosts
+
+The **Host / Project** choice selects which scope the tab edits. In Host scope,
+the **Settings host** select chooses the host daemon and appears only when more
+than one host is registered. The tab edits one host at a time. It also offers
+**Copy settings to…** when another host is available: this copies the selected
+host's saved settings read from its daemon, not unsaved edits in the tab. It
+replaces the target host's settings while keeping that host's host-specific
+keys listed below.
+
+In Project scope, choose a project and either **No host (project default)** or
+one of that project's hosts. Editing the project default sets values used by
+every host in the project. Editing a host sets per-host overrides on top of
+that default. The host view shows the effective settings: host daemon settings,
+then project defaults, then that host's overrides. `inherited from project`
+marks a value supplied by the project default. `overridden on <host> ↺` is a
+control that removes that host's override; Save writes the reset. In the
+project-default view, `project default ↺` removes that default; Save writes
+the removal. Save stores the project layers and writes each host's effective
+settings through that host's daemon.
+
+### Host-specific keys
+
+These keys refer to paths or repos on a particular host's machine (some
+values also carry commands tied to those repos). **Copy settings to…** keeps
+the target host's values for these keys and does not carry the source values
+over. Project scope treats these keys like other settings: it applies project
+defaults over each host daemon's settings, then that host's override on top.
+Use a per-host override when a value needs to differ by host.
+
+`worktreeRoot`, `sandboxRepos`, `landOnDefaultRepos`, `gateAt`, `afterLand`,
+`scopedChecks`, `mcpEnable`, `mcpDisable` and `repoPresets`.
 
 | Key                          | Type                                                                                 | Default                                                               | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Where to change it                               |
 | ---------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |

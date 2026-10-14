@@ -145,6 +145,10 @@ pub struct Settings {
     /// hook's budget derives from it, capped under Claude's 600 s hook limit.
     #[serde(default = "default_verify_timeout_secs")]
     pub verify_timeout_secs: u64,
+    /// Seconds the planner may run before it is stopped; the one resumed
+    /// retry gets twice this. `0` or a missing key means the default.
+    #[serde(default = "default_plan_timeout_secs")]
+    pub plan_timeout_secs: u64,
     /// Minutes an implement attempt may run before it is stopped and asked
     /// for a short report (failure kind `time_budget`); `0` = no limit.
     #[serde(default = "default_implement_budget_mins")]
@@ -679,6 +683,10 @@ fn default_verify_timeout_secs() -> u64 {
     1200
 }
 
+fn default_plan_timeout_secs() -> u64 {
+    1800
+}
+
 fn default_implement_budget_mins() -> f64 {
     45.0
 }
@@ -840,6 +848,7 @@ impl Default for Settings {
             daily_budget_usd: 0.0,
             child_parallel: default_child_parallel(),
             verify_timeout_secs: default_verify_timeout_secs(),
+            plan_timeout_secs: default_plan_timeout_secs(),
             implement_budget_mins: default_implement_budget_mins(),
             planner: default_planner(),
             small_plan_max_chars: default_small_plan_max_chars(),
@@ -3321,6 +3330,15 @@ mod tests {
         assert_eq!(s.planner, "claude-opus");
         assert_eq!(s.orchestrator, "");
         assert!(!s.auto_answer);
+    }
+
+    #[test]
+    fn plan_timeout_defaults_to_thirty_minutes_and_old_settings_load_it() {
+        assert_eq!(Settings::default().plan_timeout_secs, 1800);
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("planTimeoutSecs");
+        let settings: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.plan_timeout_secs, 1800);
     }
 
     #[test]

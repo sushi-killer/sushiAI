@@ -405,6 +405,8 @@ pub struct App {
     overseer_turn_timeout_ms: std::sync::atomic::AtomicU64,
     /// How long any task helper may run (ms).
     helper_timeout_ms: std::sync::atomic::AtomicU64,
+    /// Test override of the planner limit in ms; `0` = use the setting.
+    plan_timeout_override_ms: std::sync::atomic::AtomicU64,
     /// How long fetching a task's base branch may take (ms).
     base_fetch_timeout_ms: std::sync::atomic::AtomicU64,
     /// Keyed by audit id: the `repo.audit` runs still in flight.
@@ -629,6 +631,17 @@ impl App {
         Duration::from_millis(self.helper_timeout_ms.load(Ordering::SeqCst))
     }
 
+    /// The planner's limit: `planTimeoutSecs` (`0` = the default), unless a
+    /// test set an override.
+    fn planner_timeout(&self) -> Duration {
+        let over = self.plan_timeout_override_ms.load(Ordering::SeqCst);
+        if over > 0 {
+            return Duration::from_millis(over);
+        }
+        let secs = self.settings.read().unwrap().plan_timeout_secs;
+        Duration::from_secs(if secs == 0 { 1800 } else { secs })
+    }
+
     pub(super) fn task_sandbox(
         &self,
         repo: &str,
@@ -704,6 +717,7 @@ impl App {
             chat_turns: std::sync::Mutex::new(HashMap::new()),
             overseer_turn_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
             helper_timeout_ms: std::sync::atomic::AtomicU64::new(15 * 60 * 1000),
+            plan_timeout_override_ms: std::sync::atomic::AtomicU64::new(0),
             base_fetch_timeout_ms: std::sync::atomic::AtomicU64::new(
                 fresh_base::FETCH_TIMEOUT.as_millis() as u64,
             ),

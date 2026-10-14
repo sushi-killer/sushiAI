@@ -20,7 +20,10 @@ what only looks fixed.
    source, tokens over raw colours, synthetic test data.
 4. Tests: would each new test fail on the original defect? A test that
    matches a string in the source, or passes with the fix reverted, is a P1.
-5. You may run `npm run build`, targeted `node --test` files and `git` read
+5. A diff in `crates/sushiai-orch`: check it against `docs/orchd-approach.md`.
+   New code that reads LLM or tool text, a new keyword, runner or error-string
+   list, or state parsed back from decision lines is a P1.
+6. You may run `npm run build`, targeted `node --test` files and `git` read
    commands. Never edit, stage, commit or stop a process.
 
 ## Reply

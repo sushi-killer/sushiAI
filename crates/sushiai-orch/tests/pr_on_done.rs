@@ -203,19 +203,22 @@ fn settle() {
 
 #[test]
 fn a_done_task_refused_on_the_default_branch_opens_the_drafted_pull_request() {
-    let reply = "{\"branch\":\"feature/ignored\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}";
+    let reply = "{\"branch\":\"feature/drafted-name\",\"title\":\"feat: drafted title\",\"body\":\"Drafted body for the owner\"}";
     let s = setup(reply, true);
     let id = s.create(serde_json::json!({}));
-    let task = done(&s, &id);
-    let branch = task["branch"].as_str().unwrap().to_string();
+    done(&s, &id);
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
-    // The draft names no branch: the pull request is always the task's own.
+    // The pull request head is the conventional name the draft chose.
     let log = s.gh_log();
     assert!(
-        log.contains(&format!("pr create --base main --head {branch} --title feat: drafted title --body Drafted body for the owner")),
+        log.contains("pr create --base main --head feature/drafted-name --title feat: drafted title --body Drafted body for the owner"),
         "{log}"
     );
-    assert!(!log.contains("feature/ignored"), "{log}");
+    let heads = git_out(
+        s._remote.path(),
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    );
+    assert!(heads.contains("feature/drafted-name"), "{heads}");
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(task["status"], "done");
     let decisions = task["decisions"].to_string();
@@ -231,6 +234,54 @@ fn a_done_task_refused_on_the_default_branch_opens_the_drafted_pull_request() {
     assert!(
         brief.contains("CONTRIBUTING.md") && brief.contains("Add pr file"),
         "{brief}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_drafted_name_that_exists_on_the_remote_falls_back_to_the_tasks_branch() {
+    let reply = "{\"branch\":\"feature/taken\",\"title\":\"t\",\"body\":\"b\"}";
+    let s = setup(reply, true);
+    git_out(
+        s.repo.path(),
+        &["push", "-q", "origin", "main:refs/heads/feature/taken"],
+    );
+    let id = s.create(serde_json::json!({}));
+    let task = done(&s, &id);
+    let branch = task["branch"].as_str().unwrap().to_string();
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    let log = s.gh_log();
+    assert!(log.contains(&format!("--head {branch}")), "{log}");
+    assert!(!log.contains("--head feature/taken"), "{log}");
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(
+        task["decisions"]
+            .to_string()
+            .contains("feature/taken exists on the remote"),
+        "{task}"
+    );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn an_empty_drafted_name_opens_the_pull_request_on_the_tasks_branch() {
+    let reply = "{\"branch\":\"\",\"title\":\"t\",\"body\":\"b\"}";
+    let s = setup(reply, true);
+    let id = s.create(serde_json::json!({}));
+    let task = done(&s, &id);
+    let branch = task["branch"].as_str().unwrap().to_string();
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    assert!(
+        s.gh_log().contains(&format!("--head {branch}")),
+        "{}",
+        s.gh_log()
+    );
+    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
+    assert!(
+        task["decisions"]
+            .to_string()
+            .contains("the draft named none"),
+        "{task}"
     );
     s.daemon.shutdown_and_wait();
 }
@@ -346,7 +397,7 @@ fn a_task_that_lands_opens_no_pull_request() {
 
 #[test]
 fn a_body_claim_the_diff_contradicts_is_corrected_before_the_push() {
-    let reply = "{\"title\":\"t\",\"body\":\"Adds tests for the toggle\"}";
+    let reply = "{\"branch\":\"\",\"title\":\"t\",\"body\":\"Adds tests for the toggle\"}";
     let s = setup(reply, true);
     std::fs::write(
         s.tools.path().join("truth-reply"),
@@ -424,7 +475,7 @@ fn a_pull_request_opened_while_the_draft_runs_is_not_opened_twice() {
 
 #[test]
 fn a_restart_resumes_the_pull_request_of_a_done_task() {
-    let reply = "{\"title\":\"t\",\"body\":\"b\"}";
+    let reply = "{\"branch\":\"\",\"title\":\"t\",\"body\":\"b\"}";
     let mut s = setup_with(reply, true, true, false);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
@@ -696,7 +747,7 @@ fn landing_a_done_task_while_its_pull_request_is_drafted_cancels_the_pull_reques
 
 #[test]
 fn a_restart_reuses_the_saved_draft_instead_of_drafting_again() {
-    let reply = "{\"title\":\"t\",\"body\":\"b\"}";
+    let reply = "{\"branch\":\"fix/kept-name\",\"title\":\"t\",\"body\":\"b\"}";
     let mut s = setup_full(reply, Pr::Default, false, false, GH_FAILING, &[]);
     std::fs::write(s.tools.path().join("fail-first"), "1").unwrap();
     let id = s.create(serde_json::json!({}));
@@ -719,10 +770,9 @@ fn a_restart_reuses_the_saved_draft_instead_of_drafting_again() {
     ]);
     assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
     assert_eq!(drafts(&s), 1, "drafted again after the restart");
-    let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
-    let branch = task["branch"].as_str().unwrap().to_string();
+    // The retry and the restart keep the first chosen name.
     assert!(
-        s.gh_log().contains(&format!("--head {branch}")),
+        s.gh_log().contains("--head fix/kept-name"),
         "{}",
         s.gh_log()
     );

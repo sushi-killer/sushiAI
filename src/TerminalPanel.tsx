@@ -17,7 +17,11 @@ import {
 } from "./terminal-sizing";
 import { installTerminalInteractions } from "./terminal-interactions";
 import { createTerminalLinkProvider, openTerminalLink } from "./terminal-links";
-import { createTerminalInput, shouldReattach } from "./terminal-output";
+import {
+  createOutputBatcher,
+  createTerminalInput,
+  shouldReattach,
+} from "./terminal-output";
 import "@xterm/xterm/css/xterm.css";
 
 type CachedTerminal = {
@@ -156,25 +160,40 @@ export function TerminalPanel({
       const entry = runtime;
       const sessionId = panel.sessionId!;
       const exitedMessage = "Session ended. Reconnect to continue.";
-      const bytesOf = (text: string) => new TextEncoder().encode(text).length;
-      const acked = (text: string) => () => {
-        window
-          .bridge!.daemonTerminalAck(panel.id, bytesOf(text))
-          .catch(() => {});
-      };
-      entry.unsubscribe = window.bridge.onDaemonTerminal((event) => {
+      // Output is written once per frame. A hidden or throttled window gets
+      // no frames: the timeout still drains and acks it.
+      const output = createOutputBatcher({
+        write: (data, done) => terminal.write(data, done),
+        reset: () => terminal.reset(),
+        ack: (bytes) => {
+          window.bridge!.daemonTerminalAck(panel.id, bytes).catch(() => {});
+        },
+        schedule: (flush) => {
+          let frame = 0,
+            timer = 0;
+          const run = () => {
+            cancelAnimationFrame(frame);
+            window.clearTimeout(timer);
+            flush();
+          };
+          frame = requestAnimationFrame(run);
+          timer = window.setTimeout(run, 50);
+        },
+      });
+      const unsubscribe = window.bridge.onDaemonTerminal((event) => {
         if (event.panelId !== panel.id) return;
-        if (event.snapshot !== undefined) {
-          terminal.reset();
-          terminal.write(event.snapshot, acked(event.snapshot));
-        }
-        if (event.data) terminal.write(event.data, acked(event.data));
+        if (event.snapshot !== undefined) output.snapshot(event.snapshot);
+        if (event.data) output.data(event.data);
         if (event.exited) {
           entry.exited = true;
           entry.error = exitedMessage;
           entry.notify?.();
         }
       });
+      entry.unsubscribe = () => {
+        unsubscribe();
+        output.dispose();
+      };
       const input = createTerminalInput(
         (data) => window.bridge!.daemonTerminalWrite(panel.id, data),
         (message) => {

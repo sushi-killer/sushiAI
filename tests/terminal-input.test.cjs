@@ -37,3 +37,47 @@ test("a host that reconnects re-attaches a pane its disconnect ended", async () 
   // The panel itself ended: the session is gone, nothing to attach to.
   assert.equal(shouldReattach(dropped, true), false);
 });
+
+test("a large snapshot reaches xterm in slices over frames, cut on lines, all acked", async () => {
+  const { createOutputBatcher, FRAME_BUDGET } =
+    await import("../src/terminal-output.ts");
+  const log = [];
+  const acks = [];
+  const frames = [];
+  const batcher = createOutputBatcher({
+    write: (data, done) => {
+      log.push(data);
+      done();
+    },
+    reset: () => log.push(null),
+    ack: (bytes) => acks.push(bytes),
+    schedule: (flush) => frames.push(flush),
+  });
+  const screen = Array.from(
+    { length: 2000 },
+    (_, i) =>
+      `\x1b[3${i % 7}m[${i}]\x1b[0m café \u{1F600} ${"x".repeat(i % 40)}\r\n`,
+  ).join("");
+  batcher.snapshot(screen);
+  batcher.data("after");
+  let flushed = 0;
+  while (frames.length) {
+    const before = log.length;
+    frames.shift()();
+    flushed += 1;
+    const sizes = log.slice(before).filter((data) => data !== null);
+    assert.ok(
+      sizes.reduce((total, data) => total + data.length, 0) <= FRAME_BUDGET,
+    );
+  }
+  assert.ok(flushed > 1, "the snapshot is spread over frames");
+  assert.equal(log[0], null, "the reset comes first");
+  const writes = log.slice(1);
+  assert.equal(writes.join(""), screen + "after");
+  for (const data of writes.slice(0, -1))
+    assert.ok(data.endsWith("\n"), "cut after a line break");
+  assert.equal(
+    acks.reduce((total, n) => total + n, 0),
+    Buffer.byteLength(screen + "after"),
+  );
+});

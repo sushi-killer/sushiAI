@@ -19,6 +19,9 @@ const {
 const FIRST_ATTACH_SCROLLBACK = 2000;
 const MAX_QUEUED_BYTES = 4 * OUTPUT_CREDIT_BYTES;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const encoder = new TextEncoder();
+// Where flush measures a message: encodeInto counts the bytes that fit.
+const scratch = new Uint8Array(OUTPUT_CHUNK_BYTES);
 
 // A shell reads the path as one word however the file was named.
 const shellPath = (value) => `'${value.replace(/'/g, "'\\''")}' `;
@@ -43,11 +46,20 @@ function createTerminalHandlers({
     return entry;
   }
 
+  // The queue is dropped and output waits for a fresh snapshot. A renderer
+  // that has not yet acked the window before its last snapshot is still
+  // behind: another snapshot now would only be replaced, so the re-attach
+  // waits for that ack (see `ack`) and output is dropped meanwhile.
   function overflow(panelId, entry) {
     if (entry.resyncing) return;
     entry.resyncing = true;
     entry.queue = [];
     entry.queuedBytes = 0;
+    if (entry.stale > 0) entry.resyncDue = true;
+    else reattach(panelId, entry);
+  }
+
+  function reattach(panelId, entry) {
     setImmediate(() => {
       if (entry.closed || panels.get(panelId) !== entry) return;
       attachPanel(
@@ -76,38 +88,75 @@ function createTerminalHandlers({
       queuedBytes: 0,
       inFlight: 0, // bytes sent and not acked, snapshot included
       stale, // unacked bytes sent before the last snapshot
+      scheduled: false, // a flush is due on the next turn
+      resyncing: false, // output is dropped until the next snapshot
+      resyncDue: false, // the re-attach waits for `stale` to be acked
+      exitPending: false, // the session exited: tell the renderer once drained
     };
-    // Sends queued text while credit lasts. A piece is cut on a code point and
-    // by UTF-8 bytes; when not even the next character fits, it waits for an ack.
-    function flush() {
+    // Sends queued text while credit lasts, merged into messages of at most
+    // OUTPUT_CHUNK_BYTES. encodeInto stops before a character that does not
+    // fit, so a message ends on a whole code point; when not even the next
+    // character fits, the rest waits for an ack. `all` ignores the credit: the
+    // host is gone, so nothing more arrives and nothing would ack it later.
+    function flush(all = false) {
       while (
         !entry.closed &&
         entry.queue.length &&
-        entry.inFlight < OUTPUT_CREDIT_BYTES
+        (all || entry.inFlight < OUTPUT_CREDIT_BYTES)
       ) {
-        const head = entry.queue[0];
-        const room = Math.min(
-          OUTPUT_CHUNK_BYTES,
-          OUTPUT_CREDIT_BYTES - entry.inFlight,
-        );
-        let end = 0;
+        const room = all
+          ? OUTPUT_CHUNK_BYTES
+          : Math.min(OUTPUT_CHUNK_BYTES, OUTPUT_CREDIT_BYTES - entry.inFlight);
+        const parts = [];
         let bytes = 0;
-        for (const character of head) {
-          const size = Buffer.byteLength(character);
-          if (bytes + size > room) break;
-          bytes += size;
-          end += character.length;
+        while (entry.queue.length && bytes < room) {
+          const head = entry.queue[0];
+          const { read, written } = encoder.encodeInto(
+            head,
+            scratch.subarray(0, room - bytes),
+          );
+          if (read) parts.push(read < head.length ? head.slice(0, read) : head);
+          bytes += written;
+          if (read < head.length) {
+            entry.queue[0] = head.slice(read);
+            break;
+          }
+          entry.queue.shift();
         }
-        if (end === 0) break;
-        const piece = head.slice(0, end);
-        if (end < head.length) entry.queue[0] = head.slice(end);
-        else entry.queue.shift();
+        if (!bytes) break;
         entry.queuedBytes -= bytes;
         entry.inFlight += bytes;
-        send("daemon-terminal-data", { panelId, data: piece });
+        send("daemon-terminal-data", { panelId, data: parts.join("") });
       }
+      settle();
+    }
+    // The exit goes out after every byte queued before it, or after the
+    // snapshot that replaced them.
+    function settle() {
+      if (
+        !entry.exitPending ||
+        entry.closed ||
+        entry.queue.length ||
+        entry.resyncing
+      )
+        return;
+      entry.exitPending = false;
+      send("daemon-terminal-data", { panelId, exited: true });
+    }
+    // Output that arrives in one event-loop turn leaves in one flush.
+    function schedule() {
+      if (entry.scheduled) return;
+      entry.scheduled = true;
+      setImmediate(() => {
+        entry.scheduled = false;
+        flush();
+      });
     }
     entry.flush = flush;
+    // An ack releases waiting output at once unless a flush is due anyway.
+    entry.release = () => {
+      if (!entry.scheduled) flush();
+    };
     entry.onBytes = (buffer, info = {}) => {
       if (entry.closed) return;
       if (info.snapshot) {
@@ -117,6 +166,7 @@ function createTerminalHandlers({
         decoder.end();
         entry.queue = [];
         entry.queuedBytes = 0;
+        entry.resyncing = entry.resyncDue = false;
         entry.stale += entry.inFlight;
         const text = buffer.toString("utf8");
         entry.cols = info.cols ?? entry.cols;
@@ -128,16 +178,19 @@ function createTerminalHandlers({
           cols: entry.cols,
           rows: entry.rows,
         });
+        settle();
         return;
       }
       const text = decoder.write(buffer);
-      if (!text) return;
+      if (!text || entry.resyncing) return;
       entry.queue.push(text);
       entry.queuedBytes += Buffer.byteLength(text);
-      flush();
+      schedule();
       // A renderer that stopped acking (closed or throttled window) must not
-      // grow this queue without bound: drop it and take a fresh snapshot.
-      if (entry.queuedBytes > MAX_QUEUED_BYTES) overflow(panelId, entry);
+      // grow this queue without bound: drop it and take a fresh snapshot. The
+      // credit still open goes out with the next flush and does not count.
+      const open = Math.max(0, OUTPUT_CREDIT_BYTES - entry.inFlight);
+      if (entry.queuedBytes - open > MAX_QUEUED_BYTES) overflow(panelId, entry);
     };
     return entry;
   }
@@ -156,6 +209,8 @@ function createTerminalHandlers({
     // A new attach always lands in an empty terminal, so it brings the history.
     const scrollback = FIRST_ATTACH_SCROLLBACK;
     const entry = createEntry(panelId, host, sessionId, cols, rows, owed);
+    // An exit still waiting for the old queue now waits for this snapshot.
+    entry.exitPending = carry && !!before?.exitPending;
     panels.set(panelId, entry);
     try {
       const handle = await manager.attach(
@@ -221,7 +276,12 @@ function createTerminalHandlers({
     const old = Math.min(entry.stale, bytes);
     entry.stale -= old;
     entry.inFlight = Math.max(0, entry.inFlight - (bytes - old));
-    entry.flush();
+    // The renderer caught up with its last snapshot: the resync can go out.
+    if (entry.resyncDue && !entry.stale) {
+      entry.resyncDue = false;
+      reattach(panelId, entry);
+    }
+    entry.release();
   }
 
   const typePath = (panelId, file) => write(panelId, shellPath(file));
@@ -272,9 +332,11 @@ function createTerminalHandlers({
   function handleEvent(event) {
     if (event?.method !== "session.exited") return;
     const id = event.params?.id;
-    for (const [panelId, entry] of panels)
-      if (entry.host === event.host && entry.sessionId === id)
-        send("daemon-terminal-data", { panelId, exited: true });
+    for (const entry of panels.values())
+      if (entry.host === event.host && entry.sessionId === id) {
+        entry.exitPending = true;
+        entry.flush(); // the exit follows the output queued before it
+      }
   }
   const unsubscribe = onEvent ? onEvent(handleEvent) : undefined;
 
@@ -284,7 +346,13 @@ function createTerminalHandlers({
       .filter(([, e]) => e.host === host)
       .map(([id]) => id);
     for (const panelId of ids) {
-      send("daemon-terminal-data", { panelId, exited: true });
+      const entry = panels.get(panelId);
+      if (!entry) continue;
+      entry.exitPending = true;
+      entry.flush(true);
+      // A resync that was due will not come: the exit goes out anyway.
+      if (entry.exitPending)
+        send("daemon-terminal-data", { panelId, exited: true });
       await detach(panelId);
     }
   }

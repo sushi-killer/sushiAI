@@ -24,6 +24,7 @@
     "package:dmg": "npm run build:daemon && npm run build:host && npm run build && electron-builder --mac dmg --arm64 --publish never && node scripts/verify-host-manifest.mjs release/mac-arm64/sushiAI.app",
     "test:unicode": "node scripts/terminal-unicode.mjs",
     "perf": "node scripts/perf-benchmark.mjs",
+    "perf:terminal": "node scripts/terminal-perf.mjs",
     "check:conventions": "node scripts/check-conventions.mjs",
     "lint": "eslint .",
     "test:contracts": "node --test tests/app-ipc.test.cjs tests/navigation.test.cjs tests/extension-manifest.test.cjs tests/extension-registry.test.cjs tests/extension-routes.test.cjs tests/extension-contract-coverage.test.cjs tests/extension-records.test.cjs",

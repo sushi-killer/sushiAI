@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { createServer } from "vite";
 import assert from "node:assert/strict";
+import { resolveBrowser } from "./lib/browser.mjs";
 
 const server = await createServer({
   server: { port: 5189, strictPort: false, hmr: false },
@@ -8,9 +9,7 @@ const server = await createServer({
 await server.listen();
 let browser;
 try {
-  browser = await chromium.launch({
-    executablePath: process.env.TERMINAL_TEST_BROWSER || undefined,
-  });
+  browser = await chromium.launch({ executablePath: resolveBrowser(chromium) });
   const page = await browser.newPage();
   page.setDefaultTimeout(10000);
   page.on("console", (message) => {

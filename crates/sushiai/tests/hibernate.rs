@@ -125,16 +125,18 @@ fn pinned_and_focused_sessions_and_shells_stay_awake() {
     let mut sandbox = rig.sandbox(Some(1500));
     sandbox.start_daemon();
     let mut client = sandbox.client();
+    // A client that looks at a session and then goes away. It connects first, so each
+    // session gets its pin or focus one call after it is created, well inside the idle time
+    // on a loaded machine.
+    let mut viewer = sandbox.client();
     let shell = sandbox.create_shell(&mut client);
     let pinned = rig.create(&mut client);
     client.call("session.update", json!({"id": pinned, "pinned": true}));
     let focused = rig.create(&mut client);
     client.call("session.focus", json!({"id": focused, "focused": true}));
     let gone = rig.create(&mut client);
-    let control = rig.create(&mut client);
-    // A client that looks at a session and then goes away.
-    let mut viewer = sandbox.client();
     viewer.call("session.focus", json!({"id": gone, "focused": true}));
+    let control = rig.create(&mut client);
 
     wait_status(&mut client, &control, "hibernated");
     std::thread::sleep(Duration::from_millis(2500));

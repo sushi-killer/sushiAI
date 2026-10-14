@@ -316,6 +316,19 @@ pub(super) async fn carry_for_pr(
         .store
         .claim_helper_run_dir(&task.id, "pr-carry", None)
         .map_err(|e| e.to_string())?;
+    // The carry reruns the task's checks here: the tree gets the same
+    // environment as a task worktree (the repo's own setup) first.
+    {
+        let (r, p) = (repo.clone(), temp.path.clone());
+        let _ = tokio::task::spawn_blocking(move || git::bootstrap_worktree(&r, &p)).await;
+        let sandbox = app.task_sandbox(&task.repo, &temp.path, &run_dir);
+        if let Err(e) =
+            worktrees::setup_worktree(&repo, &temp.path, sandbox.as_ref(), &CancelToken::new())
+                .await
+        {
+            return Ok(PrCarry::Environment(e));
+        }
+    }
     let finals = {
         let settings = app.settings.read().unwrap();
         split_deferred(app, &settings, task).0
@@ -405,6 +418,9 @@ pub(super) enum PrCarry {
     Resolving(Vec<String>),
     /// The task ended `failed`, with a report and a notice; the reason.
     Failed(String),
+    /// The repo's setup failed in the carry worktree: an environment
+    /// problem, not a verdict on the work. Nothing moved.
+    Environment(String),
 }
 
 /// Waits for the finished loop of `id` to leave `controls`, so that starting
@@ -563,6 +579,28 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         Ok(PrCarry::Contained) => return record(app, id, Vec::new(), 0.0, true),
         // The task is back in its loop and opens the pull request when done.
         Ok(PrCarry::Resolving(_) | PrCarry::Failed(_)) => return,
+        // setup_failed: the environment, not the work. The branch is
+        // untouched; the owner hears once and opens it with task_pr.
+        Ok(PrCarry::Environment(e)) => {
+            record(
+                app,
+                id,
+                vec![format!(
+                    "PR: not opened: the setup of the carry worktree failed ({e}); this is the environment, the work is untouched and nothing was pushed"
+                )],
+                0.0,
+                true,
+            );
+            notify_owner(
+                app,
+                &task.repo,
+                format!(
+                    "Task \"{}\" is done but its pull request was not opened: the repo's worktree setup failed while carrying onto the newest base ({e}). The work is on branch {}. Fix the setup, then open it with task_pr.",
+                    task.title, task.branch
+                ),
+            );
+            return;
+        }
         Err(e) => {
             record(
                 app,

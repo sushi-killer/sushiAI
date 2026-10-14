@@ -702,9 +702,7 @@ export function TaskDetail({
               <button
                 className="ui-button secondary"
                 disabled={busy}
-                onClick={() =>
-                  setPrForm({ title: selected.title, branch: selected.branch })
-                }
+                onClick={() => setPrForm({ title: "", branch: "" })}
               >
                 Open PR
               </button>
@@ -860,7 +858,7 @@ export function TaskDetail({
               onChange={(event) =>
                 setPrForm({ ...prForm, title: event.target.value })
               }
-              placeholder="PR title"
+              placeholder="PR title (empty: orchd drafts it by the repository's rules)"
               aria-label="PR title"
               autoFocus
             />
@@ -869,7 +867,7 @@ export function TaskDetail({
               onChange={(event) =>
                 setPrForm({ ...prForm, branch: event.target.value })
               }
-              placeholder="Remote branch"
+              placeholder="Remote branch (empty: orchd names it by the repository's rules)"
               aria-label="Remote branch"
             />
             <button className="ui-button primary" type="submit" disabled={busy}>
@@ -883,11 +881,6 @@ export function TaskDetail({
               Cancel
             </button>
           </form>
-        )}
-        {prForm && canOpenPr(selected) && prForm.branch.startsWith("task/") && (
-          <p className="td-facts">
-            Your repo may expect a branch name like feature/&lt;slug&gt;.
-          </p>
         )}
         {(parentTask || waitsFor.length > 0 || waitNote) && (
           <p className="td-facts">

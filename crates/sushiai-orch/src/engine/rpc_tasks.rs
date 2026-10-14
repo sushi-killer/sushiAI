@@ -1025,7 +1025,7 @@ impl App {
         self.verify_like(like.as_deref(), &task, &p.answer)?;
         if caller != AnsweredBy::Owner {
             if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
-                if !is_refusal(q, &p.answer) {
+                if !is_refusal(q, &p.answer) && !is_recheck(q, &p.answer) {
                     return Err(format!(
                         "this {:?} question is the owner's to allow: an agent can only stop or deny it",
                         q.kind

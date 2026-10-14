@@ -52,6 +52,7 @@ impl App {
         if !quiet {
             self.post_quiet_parked_notices(now);
         }
+        self.resume_cleared_waits(now).await;
         let mut log: Option<Vec<crate::overseer::Entry>> = None;
         if remind == 0 && default == 0 {
             return;
@@ -121,6 +122,58 @@ impl App {
                     "reminder",
                     Some(&task.id),
                 );
+            }
+        }
+    }
+
+    /// A task waiting for a harness or for the daily budget goes on once the
+    /// wait has cleared itself: a harness was installed, or the UTC day
+    /// rolled over (or the budget was raised) so today's spend is under it.
+    /// The answer only asks the loop to look again; it allows nothing.
+    async fn resume_cleared_waits(&self, now: i64) {
+        let waiting: Vec<(String, QuestionKind)> = self
+            .store
+            .list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Waiting && !t.archived)
+            .filter_map(|t| Some((t.id, t.question?.kind)))
+            .filter(|(_, k)| matches!(k, QuestionKind::HarnessMissing | QuestionKind::DailyBudget))
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let harness_back = waiting
+            .iter()
+            .any(|(_, k)| *k == QuestionKind::HarnessMissing)
+            && {
+                self.refresh_availability();
+                self.any_harness_available()
+            };
+        let budget_clear = waiting.iter().any(|(_, k)| *k == QuestionKind::DailyBudget) && {
+            let budget = self.settings.read().unwrap().daily_budget_usd;
+            let data = self.data_dir.clone();
+            let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
+                .await
+                .unwrap_or_default();
+            budget.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+                || crate::costs::spend_today(&records, now).1 < budget
+        };
+        for (id, kind) in waiting {
+            let (clear, evidence) = match kind {
+                QuestionKind::HarnessMissing => (harness_back, "an agent CLI is installed now"),
+                _ => (budget_clear, "today's spend is under the daily budget"),
+            };
+            if clear {
+                let params = json!({
+                    "id": id,
+                    "answer": "retry",
+                    "source": "policy",
+                    "evidence": evidence,
+                });
+                if let Err(e) = self.handle_task_answer(params).await {
+                    eprintln!("orch: resuming task {id} failed: {e}");
+                }
             }
         }
     }
@@ -305,6 +358,105 @@ mod tests {
         assert!(a.evidence.contains("2 h"), "{}", a.evidence);
         assert!(task.decisions.iter().any(|d| d.starts_with("Policy:")));
         assert!(task.decisions.iter().all(|d| !d.starts_with("Owner:")));
+    }
+
+    async fn park_live(
+        app: &Arc<App>,
+        mut task: Task,
+    ) -> tokio::task::JoinHandle<(Option<String>, Task)> {
+        let id = task.id.clone();
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let waiter = {
+            let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
+            tokio::spawn(async move {
+                let id = task.id.clone();
+                let answer =
+                    wait_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+                (answer, task)
+            })
+        };
+        for _ in 0..200 {
+            if pending.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        app.controls.lock().unwrap().insert(
+            id,
+            TaskControl {
+                cancel,
+                pending_answer: pending,
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        waiter
+    }
+
+    #[tokio::test]
+    async fn a_daily_budget_wait_resumes_once_todays_spend_is_under_the_budget() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        app.settings.write().unwrap().daily_budget_usd = 5.0;
+        let task = waiting_in(&repo, QuestionKind::DailyBudget, &["run anyway", "stop"]);
+        app.store.save_task(&task).unwrap();
+        let waiter = park_live(&app, task).await;
+        app.wait_sla_tick(T0).await;
+        let (answer, task) = waiter.await.unwrap();
+        assert_eq!(answer.as_deref(), Some("retry"));
+        assert!(task.decisions.iter().any(|d| d.starts_with("Policy:")));
+        assert!(task.daily_budget_ok_day.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_daily_budget_wait_keeps_waiting_while_todays_spend_is_at_the_budget() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        app.settings.write().unwrap().daily_budget_usd = 5.0;
+        crate::costs::append(
+            &app.data_dir,
+            &crate::costs::CostRecord {
+                ts: T0,
+                repo: "/r".into(),
+                task_id: None,
+                run_id: None,
+                stage: "implement".into(),
+                attempt: None,
+                route_id: "r".into(),
+                harness: Harness::Claude,
+                model: "m".into(),
+                cost_usd: 6.0,
+                estimated: false,
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                ms: 0,
+                backfilled: false,
+            },
+        );
+        let task = waiting_in(&repo, QuestionKind::DailyBudget, &["run anyway", "stop"]);
+        app.store.save_task(&task).unwrap();
+        app.wait_sla_tick(T0).await;
+        let task = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Waiting);
+    }
+
+    #[tokio::test]
+    async fn a_harness_wait_resumes_once_a_cli_can_be_started() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::env::set_var("ORCHD_CODEX_BIN", "/bin/sh");
+        let task = waiting_in(&repo, QuestionKind::HarnessMissing, &["retry"]);
+        app.store.save_task(&task).unwrap();
+        let waiter = park_live(&app, task).await;
+        app.wait_sla_tick(T0).await;
+        let (answer, _) = waiter.await.unwrap();
+        std::env::remove_var("ORCHD_CODEX_BIN");
+        assert_eq!(answer.as_deref(), Some("retry"));
     }
 
     #[tokio::test]

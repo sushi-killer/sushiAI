@@ -134,6 +134,16 @@ pub(crate) fn owner_only(kind: QuestionKind) -> bool {
     )
 }
 
+/// Whether `answer` only asks the waiting loop to look again at a harness or
+/// a daily budget that may have cleared; it allows nothing, so a non-owner
+/// may give it.
+pub(super) fn is_recheck(question: &Question, answer: &str) -> bool {
+    matches!(
+        question.kind,
+        QuestionKind::HarnessMissing | QuestionKind::DailyBudget
+    ) && answer.trim().eq_ignore_ascii_case("retry")
+}
+
 /// Whether `answer` only denies or stops, so a non-owner may give it.
 pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
     if answer.trim().eq_ignore_ascii_case("stop") {

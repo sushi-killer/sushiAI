@@ -1696,6 +1696,25 @@ pub struct Question {
     pub commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_signature: Option<String>,
+    /// What the asking agent says the answer commits the owner to. A tag only
+    /// adds caution: a tagged question is the owner's, whatever its words say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk: Vec<Risk>,
+    /// The option (an index into `options`) the asking agent would take when
+    /// nobody answers in time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_option: Option<usize>,
+}
+
+/// A kind of commitment the asking agent can tag a question with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Risk {
+    Push,
+    Money,
+    Destructive,
+    Security,
+    Deploy,
 }
 
 /// How long a question stays held for the overseer.
@@ -1731,6 +1750,8 @@ impl Question {
             held_at: None,
             commands: Vec::new(),
             failure_signature: None,
+            risk: Vec::new(),
+            default_option: None,
         }
     }
 }

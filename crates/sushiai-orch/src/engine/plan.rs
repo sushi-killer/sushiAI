@@ -264,11 +264,13 @@ fn batched_question_text(questions: &[&brief::PlanQuestion]) -> String {
 /// -> <answer>"` (spec step 5) instead of the generic attempt-failure
 /// phrasing. `"stop"` is still handled centrally by `handle_task_answer`
 /// before it ever reaches here.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ask_plan_question(
     app: &Arc<App>,
     task_id: &str,
     question_text: &str,
     options: Vec<String>,
+    tags: (Vec<Risk>, Option<usize>),
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
@@ -283,12 +285,17 @@ pub(super) async fn ask_plan_question(
     let (tx, rx) = oneshot::channel();
     *pending_answer.lock().unwrap() = Some(tx);
     if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        task.question = Some(Question::new(
-            question_text,
-            options,
-            QuestionKind::PlanQuestion,
-            AskedBy::Plan,
-        ));
+        let (risk, default_option) = tags;
+        task.question = Some(Question {
+            risk,
+            default_option,
+            ..Question::new(
+                question_text,
+                options,
+                QuestionKind::PlanQuestion,
+                AskedBy::Plan,
+            )
+        });
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         app.save_task_logged(&task);
@@ -1058,6 +1065,7 @@ pub(super) async fn run_plan_stage(
                 task_id,
                 question,
                 vec![],
+                (Vec::new(), None),
                 pending_answer,
                 cancel,
                 permit,
@@ -1236,8 +1244,18 @@ pub(super) async fn run_plan_stage(
                 if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
                     task = reloaded;
                 }
-                match ask_plan_question(app, task_id, &text, vec![], pending_answer, cancel, permit)
-                    .await
+                let risk = blocking.iter().flat_map(|q| q.risk.clone()).collect();
+                match ask_plan_question(
+                    app,
+                    task_id,
+                    &text,
+                    vec![],
+                    (risk, None),
+                    pending_answer,
+                    cancel,
+                    permit,
+                )
+                .await
                 {
                     Some(_) => {}
                     None => return end_plan_stage(app, task_id, Some(idx)).await,
@@ -1257,6 +1275,7 @@ pub(super) async fn run_plan_stage(
                 task_id,
                 &q.text,
                 q.options.clone(),
+                (q.risk.clone(), q.default_option),
                 pending_answer,
                 cancel,
                 permit,
@@ -1314,6 +1333,7 @@ pub(super) async fn run_plan_stage(
                     task_id,
                     "No verification command was found. Which command proves this task?",
                     options,
+                    (Vec::new(), None),
                     pending_answer,
                     cancel,
                     permit,

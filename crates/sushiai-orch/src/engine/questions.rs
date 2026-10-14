@@ -769,6 +769,14 @@ mod tests {
             AskedBy::Implement,
         );
         assert!(overseer_allowed_answers(&settings, &task, &deploy).is_empty());
+        let mut tagged = Question::new(
+            "Which approach?",
+            vec!["A".into(), "B".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        tagged.risk = vec![Risk::Security];
+        assert!(overseer_allowed_answers(&settings, &task, &tagged).is_empty());
         let plain = Question::new(
             "Which way?",
             vec!["A".into(), "B".into()],
@@ -1003,6 +1011,7 @@ mod answer_caller_tests {
                 &loop_id,
                 "Which plan?",
                 vec!["B".into()],
+                (Vec::new(), None),
                 &pending,
                 &cancel,
                 &mut None,

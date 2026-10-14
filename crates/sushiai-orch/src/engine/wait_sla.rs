@@ -28,7 +28,7 @@ pub(super) fn default_due(asked_at: i64, after_hours: u32, now: i64) -> bool {
 impl App {
     /// One tick over the waiting questions an owner has not answered. A
     /// non-owner-only question past `waitDefaultAfterHours` takes its
-    /// cautious option (recorded as a policy assumption); otherwise one past
+    /// default option (recorded as a policy assumption); otherwise one past
     /// a `waitRemindEveryHours` interval wakes the overseer with a reminder.
     pub(super) async fn wait_sla_tick(&self, now: i64) {
         self.release_expired_holds(now);
@@ -68,9 +68,9 @@ impl App {
                 continue;
             }
             if default_due(asked_at, default, now) {
-                if let Some(answer) = cautious_choice(self, &task, &question) {
+                if let Some(answer) = default_choice(self, &task, &question) {
                     let evidence = format!(
-                        "nobody answered in {default} h: the cautious choice, the owner can overturn it"
+                        "nobody answered in {default} h: the default choice, the owner can overturn it"
                     );
                     let params = json!({
                         "id": task.id,
@@ -495,6 +495,56 @@ mod tests {
         let saved = app.store.load_task(&again.id).unwrap().unwrap();
         assert_eq!(saved.status, TaskStatus::Waiting);
         waiter.abort();
+    }
+
+    #[tokio::test]
+    async fn the_default_option_the_agent_named_is_taken_without_a_cautious_word() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        app.settings.write().unwrap().wait_default_after_hours = 2;
+        let mut task = waiting_in(
+            &repo,
+            QuestionKind::AgentQuestion,
+            &["rewrite it", "keep the old API"],
+        );
+        task.question.as_mut().unwrap().default_option = Some(1);
+        app.store.save_task(&task).unwrap();
+        let id = task.id.clone();
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let waiter = {
+            let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
+            tokio::spawn(async move {
+                let id = task.id.clone();
+                let answer =
+                    wait_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+                (answer, task)
+            })
+        };
+        for _ in 0..200 {
+            if pending.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        app.controls.lock().unwrap().insert(
+            id.clone(),
+            TaskControl {
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: Arc::new(StdMutex::new(None)),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        app.wait_sla_tick(T0 + 2 * HOUR_MS).await;
+        let (answer, task) = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the default option never answered the question")
+            .unwrap();
+        assert_eq!(answer.as_deref(), Some("keep the old API"));
+        assert_eq!(task.assumptions.len(), 1);
+        assert_eq!(task.assumptions[0].by, "policy");
     }
 
     #[tokio::test]
@@ -978,6 +1028,7 @@ mod tests {
                     &id,
                     "Which way?",
                     vec!["rewrite".into(), "keep it (reversible)".into()],
+                    (Vec::new(), None),
                     &pending,
                     &cancel,
                     &mut None,

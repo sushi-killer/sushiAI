@@ -411,6 +411,7 @@ async fn a_stopped_task_closes_a_plan_question_but_shutdown_keeps_it() {
                 &id,
                 "Which plan?",
                 vec![],
+                (Vec::new(), None),
                 &pending,
                 &cancel,
                 &mut None,

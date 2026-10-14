@@ -4,13 +4,13 @@
 //! harness (spec step 3).
 
 use crate::model::{
-    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult,
+    Attempt, AttemptStatus, Baseline, Check, Dispute, Message, MessageKind, ReviewResult, Risk,
     ScopedCheck, Stage, Task, TaskStatus, Tier, Variant, VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 9;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 10;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -63,9 +63,9 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
 
 const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding, quoted>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
 
-const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
+const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\",\"risk\":[]}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security or deploy (empty when none).\n";
 
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
@@ -767,6 +767,9 @@ pub struct Report {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub question: String,
+    /// What the blocked `question` commits the owner to (`Question.risk`).
+    #[serde(default)]
+    pub risk: Vec<Risk>,
     #[serde(default, deserialize_with = "lenient_disputes")]
     pub disputes: Vec<Dispute>,
     /// Protected tests the agent says are wrong, with the reason.
@@ -1215,7 +1218,7 @@ pub fn parse_review_with_rule(text: &str) -> Option<(ReviewResult, bool)> {
 
 const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
 
-const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"],\"risk\":[],\"defaultOption\":null}]}\n```\n";
 
 const PLAN_COVERAGE: &str = "List in `coverage` every numbered or bulleted item of the request, as its `requirement` text and the 0-based indexes of the `criteria` that prove it; each such item needs at least one criterion with a runnable `-- check:`. A criterion is about the product's behaviour, never about what the agent writes in its report, handoff, summary or decisions.";
 
@@ -1247,8 +1250,8 @@ fn plan_report_format(variant: &Variant, split: bool) -> String {
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
         format = format.replace(
-            "\"options\":[\"...\",\"...\"]}",
-            "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
+            "\"defaultOption\":null}",
+            "\"defaultOption\":null,\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
     format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
@@ -1391,6 +1394,12 @@ pub struct PlanQuestion {
     /// owner.
     #[serde(default = "default_blocking")]
     pub blocking: bool,
+    /// What the question commits the owner to (`Question.risk`).
+    #[serde(default)]
+    pub risk: Vec<Risk>,
+    /// The index in `options` taken when nobody answers (`Question.default_option`).
+    #[serde(default, rename = "defaultOption")]
+    pub default_option: Option<usize>,
 }
 
 fn default_blocking() -> bool {
@@ -2534,6 +2543,20 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_report_carries_its_risk() {
+        let report = parse_report(
+            "sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\",\"risk\":[\"security\"]}",
+        )
+        .unwrap();
+        assert_eq!(report.risk, vec![Risk::Security]);
+        let plain = parse_report("sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\"}")
+            .unwrap();
+        assert!(plain.risk.is_empty());
+        assert!(REPORT_FORMAT_BLOCK.contains("\"risk\":[]"));
+        assert!(RULES_BLOCK.contains("`risk`"));
+    }
+
+    #[test]
     fn a_pass_that_marks_a_criterion_unmet_is_a_fail() {
         let r = parse_review(
             "```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[],\"criteria\":[{\"criterion\":\"Badge reads 0/N\",\"met\":false,\"evidence\":\"list still starts at 1\"},{\"criterion\":\"Test added\",\"met\":true}]}\n```",
@@ -3074,6 +3097,14 @@ mod tests {
         assert_eq!(draft.questions.len(), 1);
         assert_eq!(draft.questions[0].text, "Which default?");
         assert_eq!(draft.questions[0].options.len(), 3);
+    }
+
+    #[test]
+    fn parse_plan_reads_a_question_risk_and_default_option() {
+        let text = "```sushi-plan\n{\"title\":\"t\",\"goal\":\"g\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"Pay for it?\",\"options\":[\"yes\",\"no\"],\"risk\":[\"money\"],\"defaultOption\":1}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(draft.questions[0].risk, vec![Risk::Money]);
+        assert_eq!(draft.questions[0].default_option, Some(1));
     }
 
     #[test]

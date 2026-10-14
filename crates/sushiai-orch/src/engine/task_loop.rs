@@ -1671,16 +1671,19 @@ pub(super) async fn run_task_loop(
                 drop(permit);
                 continue;
             }
+            let risk = report.as_ref().map(|r| r.risk.clone()).unwrap_or_default();
             task.question = Some(Question::new(
                 question_text,
                 vec![],
                 QuestionKind::AgentQuestion,
                 AskedBy::Implement,
             ));
-            task.question.as_mut().unwrap().failure_signature = task.attempts[idx]
+            let question = task.question.as_mut().unwrap();
+            question.failure_signature = task.attempts[idx]
                 .failure
                 .as_ref()
                 .map(|f| f.signature.clone());
+            question.risk = risk;
             task.status = TaskStatus::Waiting;
             task.updated_at = now_ms();
             match wait_for_answer(

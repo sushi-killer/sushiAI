@@ -87,6 +87,8 @@ const BLOCKED_REPORT: &str = r#"```sushi-report\n{\"outcome\":\"blocked\",\"summ
 
 const COMPLETE_REPORT: &str = r#"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"#;
 
+const TAGGED_REPORT: &str = r#"```sushi-report\n{\"outcome\":\"blocked\",\"summary\":\"need input\",\"decisions\":[],\"question\":\"Which auth approach?\",\"risk\":[\"security\"]}\n```"#;
+
 /// Waits until `path` exists, for a run that starts in the background.
 fn wait_for_file(path: &std::path::Path) -> bool {
     let start = std::time::Instant::now();
@@ -144,6 +146,46 @@ fn a_blocked_question_goes_to_the_overseer_with_no_triage_turn() {
         "no triage turn may run before the overseer decides"
     );
 
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+}
+
+/// The agent tags its blocked question with what it commits the owner to: the
+/// question carries the tag, and the overseer is offered no answer for it.
+#[test]
+fn a_blocked_report_tags_its_question_with_risk() {
+    let scripts_dir = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(
+        scripts_dir.path(),
+        "fake-claude.sh",
+        &overseer_script(TAGGED_REPORT),
+    );
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+
+    let mut settings = daemon.request("settings.get", serde_json::json!({}));
+    settings["review"] = serde_json::json!("");
+    settings["orchestrator"] = serde_json::json!("claude-sonnet");
+    settings["autoAnswer"] = serde_json::json!(true);
+    daemon.request("settings.set", serde_json::json!({"settings": settings}));
+
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        serde_json::json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Add auth",
+            "goal": "Add authentication",
+            "criteria": [],
+            "verify": ["true"],
+        }),
+    );
+    let task_id = task["id"].as_str().unwrap().to_string();
+    daemon.request("task.start", serde_json::json!({"id": task_id}));
+
+    let waiting = poll_until(&daemon, &task_id, |s| s == "waiting");
+    assert_eq!(waiting["question"]["risk"], serde_json::json!(["security"]));
+
+    let worktree = std::path::PathBuf::from(task["worktree"].as_str().unwrap());
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);
 }

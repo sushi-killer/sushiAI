@@ -138,10 +138,10 @@ test("every request goes to the daemon as orch.<method> with its own timeout", a
   assert.deepEqual(manager.calls[0].params, { repo: "/x" });
 });
 
-test("a daemon without the orch capability answers Update sushiai on <host>, and nothing is sent", async () => {
+test("a daemon without the orch capability is being turned on; flagged for update it answers Update sushiai on <host>, and nothing is sent", async () => {
   const manager = fakeDaemonManager({
     hosts: {
-      local: { capabilities: ["sessions"] },
+      local: { capabilities: ["sessions"], update: true },
       "devbox-id": { capabilities: ["sessions", "attach"] },
     },
   });
@@ -149,6 +149,14 @@ test("a daemon without the orch capability answers Update sushiai on <host>, and
     message: "Update sushiai on this Mac",
     code: "ORCH_MISSING",
   });
+  await assert.rejects(
+    serviceFor(manager, { host: REMOTE }).call("task.list"),
+    {
+      message: "The orchestrator is not turned on on Devbox.",
+      code: "ORCH_MISSING",
+    },
+  );
+  manager.setState("devbox-id", { update: true });
   await assert.rejects(
     serviceFor(manager, { host: REMOTE }).call("task.list"),
     { message: "Update sushiai on Devbox", code: "ORCH_MISSING" },

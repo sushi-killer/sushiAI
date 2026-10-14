@@ -22,7 +22,8 @@ import "./orchestrator.css";
 import type { OrchestratorView } from "./types";
 import type { TaskTarget } from "./notices";
 import type { OrchestratorHost, Preflight } from "./types";
-import { pendingReveal, subscribeReveal } from "./reveal";
+import { pendingReveal, publishReveal, subscribeReveal } from "./reveal";
+import { createdTaskTarget, projectOnHost } from "./hostProject";
 import {
   useOrchestratorClient,
   OrchestratorHostProvider,
@@ -45,13 +46,20 @@ import {
 } from "./hosts";
 import { HostSelect, RunOnSelect } from "./HostSelect";
 import { rememberPrepareTimes } from "../projectPrepare";
+import { prepareAndStart } from "../projectDeliver";
 import {
   PrepareProgress,
   PreparingHost,
   type PrepareFailure,
 } from "../ui/PrepareViews";
-import { PreflightStrip, RemoteSetup, RepoPrompt } from "./RemoteHostViews";
+import {
+  BringProject,
+  PreflightStrip,
+  RemoteSetup,
+  RepoPrompt,
+} from "./RemoteHostViews";
 import { useOrchestratorHosts } from "./useHosts";
+import { readComposerDraft, writeComposerDraft } from "./composerDraft";
 import { useWorkspaceRepos } from "./workspaceRepos";
 import {
   applyOrchestratorEvent,
@@ -241,7 +249,13 @@ function OrchestratorBody({
   }, []);
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
-  const [taskDraft, setTaskDraft] = useState("");
+  const [taskDraft, setTaskDraftState] = useState(() =>
+    readComposerDraft(host, cwd, "task"),
+  );
+  const setTaskDraft = (text: string) => {
+    setTaskDraftState(text);
+    writeComposerDraft(host, cwd, "task", text);
+  };
   const [baseBranchDraft, setBaseBranchDraft] = useState("");
   const [baseOpen, setBaseOpen] = useState(false);
   const [creatingBusy, setCreatingBusy] = useState(false);
@@ -628,11 +642,16 @@ function OrchestratorBody({
         start,
         project?.id,
       );
-      setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
+      // A task sent to another host is not this list's: the panel follows
+      // it there and opens it.
+      const elsewhere = createdTaskTarget(task, { panelHost: host, runHost });
+      if (!elsewhere)
+        setLive((old) => ({ ...old, tasks: upsertTask(old.tasks, task) }));
       setTaskDraft("");
       setBaseBranchDraft("");
       setBaseOpen(false);
-      if (start) open({ kind: "task", id: task.id });
+      if (elsewhere) publishReveal(elsewhere);
+      else if (start) open({ kind: "task", id: task.id });
     };
     try {
       await go();
@@ -1148,6 +1167,14 @@ function useHostTrail(host: string, info: OrchestratorHost | undefined) {
   return { trail: current, retry };
 }
 
+/** What a remote host with no repo shows while the workspace's project is
+ * placed on it: the search, the Bring card, its Prepare run, or the repo
+ * prompt. */
+type Placement =
+  | { host: string; step: "looking"; name?: string }
+  | { host: string; step: "bring" | "bringing"; project: Project }
+  | { host: string; step: "pick" };
+
 type HostTrail = {
   host: string;
   states: OrchestratorHost["state"][];
@@ -1251,15 +1278,25 @@ function OrchestratorPanelBody({
   }, [host, ready, attempt, refresh]);
 
   const suggestions = repoSuggestions(host, workspaces, tasks);
+  // A remote host never opens some other repo of its own: the workspace's
+  // project is looked for there below. This Mac keeps its first workspace.
   const repo =
-    savedRepo ?? (host === workspaceHost ? cwd : (suggestions[0] ?? ""));
+    savedRepo ??
+    (host === workspaceHost
+      ? cwd
+      : !remote && suggestions.length > 0
+        ? suggestions[0]
+        : "");
+  // Where the owner was before this host: Cancel on the Bring card goes back.
+  const cameFrom = useRef<{ host: string; repo?: string } | null>(null);
   const choose = useCallback(
     (next: { host: string; repo?: string }) => {
+      if (next.host !== host) cameFrom.current = { host, repo: savedRepo };
       onViewChange(undefined);
       setDaemon(undefined);
       onHostChange(next);
     },
-    [onViewChange, onHostChange],
+    [host, savedRepo, onViewChange, onHostChange],
   );
 
   // A notice for a task of another host lands here first: the panel switches
@@ -1301,6 +1338,119 @@ function OrchestratorPanelBody({
     }
   }
 
+  const settingUp =
+    remote && info !== undefined && needsSetup(info, answered.has(host));
+
+  // A remote host with no repo yet, past its setup: find the workspace's
+  // project there - open its checkout, or offer to bring it.
+  const placing = remote && !repo && !settingUp;
+  const [placement, setPlacement] = useState<Placement>({
+    host,
+    step: "looking",
+  });
+  const hostChange = useRef(onHostChange);
+  hostChange.current = onHostChange;
+  useEffect(() => {
+    if (!placing) return;
+    const bridge = window.bridge;
+    let cancelled = false;
+    setPlacement({ host, step: "looking" });
+    if (!bridge) {
+      setPlacement({ host, step: "pick" });
+      return;
+    }
+    // Only for the "Looking for <project>" line; projectOnHost resolves too.
+    bridge
+      .projectsResolve({ endpoint: endpoint || "local", cwd })
+      .then((project) => {
+        if (!cancelled && project)
+          setPlacement((old) =>
+            old.host === host && old.step === "looking"
+              ? { ...old, name: project.name }
+              : old,
+          );
+      })
+      .catch(() => {});
+    void projectOnHost({ bridge, endpoint, cwd, host }).then((placed) => {
+      if (cancelled) return;
+      if (placed.kind === "open")
+        hostChange.current({ host, repo: placed.repo });
+      else if (placed.kind === "bring")
+        setPlacement({ host, step: "bring", project: placed.project });
+      else setPlacement({ host, step: "pick" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [placing, host, endpoint, cwd]);
+
+  // Bring: Prepare clones and installs the project on the host, then the
+  // panel opens the checkout it reports.
+  const [bringFailure, setBringFailure] = useState<PrepareFailure | null>(null);
+  const [bringFound, setBringFound] = useState(false);
+  const [bringEditToken, setBringEditToken] = useState(false);
+  const [bringTokenDraft, setBringTokenDraft] = useState("");
+  const bringGone = useRef(false);
+  useEffect(
+    () => () => {
+      bringGone.current = true;
+    },
+    [host],
+  );
+  async function bring(
+    project: Project,
+    useHostLogin = false,
+    gitUrl?: string,
+  ) {
+    const bridge = window.bridge;
+    if (!bridge) return;
+    bringGone.current = false;
+    setBringFailure(null);
+    setBringFound(false);
+    setPlacement({ host, step: "bringing", project });
+    const outcome = await prepareAndStart({
+      bridge,
+      projectId: project.id,
+      endpoint: host,
+      useHostLogin,
+      gitUrl,
+      isGone: () => bringGone.current,
+      onPreparing: (found) => setBringFound(found.found),
+      start: async (path) => {
+        onHostChange({ host, repo: path });
+        return true;
+      },
+    });
+    if (outcome.kind === "started" || outcome.kind === "unstarted")
+      rememberPrepareTimes(project.id, host, outcome.steps);
+    if (outcome.kind === "failed" && !bringGone.current)
+      setBringFailure(outcome.failure);
+  }
+  async function saveBringToken(project: Project) {
+    if (!window.bridge || !bringTokenDraft.trim()) return;
+    try {
+      const saved = await window.bridge.projectGitTokenSet(
+        project.id,
+        bringTokenDraft,
+      );
+      setBringTokenDraft("");
+      setBringEditToken(false);
+      void bring(saved);
+    } catch (e) {
+      setBringFailure({ stage: "clone", message: errorText(e) });
+    }
+  }
+  /** Cancel on the Bring card: back to the host (and repo) shown before. */
+  function leaveHost() {
+    bringGone.current = true;
+    const back = cameFrom.current;
+    choose(
+      back && back.host !== host
+        ? back
+        : { host: workspaceHost === host ? LOCAL : workspaceHost },
+    );
+  }
+
   const name = info?.name ?? hostNameOf(hosts, host);
   const hostSelect = (
     <HostSelect
@@ -1323,8 +1473,7 @@ function OrchestratorPanelBody({
     />
   );
 
-  const settingUp =
-    remote && info !== undefined && needsSetup(info, answered.has(host));
+  const placed = placement.host === host ? placement : null;
   if (settingUp || (remote && !repo)) {
     const content =
       settingUp && info ? (
@@ -1347,12 +1496,51 @@ function OrchestratorPanelBody({
             choose({ host: workspaceHost === host ? LOCAL : workspaceHost })
           }
         />
-      ) : (
+      ) : placed?.step === "bring" ? (
+        <BringProject
+          projectName={placed.project.name}
+          hostName={name}
+          onBring={() => void bring(placed.project)}
+          onPickRepo={() => setPlacement({ host, step: "pick" })}
+          onCancel={leaveHost}
+        />
+      ) : placed?.step === "bringing" ? (
+        <PrepareProgress
+          project={placed.project}
+          hostName={name}
+          endpoint={host}
+          address={addresses[host]}
+          failure={bringFailure}
+          noSecrets={!!placed.project.hosts?.[host]?.withheld}
+          session
+          found={bringFound}
+          eyebrow={`${name} · first run of ${placed.project.name}`}
+          editToken={bringEditToken}
+          tokenDraft={bringTokenDraft}
+          onTokenDraft={setBringTokenDraft}
+          onRetry={(url) => void bring(placed.project, false, url)}
+          onHostLogin={() => void bring(placed.project, true)}
+          onEditToken={() => setBringEditToken(true)}
+          onSaveToken={() => void saveBringToken(placed.project)}
+          onCancel={() => {
+            bringGone.current = true;
+            setBringFailure(null);
+            setBringEditToken(false);
+            setPlacement({ host, step: "bring", project: placed.project });
+          }}
+        />
+      ) : placed?.step === "pick" ? (
         <RepoPrompt
           hostName={name}
           suggestions={suggestions}
           onRepo={(next) => onHostChange({ host, repo: next })}
         />
+      ) : (
+        <div className="orch-view-scroll orch-setup">
+          <p className="orch-host-looking" role="status">
+            {`Looking for ${placed?.step === "looking" && placed.name ? placed.name : "this project"} on ${name}…`}
+          </p>
+        </div>
       );
     return (
       <div className="orchestrator-host">

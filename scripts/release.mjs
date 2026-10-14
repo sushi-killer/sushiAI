@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Compute the next release from merged PR titles since the last tag (each
 // merge commit's message equals its PR title - squash-only, see AGENTS.md),
-// bump package.json, fold docs/releases/unreleased/*.md fragments into
+// bump package.json (and the Cargo workspace version), fold docs/releases/unreleased/*.md fragments into
 // docs/releases/<version>.md, and commit it all on a release/<version>
 // branch. Run manually, or via the cut-release skill - never from CI.
 // No push, no tag: those happen when the resulting PR gets squash-merged
@@ -98,6 +98,20 @@ if (newVersion !== expectedVersion) {
   process.exit(1);
 }
 
+// The daemon reports its Cargo workspace version in hello, and the desktop
+// compares it with the bundled manifest to offer an update, so Cargo.toml and
+// the workspace crates in Cargo.lock follow package.json.
+const cargoToml = readFileSync("Cargo.toml", "utf8").replace(
+  /^(\[workspace\.package\][^[]*?\nversion = )"[^"]+"/m,
+  `$1"${newVersion}"`,
+);
+writeFileSync("Cargo.toml", cargoToml);
+const cargoLock = readFileSync("Cargo.lock", "utf8").replace(
+  /(\[\[package\]\]\nname = "sushiai[^"]*"\nversion = )"[^"]+"/g,
+  `$1"${newVersion}"`,
+);
+writeFileSync("Cargo.lock", cargoLock);
+
 const apiVersions = CONTRACT.SUPPORTED_API_VERSIONS.join(", ");
 const body = fragments.length
   ? fragments
@@ -112,7 +126,14 @@ writeFileSync(
 );
 for (const name of fragments) unlinkSync(path.join(unreleasedDir, name));
 
-git(["add", "package.json", "package-lock.json", "docs/releases"]);
+git([
+  "add",
+  "package.json",
+  "package-lock.json",
+  "Cargo.toml",
+  "Cargo.lock",
+  "docs/releases",
+]);
 git(["commit", "-m", `chore(release): v${newVersion}`]);
 
 console.log(

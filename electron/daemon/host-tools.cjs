@@ -4,8 +4,9 @@
 // ready for the first time. It runs once per host: the result is recorded, so
 // a reconnect never reruns the installers. Command hosts have no shell and are
 // skipped with a note in the log. A ready host whose daemon binary differs from
-// the bundled one (hello.build against the manifest's sha256 for the host's
-// platform) is flagged for update.
+// the bundled one (hello.version against the manifest's version for the host's
+// platform, or hello.build against its sha256 when a version is missing) is
+// flagged for update.
 
 function watchHostTools({
   manager,
@@ -19,8 +20,8 @@ function watchHostTools({
   const platforms = new Map();
   const checked = new Set(); // host:generation already compared
 
-  // The bundled sushiai for the host's platform, or null when unknown.
-  async function bundledSha(endpoint, host) {
+  // The bundled manifest entry for the host's platform, or null when unknown.
+  async function bundledEntry(endpoint, host) {
     let platform = platforms.get(host);
     if (!platform) {
       platform = (
@@ -30,17 +31,24 @@ function watchHostTools({
       ).trim();
       platforms.set(host, platform);
     }
-    return manifest()?.manifest?.[platform]?.sha256 || null;
+    return manifest()?.manifest?.[platform] || null;
   }
 
   async function checkBuild(host) {
     const endpoint = `ssh:${host}`;
     try {
       if (!connections.hasShell(endpoint)) return;
-      const sha = await bundledSha(endpoint, host);
+      const entry = await bundledEntry(endpoint, host);
       const hello = manager.hello(host);
-      // An older daemon reports no build: it is older than the bundled one.
-      if (sha && hello) manager.setUpdate(host, hello.build !== sha);
+      if (!entry || !hello) return;
+      // Two builds of one version are not an update; the build hash decides
+      // only when either side has no version. An older daemon reports no
+      // build: it is older than the bundled one.
+      if (entry.version && hello.version) {
+        manager.setUpdate(host, hello.version !== entry.version);
+      } else if (entry.sha256) {
+        manager.setUpdate(host, hello.build !== entry.sha256);
+      }
     } catch (error) {
       log(`${host}: build check failed: ${error.message}`);
     }

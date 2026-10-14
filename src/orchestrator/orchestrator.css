@@ -1011,6 +1011,15 @@
   font-size: var(--text-md);
   font-weight: 500;
 }
+/* A remote host without the workspace's project: the Bring card, and the
+ * line shown while the panel looks for the project there. */
+.orch-bring .orch-setup-actions {
+  flex-wrap: wrap;
+}
+.orch-host-looking {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+}
 .orch-repo-prompt {
   display: flex;
   gap: 8px;

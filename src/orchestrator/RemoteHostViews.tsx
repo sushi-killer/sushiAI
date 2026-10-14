@@ -144,6 +144,52 @@ export function RemoteSetup({
   );
 }
 
+/** A remote host without the workspace's project: bring it there (clone and
+ * install), open another repo of the host, or go back. */
+export function BringProject({
+  projectName,
+  hostName,
+  onBring,
+  onPickRepo,
+  onCancel,
+}: {
+  projectName: string;
+  hostName: string;
+  onBring(): void;
+  onPickRepo(): void;
+  onCancel(): void;
+}) {
+  return (
+    <div className="orch-view-scroll orch-setup orch-bring">
+      <div className="orch-setup-head">
+        <h2>
+          {projectName} is not on {hostName} yet
+        </h2>
+        <p>
+          Bringing it clones the project&apos;s repo on {hostName} and installs
+          it there, so its tasks run in that checkout. The workspace&apos;s own
+          copy is left as it is.
+        </p>
+      </div>
+      <div className="orch-setup-actions">
+        <button type="button" className="ui-button primary" onClick={onBring}>
+          {`Bring ${projectName} to ${hostName}`}
+        </button>
+        <button
+          type="button"
+          className="ui-button secondary"
+          onClick={onPickRepo}
+        >
+          Choose another repo
+        </button>
+        <button type="button" className="ui-button ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** A remote host with no repo picked yet: ask for its path. */
 export function RepoPrompt({
   hostName,
@@ -154,7 +200,8 @@ export function RepoPrompt({
   suggestions: string[];
   onRepo(repo: string): void;
 }) {
-  const [draft, setDraft] = useState(suggestions[0] ?? "");
+  // Suggestions are offered in the list, never filled in: the owner picks.
+  const [draft, setDraft] = useState("");
   const commit = () => draft.trim() && onRepo(draft.trim());
   return (
     <div className="orch-view-scroll orch-setup">

@@ -134,10 +134,18 @@ test("a remote task is created through the proxy, its events come back tagged wi
   assert.equal(notices.length, 0, "a queued task needs no notice");
 });
 
-test("a host whose sushiai has no orch capability says Update sushiai on <host>, and the panel shows the same", async () => {
+test("a host whose sushiai has no orch capability is being turned on; flagged for update it says Update sushiai on <host>", async () => {
   const proxy = fakeProxy({ capabilities: ["sessions", "attach"] });
-  const { hosts } = rig(proxy);
+  const { manager, hosts } = rig(proxy);
   await hosts.setEnabled(true);
+  await assert.rejects(hosts.call("task.list", {}, ENDPOINT), {
+    message: "The orchestrator is not turned on on Devbox.",
+    code: "ORCH_MISSING",
+  });
+  let record = hosts.list().find((host) => host.id === ENDPOINT);
+  assert.equal(record.state, "connecting");
+  assert.equal(record.detail, "Turning on the orchestrator on Devbox");
+  manager.setUpdate(PROFILE.id, true);
   await assert.rejects(hosts.call("task.list", {}, ENDPOINT), {
     message: "Update sushiai on Devbox",
     code: "ORCH_MISSING",
@@ -148,7 +156,7 @@ test("a host whose sushiai has no orch capability says Update sushiai on <host>,
       .filter((request) => request.method !== "orch.settings.get"),
     [],
   );
-  const record = hosts.list().find((host) => host.id === ENDPOINT);
+  record = hosts.list().find((host) => host.id === ENDPOINT);
   assert.equal(record.state, "error");
   assert.equal(record.detail, "Update sushiai on Devbox");
 });

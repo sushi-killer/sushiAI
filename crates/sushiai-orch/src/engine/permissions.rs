@@ -793,8 +793,11 @@ pub(super) async fn decide_call(
         .lock()
         .unwrap()
         .insert(subject.name().to_string());
-    let line = answer_line(&subject, &choice);
-    append_decision(app, &ctx.task_id, line);
+    if let Err(e) = app.update_task(&ctx.task_id, |task| {
+        record_permission_answer(task, &subject, &choice)
+    }) {
+        eprintln!("orch: updating task {} failed: {e}", ctx.task_id);
+    }
     match choice {
         Choice::Deny(note) => {
             ctx.run_denied.lock().unwrap().insert(subject.rule());
@@ -835,12 +838,6 @@ fn denied_reason(subject: &Subject, note: Option<&str>) -> String {
         text.push_str(&format!(" The owner said: {note}"));
     }
     text
-}
-
-fn append_decision(app: &App, task_id: &str, line: String) {
-    if let Err(e) = app.update_task(task_id, |task| task.decisions.push(line)) {
-        eprintln!("orch: updating task {task_id} failed: {e}");
-    }
 }
 
 // -- staging -----------------------------------------------------------------
@@ -973,21 +970,28 @@ pub(super) fn unhandled_denials(
 /// same cause again after the owner has spoken.
 pub(super) fn already_answered(task: &Task, subjects: &[Subject]) -> bool {
     subjects.iter().all(|s| {
-        [
-            answer_line(s, &Choice::Once),
-            answer_line(s, &Choice::Always),
-            answer_line(s, &Choice::Deny(None)),
-        ]
-        .iter()
-        .any(|line| task.decisions.contains(line))
+        task.loop_state
+            .answered_permissions
+            .iter()
+            .any(|name| name == s.name())
     })
+}
+
+/// Notes the owner's answer for `subject`: the typed name is the state, the
+/// line is the owner's log.
+pub(super) fn record_permission_answer(task: &mut Task, subject: &Subject, choice: &Choice) {
+    let name = subject.name().to_string();
+    if !task.loop_state.answered_permissions.contains(&name) {
+        task.loop_state.answered_permissions.push(name);
+    }
+    task.decisions.push(answer_line(subject, choice));
 }
 
 /// Applies the owner's answer to the subjects a finished run was refused.
 pub(super) fn apply_answer(app: &App, task: &mut Task, subjects: &[Subject], answer: &str) {
     let choice = parse_choice(answer);
     for subject in subjects {
-        task.decisions.push(answer_line(subject, &choice));
+        record_permission_answer(task, subject, &choice);
         match &choice {
             Choice::Once => add_rule(app, Scope::Task(&task.id), &subject.rule()),
             Choice::Always => add_rule(app, Scope::Repo(&task.repo), &subject.rule()),
@@ -1204,6 +1208,22 @@ pub(super) fn apply_no_tool_answer(app: &App, task: &mut Task, capability: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answered_subject_stays_answered_after_the_line_is_reworded() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        let (a, b) = (
+            Subject::Path("docs/a.md".into()),
+            Subject::Tool("mcp__x".into()),
+        );
+        assert!(!already_answered(&task, std::slice::from_ref(&a)));
+        record_permission_answer(&mut task, &a, &Choice::Deny(None));
+        task.decisions = vec!["reworded".into()];
+        assert!(already_answered(&task, std::slice::from_ref(&a)));
+        assert!(!already_answered(&task, &[a.clone(), b.clone()]));
+        record_permission_answer(&mut task, &b, &Choice::Once);
+        assert!(already_answered(&task, &[a, b]));
+    }
 
     #[test]
     fn a_directory_rule_covers_what_is_under_it_and_nothing_else() {

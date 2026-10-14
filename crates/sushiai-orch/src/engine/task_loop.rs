@@ -3116,14 +3116,20 @@ pub(super) fn waits_for_base_move(task: &Task) -> bool {
     )
 }
 
-/// The decision line that ends the wait on `base_sha` for good.
-fn base_waited_out_line(base_sha: &str) -> String {
-    format!("Orchestrator: waited out base {base_sha}; not waiting for it to move again")
+/// Ends the wait on `base_sha` for good; the decision line is a log.
+fn record_base_waited_out(task: &mut Task, base_sha: &str) {
+    task.loop_state.waited_out_bases.push(base_sha.to_string());
+    task.decisions.push(format!(
+        "Orchestrator: waited out base {base_sha}; not waiting for it to move again"
+    ));
 }
 
 /// Whether the wait on `base_sha` already ran out its bound.
 pub(super) fn base_waited_out(task: &Task, base_sha: &str) -> bool {
-    task.decisions.contains(&base_waited_out_line(base_sha))
+    task.loop_state
+        .waited_out_bases
+        .iter()
+        .any(|b| b == base_sha)
 }
 
 /// Fetches `origin/<base_ref>` and fast-forwards the local branch to it (only
@@ -3228,7 +3234,7 @@ pub(super) async fn carry_after_base_moves(
                     short_sha(&task.base_sha),
                     base_wait_max().as_secs() / 60
                 ));
-                task.decisions.push(base_waited_out_line(&task.base_sha));
+                record_base_waited_out(task, &task.base_sha.clone());
             }
             task.updated_at = now_ms();
             app.save_task_logged(task);
@@ -3628,8 +3634,7 @@ pub(super) async fn finish_after_review(
                 && (command_named_by_task(task, &failed.command)
                     || failing_test_named_by_task(task, &base_run.failing))
             {
-                task.decisions
-                    .push(kept_check_line(&failed.command, KEPT_BY_TASK_TARGET));
+                keep_check(task, &failed.command, KEPT_BY_TASK_TARGET);
             }
             if kept.contains(&failed.command) || is_kept(task, &failed.command) {
                 ordinary.push(failed);

@@ -2261,7 +2261,20 @@ pub struct Task {
 
 /// The `LoopState::state_version` a task written today carries; a task with a
 /// lower one is migrated once, when the store loads it (`store.rs`).
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
+
+/// The base-check answer that waits for the base branch to move.
+pub const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
+
+/// Whether `answer` picks `option`: whitespace, trailing punctuation and
+/// case do not matter, so `Drop this check.` is `drop this check`.
+pub fn is_option(answer: &str, option: &str) -> bool {
+    answer
+        .trim()
+        .trim_end_matches(['.', ',', '!', '?', ';', ':'])
+        .trim_end()
+        .eq_ignore_ascii_case(option)
+}
 
 fn legacy_state_version() -> u32 {
     0
@@ -2280,8 +2293,26 @@ impl Default for LoopState {
             dependency_restarted: false,
             unreviewed_parts: Vec::new(),
             impossible_answers: Vec::new(),
+            kept_checks: Vec::new(),
+            base_answers: Vec::new(),
+            waited_out_bases: Vec::new(),
+            answered_permissions: Vec::new(),
         }
     }
+}
+
+/// An answer to the question about a check that fails on the base, kept per
+/// command: who gave it and whether it waits for the base to move.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BaseAnswer {
+    pub command: String,
+    /// The base the question was asked on; empty when an old record named none.
+    pub sha: String,
+    /// `Owner`, `Lead`, `Orchestrator`, `policy` or `judge`; empty when an old
+    /// record does not say.
+    pub by: String,
+    /// The answer was `retry after the base is fixed`.
+    pub retry: bool,
 }
 
 /// A landed subtask that no review read, as its parent's pull request names it.
@@ -2328,6 +2359,19 @@ pub struct LoopState {
     /// The criterion of each impossible question the answer policy answered.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub impossible_answers: Vec<usize>,
+    /// Checks that fail on the base and stay in the task anyway; a relaunch
+    /// does not ask about them again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept_checks: Vec<String>,
+    /// Answers to base-check questions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub base_answers: Vec<BaseAnswer>,
+    /// Bases whose bounded wait for a move already ran out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waited_out_bases: Vec<String>,
+    /// Names of the permission subjects the owner already answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub answered_permissions: Vec<String>,
 }
 
 /// What `pr_pending` opens: the remote branch, the title (empty: the task's

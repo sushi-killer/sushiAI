@@ -2,7 +2,6 @@ use super::*;
 use serde::Serialize;
 
 /// Options of the pre-existing final-check question, in the order shown.
-pub(super) const PRE_EXISTING_RETRY: &str = "retry after the base is fixed";
 pub(super) const PRE_EXISTING_DROP: &str = "drop all";
 const PRE_EXISTING_OPTIONS: [&str; 3] = [PRE_EXISTING_RETRY, PRE_EXISTING_DROP, "stop"];
 
@@ -15,26 +14,27 @@ pub(super) const KEPT_BY_TASK_TARGET: &str = "the task is meant to make it pass"
 /// Why a failing check is kept by rule: the files it names do not exist on
 /// the base, and the plan creates them.
 pub(super) const KEPT_BY_PLAN: &str = "targets absent on base; the plan creates them";
-/// Why a failing check is kept by the owner's (or the policy's) `keep all`.
-pub(super) const KEPT_BY_ANSWER: &str = "it fails on the base until the subtasks land";
 
-/// The decision line that keeps a check although it fails on the base; it is
-/// what stops a relaunch from asking again.
-pub(super) fn kept_check_line(command: &str, reason: &str) -> String {
-    format!("Orchestrator: kept check {command}, {reason}")
+/// Keeps a check although it fails on the base, once: the typed state is what
+/// stops a relaunch from asking again, the decision line is the owner's log.
+pub(super) fn keep_check(task: &mut Task, command: &str, reason: &str) {
+    if is_kept(task, command) {
+        return;
+    }
+    task.loop_state.kept_checks.push(command.to_string());
+    task.decisions
+        .push(format!("Orchestrator: kept check {command}, {reason}"));
 }
 
 /// Whether `task` already keeps `command` although it fails on the base.
 pub(super) fn is_kept(task: &Task, command: &str) -> bool {
-    [KEPT_BY_PLAN, KEPT_BY_ANSWER, KEPT_BY_TASK_TARGET]
-        .iter()
-        .any(|reason| task.decisions.contains(&kept_check_line(command, reason)))
+    task.loop_state.kept_checks.iter().any(|c| c == command)
 }
 
 /// The one owner question for every check that fails on `base_sha`: what
 /// each of them printed is quoted, the commands are listed in `commands`.
 fn base_check_question(failed: &[VerifyOutcome], base_sha: &str, options: [&str; 3]) -> Question {
-    let sha: String = base_sha.chars().take(7).collect();
+    let sha = short7(base_sha);
     let text = match failed {
         [one] => format!(
             "{} already fails on base {sha}: {}",
@@ -256,10 +256,11 @@ pub(super) fn keep_planned_checks(app: &App, task: &mut Task, failing: &[String]
         .into_iter()
         .filter(|t| t.parent.as_deref() == Some(task.id.as_str()) && !t.archived)
         .collect();
-    let paths: Vec<&String> = task
+    let paths: Vec<String> = task
         .paths
         .iter()
         .chain(children.iter().flat_map(|c| c.paths.iter()))
+        .cloned()
         .collect();
     let mut kept = Vec::new();
     for command in failing {
@@ -273,95 +274,77 @@ pub(super) fn keep_planned_checks(app: &App, task: &mut Task, failing: &[String]
         if !planned {
             continue;
         }
-        let line = kept_check_line(command, KEPT_BY_PLAN);
-        if !task.decisions.contains(&line) {
-            task.decisions.push(line);
-        }
+        keep_check(task, command, KEPT_BY_PLAN);
         kept.push(command.clone());
     }
     kept
 }
 
-/// Whether `answer` picks `option`: whitespace, trailing punctuation and
-/// case do not matter, so `Drop this check.` is `drop this check`.
-pub(super) fn is_option(answer: &str, option: &str) -> bool {
-    answer
-        .trim()
-        .trim_end_matches(['.', ',', '!', '?', ';', ':'])
-        .trim_end()
-        .eq_ignore_ascii_case(option)
-}
-
-fn base_check_prefix(who: &str, command: &str, base_sha: &str) -> String {
-    let sha: String = base_sha.chars().take(7).collect();
-    format!("{who}: base check {command} on {sha} -> ")
-}
-
 /// The decision line recording an answer to a base-check question, by `who`
-/// (`Owner`, `Lead` or `Orchestrator`).
+/// (`Owner`, `Lead` or `Orchestrator`). A log line: nothing reads it back.
 pub(super) fn base_check_line(who: &str, command: &str, base_sha: &str, answer: &str) -> String {
-    format!("{}{answer}", base_check_prefix(who, command, base_sha))
+    format!(
+        "{who}: base check {command} on {} -> {answer}",
+        short7(base_sha)
+    )
+}
+
+/// The first seven characters of a base SHA, which is all a question quotes.
+fn short7(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 /// Whether the owner, lead or orchestrator agent already answered the
 /// base-check question for this command on this base.
 pub(super) fn base_check_answered(task: &Task, command: &str, base_sha: &str) -> bool {
-    let prefixes =
-        ["Owner", "Orchestrator", "Lead"].map(|who| base_check_prefix(who, command, base_sha));
-    task.decisions
-        .iter()
-        .any(|d| prefixes.iter().any(|p| d.starts_with(p)))
+    let sha = short7(base_sha);
+    task.loop_state.base_answers.iter().any(|a| {
+        a.command == command
+            && short7(&a.sha) == sha
+            && matches!(a.by.as_str(), "Owner" | "Orchestrator" | "Lead")
+    })
 }
 
 /// Whether a non-owner already retried this command. The RPC gate passes a
 /// base SHA; the answer policy checks the command across bases, as its rules do.
 pub(super) fn non_owner_base_retry(task: &Task, command: &str, base_sha: Option<&str>) -> bool {
-    let decision = task.decisions.iter().any(|d| {
-        ["Orchestrator", "Lead"].iter().any(|who| {
-            let answer = if let Some(sha) = base_sha {
-                d.strip_prefix(&base_check_prefix(who, command, sha))
-            } else {
-                d.strip_prefix(&format!("{who}: base check {command} on "))
-                    .and_then(|rest| rest.split_once(" -> "))
-                    .filter(|(sha, _)| {
-                        !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit())
-                    })
-                    .map(|(_, answer)| answer)
-            };
-            answer.is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
-        })
-    });
-    decision
-        || task.assumptions.iter().any(|a| {
-            matches!(a.by.as_str(), "policy" | "judge")
-                && a.kind == Some(QuestionKind::PreexistingFailure)
-                && is_option(&a.answer, PRE_EXISTING_RETRY)
-                && a.commands.iter().any(|c| c == command)
-                && base_sha.is_none_or(|sha| {
-                    let sha: String = sha.chars().take(7).collect();
-                    let first_line = a.question.lines().next().unwrap_or_default();
-                    first_line.contains(&format!(" already fails on base {sha}:"))
-                        || first_line.contains(&format!(" already fail on base {sha}:"))
-                })
-        })
+    let sha = base_sha.map(short7);
+    task.loop_state.base_answers.iter().any(|a| {
+        a.retry
+            && a.command == command
+            && matches!(a.by.as_str(), "Orchestrator" | "Lead" | "policy" | "judge")
+            && sha.as_ref().is_none_or(|sha| short7(&a.sha) == *sha)
+    })
 }
 
 fn base_retry_line(command: &str, base_sha: &str) -> String {
     format!("Orchestrator: retry base check {command} after {base_sha} moves")
 }
 
-pub(super) fn record_base_retry(
+/// Records an answer to a base-check question, by `by` (`Owner`, `Lead`,
+/// `Orchestrator`, `policy` or `judge`): the typed answer per command is the
+/// state; a retry also leaves its decision line for the owner to read.
+pub(super) fn record_base_answer(
     task: &mut Task,
     commands: &[String],
     base_sha: &str,
+    by: &str,
     answer: &str,
 ) {
-    if is_option(answer, PRE_EXISTING_RETRY) {
-        for command in commands {
-            let line = base_retry_line(command, base_sha);
-            if !task.decisions.contains(&line) {
-                task.decisions.push(line);
-            }
+    let retry = is_option(answer, PRE_EXISTING_RETRY);
+    for command in commands {
+        let entry = BaseAnswer {
+            command: command.clone(),
+            sha: base_sha.to_string(),
+            by: by.to_string(),
+            retry,
+        };
+        if task.loop_state.base_answers.contains(&entry) {
+            continue;
+        }
+        task.loop_state.base_answers.push(entry);
+        if retry {
+            task.decisions.push(base_retry_line(command, base_sha));
         }
     }
 }
@@ -374,33 +357,11 @@ pub(super) fn base_retry_requested(task: &Task, commands: &[String], base_sha: &
         return false;
     }
     commands.iter().any(|command| {
-        if task.decisions.contains(&base_retry_line(command, base_sha)) {
-            return true;
-        }
-        let retry_prefix = format!("Orchestrator: retry base check {command} after ");
-        if task
-            .decisions
-            .iter()
-            .any(|line| line.starts_with(&retry_prefix))
-        {
-            return false;
-        }
-        // Tasks answered before full-SHA retry records existed.
-        ["Owner", "Orchestrator"].iter().any(|who| {
-            let prefix = base_check_prefix(who, command, base_sha);
-            task.decisions.iter().any(|line| {
-                line.strip_prefix(&prefix)
-                    .is_some_and(|answer| is_option(answer, PRE_EXISTING_RETRY))
-            })
-        }) || task.assumptions.iter().any(|a| {
-            !a.overturned
-                && a.kind == Some(QuestionKind::PreexistingFailure)
-                && a.commands.contains(command)
-                && is_option(&a.answer, PRE_EXISTING_RETRY)
-                && a.question.contains(&format!(
-                    "base {}:",
-                    base_sha.chars().take(7).collect::<String>()
-                ))
+        task.loop_state.base_answers.iter().any(|a| {
+            // An old record may quote only the first seven characters.
+            a.retry
+                && &a.command == command
+                && (a.sha == base_sha || (a.sha.len() <= 7 && base_sha.starts_with(&a.sha)))
         })
     })
 }
@@ -416,7 +377,8 @@ pub(super) fn record_owner_base_check(
     answer: &str,
     policy_answered: bool,
 ) {
-    record_base_retry(task, commands, base_sha, answer);
+    let by = answerer_name(task.question_history.last().map(|h| h.answered_by));
+    record_base_answer(task, commands, base_sha, by, answer);
     if !policy_answered {
         if let Some(who) = answerer_label(task) {
             for command in commands {
@@ -424,6 +386,17 @@ pub(super) fn record_owner_base_check(
                     .push(base_check_line(who, command, base_sha, answer));
             }
         }
+    }
+}
+
+/// Who gave an answer, as the typed state names them.
+pub(super) fn answerer_name(by: Option<AnsweredBy>) -> &'static str {
+    match by {
+        Some(AnsweredBy::Orchestrator | AnsweredBy::Overseer) => "Orchestrator",
+        Some(AnsweredBy::Lead) => "Lead",
+        Some(AnsweredBy::Policy) => "policy",
+        Some(AnsweredBy::Judge) => "judge",
+        Some(AnsweredBy::Owner) | None => "Owner",
     }
 }
 
@@ -1796,8 +1769,29 @@ mod tests {
         let sha = "0123456789abcdef";
         assert!(!base_check_answered(&task, "npm test", sha));
         let cmds = ["npm test".to_string()];
+        let failed = VerifyOutcome {
+            command: "npm test".into(),
+            code: Some(1),
+            tail: "tail".into(),
+            ms: 1,
+            ..Default::default()
+        };
+        task.base_sha = sha.to_string();
+        let q = pre_existing_question(&[failed], sha);
+        crate::engine::answer_policy::record_answered_question(
+            &mut task,
+            &q,
+            "drop all",
+            AnsweredBy::Policy,
+        );
         record_owner_base_check(&mut task, &cmds, sha, "drop all", true);
         assert!(!base_check_answered(&task, "npm test", sha));
+        crate::engine::answer_policy::record_answered_question(
+            &mut task,
+            &q,
+            "drop all",
+            AnsweredBy::Owner,
+        );
         record_owner_base_check(&mut task, &cmds, sha, "drop all", false);
         assert_eq!(
             task.decisions.last().unwrap(),
@@ -1949,12 +1943,43 @@ mod tests {
     }
 
     #[test]
-    fn a_task_target_keep_decision_survives_later_base_checks() {
+    fn a_task_target_keep_survives_later_base_checks_and_new_wording() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
-        task.decisions
-            .push(kept_check_line("cargo test", KEPT_BY_TASK_TARGET));
+        keep_check(&mut task, "cargo test", KEPT_BY_TASK_TARGET);
+        task.decisions = vec!["reworded".into()];
         assert!(is_kept(&task, "cargo test"));
         assert!(!is_kept(&task, "npm test"));
+        keep_check(&mut task, "cargo test", KEPT_BY_TASK_TARGET);
+        assert_eq!(task.loop_state.kept_checks, vec!["cargo test".to_string()]);
+    }
+
+    #[test]
+    fn a_base_answer_holds_after_its_decision_line_changes() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        let cmds = vec!["npm test".to_string()];
+        record_base_answer(&mut task, &cmds, "0123456789", "Lead", PRE_EXISTING_RETRY);
+        task.decisions = vec!["reworded".into()];
+        assert!(base_check_answered(&task, "npm test", "0123456789"));
+        assert!(!base_check_answered(&task, "npm test", "fffffff"));
+        assert!(non_owner_base_retry(&task, "npm test", Some("0123456789")));
+        assert!(non_owner_base_retry(&task, "npm test", None));
+        assert!(base_retry_requested(&task, &cmds, "0123456789"));
+        assert!(!base_retry_requested(&task, &cmds, "fffffff0"));
+        // An owner's retry is a request but not a non-owner retry.
+        let mut owned = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        record_base_answer(&mut owned, &cmds, "0123456789", "Owner", PRE_EXISTING_RETRY);
+        assert!(!non_owner_base_retry(&owned, "npm test", None));
+        assert!(base_retry_requested(&owned, &cmds, "0123456789"));
+    }
+
+    #[test]
+    fn a_waited_out_base_stops_a_retry_whatever_the_lines_say() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Waiting);
+        let cmds = vec!["npm test".to_string()];
+        record_base_answer(&mut task, &cmds, "0123456789", "Owner", PRE_EXISTING_RETRY);
+        task.loop_state.waited_out_bases.push("0123456789".into());
+        task.decisions.clear();
+        assert!(!base_retry_requested(&task, &cmds, "0123456789"));
     }
 }
 
@@ -1965,12 +1990,14 @@ mod answer_caller_tests {
     #[test]
     fn a_retry_of_a_longer_command_does_not_cover_its_prefix_command() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.decisions.push(base_check_line(
+        let base_sha = task.base_sha.clone();
+        record_base_answer(
+            &mut task,
+            &["check on target".to_string()],
+            &base_sha,
             "Lead",
-            "check on target",
-            &task.base_sha,
             PRE_EXISTING_RETRY,
-        ));
+        );
         assert!(non_owner_base_retry(&task, "check on target", None));
         assert!(!non_owner_base_retry(&task, "check", None));
         assert!(!non_owner_base_retry(&task, "check", Some(&task.base_sha)));

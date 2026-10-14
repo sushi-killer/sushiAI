@@ -150,7 +150,7 @@ fn thirty_sessions_awake_asleep_and_after_a_hard_restart() {
         wait_idle(&mut client, id);
     }
     for id in &shells {
-        wait_until("a shell to finish printing", 60, || {
+        wait_until("a shell to finish printing", || {
             text_of(&mut client, id).contains("shell-flood-done")
         });
     }
@@ -158,10 +158,10 @@ fn thirty_sessions_awake_asleep_and_after_a_hard_restart() {
 
     // From here an idle agent sleeps after two seconds.
     client.call("daemon.configure", json!({"hibernateAfterSecs": 2}));
-    wait_until("20 sessions asleep", 120, || {
+    wait_until("20 sessions asleep", || {
         count(&mut client, "hibernated") == 2 * PER_KIND
     });
-    wait_until("only the shell holders left", 30, || {
+    wait_until("only the shell holders left", || {
         sandbox.holders().len() == PER_KIND
     });
     assert_eq!(count(&mut client, "running"), PER_KIND, "the shells run on");
@@ -175,7 +175,7 @@ fn thirty_sessions_awake_asleep_and_after_a_hard_restart() {
     client.call("daemon.configure", json!({"hibernateAfterSecs": 0}));
     let (_, first) = &agents[0];
     client.type_text(first, "abc");
-    wait_until("abc to arrive", 30, || rig.typed() == "abc");
+    wait_until("abc to arrive", || rig.typed() == "abc");
     wait_status(&mut client, first, "running");
 
     // A reboot: every holder, its child and the daemon die at once.
@@ -185,12 +185,12 @@ fn thirty_sessions_awake_asleep_and_after_a_hard_restart() {
         kill(*holder, "-KILL");
     }
     kill(daemon, "-KILL");
-    wait_until("the processes to end", 15, || {
+    wait_until("the processes to end", || {
         !alive(daemon) && holders.iter().all(|h| !alive(*h))
     });
     let daemon = sandbox.start_daemon();
     let mut client = sandbox.client();
-    wait_until("20 hibernated and 10 exited", 60, || {
+    wait_until("20 hibernated and 10 exited", || {
         count(&mut client, "hibernated") == 2 * PER_KIND && count(&mut client, "exited") == PER_KIND
     });
     for id in [&agents[0].1, &agents[PER_KIND].1] {

@@ -171,17 +171,26 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
         .env("SUSHIAI_HOME", home)
         .env("HOME", &user)
         .env("CODEX_HOME", user.join(".codex"))
+        // An owner-set wrapper turns the compiler cache off: a test daemon must not start
+        // or join the owner's sccache server (fixed port 4227).
+        .env("RUSTC_WRAPPER", "")
         .stdout(log.try_clone().unwrap())
         .stderr(log);
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    // Another test process running `cargo build` renames its output over the binary for a
-    // moment; that gap is the only reason a spawn finds nothing there.
+    // A cargo build in another test process renames its output over the binary for a moment
+    // (nothing there), and a binary just written can still be open for writing
+    // (`ExecutableFileBusy`): both clear on their own.
     let start = Instant::now();
     let child = loop {
         match cmd.spawn() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && start.elapsed() < SPAWN_RETRY => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ExecutableFileBusy
+                ) && start.elapsed() < SPAWN_RETRY =>
+            {
                 std::thread::sleep(Duration::from_millis(20));
             }
             spawned => break spawned.expect("failed to spawn sushiai daemon"),
@@ -194,7 +203,7 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
     DaemonChild(child)
 }
 
-/// How long a spawn retries while the binary is missing.
+/// How long a spawn retries while the binary is missing or busy.
 const SPAWN_RETRY: Duration = Duration::from_secs(5);
 
 /// The pid of the daemon last spawned for each socket, so `wait_for_socket` can notice a

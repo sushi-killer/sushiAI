@@ -60,8 +60,8 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
     let pidfile = tmp.path().join("child.pid");
     // `wait` keeps the `sh -c` process itself alive for the full sleep,
     // so the 300ms timeout fires while both it and the backgrounded
-    // `sleep` are still running and share its process group (killpg's
-    // target). A naive `timeout(...)` around `Command::output()` would
+    // `sleep` (if the shell got that far) are still running and share its
+    // process group (killpg's target). A naive `timeout(...)` around `Command::output()` would
     // stop waiting here but leave the whole group running.
     let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
 
@@ -80,19 +80,13 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
     .await;
     assert!(outcome.tail.contains("timed out"));
 
-    let pid_text = std::fs::read_to_string(&pidfile).expect("child wrote its pid");
-    let pid: i32 = pid_text.trim().parse().expect("valid pid");
-    let start = std::time::Instant::now();
-    loop {
-        let alive = unsafe { libc::kill(pid, 0) == 0 };
-        if !alive {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "backgrounded sleep {pid} is still alive after the verify command timed out"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // The timeout can fire before the shell started the sleep: then there is nothing to
+    // outlive it. Whatever the shell did start was in the group and must be gone.
+    let pid = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok());
+    if let Some(pid) = pid {
+        assert_pid_gone_within(pid).await;
     }
 }
 
@@ -348,34 +342,53 @@ fn detached_sleep_command(dir: &Path, pidfile: &Path) -> String {
     crate::procs::testing::detach(&exe, pidfile)
 }
 
-async fn assert_pid_gone(pidfile: &Path) {
-    let pid: i32 = std::fs::read_to_string(pidfile)
-        .expect("the check wrote the pid")
-        .trim()
-        .parse()
-        .expect("valid pid");
+/// Waits until the process is gone (a killed process may stay a zombie until its parent
+/// reaps it).
+async fn assert_pid_gone_within(pid: i32) {
     let start = std::time::Instant::now();
     while unsafe { libc::kill(pid, 0) == 0 } {
         assert!(
-            start.elapsed() < Duration::from_secs(10),
+            start.elapsed() < crate::procs::testing::deadline(),
             "process {pid} is still alive"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
+async fn assert_pid_gone(pidfile: &Path) {
+    let pid: i32 = std::fs::read_to_string(pidfile)
+        .expect("the check wrote the pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+    assert_pid_gone_within(pid).await;
+}
+
+/// Starts the detached helper from a shell of its own and returns once it runs.
+fn start_detached_sleeper(dir: &Path, pidfile: &Path) {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(detached_sleep_command(dir, pidfile))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    crate::procs::testing::wait_for_file(&crate::procs::testing::ready_file(pidfile));
+}
+
 #[tokio::test]
-async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_timeout() {
+async fn verify_detached_process_inside_the_directory_is_stopped_on_timeout() {
     let tmp = tempfile::tempdir().unwrap();
     let pidfile = tmp.path().join("child.pid");
-    let cmd = format!("{}; wait", detached_sleep_command(tmp.path(), &pidfile));
+    // The helper runs before the check starts, so the timeout cannot fire before its
+    // executable is in place (a timer cannot wait for it).
+    start_detached_sleeper(tmp.path(), &pidfile);
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
     let outcome = run_one_verify_command(
         CheckContext::new(&app, None),
         tmp.path(),
-        &cmd,
-        Duration::from_millis(1500),
+        "sleep 60",
+        Duration::from_millis(300),
         None,
         "",
         &CancelToken::new(),
@@ -392,8 +405,12 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() 
     let cmd = format!("{}; wait", detached_sleep_command(tmp.path(), &pidfile));
     let cancel = CancelToken::new();
     let cancel2 = cancel.clone();
+    // Cancel once the detached helper runs from the directory.
+    let ready = crate::procs::testing::ready_file(&pidfile);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         cancel2.cancel();
     });
     let (app, _app_dir) = test_app();

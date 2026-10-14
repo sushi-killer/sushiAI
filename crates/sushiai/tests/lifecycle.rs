@@ -15,6 +15,10 @@ use common::*;
 use serde_json::{json, Value};
 use sushiai_protocol::{code, encode, Decoder, Frame, Message, Request};
 
+/// How long the daemon waits for a reattaching holder to replay (`timeout` in
+/// `sushiai-daemon/src/holder.rs`).
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[test]
 fn shutdown_can_close_its_sessions_without_a_process_list() {
     let mut sandbox = Sandbox::new();
@@ -24,8 +28,8 @@ fn shutdown_can_close_its_sessions_without_a_process_list() {
     let holder = sandbox.holder_pid(&id);
     let mut unrelated = Command::new("/bin/sleep").arg("60").spawn().unwrap();
     client.call("daemon.shutdown", json!({"closeSessions": true}));
-    wait_until("owned holder to stop", 15, || !alive(holder));
-    wait_until("daemon to exit", 15, || {
+    wait_until("owned holder to stop", || !alive(holder));
+    wait_until("daemon to exit", || {
         sandbox.daemons[0].try_wait().unwrap().is_some()
     });
     let spared = unrelated.try_wait().unwrap().is_none();
@@ -248,14 +252,14 @@ fn the_catalog_and_bindings_survive_a_daemon_restart() {
     assert_eq!(mode & 0o777, 0o600);
 
     // The state file is written by a background thread: wait for it before the kill.
-    wait_until("the state file to hold the update", 5, || {
+    wait_until("the state file to hold the update", || {
         fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("kept"))
     });
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    wait_until("the session to come back", 10, || {
+    wait_until("the session to come back", || {
         info_of(&mut sandbox.client(), &id)["status"] == "running"
     });
     let info = info_of(&mut client, &id);
@@ -346,7 +350,7 @@ fn shutdown_stops_the_daemon_and_keeps_holders_and_sessions() {
     let id = sandbox.create_shell(&mut client);
     let holder = sandbox.holder_pid(&id);
     client.call("daemon.shutdown", json!({}));
-    wait_until("the daemon to stop", 10, || !alive(daemon));
+    wait_until("the daemon to stop", || !alive(daemon));
     assert!(alive(holder), "the holder died with the daemon");
     assert!(!sandbox.socket().exists(), "the socket was left behind");
     // Nobody restarts it: the next client starts a daemon, which finds the session again.
@@ -354,7 +358,7 @@ fn shutdown_stops_the_daemon_and_keeps_holders_and_sessions() {
     assert!(!sandbox.socket().exists(), "the daemon restarted itself");
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    wait_until("the session to come back", 10, || {
+    wait_until("the session to come back", || {
         info_of(&mut client, &id)["status"] == "running"
     });
     client.call("session.close", json!({"id": id, "graceful": false}));
@@ -376,7 +380,7 @@ fn a_daemon_that_is_stopping_refuses_changes() {
     assert_eq!(refused.code, code::SHUTTING_DOWN);
     // From another connection, in the grace period: refused, or kept in the state file.
     let raced = other.try_call("session.create", create);
-    wait_until("the daemon to stop", 10, || !alive(daemon));
+    wait_until("the daemon to stop", || !alive(daemon));
     match raced {
         Err(e) => assert_eq!(e.code, code::SHUTTING_DOWN, "{e:?}"),
         Ok(created) => {
@@ -446,17 +450,18 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
     let mut client = sandbox.client();
     let live = sandbox.create_shell(&mut client);
     kill(first, "-KILL");
-    wait_until("daemon to die", 5, || !alive(first));
+    wait_until("daemon to die", || !alive(first));
 
     // A second session whose holder accepts the connection and never answers. It is listed
     // first, so a one-by-one recovery would wait out its 10 s timeout before the live one.
     let hung = "00hung";
     let sock = sandbox.home().join("sessions").join(format!("{hung}.sock"));
     let listener = UnixListener::bind(&sock).expect("bind fake holder");
+    let (hang_up, hang_up_now) = std::sync::mpsc::channel::<()>();
     let silent = std::thread::spawn(move || {
         let held: Vec<_> = listener.incoming().take(1).flatten().collect();
-        // It hangs up after a while: the daemon then gives that session up.
-        sleep(Duration::from_secs(8));
+        // It hangs up when the test says so: the daemon then gives that session up.
+        let _ = hang_up_now.recv();
         drop(held);
     });
     let state = sandbox.home().join("state.json");
@@ -473,7 +478,7 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
     sandbox.start_daemon();
     let mut client = sandbox.client();
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < RECOVERY_TIMEOUT,
         "hello waited for recovery"
     );
     let status_of = |list: &Value, id: &str| {
@@ -489,7 +494,7 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
         status_of(&first, hung).is_some() && status_of(&first, &live).is_some(),
         "{first}"
     );
-    wait_until("the live session to come back", 5, || {
+    wait_until("the live session to come back", || {
         status_of(&client.call("session.list", Value::Null), &live) == Some(json!("running"))
     });
     // The slow one stays listed as detached, and stays in the state file.
@@ -504,7 +509,8 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
         "a detached session fell out of the state file"
     );
     // Giving up on the slow one is announced as a settled status.
-    client.pump_until("session.updated", 15, |c| {
+    hang_up.send(()).expect("hang up the slow holder");
+    client.pump_until("session.updated", |c| {
         c.notes
             .iter()
             .any(|(m, p)| m == "session.updated" && p["id"] == hung && p["status"] == "exited")
@@ -593,7 +599,7 @@ fn daemon_with_log(sandbox: &mut Sandbox, level: Option<&str>) -> std::path::Pat
     }
     sandbox.daemons.push(command.spawn().expect("spawn"));
     let socket = sandbox.socket();
-    wait_until("daemon socket", 15, || {
+    wait_until("daemon socket", || {
         std::os::unix::net::UnixStream::connect(&socket).is_ok()
     });
     log
@@ -613,7 +619,7 @@ fn the_daemon_logs_at_warn_by_default() {
 
     let mut loud = Sandbox::new();
     let log = daemon_with_log(&mut loud, Some("info"));
-    wait_until("the listening line", 5, || {
+    wait_until("the listening line", || {
         fs::read_to_string(&log).is_ok_and(|t| t.contains("daemon listening"))
     });
 }
@@ -626,7 +632,7 @@ fn holder_signal(pid: u32, signal: &str) {
 /// daemon whose socket answers meanwhile. The caller thaws the holder with [`thaw`].
 fn restart_with_a_frozen_holder(sandbox: &mut Sandbox, daemon: u32, holder: u32) {
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     holder_signal(holder, "-STOP");
     sandbox.start_daemon();
 }
@@ -681,7 +687,7 @@ fn requests_for_a_restored_session_wait_for_its_holder() {
     let close = client.send("session.close", json!({"id": id, "graceful": false}));
     thaw(&sandbox, &id, holder);
     client.response("session.close", close).expect("close");
-    wait_until("the session to end", 10, || {
+    wait_until("the session to end", || {
         info_of(&mut client, &id)["status"] == "exited"
     });
 }
@@ -694,10 +700,10 @@ fn a_request_for_a_session_that_never_comes_back_gets_the_normal_error() {
     let id = sandbox.create_shell(&mut client);
     let holder = sandbox.holder_pid(&id);
     kill(first, "-KILL");
-    wait_until("daemon to die", 5, || !alive(first));
+    wait_until("daemon to die", || !alive(first));
     // The holder dies while no daemon runs: the restored session ends as exited.
     kill(holder, "-KILL");
-    wait_until("holder to die", 5, || !alive(holder));
+    wait_until("holder to die", || !alive(holder));
     sandbox.start_daemon();
     let mut client = sandbox.client();
     let err = client
@@ -807,7 +813,7 @@ fn a_proxy_started_right_after_shutdown_reaches_the_new_daemon() {
     let mut sandbox = Sandbox::new();
     let daemon = sandbox.start_daemon();
     sandbox.client().call("daemon.shutdown", Value::Null);
-    wait_until("the socket to go", 5, || !sandbox.socket().exists());
+    wait_until("the socket to go", || !sandbox.socket().exists());
     let started = Instant::now();
     let mut proxy = Command::new(BIN)
         .arg("proxy")
@@ -880,7 +886,7 @@ fn agent_session_markers_never_reach_a_session() {
                "env": {"CLAUDE_CODE_CHILD_SESSION": "1", "CODEX_COMPANION_X": "1", "KEEP_ME": "yes"}}),
     );
     assert!(created["id"].is_string(), "{created}");
-    wait_until("the child's variables", 10, || {
+    wait_until("the child's variables", || {
         fs::read_to_string(&out).is_ok_and(|text| text.contains("KEEP_ME=yes"))
     });
     let text = fs::read_to_string(&out).expect("read");
@@ -906,14 +912,14 @@ fn a_reattach_at_the_same_size_does_not_resize_the_child() {
     let id = created["id"].as_str().expect("id").to_string();
     wait_snapshot_contains(&mut client, &id, "-end");
     let before = client.attach_result(&id);
-    wait_until("the state file to hold the size", 5, || {
+    wait_until("the state file to hold the size", || {
         fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("45"))
     });
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    wait_until("the session to come back", 10, || {
+    wait_until("the session to come back", || {
         info_of(&mut sandbox.client(), &id)["status"] == "running"
     });
     let after = client.attach_result(&id);
@@ -942,15 +948,15 @@ fn a_recovered_screen_replays_output_at_the_sizes_it_was_written_at() {
     let id = created["id"].as_str().expect("id").to_string();
     wait_snapshot_contains(&mut client, &id, "-end");
     client.call("session.resize", json!({"id": id, "cols": 44, "rows": 9}));
-    wait_until("the state file to hold the size", 5, || {
+    wait_until("the state file to hold the size", || {
         fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("44"))
     });
     let before = client.attach_result(&id);
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    wait_until("the session to come back", 10, || {
+    wait_until("the session to come back", || {
         info_of(&mut sandbox.client(), &id)["status"] == "running"
     });
     let after = client.attach_result(&id);

@@ -104,12 +104,12 @@ fn a_hand_started_claude_is_reported_with_its_session_and_cleared_on_exit() {
     client.type_text(&id, "claude\n");
     client.wait_streamed("fake agent up");
 
-    client.pump_until("claude detected", 6, |c| {
+    client.pump_until("claude detected", |c| {
         meta_with(c, &id, json!("claude")).is_some()
     });
     let meta = meta_with(&client, &id, json!("claude")).expect("meta");
     // The session file may land just after the first detection.
-    client.pump_until("claude session id", 6, |c| {
+    client.pump_until("claude session id", |c| {
         meta_with(c, &id, json!("claude")).is_some_and(|m| m["agentSession"] == SESSION)
     });
     assert!(meta["transcriptPath"].is_null());
@@ -133,7 +133,7 @@ fn a_hand_started_claude_is_reported_with_its_session_and_cleared_on_exit() {
     assert!(entry.get("agentStatus").is_none(), "no status machine");
 
     client.type_text(&id, "\n");
-    client.pump_until("claude cleared", 6, |c| {
+    client.pump_until("claude cleared", |c| {
         meta_with(c, &id, Value::Null).is_some_and(|m| m["agentSession"].is_null())
     });
     let listed = client.call("session.list", Value::Null);
@@ -155,7 +155,7 @@ fn a_shell_that_exits_by_itself_right_after_its_agent_leaves_no_agent_to_reopen(
     client.attach(&id);
     client.type_text(&id, "claude\n");
     client.wait_streamed("fake agent up");
-    client.pump_until("claude detected", 6, |c| {
+    client.pump_until("claude detected", |c| {
         meta_with(c, &id, json!("claude")).is_some()
     });
     // The agent quits and the shell is left before the next poll could notice.
@@ -184,11 +184,11 @@ fn a_hand_started_codex_reports_the_rollout_it_holds_open_and_none_after_it_quit
     client.attach(&id);
     client.type_text(&id, "codex\n");
     client.wait_streamed("fake codex up");
-    client.pump_until("codex and its conversation", 8, |c| {
+    client.pump_until("codex and its conversation", |c| {
         meta_with(c, &id, json!("codex")).is_some_and(|m| m["agentSession"] == CODEX_SESSION)
     });
     client.type_text(&id, "\n");
-    client.pump_until("codex cleared", 8, |c| {
+    client.pump_until("codex cleared", |c| {
         meta_with(c, &id, Value::Null).is_some_and(|m| m["agentSession"].is_null())
     });
 }

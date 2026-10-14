@@ -83,7 +83,7 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
     let mut client = sandbox.client();
     let created = client.call("session.create", settings_params());
     let id = created["id"].as_str().expect("id").to_string();
-    wait_until("the fake claude argv", 15, || {
+    wait_until("the fake claude argv", || {
         fs::read_to_string(&out).is_ok_and(|t| t.contains("--settings"))
     });
     let argv = fs::read_to_string(&out).expect("argv");
@@ -106,10 +106,12 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
     );
 
     // Never persisted, never listed.
-    wait_until("the state file", 15, || {
-        fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains(&id))
+    // The state file is written in the background: wait until it holds the session and its
+    // recorded hooks, then check what it must not hold.
+    wait_until("the state file to record the session and its hooks", || {
+        fs::read_to_string(sandbox.home().join("state.json"))
+            .is_ok_and(|t| t.contains(&id) && t.contains("PermissionRequest"))
     });
-    sandbox_flush(&mut client);
     let state = fs::read_to_string(sandbox.home().join("state.json")).expect("state");
     let list = client.call("session.list", Value::Null).to_string();
     for text in [&state, &list] {
@@ -117,12 +119,6 @@ fn claude_settings_join_our_hooks_in_the_single_settings_argument() {
         assert!(!text.contains("apiKeyHelper"), "settings leaked: {text}");
         assert!(text.contains("PermissionRequest"), "our hooks are recorded");
     }
-}
-
-/// The state file is written in the background: a second create round trip lets it catch up.
-fn sandbox_flush(client: &mut Client) {
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    client.call("session.list", Value::Null);
 }
 
 // G1
@@ -193,11 +189,11 @@ fn the_same_idempotency_key_returns_the_same_session_even_after_a_restart() {
     );
 
     // The key is persisted with the session.
-    wait_until("the key in the state file", 15, || {
+    wait_until("the key in the state file", || {
         fs::read_to_string(sandbox.home().join("state.json")).is_ok_and(|t| t.contains("\"k1\""))
     });
     kill(daemon, "-KILL");
-    wait_until("daemon to die", 5, || !alive(daemon));
+    wait_until("daemon to die", || !alive(daemon));
     sandbox.start_daemon();
     let mut client = sandbox.client();
     assert_eq!(
@@ -558,7 +554,7 @@ fn open_checks_target_and_path() {
         .as_str()
         .expect("id")
         .to_string();
-    wait_until("the token", 15, || {
+    wait_until("the token", || {
         fs::read_to_string(&token).is_ok_and(|t| !t.is_empty())
     });
     let token = fs::read_to_string(&token).expect("token");

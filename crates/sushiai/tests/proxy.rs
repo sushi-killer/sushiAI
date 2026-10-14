@@ -12,6 +12,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use common::wait_until;
 use serde_json::{json, Value};
 use sushiai_protocol::{encode, Decoder, Frame, Message, Request};
 
@@ -26,14 +27,6 @@ fn kill(pid: u32) {
         .args(["-KILL", &pid.to_string()])
         .stderr(Stdio::null())
         .status();
-}
-
-fn wait_until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    while !ok() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        sleep(Duration::from_millis(50));
-    }
 }
 
 /// A temp home. Drop closes its sessions through the daemon and reaps owned children.
@@ -73,7 +66,7 @@ impl Sandbox {
             .expect("spawn daemon");
         self.daemons.push(child);
         let socket = self.socket();
-        wait_until("daemon socket", 15, || UnixStream::connect(&socket).is_ok());
+        wait_until("daemon socket", || UnixStream::connect(&socket).is_ok());
     }
 
     fn proxy(&mut self) -> Proxy {
@@ -108,7 +101,7 @@ impl Sandbox {
     /// The single daemon of this home; fails loudly when there is none or several.
     fn daemon_pid(&self) -> u32 {
         let mut found = Vec::new();
-        wait_until("a daemon process for this home", 10, || {
+        wait_until("a daemon process for this home", || {
             found = self.daemon_pids();
             !found.is_empty()
         });
@@ -356,11 +349,22 @@ fn two_proxies_on_an_empty_home_start_exactly_one_daemon() {
     let mut b = sandbox.proxy();
     assert_eq!(a.hello()["protocol"], 1);
     assert_eq!(b.hello()["protocol"], 1);
-    // The loser waits for the home lock for a few seconds before it gives up.
-    wait_until("the second daemon to give up", 10, || {
-        sandbox.daemon_pids().len() == 1
-    });
+    // The loser waits for the home lock for a few seconds before it gives up. The lock file
+    // names one pid whatever the loser does, so count the daemon processes themselves: they
+    // are children of the two proxies, which are alive here. Leaving before the loser exits
+    // would let it take the lock when the home is shut down and outlive the test.
+    let proxies = [a.child.id(), b.child.id()];
+    let daemons = || {
+        common::processes()
+            .into_iter()
+            .filter(|(_, parent, argv)| {
+                proxies.contains(parent) && argv.ends_with("sushiai daemon")
+            })
+            .count()
+    };
+    wait_until("the second daemon to give up", || daemons() == 1);
     sleep(Duration::from_millis(500));
+    assert_eq!(daemons(), 1);
     assert_eq!(sandbox.daemon_pids().len(), 1);
 }
 
@@ -444,7 +448,7 @@ fn the_auto_started_daemon_gets_a_clean_environment_and_the_login_path() {
             "cwd": "/tmp", "cols": 80, "rows": 24
         }),
     );
-    wait_until("vars file", 10, || {
+    wait_until("vars file", || {
         fs::read_to_string(&file).is_ok_and(|t| t.contains("PATH="))
     });
     let vars = fs::read_to_string(&file).expect("vars");
@@ -470,7 +474,7 @@ fn a_daemon_started_without_a_locale_gives_its_sessions_a_utf8_one() {
             "cwd": "/tmp", "cols": 80, "rows": 24
         }),
     );
-    wait_until("charmap file", 10, || file.exists());
+    wait_until("charmap file", || file.exists());
     let charmap = fs::read_to_string(&file).expect("charmap");
     assert_eq!(charmap.trim(), "UTF-8", "sessions need a UTF-8 locale");
 }
@@ -488,7 +492,7 @@ fn a_locale_the_host_sets_reaches_the_sessions_unchanged() {
             "cwd": "/tmp", "cols": 80, "rows": 24
         }),
     );
-    wait_until("vars file", 10, || file.exists());
+    wait_until("vars file", || file.exists());
     let vars = fs::read_to_string(&file).expect("vars");
     assert!(vars.lines().any(|l| l == "LANG=fr_FR.UTF-8"), "{vars}");
 }

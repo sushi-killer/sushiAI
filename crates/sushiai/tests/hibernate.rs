@@ -45,7 +45,7 @@ fn an_idle_agent_sleeps_keeps_its_screen_and_wakes_on_typing_in_order() {
     assert!(asleep["hibernatedAt"].as_u64().is_some());
     assert!(asleep.get("incarnation").is_none(), "first process is 0");
     assert!(asleep.get("tokenHash").is_none());
-    wait_until("the holder to end", 10, || sandbox.holders().is_empty());
+    wait_until("the holder to end", || sandbox.holders().is_empty());
     // The screen it had is served without waking it.
     let text = client.call("session.read", json!({"id": id}))["text"]
         .as_str()
@@ -60,7 +60,7 @@ fn an_idle_agent_sleeps_keeps_its_screen_and_wakes_on_typing_in_order() {
     client.call("session.update", json!({"id": id, "pinned": true}));
     client.type_text(&id, "abc");
     client.type_text(&id, "def");
-    wait_until("the typed text to arrive", 20, || rig.typed() == "abcdef");
+    wait_until("the typed text to arrive", || rig.typed() == "abcdef");
     wait_status(&mut client, &id, "running");
     let awake = entry(&mut client, &id);
     assert_eq!(awake["id"], id.as_str());
@@ -79,7 +79,7 @@ fn an_idle_agent_sleeps_keeps_its_screen_and_wakes_on_typing_in_order() {
     );
     // The stream carries on in one piece: the woken process starts with a terminal reset.
     client.type_text(&id, "!");
-    wait_until("more input", 10, || rig.typed() == "abcdef!");
+    wait_until("more input", || rig.typed() == "abcdef!");
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn a_woken_stream_continues_the_sequence_and_starts_with_a_reset() {
     let floor = attached["seq"].as_u64().expect("seq");
     client.call("session.update", json!({"id": id, "pinned": true}));
     client.call("session.wake", json!({"id": id}));
-    client.pump_until("the reset", 20, |c| {
+    client.pump_until("the reset", |c| {
         c.output.iter().any(|(_, d)| d.starts_with(b"\x1bc"))
     });
     client.wait_streamed("tail-marker-claude");
@@ -170,9 +170,7 @@ fn a_session_whose_holder_died_with_the_daemon_sleeps_and_wakes() {
     kill(daemon, "-KILL");
     kill(holder, "-KILL");
     kill(child, "-KILL");
-    wait_until("the processes to end", 10, || {
-        !alive(holder) && !alive(daemon)
-    });
+    wait_until("the processes to end", || !alive(holder) && !alive(daemon));
     sandbox.start_daemon();
     let mut client = sandbox.client();
     wait_status(&mut client, &id, "hibernated");
@@ -188,7 +186,7 @@ fn a_session_whose_holder_died_with_the_daemon_sleeps_and_wakes() {
     );
 
     client.type_text(&id, "xyz");
-    wait_until("the typed text to arrive", 20, || rig.typed() == "xyz");
+    wait_until("the typed text to arrive", || rig.typed() == "xyz");
     wait_status(&mut client, &id, "running");
     assert_eq!(entry(&mut client, &id)["incarnation"], 1);
     let argvs = rig.argvs();
@@ -204,10 +202,10 @@ fn stopping_the_daemon_saves_the_tail_of_a_running_agent() {
     let id = rig.create(&mut client);
     wait_idle(&mut client, &id);
     // The tail written at the change to idle is gone; only the stop can bring it back.
-    wait_until("the idle tail", 10, || tail_file(&sandbox, &id).exists());
+    wait_until("the idle tail", || tail_file(&sandbox, &id).exists());
     fs::remove_file(tail_file(&sandbox, &id)).expect("remove");
     client.call("daemon.shutdown", Value::Null);
-    wait_until("the tail saved on stop", 10, || {
+    wait_until("the tail saved on stop", || {
         fs::read(tail_file(&sandbox, &id))
             .is_ok_and(|t| String::from_utf8_lossy(&t).contains("tail-marker-claude"))
     });
@@ -289,7 +287,7 @@ fn a_key_that_cannot_be_read_keeps_the_record_asleep_with_error_1013() {
     client.call("session.hibernate", json!({"id": id}));
     wait_status(&mut client, &id, "hibernated");
     client.call("daemon.shutdown", Value::Null);
-    wait_until("the daemon to stop", 10, || !alive(daemon));
+    wait_until("the daemon to stop", || !alive(daemon));
     // A new daemon has not read the key yet; the key file is now unreadable (a directory).
     let key = rig.dir.path().join("launch.key");
     let saved = fs::read(&key).expect("key");
@@ -341,7 +339,7 @@ fn closing_a_session_deletes_its_launch_and_a_clean_exit_keeps_it_for_reopen() {
     assert!(launch_file(&sandbox, &closed).exists());
     client.call("session.close", json!({"id": closed, "graceful": true}));
     wait_status(&mut client, &closed, "exited");
-    wait_until("the launch to go", 10, || {
+    wait_until("the launch to go", || {
         !launch_file(&sandbox, &closed).exists()
     });
     let refused = client
@@ -393,7 +391,7 @@ fn configure_saves_the_setting_and_a_state_file_of_schema_one_loads() {
     );
     let id = rig.create(&mut client);
     wait_status(&mut client, &id, "hibernated");
-    wait_until("the state file to be schema 2", 10, || {
+    wait_until("the state file to be schema 2", || {
         fs::read_to_string(sandbox.home().join("state.json"))
             .is_ok_and(|t| t.contains("\"schemaVersion\": 2") && t.contains("hibernated"))
     });
@@ -426,7 +424,7 @@ fn resizing_a_sleeping_session_succeeds_and_the_wake_uses_the_new_size() {
     client.call("session.update", json!({"id": id, "pinned": true}));
     client.type_text(&id, "x");
     wait_status(&mut client, &id, "running");
-    wait_until("the woken process to report its size", 20, || {
+    wait_until("the woken process to report its size", || {
         rig.log().contains("size 132x41")
     });
 }
@@ -448,10 +446,10 @@ fn input_typed_while_the_agent_ends_for_a_sleep_arrives_after_the_wake_in_order(
     assert_eq!(status_of(&mut client, &id), "running", "still ending");
     client.type_text(&id, "abc");
     client.type_text(&id, "def");
-    wait_until("the wake after the sleep", 30, || {
+    wait_until("the wake after the sleep", || {
         entry(&mut client, &id)["incarnation"] == 1
     });
-    wait_until("the typed text to arrive", 20, || rig.typed() == "abcdef");
+    wait_until("the typed text to arrive", || rig.typed() == "abcdef");
     wait_status(&mut client, &id, "running");
 }
 
@@ -468,7 +466,7 @@ fn a_wake_asked_while_the_agent_ends_for_a_sleep_wakes_it_once_asleep() {
     wait_idle(&mut client, &id);
     client.call("session.hibernate", json!({"id": id}));
     client.call("session.wake", json!({"id": id}));
-    wait_until("the wake after the sleep", 30, || {
+    wait_until("the wake after the sleep", || {
         entry(&mut client, &id)["incarnation"] == 1
     });
     wait_status(&mut client, &id, "running");
@@ -489,7 +487,7 @@ fn a_woken_codex_that_sends_no_hook_is_idle_so_it_can_sleep_again() {
     wait_status(&mut client, &id, "hibernated");
     client.call("session.wake", json!({"id": id}));
     wait_status(&mut client, &id, "running");
-    wait_until("idle after the wake", 10, || {
+    wait_until("idle after the wake", || {
         entry(&mut client, &id)["agentStatus"] == "idle"
     });
     // And idle means it sleeps again once the threshold passes.
@@ -508,7 +506,7 @@ fn a_hibernated_record_without_a_launch_at_start_is_exited() {
     client.call("session.hibernate", json!({"id": id}));
     wait_status(&mut client, &id, "hibernated");
     client.call("daemon.shutdown", Value::Null);
-    wait_until("the daemon to stop", 10, || !alive(daemon));
+    wait_until("the daemon to stop", || !alive(daemon));
     fs::remove_file(launch_file(&sandbox, &id)).expect("remove launch");
     sandbox.start_daemon();
     let mut client = sandbox.client();

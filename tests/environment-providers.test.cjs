@@ -115,13 +115,17 @@ test("no provider is asked for a withheld host", async (t) => {
 });
 
 test("environmentChanged refreshes the daemons' copies", async (t) => {
+  // The 250 ms debounce runs on a mocked clock: no wall-clock margin to lose under load.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { projects } = await fixture(t);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  t.mock.timers.tick(250);
   let changes = 0;
   projects.onChange = () => (changes += 1);
   projects.environmentChanged();
   projects.environmentChanged();
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  t.mock.timers.tick(249);
+  assert.equal(changes, 0, "refreshed before the debounce elapsed");
+  t.mock.timers.tick(1);
   assert.equal(changes, 1);
 });
 

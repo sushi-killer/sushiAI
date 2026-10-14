@@ -461,7 +461,17 @@ fn evolution_approve_creates_a_task_and_adopts_it_once_done() {
     daemon.request("evolution.run", json!({}));
     let list = daemon.request("evolution.list", json!({}));
     assert_eq!(list[0]["status"], "adopted", "{list}");
-    assert_eq!(list[0]["adoptedAt"], settled["updatedAt"], "{list}");
+    // Adoption stamps the task's `updatedAt` as the run saw it. The task can be saved again
+    // after it settled, so that stamp lies between the settled snapshot and a fresh read.
+    let latest = daemon.request("task.get", json!({"id": task_id}));
+    let adopted_at = list[0]["adoptedAt"].as_i64().expect("adoptedAt");
+    assert!(
+        settled["updatedAt"].as_i64().unwrap() <= adopted_at
+            && adopted_at <= latest["updatedAt"].as_i64().unwrap(),
+        "{adopted_at} outside {} ..= {}",
+        settled["updatedAt"],
+        latest["updatedAt"]
+    );
     assert!(list[0]["before"].is_object() && list[0]["after"].is_object());
     daemon.shutdown_and_wait();
 }

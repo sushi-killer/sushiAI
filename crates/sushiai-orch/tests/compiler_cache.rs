@@ -277,7 +277,6 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
     let env =
         VerifyEnvironment::with_cache(&first, path.clone(), tmp.path().join("cache"), port, false);
     let cache = env.compiler_cache.as_ref().unwrap();
-    drop(listener);
     let _server = TestServer {
         executable: std::env::split_paths(&path)
             .map(|p| p.join("sccache"))
@@ -287,6 +286,8 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
         dir: cache.dir.clone(),
         port,
     };
+    // The port is held until the server starts: nothing else can take it in between.
+    drop(listener);
     let first_run = CacheRun::begin(Some(cache.clone())).await;
     verify(&first, &env, "cargo build --offline").await;
     assert!(

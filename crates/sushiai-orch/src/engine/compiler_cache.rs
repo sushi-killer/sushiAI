@@ -43,6 +43,11 @@ impl CompilerCache {
     }
 
     pub fn for_worktree(worktree: &Path, path: &str) -> Option<Self> {
+        // A unit test never joins the owner's server (port 4227) or fills the owner's
+        // cache directory: there, only `discover` with its own directory and port builds one.
+        if cfg!(test) {
+            return None;
+        }
         let home = std::env::var_os("HOME")?;
         Self::discover(
             path,

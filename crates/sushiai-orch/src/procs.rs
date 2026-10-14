@@ -141,6 +141,8 @@ pub(crate) mod testing {
     use std::path::{Path, PathBuf};
 
     pub const ENV: &str = "SUSHIAI_TEST_SLEEPER";
+    /// A file the helper writes once it runs (its executable is then in place).
+    pub const READY_ENV: &str = "SUSHIAI_TEST_SLEEPER_READY";
     pub const ARGS: &str = "procs::tests::sleeper_helper --exact --nocapture";
 
     /// Copies the test binary to `dir/sleeper` (the test, not the check, puts
@@ -151,13 +153,45 @@ pub(crate) mod testing {
         exe
     }
 
+    /// The file the detached helper writes once it runs.
+    pub fn ready_file(pidfile: &Path) -> PathBuf {
+        let mut name = pidfile.as_os_str().to_os_string();
+        name.push(".ready");
+        PathBuf::from(name)
+    }
+
+    /// The one wall-clock budget of a positive wait: 180 s, or
+    /// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (the contract of
+    /// `tests/common` and `tests/helpers/deadline.cjs`).
+    pub fn deadline() -> std::time::Duration {
+        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0);
+        std::time::Duration::from_secs(secs.unwrap_or(180))
+    }
+
+    /// Waits until `path` exists; panics naming it at the deadline.
+    pub fn wait_for_file(path: &Path) {
+        let end = std::time::Instant::now() + deadline();
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < end,
+                "{} never appeared",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// A shell fragment starting `exe` detached into its own session, its
-    /// pid written to `pidfile`; it returns at once.
+    /// pid written to `pidfile` and its readiness to [`ready_file`]; it returns at once.
     pub fn detach(exe: &Path, pidfile: &Path) -> String {
         format!(
-            "{ENV}=1 perl -MPOSIX -e 'POSIX::setsid(); for (1..50) {{ exec {{$ARGV[0]}} @ARGV; select(undef, undef, undef, 0.02) }}' '{exe}' {ARGS} >/dev/null 2>&1 </dev/null & echo $! > '{pid}'",
+            "{ENV}=1 {READY_ENV}='{ready}' perl -MPOSIX -e 'POSIX::setsid(); for (1..50) {{ exec {{$ARGV[0]}} @ARGV; select(undef, undef, undef, 0.02) }}' '{exe}' {ARGS} >/dev/null 2>&1 </dev/null & echo $! > '{pid}'",
             exe = exe.display(),
             pid = pidfile.display(),
+            ready = ready_file(pidfile).display(),
         )
     }
 }
@@ -176,6 +210,9 @@ mod tests {
     #[test]
     fn sleeper_helper() {
         if std::env::var_os(testing::ENV).is_some() {
+            if let Some(ready) = std::env::var_os(testing::READY_ENV) {
+                std::fs::write(ready, "x").unwrap();
+            }
             std::thread::sleep(Duration::from_secs(60));
         }
     }
@@ -236,13 +273,13 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while crate::process::executable(pid)
-            .is_none_or(|e| !e.starts_with(tmp.path().canonicalize().unwrap()))
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(POLL);
-        }
+        // The helper writes its ready file once it runs: its executable is in place then.
+        testing::wait_for_file(&testing::ready_file(&pidfile));
+        assert!(
+            crate::process::executable(pid)
+                .is_some_and(|e| e.starts_with(tmp.path().canonicalize().unwrap())),
+            "the detached helper did not run from the directory"
+        );
         let parent = crate::process::parent_pid(pid);
         if parent != Some(1) {
             eprintln!("skipped: the orphan's parent is {parent:?}, not PID 1 (subreaper)");

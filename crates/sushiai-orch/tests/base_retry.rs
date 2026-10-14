@@ -8,7 +8,6 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// Implements (writes a marker) and, as the reviewer, answers a plain PASS.
 const FAKE: &str = r###"#!/bin/sh
@@ -79,18 +78,19 @@ fn a_retry_starts_no_attempt_until_the_base_branch_moves() {
     let old_base = waiting["baseSha"].as_str().unwrap().to_string();
 
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
-    std::thread::sleep(Duration::from_secs(3));
-    let idle = daemon.request("task.get", json!({"id": id}));
-    assert_eq!(idle["attempts"].as_array().unwrap().len(), 1, "{idle}");
-    assert_eq!(idle["baseSha"].as_str().unwrap(), old_base, "{idle}");
-    assert!(
-        idle["decisions"]
+    // The decision to wait is made instead of starting an attempt: once it is recorded, no
+    // attempt on the old base exists or can still start.
+    let idle = wait_until("the retry to wait for the base to move", || {
+        let task = daemon.request("task.get", json!({"id": id}));
+        task["decisions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d.as_str().unwrap().contains("waiting for")),
-        "{idle}"
-    );
+            .any(|d| d.as_str().unwrap().contains("waiting for"))
+            .then_some(task)
+    });
+    assert_eq!(idle["attempts"].as_array().unwrap().len(), 1, "{idle}");
+    assert_eq!(idle["baseSha"].as_str().unwrap(), old_base, "{idle}");
 
     commit_file(repo.path(), "FIXED.txt");
     let done = poll_until(&daemon, &id, |s| s == "done");

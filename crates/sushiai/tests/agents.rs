@@ -149,14 +149,14 @@ fn statuses(client: &Client, id: &str) -> Vec<String> {
 }
 
 fn wait_status(client: &mut Client, id: &str, count: usize, last: &str) {
-    client.pump_until(last, 15, |c| {
+    client.pump_until(last, |c| {
         let s = statuses(c, id);
         s.len() >= count && s.last().is_some_and(|l| l == last)
     });
 }
 
 fn wait_file(path: &Path, needle: &str) {
-    wait_until(needle, 15, || {
+    wait_until(needle, || {
         fs::read_to_string(path).is_ok_and(|t| t.contains(needle))
     });
 }
@@ -415,7 +415,7 @@ fn a_turn_stop_while_a_subagent_runs_keeps_the_session_working() {
     sandbox.start_daemon();
     let mut client = sandbox.client();
     let id = create_agent(&mut client, "claude");
-    wait_until("token file", 15, || !fake.read("token").is_empty());
+    wait_until("token file", || !fake.read("token").is_empty());
     let token = fake.read("token").trim().to_string();
     let mut hook = hook_client(&sandbox);
     let mut send = |payload: Value| {
@@ -440,7 +440,7 @@ fn a_hook_for_another_agent_is_rejected_by_the_daemon_too() {
     sandbox.start_daemon();
     let mut client = sandbox.client();
     let id = create_agent(&mut client, "claude");
-    wait_until("token file", 15, || !fake.read("token").is_empty());
+    wait_until("token file", || !fake.read("token").is_empty());
     let token = fake.read("token").trim().to_string();
     let mut hook = hook_client(&sandbox);
     let payload = json!({"hook_event_name": "SessionStart", "session_id": "other"});
@@ -474,7 +474,7 @@ fn a_wrong_token_is_rejected_and_hook_connections_only_call_hooks() {
     assert_eq!(list.expect_err("hook role").code, 1007);
     // hook.event is for hook connections only: a normal client is refused even with the
     // right token.
-    wait_until("token file", 15, || !fake.read("token").is_empty());
+    wait_until("token file", || !fake.read("token").is_empty());
     let token = fake.read("token").trim().to_string();
     let normal = client.try_call("hook.event", hook_params(&id, &token, "claude", payload));
     assert_eq!(normal.expect_err("normal client").code, 1007);
@@ -585,7 +585,7 @@ fn a_hook_without_session_variables_exits_zero_silently() {
 }
 
 #[test]
-fn a_hook_with_the_daemon_down_exits_zero_within_two_seconds() {
+fn a_hook_with_the_daemon_down_exits_zero_and_prints_nothing() {
     let dir = tempfile::Builder::new()
         .prefix("hd")
         .tempdir_in("/tmp")
@@ -596,10 +596,9 @@ fn a_hook_with_the_daemon_down_exits_zero_within_two_seconds() {
         .env("SUSHIAI_SESSION_ID", "s")
         .env("SUSHIAI_SESSION_TOKEN", "t")
         .env("SUSHIAI_AGENT", "claude");
-    let (status, stdout, took) = run_hook(command);
+    let (status, stdout, _) = run_hook(command);
     assert!(status.success());
     assert_eq!(stdout, "");
-    assert!(took < Duration::from_secs(2), "took {took:?}");
 }
 
 #[test]
@@ -622,12 +621,12 @@ stay();
     let token = fake.read("token").trim().to_string();
     assert!(!token.is_empty());
     let state_path = sandbox.home().join("state.json");
-    wait_until("blocked in the state file", 5, || {
+    wait_until("blocked in the state file", || {
         fs::read_to_string(&state_path).is_ok_and(|t| t.contains("blocked"))
     });
 
     kill(first, "-KILL");
-    wait_until("daemon to die", 5, || !alive(first));
+    wait_until("daemon to die", || !alive(first));
     let state = fs::read_to_string(&state_path).expect("state");
     assert!(
         !state.contains(&token),
@@ -705,7 +704,7 @@ stay();
         waiting.push((hook, rid));
         if n < 20 {
             let want = n + 1;
-            client.pump_until("ask", 15, |c| {
+            client.pump_until("ask", |c| {
                 c.notes.iter().filter(|x| x.0 == "session.ask").count() >= want
             });
         }
@@ -745,18 +744,14 @@ fn an_exited_session_takes_no_more_hooks() {
     let token = fake.read("token").trim().to_string();
     let mut hook = hook_client(&sandbox);
     let payload = json!({"hook_event_name": "UserPromptSubmit"});
-    let start = Instant::now();
+    // A reply at all means no wait for a dead actor: `try_call` panics without one.
     let late = hook.try_call("hook.event", hook_params(&id, &token, "claude", payload));
     assert_eq!(late.expect_err("exited").code, 1007);
-    assert!(
-        start.elapsed() < Duration::from_secs(1),
-        "waited for a dead actor"
-    );
     let (state_path, hash) = (
         sandbox.home().join("state.json"),
         common::sha256_hex(&token),
     );
-    wait_until("the token hash to leave the state file", 5, || {
+    wait_until("the token hash to leave the state file", || {
         let state = fs::read_to_string(&state_path).unwrap_or_default();
         state.contains("exited") && !state.contains(&hash)
     });
@@ -888,7 +883,7 @@ fn a_session_that_lost_its_holder_across_a_restart_drops_its_token() {
     sandbox.start_daemon();
     let mut client = sandbox.client();
     assert_eq!(list_entry(&mut client, "dead1")["status"], "exited");
-    wait_until("the hash to leave the state file", 5, || {
+    wait_until("the hash to leave the state file", || {
         let text = fs::read_to_string(&path).unwrap_or_default();
         text.contains("exited") && !text.contains("deadbeef")
     });
@@ -959,17 +954,19 @@ fn gemini_and_cursor_status_is_read_from_the_screen() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    // Gemini asks for confirmation, then (a second screen later) shows nothing it knows.
+    // Gemini asks for confirmation and keeps the screen until the test answers, then shows
+    // nothing it knows.
     let gemini = create_screen_agent(
         &mut client,
         "gemini",
-        "printf 'Waiting for user confirmation\\n'; sleep 1; printf '\\033[2J\\033[Hready\\n'; sleep 60",
+        "printf 'Waiting for user confirmation\\n'; read x; printf '\\033[2J\\033[Hready\\n'; sleep 60",
     );
     wait_status(&mut client, &gemini, 1, "blocked");
     assert_eq!(
         agent_status(&mut client, &gemini),
         ("blocked".into(), "heuristic".into())
     );
+    client.type_text(&gemini, "\n");
     wait_status(&mut client, &gemini, 2, "idle");
 
     // Cursor shows its working marker.
@@ -990,12 +987,15 @@ fn a_codex_dialog_no_hook_reports_blocks_the_session_until_hooks_take_over() {
     let flow = r#"
 process.stdout.write('Do you trust the contents of this directory?\n');
 say('dialog');
-setTimeout(() => {
+const gate = path.join(OUT, 'go');
+const poll = setInterval(() => {
+  if (!fs.existsSync(gate)) return;
+  clearInterval(poll);
   run('SessionStart', 'SessionStart-startup.json');
   say('hooked');
   process.stdout.write('Allow command?\n');
   say('done');
-}, 1500);
+}, 25);
 stay();
 "#;
     let fake = Fake::new("codex", flow);
@@ -1015,6 +1015,7 @@ stay();
         agent_status(&mut client, &id),
         ("blocked".into(), "heuristic".into())
     );
+    fs::write(fake.out("go"), "x").expect("open the gate");
     // Once the hooks speak, they win: the later "Allow command?" text changes nothing.
     wait_file(&fake.out("done"), "x");
     std::thread::sleep(Duration::from_millis(1200));

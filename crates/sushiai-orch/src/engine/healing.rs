@@ -860,11 +860,14 @@ pub(super) async fn capture_screenshots(
 
 /// The reviewer's own findings that the diff did not cause, shown by their
 /// scenario: the reviewer says `causedByDiff` is false and the scenario's
-/// `run` also fails on the base. Anything else stays blocking.
+/// `run` fails the same way on the base and on the task tree. A scenario whose
+/// target is absent on the base, a planner test or a bare failing command
+/// proves nothing about the base: the finding stays blocking.
 pub(super) async fn findings_old_on_base(
     app: &Arc<App>,
     task: &Task,
     review: &ReviewResult,
+    worktree: &Path,
     run_dir: &Path,
     cancel: &CancelToken,
 ) -> Vec<usize> {
@@ -879,26 +882,59 @@ pub(super) async fn findings_old_on_base(
         let Some(run) = run.filter(|_| detail.caused_by_diff == Some(false)) else {
             continue;
         };
+        if task.planner_tests.commands.iter().any(|c| c == &run)
+            || !base_check::targets_absent_on_base(&task.repo, &task.base_sha, &run).is_empty()
+        {
+            continue;
+        }
         let ran = base_check::run_on_base(
             app,
             Some(&task.id),
             &task.repo,
             &task.base_sha,
-            &[run],
+            std::slice::from_ref(&run),
             &run_dir.join("finding-base"),
             cancel,
         )
         .await;
-        if let Ok(results) = ran {
-            if results
-                .first()
-                .is_some_and(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
-            {
-                old.push(i);
-            }
+        let Ok(results) = ran else { continue };
+        let Some(base) = results
+            .first()
+            .filter(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
+        else {
+            continue;
+        };
+        let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+        let here = run_verify_commands(
+            CheckContext::new(app, Some(&task.id)),
+            worktree,
+            &run_dir.join("finding-task"),
+            std::slice::from_ref(&run),
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        )
+        .await;
+        if here
+            .first()
+            .is_some_and(|r| r.code.is_some_and(|c| c != 0) && same_failure(r, base))
+        {
+            old.push(i);
         }
     }
     old
+}
+
+/// Whether the task's run fails the same named tests as the base's run.
+fn same_failure(run: &VerifyOutcome, base: &VerifyOutcome) -> bool {
+    if matches!(baseline::compare(run, base), baseline::Compared::Covered(_)) {
+        return true;
+    }
+    let (now, before): (
+        std::collections::BTreeSet<&String>,
+        std::collections::BTreeSet<&String>,
+    ) = (run.failing.iter().collect(), base.failing.iter().collect());
+    !now.is_empty() && now == before
 }
 
 /// After the first attempt only a P0/P1 finding about the task's own work
@@ -1089,6 +1125,27 @@ pub(super) async fn heal_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failed_run(failing: &[&str]) -> VerifyOutcome {
+        VerifyOutcome {
+            command: "cargo test".into(),
+            code: Some(1),
+            output_key: "key".into(),
+            failing: failing.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_finding_is_old_only_when_the_same_named_tests_fail_on_both_trees() {
+        let base = failed_run(&["a::bad"]);
+        assert!(same_failure(&failed_run(&["a::bad"]), &base));
+        // The task tree fails other tests, or the runs name none (`false`).
+        assert!(!same_failure(&failed_run(&["a::bad", "b::new"]), &base));
+        assert!(!same_failure(&failed_run(&["b::other"]), &base));
+        assert!(!same_failure(&failed_run(&[]), &failed_run(&[])));
+        assert!(!same_failure(&failed_run(&[]), &base));
+    }
 
     #[tokio::test]
     async fn a_rewritten_verify_starts_the_preflight_again_for_the_new_commands() {

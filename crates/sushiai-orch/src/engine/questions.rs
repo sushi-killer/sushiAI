@@ -54,9 +54,16 @@ pub(super) async fn wait_for_exhausted_answer(
     }
     let auto_answer = app.settings.read().unwrap().auto_answer;
     if (task.loop_state.non_owner_continues as usize) < MAX_ORCHESTRATOR_CONTINUES && auto_answer {
-        let text = park_for_answer(app, task_id, task, pending_answer, cancel, permit).await?;
-        app.take_agent_answer(task_id);
-        return Some(Answered { text });
+        match park(app, task_id, task, pending_answer, cancel, permit, true).await {
+            Parked::Answer(text) => {
+                let text = text?;
+                app.take_agent_answer(task_id);
+                return Some(Answered { text });
+            }
+            // No overseer turn started: the ladder decides, not a wait with
+            // nobody to answer.
+            Parked::NoOverseer => {}
+        }
     }
     // The next rung is never an open question: one changed approach, then
     // the task fails with a report (`ladder.rs`).
@@ -125,13 +132,36 @@ pub(super) async fn park_for_answer(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Option<String> {
+    match park(app, task_id, task, pending_answer, cancel, permit, false).await {
+        Parked::Answer(answer) => answer,
+        Parked::NoOverseer => None,
+    }
+}
+
+/// How a park ended.
+enum Parked {
+    Answer(Option<String>),
+    /// `need_overseer` was set and the wake neither started a turn nor held
+    /// the question: nobody will answer it. The question is still open.
+    NoOverseer,
+}
+
+async fn park(
+    app: &Arc<App>,
+    task_id: &str,
+    task: &mut Task,
+    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
+    cancel: &CancelToken,
+    permit: &mut Option<SlotPermit>,
+    need_overseer: bool,
+) -> Parked {
     if cancel.is_cancelled() {
         app.apply_cancellation(task);
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
         app.advance_queue(&task.repo);
-        return None;
+        return Parked::Answer(None);
     }
     // A task waiting for its owner holds no slot: parallel limits running
     // agents, not open questions.
@@ -146,6 +176,10 @@ pub(super) async fn park_for_answer(
         if let Some(s) = saved.question {
             (q.held_for_overseer, q.held_at) = (s.held_for_overseer, s.held_at);
         }
+    }
+    if need_overseer && !task.question.as_ref().is_some_and(|q| q.held_for_overseer) {
+        *pending_answer.lock().unwrap() = None;
+        return Parked::NoOverseer;
     }
     app.broadcast_task(task);
     let reply = tokio::select! {
@@ -199,7 +233,7 @@ pub(super) async fn park_for_answer(
             }
         }
     }
-    result
+    Parked::Answer(result)
 }
 
 /// The question text an orchestrator answer line carries. An "Attempts keep
@@ -216,8 +250,8 @@ pub(super) fn answer_line_question(q: &Question) -> &str {
 /// Why `answer` to the waiting `question` of `task` is refused for a caller
 /// that is not the owner: the gate that refuses it, with the reason the caller
 /// is told. Owner-only kinds keep only refusals, a shared check is not dropped
-/// by an agent, and the overseer stays under the hard limits
-/// (`decision_memory.rs`); a lead or chat caller relays what the owner said,
+/// by an agent, and the overseer and the answer policy stay under
+/// the hard limits (`decision_memory.rs`); a lead or chat caller relays what the owner said,
 /// so the hard limits do not bind it.
 pub(super) fn non_owner_refusal(
     settings: &Settings,
@@ -257,12 +291,12 @@ pub(super) fn non_owner_refusal(
             );
         }
     }
-    if caller == AnsweredBy::Overseer && !owner_only(question.kind) {
+    if matches!(caller, AnsweredBy::Overseer | AnsweredBy::Policy) && !owner_only(question.kind) {
         if let Some(limit) =
             hard_limit(question, answer).filter(|l| *l != HardLimit::SharedCheckDrop)
         {
             return Some(format!(
-                "this question is under a hard limit ({limit:?}): the owner decides, not the overseer"
+                "this question is under a hard limit ({limit:?}): the owner decides, not an agent"
             ));
         }
     }
@@ -463,15 +497,22 @@ impl App {
     /// Releases every hold that `keep` does not keep.
     fn release_holds_where(&self, keep: impl Fn(&Question) -> bool) {
         for mut task in self.store.list_tasks().unwrap_or_default() {
-            if let Some(q) = task
+            let Some(q) = task
                 .question
                 .as_mut()
                 .filter(|q| q.held_for_overseer && !keep(q))
-            {
-                q.release();
-                self.save_task_logged(&task);
-                self.broadcast_task(&task);
+            else {
+                continue;
+            };
+            // An "attempts keep failing" question is never left open: with
+            // the hold gone nobody answers it, so the ladder ends the task.
+            if q.kind == QuestionKind::AttemptsFailing {
+                self.end_unanswered_exhausted(&mut task);
+                continue;
             }
+            q.release();
+            self.save_task_logged(&task);
+            self.broadcast_task(&task);
         }
     }
 
@@ -815,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exhausted_failure_goes_to_the_overseer_with_no_triage_turn() {
+    async fn an_exhausted_failure_goes_to_the_overseer_with_no_extra_turn() {
         let _harness = chat::fake_overseer_harness();
         let (app, dir) = test_app();
         app.settings.write().unwrap().auto_answer = true;
@@ -976,6 +1017,93 @@ mod tests {
             .decisions
             .iter()
             .any(|d| d.starts_with("Ladder: stopped")));
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_failure_never_waits_when_no_overseer_turn_starts() {
+        let (app, dir) = test_app();
+        app.settings.write().unwrap().auto_answer = true;
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        // The repository is not a directory: the wake does not start.
+        task.repo = dir.path().join("missing").to_string_lossy().to_string();
+        task.worktree = worktree.to_string_lossy().to_string();
+        task.attempts
+            .push(super::super::test_support::attempt_with_failure(
+                1, "verify",
+            ));
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        let mut budget = 1;
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let (app2, pending2, cancel2) = (app.clone(), pending.clone(), cancel.clone());
+        let waiter = tokio::spawn(async move {
+            fail_and_continue(
+                &app2,
+                &id,
+                &mut task,
+                0,
+                FailureKind::Verify,
+                "npm test failed".into(),
+                &mut budget,
+                &pending2,
+                &cancel2,
+                &mut None,
+            )
+            .await;
+            task
+        });
+        let task = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("the failure waited for an overseer that never started")
+            .unwrap();
+        assert_ne!(task.status, TaskStatus::Waiting);
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hold_that_expires_on_an_exhausted_question_ends_the_ladder() {
+        let (app, _dir) = test_app();
+        let mut task = exhausted_task();
+        if let Some(q) = task.question.as_mut() {
+            q.held_for_overseer = true;
+            q.held_at = Some(1_000);
+        }
+        app.store.save_task(&task).unwrap();
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Failed);
+        assert!(saved.question.is_none());
+    }
+
+    #[test]
+    fn the_answer_policy_stays_under_the_hard_limits_like_the_overseer() {
+        let settings = Settings::default();
+        let task = task_with_status(TaskStatus::Waiting);
+        let mut question = Question::new(
+            "How should the old data go?",
+            vec!["delete the old data".into(), "keep the old data".into()],
+            QuestionKind::AgentQuestion,
+            AskedBy::Implement,
+        );
+        question.risk = vec![Risk::Destructive];
+        for caller in [AnsweredBy::Policy, AnsweredBy::Overseer] {
+            assert!(
+                non_owner_refusal(&settings, &task, &question, "keep the old data", caller)
+                    .is_some(),
+                "{caller:?}"
+            );
+        }
+        assert!(non_owner_refusal(
+            &settings,
+            &task,
+            &question,
+            "keep the old data",
+            AnsweredBy::Lead
+        )
+        .is_none());
     }
 
     #[tokio::test]

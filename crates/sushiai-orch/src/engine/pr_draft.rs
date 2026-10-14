@@ -17,15 +17,16 @@ const MAX_BODY_CHARS: usize = 20_000;
 
 /// The reply shape the drafter must match, enforced by the harness
 /// (`--json-schema` / `--output-schema`).
-const DRAFT_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"}},"required":["title","body"],"additionalProperties":false}"#;
+const DRAFT_SCHEMA: &str = r#"{"type":"object","properties":{"branch":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"}},"required":["branch","title","body"],"additionalProperties":false}"#;
 
 /// The reply shape of the body check, enforced the same way.
 const BODY_CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"ok":{"type":"boolean"},"corrections":{"type":"array","items":{"type":"string"}},"body":{"type":["string","null"]}},"required":["ok","corrections","body"],"additionalProperties":false}"#;
 
-/// What the drafter replied: the title and body of the pull request. An empty
-/// field falls back to the task's own.
+/// What the drafter replied: the branch, title and body of the pull request.
+/// An empty field falls back to the task's own.
 #[derive(Debug, Default, PartialEq, Deserialize)]
 struct Draft {
+    branch: String,
     title: String,
     body: String,
 }
@@ -592,14 +593,30 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         Some(plan) => plan,
         None => {
             let mut cost = 0.0;
+            let mut drafted_ok = true;
             let (mut lines, draft) = match draft_pr(app, &task, &mut cost).await {
                 Ok((route, draft)) => (vec![format!("PR: drafted by {route}")], draft),
-                Err(reason) => (
-                    vec![format!(
-                        "PR: draft failed ({reason}); opened with the task's own title and body"
-                    )],
-                    Draft::default(),
-                ),
+                Err(reason) => {
+                    drafted_ok = false;
+                    (
+                        vec![format!(
+                            "PR: draft failed ({reason}); opened with the task's own title and body"
+                        )],
+                        Draft::default(),
+                    )
+                }
+            };
+            let branch = match choose_branch(&task, &draft.branch).await {
+                Ok(name) => name,
+                Err(why) => {
+                    if drafted_ok {
+                        lines.push(format!(
+                            "PR: branch: {why}; the task's own branch {} is used",
+                            task.branch
+                        ));
+                    }
+                    task.branch.clone()
+                }
             };
             // Landed, or opened by the overseer or the owner, while the draft ran.
             let Some(task) = owed(app, id) else {
@@ -646,7 +663,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             };
             let body = final_body(&task, checked, &secrets, home.as_deref());
             let plan = PrPlan {
-                branch: task.branch.clone(),
+                branch,
                 title,
                 body,
             };
@@ -816,7 +833,60 @@ async fn helper_turn(
     outcome.map(|outcome| (route.id, outcome))
 }
 
-/// Drafts the title and body of the pull request; `cost` gets the spend.
+/// Gates the branch name the drafter chose: a valid ref name that is not the
+/// default or base branch, and not a branch that already exists on the push
+/// remote or locally (the task's own excepted). `Err` is the reason the
+/// task's own branch is used instead.
+async fn choose_branch(task: &Task, drafted: &str) -> Result<String, String> {
+    // A pull request already open keeps its head.
+    if let Some(open) = task.pr_branch.as_deref().filter(|_| task.pr_url.is_some()) {
+        return Ok(open.to_string());
+    }
+    let name = drafted.trim();
+    if name.is_empty() {
+        return Err("the draft named none".to_string());
+    }
+    let bad = |why: &str| format!("the drafted name {name} {why}");
+    if pr::check_branch_syntax(name).is_err() {
+        return Err(bad("is not a usable branch name"));
+    }
+    if name == task.branch {
+        return Ok(task.branch.clone());
+    }
+    let repo = PathBuf::from(&task.repo);
+    async fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+        pr::run_cmd("git", args, repo, pr::GIT_TIMEOUT).await
+    }
+    if git(&repo, &["check-ref-format", "--branch", name])
+        .await
+        .is_err()
+    {
+        return Err(bad("is not a valid branch name"));
+    }
+    let default = {
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || git::default_branch(&repo))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    if [default.as_deref(), task.base_ref.as_deref()].contains(&Some(name)) {
+        return Err(bad("is the base branch"));
+    }
+    let full = format!("refs/heads/{name}");
+    if git(&repo, &["show-ref", "--verify", "-q", &full])
+        .await
+        .is_ok()
+    {
+        return Err(bad("is a local branch of another task"));
+    }
+    match git(&repo, &["ls-remote", "--heads", "origin", &full]).await {
+        Ok(out) if out.trim().is_empty() => Ok(name.to_string()),
+        Ok(_) => Err(bad("exists on the remote")),
+        Err(e) => Err(format!("the remote could not be checked ({e})")),
+    }
+}
+
+/// Drafts the branch, title and body of the pull request; `cost` gets the spend.
 async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String, Draft), String> {
     let (route, outcome) = helper_turn(
         app,
@@ -988,8 +1058,9 @@ mod tests {
 
     #[test]
     fn a_schema_checked_reply_is_read_and_anything_else_fails_the_turn() {
-        let json = r#"{"title":"feat: x","body":"Why\n"}"#;
+        let json = r#"{"branch":"feature/x","title":"feat: x","body":"Why\n"}"#;
         let want = Draft {
+            branch: "feature/x".into(),
             title: "feat: x".into(),
             body: "Why\n".into(),
         };
@@ -1004,8 +1075,8 @@ mod tests {
         for bad in [
             format!("```json\n{json}\n```"),
             format!("Here you go: {json} done"),
-            r#"{"title":"t"}"#.to_string(),
-            r#"{"title":5,"body":""}"#.to_string(),
+            r#"{"title":"t","body":""}"#.to_string(),
+            r#"{"branch":"b","title":5,"body":""}"#.to_string(),
             "no json here".to_string(),
         ] {
             assert_eq!(

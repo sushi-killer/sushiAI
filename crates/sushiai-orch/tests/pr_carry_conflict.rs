@@ -38,7 +38,7 @@ dir="$(dirname "$0")"
 brief=$(cat)
 case "$brief" in
 "## Pull request draft"*)
-printf '%s\n' '{"type":"result","result":"{}"}'
+printf '%s\n' '{"type":"result","result":"{\"branch\":\"\",\"title\":\"\",\"body\":\"\"}"}'
 ;;
 "## Pull request body check"*)
 printf '%s\n' '{"type":"result","result":"{\"ok\":true,\"corrections\":[]}"}'

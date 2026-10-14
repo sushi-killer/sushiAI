@@ -501,11 +501,11 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
+/// A result the environment caused: its setup failed before the command ran.
+/// The command's own output never says so (an install error in a check's
+/// tail is that check's failure).
 pub(crate) fn is_environment_result(outcome: &VerifyOutcome) -> bool {
-    let tail = outcome.tail.to_ascii_lowercase();
-    ["setup failed", "eexist", "failed to install"]
-        .iter()
-        .any(|marker| tail.contains(marker))
+    outcome.setup_failed
 }
 
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
@@ -563,8 +563,8 @@ fn save_base_runs(data_dir: &Path, cache: &HashMap<(String, String), VerifyOutco
 /// Runs `commands` on the commit `base_sha` of `repo`, in a throwaway
 /// detached worktree that is removed again whatever happens (done, failed or
 /// cancelled). Results are cached on the app per (base sha, command), so the
-/// same command on an unchanged base runs once. Environment results and
-/// checkout errors get one retry in a fresh worktree and are never cached.
+/// same command on an unchanged base runs once. A checkout error gets one retry
+/// in a fresh worktree.
 /// `Err` when neither checkout could be made; nothing is known about the base.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_on_base(
@@ -658,13 +658,8 @@ pub(super) async fn run_on_base(
             Err(e) if known.is_empty() => return Err(e),
             Err(_) => break,
         };
-        let mut retry = Vec::new();
         let mut cache = app.base_runs.lock().unwrap();
         for (c, r) in missing.iter().zip(results) {
-            if is_environment_result(&r) {
-                retry.push(c.clone());
-                continue;
-            }
             // An interrupted run says nothing about the commit.
             if !cancelled && r.code.is_some() && !is_interrupted(&r) {
                 cache.insert((base_sha.to_string(), c.clone()), r.clone());
@@ -672,7 +667,7 @@ pub(super) async fn run_on_base(
             known.insert(c.clone(), r);
         }
         save_base_runs(&app.data_dir, &cache);
-        missing = retry;
+        missing.clear();
     }
     Ok(commands
         .iter()
@@ -1469,6 +1464,18 @@ mod tests {
             ms: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_a_failed_setup_is_an_environment_result_never_a_tail() {
+        let mut eexist = outcome("cargo test", 1);
+        eexist.tail = "Error: EEXIST: file already exists, mkdir 'target'".into();
+        let mut install = outcome("npm test", 1);
+        install.tail = "setup failed (exit 1): npm ERR! failed to install".into();
+        assert!(!is_environment_result(&eexist));
+        assert!(!is_environment_result(&install));
+        install.setup_failed = true;
+        assert!(is_environment_result(&install));
     }
 
     #[tokio::test]

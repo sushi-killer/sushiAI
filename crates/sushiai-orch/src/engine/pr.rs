@@ -1,6 +1,7 @@
 //! `task.pr`: pushes a finished task's branch to `origin` and opens a GitHub
 //! pull request against the repo's default branch. The owner starts it from the
-//! app; the orchestrator agent may call it as the `task_pr` MCP tool. It pushes
+//! app; an agent may call it as the `task_pr` MCP tool only where automatic pull
+//! requests are on (`may_open_pr_on_done`). It pushes
 //! the task's own branch only, never the default branch, and never merges.
 
 use super::*;
@@ -241,6 +242,20 @@ impl App {
             .load_task(&p.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
+        // The owner's own calls (the app, or the owner's chat) always open one;
+        // an agent opens one only where automatic pull requests are on.
+        let by_owner = matches!(p.source.as_deref(), None | Some("") | Some("chat"));
+        let automatic = self
+            .settings
+            .read()
+            .unwrap()
+            .may_open_pr_on_done(&task.repo);
+        if !by_owner && !automatic {
+            return Err(
+                "automatic pull requests are off for this repo: the owner opens the pull request"
+                    .to_string(),
+            );
+        }
         if task.parent.is_some() {
             return Err("only a top-level task can open a pull request".to_string());
         }

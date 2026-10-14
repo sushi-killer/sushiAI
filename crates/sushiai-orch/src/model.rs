@@ -2326,6 +2326,14 @@ pub struct VerifyOutcome {
     /// Returned to the task owner as well as published while the check waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<String>,
+    /// The worktree setup failed, so the command never ran. Set by orchd,
+    /// never read from the command's output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub setup_failed: bool,
+    /// Git tree id of the worktree the command ran in. Two failing runs of one
+    /// command compare as flaky only when their trees are equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
 }
 
 /// How much of an attempt a review looked at: everything, or only the open

@@ -471,7 +471,9 @@ impl App {
                     .as_ref()
                     .is_some_and(|q| q.kind == QuestionKind::AttemptsFailing)
                 {
-                    self.end_unanswered_exhausted(&mut task);
+                    if self.step_unanswered_exhausted(&mut task) {
+                        self.advance_queue(&task.repo);
+                    }
                     continue;
                 }
                 if let Some(q) = task.question.as_mut() {
@@ -484,14 +486,60 @@ impl App {
     }
 
     /// An overseer turn ended on "attempts keep failing" and did not answer
-    /// it: the owner is not asked. The failure ladder ends the task (failed,
-    /// with its report and one notice) and the parked loop is cancelled.
-    fn end_unanswered_exhausted(&self, task: &mut Task) {
+    /// it: the owner is not asked. The failure ladder takes its next rung, as
+    /// when no overseer turn starts: one changed approach (the parked loop
+    /// gets `change approach` as the answer; with no loop it is applied here
+    /// and the task queued), then the end (failed, with its report and one
+    /// notice) with the parked loop cancelled.
+    /// Returns whether it queued the task for a new loop.
+    pub(super) fn step_unanswered_exhausted(&self, task: &mut Task) -> bool {
+        if !ladder::approach_changed(task) {
+            let attempt_n = task
+                .attempts
+                .iter()
+                .rfind(|a| a.stage == Stage::Implement)
+                .map(|a| a.n);
+            let live = self.controls.lock().unwrap().get(&task.id).map(|c| {
+                c.pending_answer.lock().unwrap().take().is_some_and(|tx| {
+                    tx.send(Reply {
+                        text: "change approach".to_string(),
+                        default_evidence: None,
+                        like: None,
+                    })
+                    .is_ok()
+                })
+            });
+            match (live, attempt_n) {
+                // The parked loop settles the answer and saves.
+                (Some(true), _) => return false,
+                // A loop between two waits: its own copy decides next.
+                (Some(false), _) => {
+                    if let Some(q) = task.question.as_mut() {
+                        q.release();
+                    }
+                    self.save_task_logged(task);
+                    self.broadcast_task(task);
+                    return false;
+                }
+                (None, Some(n)) => {
+                    let settings = self.settings.read().unwrap().clone();
+                    ladder::change_approach(task, &settings, n);
+                    task.question = None;
+                    task.status = TaskStatus::Queued;
+                    task.updated_at = now_ms();
+                    self.save_task_logged(task);
+                    self.broadcast_task(task);
+                    return true;
+                }
+                (None, None) => {}
+            }
+        }
         ladder::end_ladder(self, task);
         self.notify_task_failed(task);
         if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
             control.cancel.cancel();
         }
+        false
     }
 
     /// Releases every hold that `keep` does not keep.
@@ -505,9 +553,14 @@ impl App {
                 continue;
             };
             // An "attempts keep failing" question is never left open: with
-            // the hold gone nobody answers it, so the ladder ends the task.
-            if q.kind == QuestionKind::AttemptsFailing {
-                self.end_unanswered_exhausted(&mut task);
+            // the hold gone and no queued wake to answer it, the ladder takes
+            // its next rung. A queued wake keeps the question for its turn.
+            if q.kind == QuestionKind::AttemptsFailing
+                && !chat::wake_queued_for(self, &task.repo, &task.id)
+            {
+                if self.step_unanswered_exhausted(&mut task) {
+                    self.advance_queue(&task.repo);
+                }
                 continue;
             }
             q.release();
@@ -517,8 +570,17 @@ impl App {
     }
 
     /// A daemon that stopped mid-turn left its holds behind: no turn runs now.
+    /// An "attempts keep failing" question stays open: the restart wake asks
+    /// the overseer again, and `retire_ladder_questions` steps the ladder when
+    /// nobody will.
     pub(crate) fn release_stale_holds(&self) {
-        self.release_holds_where(|_| false);
+        for mut task in self.store.list_tasks().unwrap_or_default() {
+            if let Some(q) = task.question.as_mut().filter(|q| q.held_for_overseer) {
+                q.release();
+                self.save_task_logged(&task);
+                self.broadcast_task(&task);
+            }
+        }
     }
 
     /// Holds older than [`HOLD_TTL_MS`] end, whatever the turn is doing.
@@ -963,6 +1025,7 @@ mod tests {
             .push(super::super::test_support::attempt_with_failure(
                 1, "verify",
             ));
+        task.loop_state.approach_changed_after = Some(1);
         let id = task.id.clone();
         let mut budget = 1;
         let pending = Arc::new(StdMutex::new(None));
@@ -1063,19 +1126,69 @@ mod tests {
         assert!(pending.lock().unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn a_hold_that_expires_on_an_exhausted_question_ends_the_ladder() {
-        let (app, _dir) = test_app();
+    fn held_exhausted(app: &App, approach_changed: bool) -> Task {
         let mut task = exhausted_task();
+        task.attempts = vec![super::super::test_support::attempt_with_failure(
+            1, "verify",
+        )];
+        if approach_changed {
+            task.loop_state.approach_changed_after = Some(1);
+        }
         if let Some(q) = task.question.as_mut() {
             q.held_for_overseer = true;
             q.held_at = Some(1_000);
         }
         app.store.save_task(&task).unwrap();
+        task
+    }
+
+    #[tokio::test]
+    async fn a_hold_that_expires_on_an_exhausted_question_takes_the_next_ladder_rung() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, true);
         app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
         let saved = app.store.load_task(&task.id).unwrap().unwrap();
         assert_eq!(saved.status, TaskStatus::Failed);
         assert!(saved.question.is_none());
+
+        // Before the changed approach, the rung is the change, not the end.
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, false);
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Queued);
+        assert!(saved.question.is_none());
+        assert!(ladder::approach_changed(&saved));
+    }
+
+    #[tokio::test]
+    async fn a_hold_that_expires_while_an_overseer_wake_is_queued_keeps_the_question() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, true);
+        app.deferred_wakes.lock().unwrap().insert(
+            task.repo.clone(),
+            vec![chat::test_deferred_wake("waiting", &task.id)],
+        );
+        app.release_expired_holds(1_000 + HOLD_TTL_MS + 1);
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        let q = saved.question.expect("the question stays open");
+        assert!(!q.held_for_overseer);
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_a_held_exhausted_question_for_the_restart_wake() {
+        let (app, _dir) = test_app();
+        let task = held_exhausted(&app, false);
+        app.release_stale_holds();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        assert!(!saved.question.unwrap().held_for_overseer);
+        // With nobody to ask again, the start takes the changed approach.
+        app.retire_ladder_questions();
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Queued);
+        assert!(ladder::approach_changed(&saved));
     }
 
     #[test]

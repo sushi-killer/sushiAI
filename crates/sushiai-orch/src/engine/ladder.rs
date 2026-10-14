@@ -364,8 +364,14 @@ impl App {
             }
             match kind {
                 QuestionKind::AttemptsFailing => {
-                    end_ladder(self, &mut task);
-                    self.notify_task_failed(&task);
+                    // The restart wake asks the overseer again; with nobody
+                    // to ask, the ladder takes its next rung.
+                    let asked_again = self.settings.read().unwrap().auto_answer
+                        && (task.loop_state.non_owner_continues as usize)
+                            < questions::MAX_ORCHESTRATOR_CONTINUES;
+                    if !asked_again {
+                        self.step_unanswered_exhausted(&mut task);
+                    }
                 }
                 QuestionKind::ReviewNoVerdict => {
                     let Some(n) = task
@@ -819,8 +825,8 @@ mod tests {
         app.retire_ladder_questions();
 
         let exhausted = app.store.load_task(&exhausted.id).unwrap().unwrap();
-        assert_eq!(exhausted.status, TaskStatus::Failed);
-        assert!(exhausted.question.is_none());
+        assert_eq!(exhausted.status, TaskStatus::Queued);
+        assert!(exhausted.question.is_none() && approach_changed(&exhausted));
         let silent = app.store.load_task("silent").unwrap().unwrap();
         assert!(silent.question.is_none() && silent.unreviewed);
         assert_eq!(silent.status, TaskStatus::Queued);

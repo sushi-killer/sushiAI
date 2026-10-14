@@ -13,7 +13,7 @@ pub(super) enum BaseVerdict {
     Waived,
     /// The task fails a test the base does not: an ordinary failure.
     /// The task's own run to report (a full run when the first was fail-fast).
-    NewFailures(VerifyOutcome),
+    NewFailures(Box<VerifyOutcome>),
     /// Neither output names tests and they differ: the existing question.
     Unclear,
 }
@@ -183,7 +183,7 @@ async fn judge_pair(
     )
     .await;
     let Some(again) = again.first().filter(|r| !is_interrupted(r)) else {
-        return BaseVerdict::NewFailures(failed.clone());
+        return BaseVerdict::NewFailures(Box::new(failed.clone()));
     };
     let tests = failed.failing.clone();
     if again.code == Some(0) {
@@ -195,7 +195,7 @@ async fn judge_pair(
             waive(task, failed, &tests, true);
             BaseVerdict::Waived
         }
-        _ => BaseVerdict::NewFailures(failed.clone()),
+        _ => BaseVerdict::NewFailures(Box::new(failed.clone())),
     }
 }
 
@@ -260,6 +260,29 @@ mod tests {
         let task = run(1, "coverage 12.4% is below the gate\n");
         assert_eq!(compare(&task, &base), Compared::Unparsed);
         assert_eq!(compare(&base, &base), Compared::Unparsed);
+    }
+
+    #[test]
+    fn the_stored_outcome_has_counts_and_a_key_and_the_lists_come_back_from_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let passing: String = (0..600).map(|i| format!("ok {i} - t{i}\n")).collect();
+        let output = format!("{passing}not ok 600 - bad\n");
+        let mut base = run(1, &output);
+        base.tail.clear();
+        crate::test_failures::stash_lists(dir.path(), &mut base);
+        assert_eq!((base.failing_count, base.passing_count), (1, 600));
+        assert_eq!(base.tests_key.len(), 16);
+        let stored = serde_json::to_string(&base).unwrap();
+        assert!(!stored.contains("t599"), "{} bytes", stored.len());
+        assert!(stored.len() < 1000, "{} bytes", stored.len());
+        let mut loaded: VerifyOutcome = serde_json::from_str(&stored).unwrap();
+        let task = run(1, &output);
+        assert_eq!(compare(&task, &loaded), Compared::Unparsed);
+        crate::test_failures::hydrate_lists(dir.path(), &mut loaded);
+        assert_eq!(
+            compare(&task, &loaded),
+            Compared::Covered(vec!["bad".into()])
+        );
     }
 
     #[test]

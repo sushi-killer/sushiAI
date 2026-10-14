@@ -1282,6 +1282,7 @@ async fn execute_verify_command(
     let mut result = run_verify_command(cwd, cmd, command, timeout, cancel.cancelled()).await;
     result.load = load;
     result.cores = cores;
+    crate::test_failures::stash_lists(&ctx.app.data_dir, &mut result);
     result
 }
 

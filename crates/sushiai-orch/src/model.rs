@@ -2294,12 +2294,21 @@ pub struct VerifyOutcome {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub load_timeout: bool,
     /// The failing tests the full output named; empty for a passing
-    /// run or an output no known runner format matches.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// run or an output no known runner format matches. Kept in memory only:
+    /// the stored outcome has the counts and `tests_key`, and the lists are in
+    /// the `test-lists` file of that key.
+    #[serde(skip)]
     pub failing: Vec<String>,
-    /// The passing tests the full output named.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The passing tests the full output named; in memory only, like `failing`.
+    #[serde(skip)]
     pub passing: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub failing_count: usize,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub passing_count: usize,
+    /// Names the file with both lists; empty when the run named no test.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tests_key: String,
     /// The output shows a crash, an abort or a build that did not finish.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,

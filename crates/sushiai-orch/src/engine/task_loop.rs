@@ -3628,7 +3628,7 @@ pub(super) async fn finish_after_review(
             match judge_against_base(app, task, &failed, &base_run, worktree, run_dir, cancel).await
             {
                 BaseVerdict::Waived => {}
-                BaseVerdict::NewFailures(own) => ordinary.push(own),
+                BaseVerdict::NewFailures(own) => ordinary.push(*own),
                 BaseVerdict::Unclear => pre_existing.push(base_run),
             }
         }

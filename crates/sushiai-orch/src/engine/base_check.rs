@@ -516,6 +516,10 @@ pub(super) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), Verif
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+    let mut rows = rows;
+    for row in rows.iter_mut() {
+        crate::test_failures::hydrate_lists(data_dir, &mut row.outcome);
+    }
     let poisoned = rows
         .iter()
         .any(|r| is_interrupted(&r.outcome) || is_environment_result(&r.outcome));

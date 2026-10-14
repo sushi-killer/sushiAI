@@ -1805,15 +1805,17 @@ impl App {
                 }
                 // Queued before its loop runs, so nothing reads it as
                 // ended again while it retries.
-                let mut dep = dep.clone();
-                dep.queue.restart_children = is_parent(&dep, &all);
-                dep.queue.stopped_explicitly = false;
-                dep.queue.park = None;
-                dep.question = None;
-                dep.status = TaskStatus::Queued;
-                dep.updated_at = now_ms();
-                self.save_task_logged(&dep);
-                self.broadcast_task(&dep);
+                // From the stored task: the restart gate just wrote its record there.
+                let restart_children = is_parent(dep, &all);
+                let Ok(dep) = self.update_task(&dep.id, |d| {
+                    d.queue.restart_children = restart_children;
+                    d.queue.stopped_explicitly = false;
+                    d.queue.park = None;
+                    d.question = None;
+                    d.status = TaskStatus::Queued;
+                }) else {
+                    continue;
+                };
                 drop(cancellations);
                 self.spawn_task_loop(dep.id.clone(), true);
             }

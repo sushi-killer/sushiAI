@@ -624,12 +624,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_agent_retry_through_the_dependency_question_is_refused() {
-        let (app, _dir) = test_app();
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let repo = repo.display().to_string();
         let mut dep = task_with_status(TaskStatus::Failed);
         dep.id = "dep".into();
-        dep.decisions.push(AGENT_RESTART_LINE.to_string());
+        dep.repo = repo.clone();
         let mut waiting = task_with_status(TaskStatus::Waiting);
         waiting.id = "waiting".into();
+        waiting.repo = repo;
         waiting.depends_on = vec!["dep".into()];
         waiting.question = Some(Question::new(
             format!("{DEPENDENCY_QUESTION} dep"),
@@ -639,53 +643,87 @@ mod tests {
         ));
         app.store.save_task(&dep).unwrap();
         app.store.save_task(&waiting).unwrap();
-        let err = app
-            .answer_dependency_question(
+        let retry = || {
+            app.answer_dependency_question(
                 waiting.clone(),
                 "retry the dependency",
                 Some(AnsweredBy::Overseer),
                 None,
                 None,
             )
-            .unwrap_err();
+        };
+        // The first agent retry goes through, and its record survives the requeue.
+        retry().unwrap();
+        let stored = app.store.load_task("dep").unwrap().unwrap();
+        assert!(
+            stored.decisions.contains(&AGENT_RESTART_LINE.to_string()),
+            "{:?}",
+            stored.decisions
+        );
+        // Failed again: the second is refused.
+        let mut failed = stored;
+        failed.mark_failed();
+        app.store.save_task(&failed).unwrap();
+        let err = retry().unwrap_err();
         assert!(err.contains("only the owner"), "{err}");
-        assert!(!agent_may_restart(&dep));
         assert!(!app.restart_environment_dependency(
             &waiting,
             &app.repo_tasks(&waiting.repo),
             &["dep".to_string()]
         ));
+        app.shutdown();
     }
 
-    #[test]
-    fn a_parent_stays_unreviewed_while_a_landed_subtask_is() {
-        let (app, _dir) = test_app();
+    #[tokio::test]
+    async fn a_parent_attempt_finishing_stays_unreviewed_and_lands_nothing() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
         let mut parent = task_with_status(TaskStatus::Running);
         parent.id = "parent".into();
+        parent.repo = repo.display().to_string();
+        parent.worktree = parent.repo.clone();
+        parent.variant = Some(Variant {
+            land: true,
+            ..Variant::default()
+        });
+        parent.attempts = vec![attempt_with_failure(1, "none")];
         let mut child = task_with_status(TaskStatus::Done);
         child.id = "child".into();
+        child.repo = parent.repo.clone();
         child.parent = Some("parent".into());
         child.unreviewed = true;
         app.store.save_task(&child).unwrap();
-        // The parent's own attempt resets the flag, then derives it again.
+        // The parent's own attempt had a verdict: its flag was reset.
         parent.unreviewed = false;
-        inherit_unreviewed(&app, &mut parent);
-        inherit_unreviewed(&app, &mut parent);
-        assert!(parent.unreviewed);
-        assert_eq!(
-            parent
-                .decisions
-                .iter()
-                .filter(|d| d.contains("child"))
-                .count(),
-            1
+        let mut permit = None;
+        let pending = Arc::new(StdMutex::new(None));
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir(&run_dir).unwrap();
+        let wt = repo.clone();
+        finish_attempt(
+            &app,
+            "parent",
+            &mut parent,
+            0,
+            1,
+            &wt,
+            &run_dir,
+            &mut 3,
+            &pending,
+            &CancelToken::new(),
+            &mut permit,
+        )
+        .await;
+        assert!(parent.unreviewed, "{:?}", parent.decisions);
+        assert!(
+            !parent.decisions.iter().any(|d| d.starts_with("Land:")),
+            "{:?}",
+            parent.decisions
         );
-        child.archived = true;
-        app.store.save_task(&child).unwrap();
-        let mut other = task_with_status(TaskStatus::Running);
-        other.id = "other".into();
-        inherit_unreviewed(&app, &mut other);
-        assert!(!other.unreviewed);
+        assert!(parent.landed_sha.is_none());
+        app.shutdown();
     }
 
     #[tokio::test]

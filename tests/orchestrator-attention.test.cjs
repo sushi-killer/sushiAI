@@ -19,7 +19,19 @@ test("tasks become answer, decide and review items, newest first within a kind",
   const { attentionItems } = await load();
   const items = attentionItems(
     [
-      task({ id: "q", status: "waiting", updatedAt: 5 }),
+      task({
+        id: "q",
+        status: "waiting",
+        question: { text: "Which?", options: [], forOwner: true },
+        updatedAt: 5,
+      }),
+      // Not handed to the owner yet: the overseer may still answer it.
+      task({
+        id: "held",
+        status: "waiting",
+        question: { text: "Which?", options: [], heldForOverseer: true },
+        updatedAt: 8,
+      }),
       task({ id: "f", status: "failed", updatedAt: 6 }),
       task({ id: "d", status: "done", updatedAt: 7 }),
       task({ id: "r", status: "running" }),
@@ -43,7 +55,13 @@ test("tasks become answer, decide and review items, newest first within a kind",
 test("a remote-host task is filed under its host, not Local", async () => {
   const { attentionItems } = await load();
   const [item] = attentionItems(
-    [task({ status: "waiting", host: "ssh:lab" })],
+    [
+      task({
+        status: "waiting",
+        host: "ssh:lab",
+        question: { text: "Which?", options: [], forOwner: true },
+      }),
+    ],
     true,
   );
   assert.equal(item.host, "ssh:lab");
@@ -119,6 +137,7 @@ test("rows carry their second line, action chips and keys, and drop an orch: tit
         question: {
           text: "Which cache?\nMore detail",
           options: ["LRU", "Disk"],
+          forOwner: true,
         },
       }),
       task({ id: "f", status: "failed", costUsd: 0.41 }),
@@ -174,7 +193,7 @@ test("answer chips show the first choice as picked until the owner picks another
   const waiting = task({
     id: "q",
     status: "waiting",
-    question: { text: "Which?", options: ["A", "B"] },
+    question: { text: "Which?", options: ["A", "B"], forOwner: true },
   });
   const picked = (state) =>
     attentionItems([waiting], true, state)[0]

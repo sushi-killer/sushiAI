@@ -67,7 +67,12 @@ test("needsOwner counts waiting, failed, landing and engine stops, never owner s
   const { needsOwner, ownerTasks } = await load();
   const failedAttempt = { status: "failed", failure: { kind: "verify" } };
   const tasks = [
-    task({ id: "wait", status: "waiting", updatedAt: 3 }),
+    task({
+      id: "wait",
+      status: "waiting",
+      question: { text: "Which?", options: [], forOwner: true },
+      updatedAt: 3,
+    }),
     task({ id: "fail", status: "failed", updatedAt: 2 }),
     task({ id: "land", status: "landing", updatedAt: 1 }),
     task({
@@ -101,57 +106,23 @@ test("needsOwner counts waiting, failed, landing and engine stops, never owner s
   );
 });
 
-test("a question held for the orchestrator agent raises no attention until it is released", async () => {
+test("only a question handed to the owner raises attention, whatever its hold", async () => {
   const { needsOwner, needsOwnerNow, ownerTasks } = await load();
-  const held = task({
-    id: "held",
-    status: "waiting",
-    question: {
-      text: "Which?",
-      options: [],
-      kind: "agent_question",
-      heldForOverseer: true,
-      heldAt: Date.now(),
-    },
-  });
-  const open = task({
-    id: "open",
-    status: "waiting",
-    question: { text: "Which?", options: [], kind: "agent_question" },
-  });
-  assert.equal(needsOwner(held), true, "the rail still lists it");
-  assert.equal(needsOwnerNow(held), false);
+  const question = { text: "Which?", options: [], kind: "agent_question" };
+  const waiting = (id, extra) =>
+    task({ id, status: "waiting", question: { ...question, ...extra } });
+  const held = waiting("held", { heldForOverseer: true, heldAt: Date.now() });
+  const unheld = waiting("unheld", {});
+  // A hold the ten-minute TTL ended is no hand-over either.
+  const stale = waiting("stale", { heldForOverseer: true, heldAt: 1 });
+  const handed = waiting("handed", { forOwner: true });
+  for (const t of [held, unheld, stale]) {
+    assert.equal(needsOwner(t), true, `the rail still lists ${t.id}`);
+    assert.equal(needsOwnerNow(t), false, t.id);
+  }
+  assert.equal(needsOwnerNow(handed), true);
   assert.deepEqual(
-    ownerTasks([held, open]).map((t) => t.id),
-    ["open"],
+    ownerTasks([held, unheld, stale, handed]).map((t) => t.id),
+    ["handed"],
   );
-  // The overseer's turn ended without an answer: the flag is gone.
-  const released = {
-    ...held,
-    question: { ...held.question, heldForOverseer: undefined },
-  };
-  assert.deepEqual(
-    ownerTasks([released, open])
-      .map((t) => t.id)
-      .sort(),
-    ["held", "open"],
-  );
-});
-
-test("a hold older than ten minutes no longer hides the question", async () => {
-  const { needsOwnerNow, ownerTasks } = await load();
-  const held = task({
-    id: "held",
-    status: "waiting",
-    question: {
-      text: "Which?",
-      options: [],
-      kind: "agent_question",
-      heldForOverseer: true,
-      heldAt: 1_000_000,
-    },
-  });
-  assert.equal(needsOwnerNow(held, 1_000_000 + 599_000), false);
-  assert.equal(needsOwnerNow(held, 1_000_000 + 600_000), true);
-  assert.equal(ownerTasks([held]).length, 1, "the real clock is far past it");
 });

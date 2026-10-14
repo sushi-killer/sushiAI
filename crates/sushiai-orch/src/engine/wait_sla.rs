@@ -48,9 +48,11 @@ impl App {
         if digest_off && !quiet {
             self.post_held_notices(now);
         }
-        // Owner-only questions that parked in quiet hours are noticed once they end.
+        // Owner-only questions that parked in quiet hours are noticed once
+        // they end, and the questions whose notices they held are the owner's.
         if !quiet {
             self.post_quiet_parked_notices(now);
+            self.hand_over_deferred(now);
         }
         self.resume_cleared_waits(now).await;
         let mut log: Option<Vec<crate::overseer::Entry>> = None;
@@ -185,8 +187,25 @@ impl App {
 
     /// After a restart: wakes the overseer once per repo that has a waiting
     /// question the owner is not the only one to answer.
+    ///
+    /// A question nobody will take after the restart is the owner's: an
+    /// owner-only kind, or any with auto-answer off. A restart wake that
+    /// cannot start hands its questions over itself (`chat::wake_overseer`).
     pub(super) fn wake_overseer_for_waiting_after_restart(&self) {
-        if !self.settings.read().unwrap().auto_answer {
+        let auto_answer = self.settings.read().unwrap().auto_answer;
+        for task in self.store.list_tasks().unwrap_or_default() {
+            if task.archived || task.status != TaskStatus::Waiting {
+                continue;
+            }
+            if let Some(q) = task
+                .question
+                .as_ref()
+                .filter(|q| !q.for_owner && (!auto_answer || owner_only(q.kind)))
+            {
+                self.hand_to_owner(&task.id, q.asked_at);
+            }
+        }
+        if !auto_answer {
             return;
         }
         let mut repos: Vec<String> = self
@@ -967,17 +986,17 @@ mod tests {
         q.held_at = Some(2000);
         app.store.save_task(&task).unwrap();
         // An older turn's hold is not this question's current hold.
-        app.release_holds(&repo_str, &[(task.id.clone(), 1000)]);
+        app.release_holds(&repo_str, &[(task.id.clone(), 1000)], false);
         assert!(held(&app, &task.id));
         // A queued wake for the task will hold it again: no flicker.
         app.deferred_wakes.lock().unwrap().insert(
             repo_str.clone(),
             vec![chat::test_deferred_wake("waiting", &task.id)],
         );
-        app.release_holds(&repo_str, &[(task.id.clone(), 2000)]);
+        app.release_holds(&repo_str, &[(task.id.clone(), 2000)], false);
         assert!(held(&app, &task.id));
         app.deferred_wakes.lock().unwrap().clear();
-        app.release_holds(&repo_str, &[(task.id.clone(), 2000)]);
+        app.release_holds(&repo_str, &[(task.id.clone(), 2000)], false);
         assert!(!held(&app, &task.id));
     }
 

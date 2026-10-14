@@ -26,7 +26,7 @@ const task = (id, over = {}) => ({
   archived: false,
   decisions: [],
   attempts: [],
-  question: { text: "Which?" },
+  question: { text: "Which?", forOwner: true },
   ...over,
 });
 

@@ -299,8 +299,11 @@ pub(super) async fn ask_plan_question(
         task.status = TaskStatus::Waiting;
         task.updated_at = now_ms();
         app.save_task_logged(&task);
-        app.broadcast_task(&task);
+        // The wake may hold the question or hand it to the owner: the
+        // broadcast that shows the waiting task carries either.
         wake_orchestrator_for_waiting(app, &task);
+        let shown = app.store.load_task(task_id).ok().flatten().unwrap_or(task);
+        app.broadcast_task(&shown);
     }
 
     let reply = tokio::select! {

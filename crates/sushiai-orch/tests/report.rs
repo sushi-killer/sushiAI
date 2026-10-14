@@ -17,6 +17,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"handoff\":\"Wire the docs page next\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"criteria\":[\"a.txt exists\",\"a.txt is documented\"],\"verify\":[\"test -f a.txt\"]}\n```"' ;;

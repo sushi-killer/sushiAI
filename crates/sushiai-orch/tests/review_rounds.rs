@@ -314,14 +314,17 @@ fn returning_plan(returning: Value) -> Vec<String> {
 }
 
 #[test]
-fn a_returning_finding_without_a_scenario_goes_to_the_judge_not_away_by_its_id() {
+fn a_returning_finding_without_a_scenario_is_kept_and_blocks_not_dropped_by_its_id() {
     let rig = Rig::new(&returning_plan(
         json!({"finding": "P1: a.rs:5 - null check missing", "id": "F-1"}),
     ));
     let (_, settled) = rig.run("Write the marker");
     assert_eq!(settled["status"], "done", "{settled}");
     let attempts = implements(&settled);
-    assert_eq!(attempts.len(), 3, "{settled}");
+    // No judge turn: the finding stays blocking, so attempt 3 fails its
+    // review and attempt 4 passes it.
+    assert_eq!(attempts.len(), 4, "{settled}");
+    assert_eq!(rig.count("judge.brief."), 0, "no judge turn");
     let id = id_mark(attempts[0]["review"]["findings"][0].as_str().unwrap());
     assert!(
         decisions(&settled)
@@ -329,7 +332,8 @@ fn a_returning_finding_without_a_scenario_goes_to_the_judge_not_away_by_its_id()
             .any(|d| d.contains(&id) && d.contains("came back") && d.contains("kept")),
         "{settled}"
     );
-    assert_eq!(attempts[2]["review"]["verdict"], "PASS", "{settled}");
+    assert_eq!(attempts[2]["review"]["verdict"], "FAIL", "{settled}");
+    assert_eq!(attempts[3]["review"]["verdict"], "PASS", "{settled}");
     rig.finish(&settled);
 }
 

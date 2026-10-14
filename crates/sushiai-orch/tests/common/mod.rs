@@ -641,6 +641,8 @@ console.log(JSON.stringify({
 pub const FAKE_PLANNER_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*)
+    printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     if [ -n "$PLAN_ASK_QUESTION" ]; then

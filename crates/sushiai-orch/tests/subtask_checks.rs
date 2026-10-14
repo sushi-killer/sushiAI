@@ -6,8 +6,22 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 const FAKE: &str = r#"#!/bin/sh
-cat > /dev/null
-for file in $IMPL_FILES; do
+input="$(cat)"
+case "$input" in
+  *"You review a coding task plan"*)
+    printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}'
+    exit 0 ;;
+  *sushi-plan*)
+    case "$input" in
+      *PART_A*) cat "$PLAN_CHILD" ;;
+      *PART_B*) cat "$PLAN_OTHER" ;;
+      *) cat "$PLAN_PARENT" ;;
+    esac
+    exit 0 ;;
+esac
+files="$IMPL_FILES"
+case "$input" in *PART_B*) files="b.txt" ;; esac
+for file in $files; do
   mkdir -p "$(dirname "$file")"
   echo changed >> "$file"
 done
@@ -65,12 +79,7 @@ fn commands_in(log: &str, task: &Value) -> Vec<String> {
         .collect()
 }
 
-fn run(
-    files: &str,
-    command: &str,
-    gate_at: &str,
-    parent_lists_check: bool,
-) -> (Value, Value, Vec<String>, Vec<String>) {
+fn fixture() -> tempfile::TempDir {
     let repo = init_git_repo();
     write(
         repo.path(),
@@ -96,6 +105,32 @@ fn run(
     );
     git_out(repo.path(), &["add", "."]);
     git_out(repo.path(), &["commit", "-qm", "fixture"]);
+    repo
+}
+
+/// The plan turn's reply: one `sushi-plan` block.
+fn plan_reply(dir: &Path, name: &str, plan: Value) -> PathBuf {
+    let text = format!("```sushi-plan\n{plan}\n```");
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!("{}\n", json!({"type": "result", "result": text})),
+    )
+    .unwrap();
+    path
+}
+
+/// Runs one subtask at its parent. With a `check` the planner splits the
+/// parent into a part that names it; without one the subtask is created by
+/// hand and has no planner check.
+fn run(
+    files: &str,
+    command: &str,
+    check: Option<&str>,
+    gate_at: &str,
+    parent_lists_check: bool,
+) -> (Value, Value, Vec<String>, Vec<String>) {
+    let repo = fixture();
     let bin = tempfile::tempdir().unwrap();
     let log = tempfile::tempdir().unwrap();
     let harness = fake_harness_script(bin.path(), "fake-claude.sh", FAKE);
@@ -108,26 +143,78 @@ fn run(
         std::env::var("PATH").unwrap_or_default()
     );
     let check_log = log.path().join("checks.log");
+    let part = json!({
+        "key": "a", "title": "Part", "request": "PART_A write files",
+        "paths": files.split_whitespace().collect::<Vec<_>>(),
+        "check": check.unwrap_or_default(),
+    });
+    // A single part is the task itself: a second, unrelated part keeps the split.
+    let other = json!({
+        "key": "b", "title": "Other", "request": "PART_B write b.txt",
+        "paths": ["b.txt"], "check": "test -f b.txt",
+    });
+    let other_plan = plan_reply(
+        log.path(),
+        "plan-other.json",
+        json!({"title": "Other", "goal": "PART_B: write b.txt", "verify": ["test -f b.txt"]}),
+    );
+    let parent_plan = plan_reply(
+        log.path(),
+        "plan-parent.json",
+        json!({
+            "title": "Parent", "goal": "Combined tree", "verify": ["true"],
+            "finalVerify": if parent_lists_check { vec![command] } else { vec![] },
+            "subtasks": [part, other],
+        }),
+    );
+    let child_plan = plan_reply(
+        log.path(),
+        "plan-child.json",
+        json!({"title": "Part", "goal": "PART_A: write files", "verify": ["true"], "finalVerify": [command]}),
+    );
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
+        ("PLAN_PARENT", parent_plan.to_str().unwrap()),
+        ("PLAN_CHILD", child_plan.to_str().unwrap()),
+        ("PLAN_OTHER", other_plan.to_str().unwrap()),
         ("IMPL_FILES", files),
         ("CHECK_LOG", check_log.to_str().unwrap()),
         ("PATH", &path),
     ]);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("");
+    settings["briefCheckRoute"] = json!("");
+    settings["planReview"] = json!("");
+    settings["answerPolicy"] = json!(true);
     settings["sandbox"] = json!("host");
     settings["gateAt"] = json!({repo.path().to_str().unwrap(): gate_at});
     daemon.request("settings.set", json!({"settings":settings}));
-    let parent = daemon.request("task.create", json!({
-        "repo":repo.path().to_str().unwrap(), "title":"Parent", "goal":"Combined tree", "verify":["true"],
-        "finalVerify": if parent_lists_check { vec![command] } else { vec![] }, "start":false,
-    }));
-    let child = daemon.request("task.create", json!({
-        "repo":repo.path().to_str().unwrap(), "title":"Part", "goal":"Write files", "verify":[command], "parent":parent["id"],
-    }));
-    let child = settle(&daemon, child["id"].as_str().unwrap());
-    let parent = settle(&daemon, parent["id"].as_str().unwrap());
+    let (parent, child) = if check.is_some() {
+        let parent = daemon.request(
+            "task.create",
+            json!({"repo": repo.path().to_str().unwrap(), "request": "combine the parts", "start": true}),
+        );
+        let parent = settle(&daemon, parent["id"].as_str().unwrap());
+        let listed = daemon.request("task.list", json!({"repo": parent["repo"]}));
+        let child = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["parent"] == parent["id"] && t["title"] == "Part")
+            .unwrap_or_else(|| panic!("the planner created a child: {listed}"))
+            .clone();
+        (parent, settle(&daemon, child["id"].as_str().unwrap()))
+    } else {
+        let parent = daemon.request("task.create", json!({
+            "repo":repo.path().to_str().unwrap(), "title":"Parent", "goal":"Combined tree", "verify":["true"],
+            "finalVerify": if parent_lists_check { vec![command] } else { vec![] }, "start":false,
+        }));
+        let child = daemon.request("task.create", json!({
+            "repo":repo.path().to_str().unwrap(), "title":"Part", "goal":"Write files", "verify":[command], "parent":parent["id"],
+        }));
+        let child = settle(&daemon, child["id"].as_str().unwrap());
+        (settle(&daemon, parent["id"].as_str().unwrap()), child)
+    };
     assert_eq!(child["status"], "done", "{child}");
     assert_eq!(parent["status"], "done", "{parent}");
     let log = std::fs::read_to_string(&check_log).unwrap();
@@ -142,9 +229,14 @@ fn run(
 
 #[test]
 fn crate_a_runs_its_package_and_registers_the_workspace_check_at_the_parent() {
-    let (child, parent, child_commands, parent_commands) =
-        run("a/src/lib.rs", "cargo test --workspace", "parent", false);
-    assert_eq!(child_commands, ["cargo test -p package-a"]);
+    let (child, parent, child_commands, parent_commands) = run(
+        "a/src/lib.rs",
+        "cargo test --workspace",
+        Some("cargo test -p package-a"),
+        "parent",
+        false,
+    );
+    assert_eq!(child_commands, ["cargo test -p package-a"], "{child}");
     assert_eq!(parent_commands, ["cargo test --workspace"]);
     assert!(decisions(&child).contains(&"Orchestrator: subtask ran cargo test -p package-a instead of cargo test --workspace; the parent runs cargo test --workspace on the combined tree"), "{child}");
     let line = format!(
@@ -160,6 +252,7 @@ fn source_and_test_pair_runs_only_the_matching_node_test() {
     let (child, parent, child_commands, parent_commands) = run(
         "src/pair.js tests/pair.test.cjs",
         "npm run ci",
+        Some("node --test tests/pair.test.cjs"),
         "parent",
         false,
     );
@@ -170,23 +263,32 @@ fn source_and_test_pair_runs_only_the_matching_node_test() {
 }
 
 #[test]
-fn lockfile_changes_run_the_full_command_in_the_child() {
+fn a_subtask_without_a_planner_check_runs_the_full_command_in_the_child() {
     let (child, parent, child_commands, parent_commands) = run(
         "a/src/lib.rs Cargo.lock",
         "cargo test --workspace",
+        None,
         "parent",
         true,
     );
     assert_eq!(child_commands, ["cargo test --workspace"], "{child}");
     assert!(parent_commands.is_empty(), "{parent_commands:?}");
     assert_parent_reuses_check(&parent, "cargo test --workspace");
-    assert!(decisions(&child).contains(&"Orchestrator: subtask runs cargo test --workspace in full: Cargo.lock maps to no package or test"), "{child}");
+    assert!(
+        !decisions(&child).iter().any(|d| d.contains("subtask ran")),
+        "{child}"
+    );
 }
 
 #[test]
 fn every_gate_keeps_the_workspace_command_in_the_child() {
-    let (child, parent, child_commands, parent_commands) =
-        run("a/src/lib.rs", "cargo test --workspace", "every", true);
+    let (child, parent, child_commands, parent_commands) = run(
+        "a/src/lib.rs",
+        "cargo test --workspace",
+        None,
+        "every",
+        true,
+    );
     assert_eq!(child_commands, ["cargo test --workspace"], "{child}");
     assert!(parent_commands.is_empty(), "{parent_commands:?}");
     assert_parent_reuses_check(&parent, "cargo test --workspace");
@@ -205,6 +307,7 @@ fn explicit_package_and_test_targets_stay_unchanged() {
     let (child, parent, child_commands, parent_commands) = run(
         "a/src/lib.rs",
         "cargo test -p package-a --test one",
+        None,
         "parent",
         true,
     );

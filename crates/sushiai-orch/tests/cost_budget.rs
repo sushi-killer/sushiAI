@@ -385,6 +385,7 @@ fn a_task_over_its_dollar_budget_waits_before_the_next_attempt_and_raise_continu
 const UNPARSEABLE_FIRST_PLAN_SCRIPT: &str = r#"#!/bin/sh
 input="$(cat)"
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'
     if [ -f "$MSG_DIR/plan-runs" ]; then

@@ -27,6 +27,7 @@ case "$input" in
       printf '%s\n' '{{"type":"result","result":"```sushi-review\n{next_review}\n```"}}'
     fi
     exit 0 ;;
+  *"You review a coding task plan"*) printf '%s\n' '{{"type":"result","result":"{{\"findings\": []}}"}}' ;;
   *sushi-plan*)
     printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-plan"}}'
     printf '%s\n' '{{"type":"result","result":"```sushi-plan\n{{\"title\":\"Planned\",\"goal\":\"Add lines\",\"criteria\":[\"Lines added\"],\"verify\":[\"true\"]}}\n```"}}'
@@ -415,6 +416,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
+  *"You review a coding task plan"*) printf '%s\n' '{"type":"result","result":"{\"findings\": []}"}' ;;
   *sushi-plan*)
     case "$input" in
       *PART_A*) out '"```sushi-plan\n{\"title\":\"Part A\",\"goal\":\"PART_A: create a.txt\",\"verify\":[\"test -f a.txt\"]}\n```"' ;;

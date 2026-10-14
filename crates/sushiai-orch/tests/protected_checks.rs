@@ -35,6 +35,10 @@ if grep -q 'Rewrite one acceptance test' "$LOG_DIR/brief.$$"; then
   cat "$LOG_DIR/rewrite.json"
   exit 0
 fi
+if head -c 40 "$LOG_DIR/brief.$$" | grep -q 'You review a coding task plan'; then
+  printf '%s\n' '{{"type":"result","result":"{{\"findings\": []}}"}}'
+  exit 0
+fi
 if grep -q 'sushi-plan' "$LOG_DIR/brief.$$"; then
   cat "$LOG_DIR/plan.json"
   exit 0

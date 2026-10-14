@@ -585,7 +585,7 @@ fn after_the_first_attempt_p2_and_unrelated_findings_do_not_cost_an_attempt_and_
         "{\"verdict\":\"FAIL\",\"findings\":[\"P1: CHANGED_MARKER.txt:1 - wrong content\"]}",
     );
     let second = review_reply(
-        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",{\"finding\":\"P1: legacy/other.rs:9 - an old bug\",\"causedByDiff\":false,\"scenario\":{\"run\":\"false\",\"fails\":\"exit 1\"}}]}",
+        "{\"verdict\":\"FAIL\",\"findings\":[\"P2: CHANGED_MARKER.txt:1 - naming\",{\"finding\":\"P1: legacy/other.rs:9 - an old bug\",\"causedByDiff\":false,\"scenario\":{\"run\":\"echo 'test legacy::old_bug ... FAILED'; exit 1\",\"fails\":\"exit 1\"}}]}",
     );
     let s = setup(
         &[("REVIEW_0", &first), ("REVIEW_REST", &second)],

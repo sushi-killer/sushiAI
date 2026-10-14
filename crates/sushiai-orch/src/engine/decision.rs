@@ -375,8 +375,9 @@ pub(super) enum LoopSignal {
 }
 
 /// Record a failure, apply the tier/waiting rules, and -- when attempts are
-/// exhausted -- walk the failure ladder (`ladder.rs`): a policy or triage
-/// answer, one changed approach, then `failed`. The owner is never asked.
+/// exhausted -- walk the failure ladder (`ladder.rs`): a policy or overseer
+/// answer, one changed approach, then `failed`. The owner is never asked by
+/// the ladder itself.
 /// A continue extends the attempt budget by 2.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fail_and_continue(
@@ -402,7 +403,7 @@ pub(super) async fn fail_and_continue(
     // Not persisted here: the wait does it itself, after the one-shot is
     // installed (see `wait_for_answer`).
     let Some(answered) =
-        wait_for_exhausted_answer(app, task_id, task, idx, pending_answer, cancel, permit).await
+        wait_for_exhausted_answer(app, task_id, task, pending_answer, cancel, permit).await
     else {
         return LoopSignal::Stop;
     };

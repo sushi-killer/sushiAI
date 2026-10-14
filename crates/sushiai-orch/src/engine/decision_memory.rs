@@ -29,6 +29,19 @@ pub(crate) enum HardLimit {
     ProductionDeploy,
 }
 
+impl Risk {
+    /// The limit a question tagged with this risk is under.
+    fn limit(self) -> HardLimit {
+        match self {
+            Risk::Push => HardLimit::PushPrMergeRelease,
+            Risk::Money => HardLimit::Money,
+            Risk::Destructive => HardLimit::Destructive,
+            Risk::Security => HardLimit::SandboxOrSecurity,
+            Risk::Deploy => HardLimit::ProductionDeploy,
+        }
+    }
+}
+
 /// Phrases (lower-case words) that put a question under a limit. Matching is
 /// per whole word, so `pr` never matches `improve`.
 const KEYWORDS: [(HardLimit, &[&str]); 5] = [
@@ -153,6 +166,10 @@ pub(crate) fn hard_limit(question: &Question, answer: &str) -> Option<HardLimit>
     };
     if drops {
         return Some(HardLimit::SharedCheckDrop);
+    }
+    // The asking agent's own tag, on top of the words below: it can only add a limit.
+    if let Some(risk) = question.risk.first() {
+        return Some(risk.limit());
     }
     let prose = if question.kind == QuestionKind::PreexistingFailure {
         overseer::question_prose(question)
@@ -767,6 +784,18 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn a_risk_tag_adds_its_limit_to_a_question_without_the_keyword() {
+        let mut q = free_q("Which approach, A or B?", &["A", "B"]);
+        assert_eq!(hard_limit(&q, "A"), None);
+        q.risk = vec![Risk::Security];
+        assert_eq!(hard_limit(&q, "A"), Some(HardLimit::SandboxOrSecurity));
+        // A tag only adds: a question the words already put under a limit stays there.
+        let mut pushing = free_q("Push the branch?", &["push", "hold"]);
+        pushing.risk = vec![Risk::Money];
+        assert!(hard_limit(&pushing, "push").is_some());
+    }
+
     #[tokio::test]
     async fn decision_memory_every_hard_limit_reaches_the_owner() {
         let (app, dir) = overseer_app();
@@ -857,10 +886,7 @@ mod tests {
         let (answer, task) = park(&app, task).await;
         assert_eq!(answer.as_deref(), Some("continue"));
         assert_eq!(task.loop_state.non_owner_continues, 2);
-        assert!(task
-            .decisions
-            .iter()
-            .any(|d| is_orchestrator_answer_decision(d)));
+        assert!(task.decisions.iter().any(|d| d.contains(" -> continue")));
         // One non-owner retry per base.
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);

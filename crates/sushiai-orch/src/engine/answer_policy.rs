@@ -1,7 +1,7 @@
 use super::*;
 
 /// Automatic answers per kind of question and cause on one task; the next
-/// question of that kind and cause goes on to triage and the owner.
+/// question of that kind and cause goes on to the overseer and the owner.
 pub(super) const MAX_POLICY_ANSWERS: usize = 3;
 
 const JUDGE_PROMPT: &str = "A coding agent claims that an acceptance criterion cannot be met, and gives evidence. You may read files in the working directory but change nothing. Check the evidence yourself. Answer verified true only when you confirmed the evidence is true and that it really makes the criterion impossible; otherwise false. Reply with only JSON: {\"verified\": true|false, \"reason\": \"<one sentence>\"}";
@@ -371,7 +371,7 @@ pub(super) fn remove_check_command(
 /// a shared check: "drop all" on a base-check question, or "drop
 /// criterion" on an impossible one whose criterion carries one. Only the
 /// owner may; others may retry or stop. Callers that answer by rule, judge or
-/// triage escalate to the owner instead.
+/// the overseer escalates to the owner instead.
 pub(super) fn shared_check_drop_refusal(
     settings: &Settings,
     task: &Task,
@@ -603,9 +603,9 @@ pub(super) fn record_answered_question(
 }
 
 /// Answers `task`'s waiting question by rule or judge, when the policy is on
-/// and allows it; `None` sends the question on (triage, then the owner). The
-/// question and waiting state are cleared and persisted on an answer. Plan and
-/// agent questions are left to the triage wrappers, which need triage's view.
+/// and allows it; `None` sends the question on (the overseer, then the owner).
+/// The question and waiting state are cleared and persisted on an answer. Plan
+/// and agent questions have no rule: the overseer decides them.
 pub(super) async fn try_policy_answer(
     app: &Arc<App>,
     task: &mut Task,
@@ -782,26 +782,24 @@ pub(super) fn cautious_option(options: &[String]) -> Option<&String> {
     })
 }
 
-/// The cautious option to take for a plan or agent question if triage agrees:
-/// `None` when the policy is off or spent, the kind is not one of those two, or
-/// no option is marked cautious.
-pub(super) fn cautious_choice(app: &App, task: &Task, question: &Question) -> Option<String> {
+/// The option taken for a waiting question nobody answers in time: the
+/// `default_option` the asking agent named, else the option marked cautious on
+/// a plan or agent question. `None` when the policy is off or spent, or the
+/// question names neither.
+pub(super) fn default_choice(app: &App, task: &Task, question: &Question) -> Option<String> {
+    if !policy_open(app, task, question) {
+        return None;
+    }
+    if let Some(index) = question.default_option {
+        return question.options.get(index).cloned();
+    }
     if !matches!(
         question.kind,
         QuestionKind::PlanQuestion | QuestionKind::AgentQuestion
-    ) || !policy_open(app, task, question)
-    {
+    ) {
         return None;
     }
     cautious_option(&question.options).cloned()
-}
-
-/// Whether triage's answer is `cautious`.
-pub(super) fn agrees_with(decision: &brief::TriageDecision, cautious: Option<&str>) -> bool {
-    cautious.is_some_and(|c| {
-        matches!(decision.action, brief::TriageAction::Answer)
-            && decision.answer.trim().eq_ignore_ascii_case(c.trim())
-    })
 }
 
 #[cfg(test)]

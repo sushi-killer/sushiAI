@@ -5,13 +5,13 @@
 
 use crate::model::{
     Attempt, AttemptStatus, Baseline, Check, Decline, DeclineReason, DeclineRuling, FindingStatus,
-    Message, MessageKind, ReviewResult, ScopedCheck, Stage, Task, TaskStatus, Tier, Variant,
+    Message, MessageKind, ReviewResult, Risk, ScopedCheck, Stage, Task, TaskStatus, Tier, Variant,
     VerifyOutcome,
 };
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 10;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 12;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -64,9 +64,9 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
 
 const DECLINES_BLOCK: &str = "\nThe last attempt failed review. If a review finding is wrong, already satisfied, or its smaller fix would change behaviour, decline it with evidence instead of working around it: add a `declines` array to the report, `\"declines\":[{\"id\":\"<the finding's id, such as F-1>\",\"reason\":\"wrong|already_satisfied|changes_behaviour\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. The review of this attempt rules on each decline by its id. A decline it does not uphold leaves the finding blocking, and a decline without evidence is ignored.\n";
 
-const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
+const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\",\"risk\":[]}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security or deploy (empty when none).\n";
 
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
@@ -775,6 +775,9 @@ pub struct Report {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub question: String,
+    /// What the blocked `question` commits the owner to (`Question.risk`).
+    #[serde(default)]
+    pub risk: Vec<Risk>,
     #[serde(default, deserialize_with = "lenient_declines")]
     pub declines: Vec<Decline>,
     /// Protected tests the agent says are wrong, with the reason.
@@ -1224,13 +1227,13 @@ pub fn parse_review_with_rule(text: &str, criteria: &[String]) -> Option<(Review
     Some((result, recorded_as_pass))
 }
 
-const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk a question only for a decision neither the request nor the repository can answer -- at most 3. Anything you can look up or reasonably decide yourself, decide, and fold the decision into the goal instead of asking.";
+const PLAN_INSTRUCTIONS: &str = "Read the repository's own instructions (AGENTS.md / CLAUDE.md / README) and the code the request touches.\n\nThen draft this task. Acceptance criteria must be observable from outside the code (something a reviewer could check without reading the diff). Verify commands must be the fastest ones that already exist in this repo and actually exercise the criteria -- check package.json scripts, a Makefile, Cargo, or similar before inventing one, and prefer a targeted test over a full CI run. Prefer a test file over a grep check for behaviour. When a command greps for a pattern that may start with `-` (a markdown list item such as `- foo`), put `--` before the pattern: `grep -qF -- '<pattern>' file`. Each verify entry is run verbatim with `sh -c` and must exit 0: only exact shell commands, no prose, no conditions in parentheses. A check that needs judgement (a screenshot, a visual look, \"only if X changed\") goes into criteria, where the reviewer checks it.\n\nPick the tier: `mechanical` for a small, fully specified edit, `hard` for work that needs design judgement or touches several subsystems, `standard` otherwise.\n\nWhen the work changes what a screen shows, the goal must name the exact repo command that produces its screenshot evidence -- look for one before assuming none exists, so the implementer never has to rediscover it. Also put that command in the plan's `screenshot` field: orchd then runs it itself after verify passes and saves the images. Take it only from what the repository already has (package.json scripts, a Makefile, a scripts directory, its own docs); when it has none, leave `screenshot` empty rather than inventing one.\n\nEvery `-- check:` must be something this repository can actually run today (its test runner, harness or script exists); do not ask for a kind of test the repo has no harness for.\n\nAsk the owner only about a call that belongs to a person, and only these four kinds: (1) a scope change against the request, (2) money or a paid service, (3) a destructive or irreversible action, (4) the security model or a public API or contract change. Anything else you settle yourself: decide it, fold the decision into the goal, and do not ask. At most 3 questions.";
 
-const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"]}]}\n```\n";
+const PLAN_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-plan\n{\"title\":\"...\",\"goal\":\"...\",\"tier\":\"mechanical|standard|hard\",\"criteria\":[],\"coverage\":[{\"requirement\":\"...\",\"criteria\":[0]}],\"verify\":[],\"questions\":[{\"text\":\"...\",\"options\":[\"...\",\"...\"],\"risk\":[],\"defaultOption\":null}]}\n```\n";
 
 const PLAN_COVERAGE: &str = "List in `coverage` every numbered or bulleted item of the request, as its `requirement` text and the 0-based indexes of the `criteria` that prove it; each such item needs at least one criterion with a runnable `-- check:`. A criterion is about the product's behaviour, never about what the agent writes in its report, handoff, summary or decisions.";
 
-const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when a wrong guess is irreversible or consequential (data loss, a public API or contract, money, security). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
+const PLAN_BATCH_QUESTIONS: &str = "Give every question a `recommended` option (one of its `options`), the `evidence` for it, and `blocking`: true only when the question is one of the four kinds of call that belong to a person (a scope change against the request, money or a paid service, a destructive or irreversible action, the security model or a public API or contract change). A non-blocking question is not asked: your recommendation is recorded as an assumption and the work goes on, so recommend what you would pick yourself. Blocking questions are asked together in one message.";
 
 const PLAN_CONTRACT: &str = "The criteria are the contract the work is judged by. Before writing them, check every factual claim the request makes against the code; when one is wrong, say so in the goal and plan for what is actually true. Write each criterion as `<observable outcome> -- check: <how a read-only reviewer confirms it: a verify command whose output shows it, the file and function to read, or for a visual result the screenshot the implementer must save under artifacts/>`. The reviewer cannot run the app. A criterion whose proof is an image may instead be written as `{\"text\": \"...\", \"visual\": true}`; orchd then requires a saved image under artifacts/ before review. `visual` means the criterion is proven by looking at an image; a criterion checked by a command is never visual, so do not flag one. Mark a criterion visual only for a screen the task changes, name its screenshot file (`artifacts/<name>.png`) in its check, and use one screenshot per changed screen: orchd keeps only the images a visual criterion names as evidence, so the other images a test run leaves under `artifacts/` are dropped.";
 
@@ -1258,8 +1261,8 @@ fn plan_report_format(variant: &Variant, split: bool) -> String {
     let mut format = PLAN_REPORT_FORMAT.to_string();
     if variant.batch_questions {
         format = format.replace(
-            "\"options\":[\"...\",\"...\"]}",
-            "\"options\":[\"...\",\"...\"],\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
+            "\"defaultOption\":null}",
+            "\"defaultOption\":null,\"recommended\":\"...\",\"evidence\":\"...\",\"blocking\":false}",
         );
     }
     format = format.replace("\"verify\":[],", "\"verify\":[],\"paths\":[\"src/...\"],");
@@ -1402,6 +1405,12 @@ pub struct PlanQuestion {
     /// owner.
     #[serde(default = "default_blocking")]
     pub blocking: bool,
+    /// What the question commits the owner to (`Question.risk`).
+    #[serde(default)]
+    pub risk: Vec<Risk>,
+    /// The index in `options` taken when nobody answers (`Question.default_option`).
+    #[serde(default, rename = "defaultOption")]
+    pub default_option: Option<usize>,
 }
 
 fn default_blocking() -> bool {
@@ -1870,14 +1879,10 @@ pub fn parse_proposal(text: &str) -> Result<crate::model::ProposalReply, Proposa
     Ok(reply)
 }
 
-const TRIAGE_INSTRUCTIONS: &str = "You are triaging a question this task's own agent could not answer, on the owner's behalf. Answer only if the repository, the task, or earlier owner decisions already settle it. Otherwise escalate, and sharpen the question into one precise question with 2-4 concrete options a person can pick from.\n\nWhen the question is that attempts keep failing: read the last failure. If it is fixable, answer `continue - ` followed by exactly what to fix; if a review finding is wrong (it contradicts the code or the repository), answer `continue - ` and say which finding to disregard and why. Escalate when the task itself looks wrong or the same failure keeps coming back.";
-
-const TRIAGE_REPORT_FORMAT: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-triage\n{\"action\":\"answer\"|\"escalate\",\"answer\":\"...\",\"question\":\"...\",\"options\":[],\"reason\":\"...\"}\n```\n";
-
-/// Cap applied to each piece of agent-written text quoted into a triage
-/// brief -- independent of, and generally tighter than, [`MAX_FAILURE_DETAIL`]
-/// (which is sized for an agent's own retry brief, not a nested untrusted
-/// quote inside a different session's prompt).
+/// Cap applied to each piece of agent-written text quoted into a brief for
+/// another session -- independent of, and generally tighter than,
+/// [`MAX_FAILURE_DETAIL`] (which is sized for an agent's own retry brief, not
+/// a nested untrusted quote inside a different session's prompt).
 const UNTRUSTED_MAX_CHARS: usize = 2000;
 
 fn escape_untrusted_tags(text: &str) -> String {
@@ -1901,9 +1906,9 @@ fn escape_untrusted_tags(text: &str) -> String {
 
 /// Wraps a piece of agent-written text (the question itself, a summary, an
 /// `"Agent: ..."` decision note, or a failure detail) in an explicit fence
-/// before it goes into the triage brief: all of it comes from a previous,
-/// less-trusted agent session in the same worktree the triage session is
-/// about to read, so it must never be mistaken for the triage session's own
+/// before it goes into a brief for another session: all of it comes from a
+/// previous, less-trusted agent session in the same worktree that session is
+/// about to read, so it must never be mistaken for that session's own
 /// instructions.
 pub(crate) fn untrusted_block(label: &str, text: &str) -> String {
     format!(
@@ -2337,168 +2342,6 @@ fn grounded_checks_block(task: &Task, verify_results: &[VerifyOutcome]) -> Strin
     format!("\n## Grounded checks\n\n{out}")
 }
 
-/// The triage brief: enough of the task for a fresh read-only session to
-/// judge whether it can answer the question itself (spec "wake the
-/// orchestrator before bothering the owner") -- goal, criteria, verify,
-/// decisions so far, the last attempt's summary/failure if any, then the
-/// question itself and the triage instructions. `question`, the summary,
-/// any `"Agent: ..."` decision, and the failure detail are all agent-
-/// written and go in behind [`untrusted_block`].
-pub fn build_triage_brief(task: &Task, question: &str, options: &[String]) -> String {
-    let mut out = String::new();
-    out.push_str("## Task\n\n");
-    out.push_str(&task.goal);
-    out.push_str("\n\n## Acceptance criteria\n\n");
-    if task.criteria.is_empty() {
-        out.push_str("(none specified)\n");
-    } else {
-        for c in &task.criteria {
-            out.push_str("- ");
-            out.push_str(c);
-            out.push('\n');
-        }
-    }
-    out.push_str("\n## Verification commands\n\n");
-    if task.verify.is_empty() {
-        out.push_str("(none specified)\n");
-    } else {
-        for v in &task.verify {
-            out.push_str("- `");
-            out.push_str(v);
-            out.push_str("`\n");
-        }
-    }
-    out.push_str("\n## Decisions so far\n\n");
-    if task.decisions.is_empty() {
-        out.push_str("(none)\n");
-    } else {
-        for d in &task.decisions {
-            match d.strip_prefix("Agent: ") {
-                Some(agent_text) => {
-                    out.push_str(&untrusted_block("An agent's decision", agent_text))
-                }
-                None => {
-                    out.push_str("- ");
-                    out.push_str(d);
-                    out.push('\n');
-                }
-            }
-        }
-    }
-    if let Some(last) = task.attempts.last() {
-        if let Some(summary) = &last.summary {
-            out.push_str("\n## Last attempt summary\n\n");
-            out.push_str(&untrusted_block("Summary", summary));
-        }
-        if let Some(failure) = &last.failure {
-            out.push_str("\n## Last attempt failure\n\n");
-            out.push_str(&untrusted_block("Failure detail", &failure.detail));
-        }
-    }
-    out.push_str("\n## Question\n\n");
-    out.push_str(&untrusted_block("The question", question));
-    if !options.is_empty() {
-        out.push_str("\nOptions: ");
-        out.push_str(&options.join(", "));
-        out.push('\n');
-    }
-    out.push_str("\n## Instructions\n\n");
-    out.push_str(TRIAGE_INSTRUCTIONS);
-    out.push_str("\n\n");
-    out.push_str(TRIAGE_REPORT_FORMAT);
-    out
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TriageAction {
-    Answer,
-    Escalate,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct TriageDecision {
-    pub action: TriageAction,
-    #[serde(default)]
-    pub answer: String,
-    #[serde(default)]
-    pub question: String,
-    #[serde(default)]
-    pub options: Vec<String>,
-    #[serde(default)]
-    pub reason: String,
-}
-
-/// Same last-fence-wins, malformed-is-`None` rule as [`parse_report`]/
-/// [`parse_review`]/[`parse_plan`].
-pub fn parse_triage(text: &str) -> Option<TriageDecision> {
-    let body = last_fenced_block(text, "sushi-triage")?;
-    serde_json::from_str(&body).ok()
-}
-
-/// Turns a raw (possibly missing or malformed) triage reply into a decision
-/// that's always safe to act on:
-/// - a missing fence or unparseable JSON always escalates with the original
-///   question;
-/// - an answer that's empty, or -- after trimming, lowercasing and
-///   stripping trailing punctuation -- exactly `"approve"` or `"stop"`
-///   (which would otherwise let triage silently rubber-stamp a
-///   protected-path change or end the task without the owner ever seeing
-///   it) also escalates with the original question;
-/// - an escalation with a blank question, or empty options, falls back to
-///   the original question/options rather than showing the owner nothing.
-///
-/// Fail-open to the owner, never loops.
-pub fn sanitize_triage(
-    parsed: Option<TriageDecision>,
-    original_question: &str,
-    original_options: &[String],
-) -> TriageDecision {
-    let escalate_with = |reason: String| TriageDecision {
-        action: TriageAction::Escalate,
-        answer: String::new(),
-        question: original_question.to_string(),
-        options: original_options.to_vec(),
-        reason,
-    };
-    let Some(d) = parsed else {
-        return escalate_with("triage response was missing or malformed".to_string());
-    };
-    match d.action {
-        TriageAction::Answer => {
-            let normalized = d
-                .answer
-                .trim()
-                .trim_end_matches(|c: char| c.is_ascii_punctuation())
-                .to_ascii_lowercase();
-            if normalized.is_empty() {
-                escalate_with("triage answered with nothing".to_string())
-            } else if normalized == "approve" || normalized == "stop" {
-                escalate_with(format!("triage tried to answer \"{normalized}\" itself"))
-            } else {
-                d
-            }
-        }
-        TriageAction::Escalate => {
-            let question = if d.question.trim().is_empty() {
-                original_question.to_string()
-            } else {
-                d.question
-            };
-            let options = if d.options.is_empty() {
-                original_options.to_vec()
-            } else {
-                d.options
-            };
-            TriageDecision {
-                question,
-                options,
-                ..d
-            }
-        }
-    }
-}
-
 /// The body of the last ` ```<tag>` fence or `<tag>...</tag>` block in
 /// `text`, whichever opens later. A fence closes only on a line that is
 /// just ` ``` `, so a JSON string quoting ` ```sushi-review``` ` inline
@@ -2821,6 +2664,20 @@ mod tests {
             parse_report("sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\"}")
                 .unwrap();
         assert_eq!(report.outcome, Outcome::Blocked);
+    }
+
+    #[test]
+    fn a_blocked_report_carries_its_risk() {
+        let report = parse_report(
+            "sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\",\"risk\":[\"security\"]}",
+        )
+        .unwrap();
+        assert_eq!(report.risk, vec![Risk::Security]);
+        let plain = parse_report("sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\"}")
+            .unwrap();
+        assert!(plain.risk.is_empty());
+        assert!(REPORT_FORMAT_BLOCK.contains("\"risk\":[]"));
+        assert!(RULES_BLOCK.contains("`risk`"));
     }
 
     #[test]
@@ -3433,6 +3290,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_plan_reads_a_question_risk_and_default_option() {
+        let text = "```sushi-plan\n{\"title\":\"t\",\"goal\":\"g\",\"criteria\":[],\"verify\":[],\"questions\":[{\"text\":\"Pay for it?\",\"options\":[\"yes\",\"no\"],\"risk\":[\"money\"],\"defaultOption\":1}]}\n```";
+        let draft = parse_plan(text).unwrap();
+        assert_eq!(draft.questions[0].risk, vec![Risk::Money]);
+        assert_eq!(draft.questions[0].default_option, Some(1));
+    }
+
+    #[test]
     fn parse_plan_returns_none_when_malformed_or_missing() {
         assert!(parse_plan("no fence here").is_none());
         assert!(parse_plan("```sushi-plan\nnot json\n```").is_none());
@@ -3445,220 +3310,6 @@ mod tests {
         assert!(draft.criteria.is_empty());
         assert!(draft.verify.is_empty());
         assert!(draft.questions.is_empty());
-    }
-
-    #[test]
-    fn build_triage_brief_includes_task_context_and_question() {
-        let mut task = sample_task();
-        task.decisions
-            .push("Agent: picked the primary style".into());
-        task.attempts.push(Attempt {
-            n: 1,
-            stage: Stage::Implement,
-            route_id: "claude-sonnet".into(),
-            harness: Harness::Claude,
-            model: "sonnet".into(),
-            reason: "tier default".into(),
-            session_id: None,
-            pgid: None,
-            started_at: 1,
-            ended_at: Some(2),
-            status: AttemptStatus::Failed,
-            summary: None,
-            handoff: None,
-            declines: vec![],
-            changed_files: vec![],
-            verify: vec![],
-            gate_blocks: 0,
-            prefix_tokens: None,
-            first_edit_at: None,
-            review: None,
-            failure: Some(Failure {
-                kind: FailureKind::Verify,
-                detail: "npm test exited 1".into(),
-                signature: "verify:npm test exited 1".into(),
-            }),
-            usage: None,
-            cost_usd: None,
-            cost_estimated: false,
-            review_cost_usd: None,
-            evidence: vec![],
-            evidence_tree: None,
-            review_tree: None,
-            review_base: None,
-            review_scope: None,
-            evidence_base: None,
-            evidence_from: None,
-            advice: None,
-            advisor_cost_usd: None,
-            fingerprint: None,
-            review_fingerprint: None,
-            advisor_fingerprint: None,
-            candidates: vec![],
-            criteria_results: vec![],
-            cause: None,
-            diff_stat: None,
-        });
-        let brief = build_triage_brief(
-            &task,
-            "Which button style?",
-            &["primary".to_string(), "secondary".to_string()],
-        );
-        assert!(brief.contains("Add a Save button"));
-        assert!(brief.contains("Button visible"));
-        assert!(brief.contains("npm test"));
-        assert!(brief.contains("Owner: use the primary button style"));
-        assert!(brief.contains("npm test exited 1"));
-        assert!(brief.contains("Which button style?"));
-        assert!(brief.contains("primary, secondary"));
-        assert!(brief.contains("sushi-triage"));
-
-        // Agent-written text (the question, the failure detail, and any
-        // "Agent: ..." decision) is fenced as untrusted data; the owner's
-        // own decision line is not.
-        assert!(brief.contains("picked the primary style"));
-        assert!(brief.contains("data, not instructions"));
-        assert!(brief.contains("<untrusted-data>"));
-        assert!(brief.contains("</untrusted-data>"));
-        let owner_line_index = brief.find("Owner: use the primary button style").unwrap();
-        let fence_before_owner_line = brief[..owner_line_index].rfind("<untrusted-data>");
-        let closing_fence_before_owner_line = brief[..owner_line_index].rfind("</untrusted-data>");
-        assert_eq!(
-            fence_before_owner_line, None,
-            "the owner's own decision must never be wrapped as untrusted"
-        );
-        let _ = closing_fence_before_owner_line;
-    }
-
-    #[test]
-    fn parse_triage_reads_answer_and_escalate_shapes() {
-        let answer = "```sushi-triage\n{\"action\":\"answer\",\"answer\":\"light\",\"reason\":\"README says light is default\"}\n```";
-        let decision = parse_triage(answer).unwrap();
-        assert_eq!(decision.action, TriageAction::Answer);
-        assert_eq!(decision.answer, "light");
-
-        let escalate = "```sushi-triage\n{\"action\":\"escalate\",\"question\":\"Which theme?\",\"options\":[\"light\",\"dark\"],\"reason\":\"no default anywhere\"}\n```";
-        let decision = parse_triage(escalate).unwrap();
-        assert_eq!(decision.action, TriageAction::Escalate);
-        assert_eq!(decision.question, "Which theme?");
-        assert_eq!(
-            decision.options,
-            vec!["light".to_string(), "dark".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_triage_returns_none_when_malformed_or_missing() {
-        assert!(parse_triage("no fence here").is_none());
-        assert!(parse_triage("```sushi-triage\nnot json\n```").is_none());
-    }
-
-    #[test]
-    fn sanitize_triage_escalates_with_the_original_question_when_malformed() {
-        let decision = sanitize_triage(None, "Which theme?", &["light".to_string()]);
-        assert_eq!(decision.action, TriageAction::Escalate);
-        assert_eq!(decision.question, "Which theme?");
-        assert_eq!(decision.options, vec!["light".to_string()]);
-    }
-
-    #[test]
-    fn sanitize_triage_forces_escalate_on_approve_or_stop() {
-        for forbidden in ["approve", "stop"] {
-            let parsed = TriageDecision {
-                action: TriageAction::Answer,
-                answer: forbidden.to_string(),
-                question: String::new(),
-                options: vec![],
-                reason: "sure, why not".to_string(),
-            };
-            let decision = sanitize_triage(Some(parsed), "original?", &[]);
-            assert_eq!(decision.action, TriageAction::Escalate);
-            assert_eq!(decision.question, "original?");
-        }
-    }
-
-    #[test]
-    fn sanitize_triage_passes_through_a_well_formed_decision() {
-        let parsed = TriageDecision {
-            action: TriageAction::Answer,
-            answer: "light".to_string(),
-            question: String::new(),
-            options: vec![],
-            reason: "README says so".to_string(),
-        };
-        let decision = sanitize_triage(Some(parsed), "original?", &[]);
-        assert_eq!(decision.action, TriageAction::Answer);
-        assert_eq!(decision.answer, "light");
-    }
-
-    #[test]
-    fn sanitize_triage_normalizes_before_the_approve_stop_check() {
-        for written in ["Approve.", "  STOP  ", "Stop!", "APPROVE"] {
-            let parsed = TriageDecision {
-                action: TriageAction::Answer,
-                answer: written.to_string(),
-                question: String::new(),
-                options: vec![],
-                reason: "sure".to_string(),
-            };
-            let decision = sanitize_triage(Some(parsed), "original?", &[]);
-            assert_eq!(
-                decision.action,
-                TriageAction::Escalate,
-                "{written:?} should have been caught"
-            );
-            assert_eq!(decision.question, "original?");
-        }
-    }
-
-    #[test]
-    fn sanitize_triage_escalates_on_an_empty_answer() {
-        let parsed = TriageDecision {
-            action: TriageAction::Answer,
-            answer: "   ".to_string(),
-            question: String::new(),
-            options: vec![],
-            reason: "".to_string(),
-        };
-        let decision = sanitize_triage(Some(parsed), "original?", &["a".to_string()]);
-        assert_eq!(decision.action, TriageAction::Escalate);
-        assert_eq!(decision.question, "original?");
-        assert_eq!(decision.options, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn sanitize_triage_escalate_falls_back_to_original_question_and_options_when_blank() {
-        let parsed = TriageDecision {
-            action: TriageAction::Escalate,
-            answer: String::new(),
-            question: "  ".to_string(),
-            options: vec![],
-            reason: "no better question came to mind".to_string(),
-        };
-        let decision = sanitize_triage(
-            Some(parsed),
-            "Which theme?",
-            &["light".to_string(), "dark".to_string()],
-        );
-        assert_eq!(decision.question, "Which theme?");
-        assert_eq!(
-            decision.options,
-            vec!["light".to_string(), "dark".to_string()]
-        );
-    }
-
-    #[test]
-    fn sanitize_triage_escalate_keeps_a_real_sharpened_question() {
-        let parsed = TriageDecision {
-            action: TriageAction::Escalate,
-            answer: String::new(),
-            question: "Pick the auth approach".to_string(),
-            options: vec!["OAuth".to_string()],
-            reason: "no default".to_string(),
-        };
-        let decision = sanitize_triage(Some(parsed), "original?", &["x".to_string()]);
-        assert_eq!(decision.question, "Pick the auth approach");
-        assert_eq!(decision.options, vec!["OAuth".to_string()]);
     }
 
     #[test]
@@ -4016,6 +3667,26 @@ mod tests {
     fn the_default_plan_brief_asks_for_a_recommended_option() {
         let brief = build_plan_brief("Fix it", &Variant::default(), "");
         assert!(brief.contains("\"recommended\""));
+    }
+
+    #[test]
+    fn the_plan_brief_asks_the_owner_only_the_closed_list_of_calls() {
+        let variant = Variant {
+            batch_questions: false,
+            ..Variant::default()
+        };
+        let batched = build_plan_brief("Fix it", &Variant::default(), "");
+        for brief in [build_plan_brief("Fix it", &variant, ""), batched] {
+            for call in [
+                "(1) a scope change against the request",
+                "(2) money or a paid service",
+                "(3) a destructive or irreversible action",
+                "(4) the security model or a public API or contract change",
+            ] {
+                assert!(brief.contains(call), "missing {call}");
+            }
+            assert!(brief.contains("Anything else you settle yourself"));
+        }
     }
 
     #[test]

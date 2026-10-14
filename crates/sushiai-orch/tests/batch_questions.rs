@@ -8,7 +8,9 @@ use serde_json::json;
 use std::path::Path;
 
 /// A fake Claude that plans with `plan` (written next to the script), answers
-/// triage by escalating with a sharpened question, and implements trivially.
+/// the overseer with a plain note, records any triage run in `triage-ran.txt`
+/// (a triage turn must never happen; it would escalate with a sharpened
+/// question), and implements trivially.
 fn setup(plan: serde_json::Value, dir: &Path) -> std::path::PathBuf {
     let result = json!({
         "type": "result",
@@ -29,7 +31,13 @@ case "$input" in
     printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-plan"}}'
     cat {d}/plan.jsonl
     ;;
+  *"is waiting for an answer"*)
+    echo overseer >> overseer-ran.txt
+    printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-overseer"}}'
+    printf '%s\n' '{{"type":"result","total_cost_usd":0.01,"usage":{{"input_tokens":1,"output_tokens":1}},"result":"Overseer note."}}'
+    ;;
   *sushi-triage*)
+    echo triage >> triage-ran.txt
     printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-triage"}}'
     cat {d}/triage.jsonl
     ;;
@@ -56,8 +64,14 @@ fn triage(dir: &Path, decision: serde_json::Value) {
     std::fs::write(dir.join("triage.jsonl"), format!("{result}\n")).unwrap();
 }
 
-const SETTLES: fn() -> serde_json::Value =
-    || json!({"action": "answer", "answer": "go with the recommendation", "reason": "routine"});
+/// Answers the routine question `text` as the overseer does.
+fn settle_by_overseer(daemon: &Daemon, id: &str, text: &str) {
+    wait_for_question(daemon, id, text);
+    daemon.request(
+        "task.answer",
+        json!({"id": id, "answer": "go with the recommendation", "source": "overseer"}),
+    );
+}
 
 fn plan(questions: serde_json::Value) -> serde_json::Value {
     json!({
@@ -96,8 +110,20 @@ fn finished(s: &str) -> bool {
     matches!(s, "done" | "failed" | "stopped" | "waiting")
 }
 
+/// Polls until the task waits for `text`, the question the test is up to.
+fn wait_for_question(daemon: &Daemon, id: &str, text: &str) -> serde_json::Value {
+    for _ in 0..400 {
+        let task = daemon.request("task.get", json!({"id": id}));
+        if task["status"] == "waiting" && task["question"]["text"] == text {
+            return task;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("the task never waited for {text:?}");
+}
+
 #[test]
-fn non_blocking_questions_become_assumptions_and_never_wait() {
+fn non_blocking_questions_are_settled_by_the_overseer_as_assumptions() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(
         plan(json!([
@@ -106,29 +132,37 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
         ])),
         dir.path(),
     );
-    triage(dir.path(), SETTLES());
-    let daemon = spawn(&script, false);
+    let daemon = spawn(&script, true);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, true);
     let id = task["id"].as_str().unwrap().to_string();
-    let settled = poll_until(&daemon, &id, finished);
+    // Each routine question waits for the overseer, which answers it.
+    for question in ["Which default theme?", "Where does the toggle live?"] {
+        wait_for_question(&daemon, &id, question);
+        daemon.request(
+            "task.answer",
+            json!({"id": id, "answer": "go with the recommendation", "source": "overseer"}),
+        );
+    }
+    // The loop records each answer after the reply; wait for the plan to end.
+    let settled = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(settled["status"], "done", "task JSON: {settled}");
     let assumptions = settled["assumptions"].as_array().unwrap();
     assert_eq!(assumptions.len(), 2, "{settled}");
     assert_eq!(assumptions[0]["question"], "Which default theme?");
     assert_eq!(assumptions[0]["answer"], "go with the recommendation");
-    assert!(assumptions[0]["evidence"]
-        .as_str()
-        .unwrap()
-        .contains("the app is dark already Triage: routine"));
+    assert_eq!(assumptions[0]["evidence"], "the app is dark already");
     assert_eq!(assumptions[0]["by"], "policy");
     assert_eq!(assumptions[0]["overturned"], false);
+    assert!(!Path::new(task["worktree"].as_str().unwrap())
+        .join("triage-ran.txt")
+        .exists());
     daemon.shutdown_and_wait();
     remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
 
 #[test]
-fn a_non_blocking_question_triage_escalates_is_asked_not_assumed() {
+fn a_non_blocking_question_the_overseer_does_not_settle_is_asked_not_assumed() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(
         plan(json!([
@@ -155,7 +189,7 @@ fn a_non_blocking_question_triage_escalates_is_asked_not_assumed() {
 }
 
 #[test]
-fn triage_does_not_settle_a_planner_question_while_the_answer_policy_is_off() {
+fn the_overseer_does_not_settle_a_planner_question_while_the_answer_policy_is_off() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(
         plan(json!([
@@ -163,8 +197,7 @@ fn triage_does_not_settle_a_planner_question_while_the_answer_policy_is_off() {
         ])),
         dir.path(),
     );
-    triage(dir.path(), SETTLES());
-    let daemon = spawn(&script, false);
+    let daemon = spawn(&script, true);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["answerPolicy"] = json!(false);
     daemon.request("settings.set", json!({"settings": settings}));
@@ -215,8 +248,7 @@ fn a_task_created_without_a_variant_assumes_a_non_blocking_question() {
         ])),
         dir.path(),
     );
-    triage(dir.path(), SETTLES());
-    let daemon = spawn(&script, false);
+    let daemon = spawn(&script, true);
     let repo = init_git_repo();
     let task = daemon.request(
         "task.create",
@@ -227,7 +259,8 @@ fn a_task_created_without_a_variant_assumes_a_non_blocking_question() {
         }),
     );
     let id = task["id"].as_str().unwrap().to_string();
-    let stopped = poll_until(&daemon, &id, finished);
+    settle_by_overseer(&daemon, &id, "Which default theme?");
+    let stopped = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(stopped["status"], "stopped", "{stopped}");
     assert_eq!(
         stopped["assumptions"][0]["answer"], "go with the recommendation",
@@ -304,7 +337,7 @@ fn a_plan_without_a_verify_command_asks_when_the_repo_offers_no_whole_suite() {
 }
 
 #[test]
-fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
+fn two_blocking_questions_become_one_owner_question_with_no_triage_turn() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(
         plan(json!([
@@ -314,7 +347,8 @@ fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
         ])),
         dir.path(),
     );
-    let daemon = spawn(&script, true);
+    // Without auto-answer nobody settles the routine question: it joins the batch.
+    let daemon = spawn(&script, false);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, true);
     let id = task["id"].as_str().unwrap().to_string();
@@ -327,6 +361,9 @@ fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     assert!(!text.contains("Sharpened one"), "{text}");
     assert!(text.contains("Which colour?"), "{text}");
     assert!(waiting.get("assumptions").is_none(), "{waiting}");
+    assert!(!Path::new(task["worktree"].as_str().unwrap())
+        .join("triage-ran.txt")
+        .exists());
 
     daemon.request("task.answer", json!({"id": id, "answer": "no to both"}));
     let settled = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
@@ -344,12 +381,12 @@ fn overturn_marks_the_assumption_and_reaches_the_next_attempt() {
         ])),
         dir.path(),
     );
-    triage(dir.path(), SETTLES());
-    let daemon = spawn(&script, false);
+    let daemon = spawn(&script, true);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, false);
     let id = task["id"].as_str().unwrap().to_string();
-    let stopped = poll_until(&daemon, &id, finished);
+    settle_by_overseer(&daemon, &id, "Which default theme?");
+    let stopped = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
     assert_eq!(stopped["status"], "stopped", "{stopped}");
     assert_eq!(stopped["assumptions"].as_array().unwrap().len(), 1);
 

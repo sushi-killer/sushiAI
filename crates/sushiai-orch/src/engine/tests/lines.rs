@@ -13,7 +13,6 @@ fn no_planner_tier_line_names_the_standard_route() {
         line,
         "Orchestrator: no planner tier -> standard, route claude-sonnet"
     );
-    assert!(!is_orchestrator_answer_decision(&line));
 }
 
 #[test]
@@ -24,10 +23,3 @@ fn orchestrator_answer_line_includes_question_answer_and_reason() {
     );
 }
 
-#[test]
-fn orchestrator_escalate_line_includes_the_reason() {
-    assert_eq!(
-        orchestrator_escalate_line("no default anywhere"),
-        "Orchestrator: escalated (no default anywhere)"
-    );
-}

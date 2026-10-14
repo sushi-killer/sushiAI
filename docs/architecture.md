@@ -457,7 +457,7 @@ flowchart TD
   fail["Failure<br/>signature dedup, maybe escalate tier"]
   budget{"Budget left?"}
   ab[["sushiai orch ab<br/>metrics per variant"]]
-  triage["Orchestrator triages, max 2 per task<br/>continue / reject finding / escalate"]
+  overseer["Overseer decides, max 2 continues per task<br/>continue / change approach / escalate"]
   ownerQ(["Owner question"])
 
   plan --> plangate --> split --> baseline --> tier --> impl --> rebase --> checklist --> verify
@@ -500,11 +500,11 @@ flowchart TD
   judge["Tie-break judge<br/>read-only, cheapest route never weaker than the implementer, not the reviewer, once per finding"]
   judge -->|"invalid: drop the finding as an assumption, review the same attempt again"| review
   judge -->|"valid / no verdict / no route"| fail
-  fail -->|"review finding the registry holds open from an earlier run: first one runs the advisor and tiers up, second waits"| triage
+  fail -->|"review finding the registry holds open from an earlier run: first one runs the advisor and tiers up, second waits"| overseer
   fail --> budget
   budget -->|yes| impl
-  budget -->|no| triage --> ownerQ
-  triage -->|continue| impl
+  budget -->|no| overseer --> ownerQ
+  overseer -->|continue| impl
   commit -.-> ab
 
   classDef planned stroke-dasharray: 5 5

@@ -13,7 +13,7 @@ pub(super) enum BaseVerdict {
     Waived,
     /// The task fails a test the base does not: an ordinary failure.
     /// The task's own run to report (a full run when the first was fail-fast).
-    NewFailures(VerifyOutcome),
+    NewFailures(Box<VerifyOutcome>),
     /// Neither output names tests and they differ: the existing question.
     Unclear,
 }
@@ -183,7 +183,7 @@ async fn judge_pair(
     )
     .await;
     let Some(again) = again.first().filter(|r| !is_interrupted(r)) else {
-        return BaseVerdict::NewFailures(failed.clone());
+        return BaseVerdict::NewFailures(Box::new(failed.clone()));
     };
     let tests = failed.failing.clone();
     if again.code == Some(0) {
@@ -195,7 +195,7 @@ async fn judge_pair(
             waive(task, failed, &tests, true);
             BaseVerdict::Waived
         }
-        _ => BaseVerdict::NewFailures(failed.clone()),
+        _ => BaseVerdict::NewFailures(Box::new(failed.clone())),
     }
 }
 

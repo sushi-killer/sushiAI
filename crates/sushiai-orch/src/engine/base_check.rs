@@ -501,11 +501,11 @@ struct StoredBaseRun {
     outcome: VerifyOutcome,
 }
 
+/// A result the environment caused: its setup failed before the command ran.
+/// The command's own output never says so (an install error in a check's
+/// tail is that check's failure).
 pub(crate) fn is_environment_result(outcome: &VerifyOutcome) -> bool {
-    let tail = outcome.tail.to_ascii_lowercase();
-    ["setup failed", "eexist", "failed to install"]
-        .iter()
-        .any(|marker| tail.contains(marker))
+    outcome.setup_failed
 }
 
 /// The base results of an earlier daemon: (base sha, command) -> outcome.
@@ -1465,6 +1465,18 @@ mod tests {
             ms: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_a_failed_setup_is_an_environment_result_never_a_tail() {
+        let mut eexist = outcome("cargo test", 1);
+        eexist.tail = "Error: EEXIST: file already exists, mkdir 'target'".into();
+        let mut install = outcome("npm test", 1);
+        install.tail = "setup failed (exit 1): npm ERR! failed to install".into();
+        assert!(!is_environment_result(&eexist));
+        assert!(!is_environment_result(&install));
+        install.setup_failed = true;
+        assert!(is_environment_result(&install));
     }
 
     #[tokio::test]

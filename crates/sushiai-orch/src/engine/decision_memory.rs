@@ -568,6 +568,7 @@ mod tests {
             cores: 1,
             load_timeout: false,
             decisions: vec![],
+            setup_failed: true,
             ..Default::default()
         }];
         task.attempts.push(attempt);
@@ -603,15 +604,31 @@ mod tests {
             a
         };
         let mut task = task_with_status(TaskStatus::Queued);
+        // Different failures on one tree are flaky; on two trees they are two changes.
+        let on_tree = |n, text: &str, tree: &str| {
+            let mut a = attempt(n, outcome(Some(1), text));
+            a.verify[0].tree = Some(tree.into());
+            a
+        };
         task.attempts = vec![
-            attempt(1, outcome(Some(1), "not ok 1 - alpha")),
-            attempt(2, outcome(Some(1), "not ok 2 - beta")),
+            on_tree(1, "not ok 1 - alpha", "tree-a"),
+            on_tree(2, "not ok 2 - beta", "tree-a"),
         ];
         assert_eq!(precedents::signals_of(&task), ["flaky"]);
+        task.attempts = vec![
+            on_tree(1, "not ok 1 - alpha", "tree-a"),
+            on_tree(2, "not ok 2 - beta", "tree-b"),
+        ];
+        assert!(precedents::signals_of(&task).is_empty());
         task.attempts = vec![attempt(1, outcome(None, "killed after 600s"))];
         assert_eq!(precedents::signals_of(&task), ["timeout"]);
-        task.attempts = vec![attempt(1, outcome(Some(1), "npm ERR! failed to install"))];
+        // The install signal comes from a failed setup, never from a check's own words.
+        let mut setup = outcome(Some(1), "npm ERR! failed to install");
+        setup.setup_failed = true;
+        task.attempts = vec![attempt(1, setup)];
         assert_eq!(precedents::signals_of(&task), ["install"]);
+        task.attempts = vec![attempt(1, outcome(Some(1), "npm ERR! failed to install"))];
+        assert!(precedents::signals_of(&task).is_empty());
         let mut other = attempt(1, outcome(Some(1), "FAIL tests/other.test.js"));
         other.changed_files = vec!["src/mine.js".into()];
         task.attempts = vec![other];

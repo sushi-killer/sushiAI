@@ -520,6 +520,8 @@ pub(super) async fn run_verify_commands(
     cancel: &CancelToken,
 ) -> Vec<VerifyOutcome> {
     let cache_run = CacheRun::for_commands(cwd, commands).await;
+    // Taken before the commands run: the code they check, not what they wrote.
+    let tree = check_tree(cwd).await;
     let mut results = Vec::new();
     for cmd in commands {
         let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
@@ -530,6 +532,9 @@ pub(super) async fn run_verify_commands(
         if let Some(result) = results.last_mut() {
             ctx.decision(line, &mut result.decisions);
         }
+    }
+    for result in &mut results {
+        result.tree.clone_from(&tree);
     }
     results
 }
@@ -565,7 +570,10 @@ pub(super) async fn run_eval_check(
         Err(e) => return failed(format!("check checkout panicked: {e}")),
     }
     if let Err(e) = super::worktrees::setup_worktree(repo, &path, sandbox, cancel).await {
-        return failed(e);
+        return VerifyOutcome {
+            setup_failed: true,
+            ..failed(e)
+        };
     }
     let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
     let cache_run = CacheRun::for_commands(&path, &[cmd.to_string()]).await;

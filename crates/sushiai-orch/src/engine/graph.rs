@@ -1232,7 +1232,7 @@ pub(super) async fn carry_and_check(
     .await
     .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
     let carried = carried.map(|(carried, tests)| {
-        task.planner_tests = tests;
+        adopt_carried_tests(task, tests, &carried);
         carried
     });
     if matches!(

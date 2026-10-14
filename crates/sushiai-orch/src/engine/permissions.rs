@@ -861,6 +861,7 @@ pub(super) fn unhandled_denials(
     handled: &BTreeSet<String>,
     worktree: &Path,
     outcome: &harness::RunOutcome,
+    protected: &[String],
 ) -> Vec<Subject> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -886,7 +887,10 @@ pub(super) fn unhandled_denials(
         } else {
             continue;
         };
-        if handled.contains(subject.name()) || !seen.insert(subject.rule()) {
+        // A planner test or a check-run file is restored by orchd, never asked
+        // about: the owner has nothing to allow.
+        let is_protected = matches!(&subject, Subject::Path(rel) if protected.contains(rel));
+        if is_protected || handled.contains(subject.name()) || !seen.insert(subject.rule()) {
             continue;
         }
         out.push(subject);
@@ -1189,13 +1193,34 @@ mod tests {
             ..Default::default()
         };
         let handled: BTreeSet<String> = [".claude/done.md".to_string()].into();
-        let subjects = unhandled_denials(&handled, Path::new("/wt"), &outcome);
+        let subjects = unhandled_denials(&handled, Path::new("/wt"), &outcome, &[]);
         assert_eq!(
             subjects,
             vec![
                 Subject::Tool("mcp__slack__post".into()),
                 Subject::Path(".claude/a.md".into())
             ]
+        );
+    }
+
+    #[test]
+    fn a_refused_write_to_a_protected_path_raises_no_question() {
+        let outcome = harness::RunOutcome {
+            permission_denials: vec![
+                denial("Write", json!({"file_path": "/wt/tests/a.rs"})),
+                denial("Edit", json!({"file_path": "/wt/docs/b.md"})),
+            ],
+            ..Default::default()
+        };
+        let none = BTreeSet::new();
+        let protected = vec!["tests/a.rs".to_string()];
+        assert_eq!(
+            unhandled_denials(&none, Path::new("/wt"), &outcome, &protected),
+            vec![Subject::Path("docs/b.md".into())]
+        );
+        assert_eq!(
+            unhandled_denials(&none, Path::new("/wt"), &outcome, &[]).len(),
+            2
         );
     }
 

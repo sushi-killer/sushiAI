@@ -7,10 +7,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const MAX_TEST_FILES: usize = 8;
-const MAX_TEST_BYTES: usize = 64 * 1024;
+pub(super) const MAX_TEST_BYTES: usize = 64 * 1024;
 
 /// The repo-relative form of a planned path, or why it is refused.
-fn clean_test_path(raw: &str) -> Result<String, &'static str> {
+pub(super) fn clean_test_path(raw: &str) -> Result<String, &'static str> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("empty path");
@@ -80,6 +80,18 @@ fn command_words(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `path` is a document: a check reads it, the task writes it.
+fn is_document(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    DOC_EXTENSIONS.contains(&ext.as_str())
+}
+
+const DOC_EXTENSIONS: [&str; 3] = ["md", "mdx", "rst"];
+
 /// Everything the tests commit makes unchangeable: the planner's files and
 /// every file in the repository a visible check command names. The
 /// held-out command is not read, so its files stay unnamed.
@@ -94,8 +106,14 @@ pub(super) fn protected_hashes(
         .iter()
         .map(|t| t.path.clone())
         .collect();
+    // A document a check names is not protected: the task is asked to write it.
+    let planned = paths.clone();
     for check in &task.checks {
-        paths.extend(command_words(&check.run));
+        paths.extend(
+            command_words(&check.run)
+                .into_iter()
+                .filter(|p| planned.contains(p) || !is_document(p)),
+        );
     }
     paths.sort();
     paths.dedup();
@@ -123,7 +141,9 @@ pub(super) fn carry_with_planner_tests(
         .as_deref()
         .filter(|commit| *commit != task.base_sha)
     else {
-        return git::carry_onto_moved_base(worktree, base_ref, &task.base_sha, &task.id);
+        let carried = git::carry_onto_moved_base(worktree, base_ref, &task.base_sha, &task.id)?;
+        refresh_protected(task, worktree, &carried);
+        return Ok(carried);
     };
     let paths: Vec<String> = task
         .planner_tests
@@ -149,15 +169,32 @@ pub(super) fn carry_with_planner_tests(
     Ok(carried)
 }
 
-/// The protected files in absolute form, for the deny rules of a run's
-/// settings.
-pub(super) fn protected_abs_paths(task: &Task, worktree: &Path) -> Vec<String> {
-    task.planner_tests
-        .protected
-        .iter()
-        .flat_map(|m| m.keys())
-        .map(|p| worktree.join(p).to_string_lossy().to_string())
-        .collect()
+/// After a carry without planner tests: the hashes of the files the checks
+/// name are those of the new head, so a file the new base changed is not
+/// mistaken for the agent's edit and put back to the old content.
+fn refresh_protected(task: &mut Task, worktree: &Path, carried: &git::Rebase) {
+    if let git::Rebase::Moved { new_sha, .. } | git::Rebase::Conflicts { new_sha, .. } = carried {
+        if task.planner_tests.protected.is_some() {
+            task.planner_tests.protected = Some(protected_hashes(worktree, new_sha, task));
+        }
+    }
+}
+
+/// Stores the planner-tests state a carry returned, with one decision line for
+/// every protected file whose hash the new base changed.
+pub(super) fn adopt_carried_tests(task: &mut Task, tests: PlannerTests, carried: &git::Rebase) {
+    if let git::Rebase::Moved { new_sha, .. } | git::Rebase::Conflicts { new_sha, .. } = carried {
+        let old = task.planner_tests.protected.clone().unwrap_or_default();
+        for (path, hash) in tests.protected.iter().flatten() {
+            if old.get(path).is_some_and(|h| h != hash) {
+                task.decisions.push(format!(
+                    "Orchestrator: protected {path} now matches the new base {}",
+                    short_sha(new_sha)
+                ));
+            }
+        }
+    }
+    task.planner_tests = tests;
 }
 
 /// Before the first attempt something is left to do: the tests are not
@@ -524,12 +561,12 @@ fn without_layout(text: &str) -> String {
 
 /// After an attempt: the protected files that changed since the tests
 /// commit or no longer match their stored hash, put back from that commit.
-/// `None` when nothing protected was touched.
+/// Returns the files it restored; `None` when nothing protected was touched.
 pub(super) async fn guard_protected(
     task: &Task,
     worktree: &Path,
     changed: &[String],
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let hashes = task
         .planner_tests
         .protected
@@ -556,10 +593,7 @@ pub(super) async fn guard_protected(
         }
         bad.sort();
         let _ = git::restore_paths(&wt, &rev, &bad);
-        Some(format!(
-            "The attempt changed protected files: {}. They are the task's tests and the files its checks name; orchd put them back. Make the change in other files and leave these as they are.",
-            bad.join(", ")
-        ))
+        Some(bad)
     })
     .await
     .unwrap_or(None)
@@ -694,6 +728,115 @@ mod tests {
         let pending = git::changed_files(&wt, &new_base).unwrap();
         assert!(pending.contains(&"tests/planner.sh".to_string()));
         assert!(pending.contains(&"implementation.txt".to_string()));
+    }
+
+    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        for (path, text) in files {
+            let target = repo.join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, text).unwrap();
+        }
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "files"]);
+        (dir, repo)
+    }
+
+    #[test]
+    fn a_document_a_check_names_stays_writable_and_a_test_file_stays_protected() {
+        let (_dir, repo) = repo_with(&[
+            ("docs/guide.md", "old\n"),
+            ("checks/t.test", "x\n"),
+            ("notes/readme.rst", "r\n"),
+        ]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.criteria = vec!["Guide documents it -- check: grep -q parser docs/guide.md".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "grep -q parser docs/guide.md notes/readme.rst && run-tests checks/t.test".into(),
+            baseline: None,
+        }];
+        let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
+        assert_eq!(kept, vec!["checks/t.test"]);
+    }
+
+    #[tokio::test]
+    async fn the_guard_restores_an_edited_test_and_reports_which_files() {
+        let (_dir, repo) = repo_with(&[("t/a.test", "one\n"), ("t/b.test", "two\n")]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.planner_tests.files = vec![test("t/a.test", "one\n"), test("t/b.test", "two\n")];
+        task.planner_tests.protected = Some(protected_hashes(&repo, "HEAD", &task));
+        task.planner_tests.commit = Some(git::head_sha(&repo).unwrap());
+        std::fs::write(repo.join("t/a.test"), "edited\n").unwrap();
+        std::fs::remove_file(repo.join("t/b.test")).unwrap();
+        let restored = guard_protected(&task, &repo, &[]).await.unwrap();
+        assert_eq!(restored, vec!["t/a.test", "t/b.test"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("t/a.test")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("t/b.test")).unwrap(),
+            "two\n"
+        );
+        assert!(guard_protected(&task, &repo, &[]).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_carry_refreshes_the_protected_hashes_of_check_files_from_the_new_head() {
+        let (_app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("check.sh"), "old\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "check"]);
+        let base_ref = git::branch_of(&repo, "HEAD").unwrap();
+        let wt = dir.path().join("task");
+        let created = git::create_worktree(&repo, "task/carry", &wt, "HEAD").unwrap();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = repo.to_string_lossy().to_string();
+        task.worktree = wt.to_string_lossy().to_string();
+        task.base_sha = created.base_sha;
+        task.base_ref = Some(base_ref.clone());
+        task.criteria = vec!["it works".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "sh check.sh".into(),
+            baseline: None,
+        }];
+        task.planner_tests.protected = Some(protected_hashes(&wt, &task.base_sha, &task));
+        // The base moves and changes the protected file; the task did not.
+        std::fs::write(repo.join("check.sh"), "new\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "newer check"]);
+        std::fs::write(wt.join("impl.txt"), "work\n").unwrap();
+        let mut snapshot = task.clone();
+        let carried = carry_with_planner_tests(&mut snapshot, &wt, &base_ref).unwrap();
+        assert!(matches!(carried, git::Rebase::Moved { .. }), "{carried:?}");
+        adopt_carried_tests(&mut task, snapshot.planner_tests, &carried);
+        assert_eq!(
+            task.planner_tests.protected.as_ref().unwrap()["check.sh"],
+            sha256_hex(b"new\n")
+        );
+        assert!(
+            task.decisions
+                .iter()
+                .any(|d| d.contains("protected check.sh now matches the new base")),
+            "{:?}",
+            task.decisions
+        );
+        if let git::Rebase::Moved { new_sha, .. } = carried {
+            task.base_sha = new_sha;
+        }
+        let changed = git::changed_files(&wt, task.work_base()).unwrap();
+        assert!(guard_protected(&task, &wt, &changed).await.is_none());
+        assert_eq!(
+            std::fs::read_to_string(wt.join("check.sh")).unwrap(),
+            "new\n"
+        );
     }
 
     #[test]

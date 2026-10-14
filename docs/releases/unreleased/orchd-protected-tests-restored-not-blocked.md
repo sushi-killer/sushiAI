@@ -1,0 +1,6 @@
+## Protected tests are restored, not blocked
+
+- orchd no longer makes the planner's tests and the files a task's checks name read-only for the agent, and it no longer raises a permission question for them. An attempt that changes one is not failed: orchd puts the original back, records one decision line, and the next brief tells the agent that its edits were discarded and that the checks run on the originals.
+- If the agent thinks a planner test is wrong, it says so in its report (`testClaims`: `path` and `reason`). A fresh read-only judge on the planner route checks the claim against the task goal. Confirmed: the planner rewrites that test, orchd commits it into the planner tests and refreshes the protected hashes, and a decision line records what changed and why. Rejected: the agent carries on. Unclear: one owner question (`Rewrite the test` or `Keep the test`). Each test file is ruled on once per task.
+- A document a check names (`.md`, `.mdx`, `.rst`) is no longer protected, so a criterion that asks for a docs change can be met.
+- After the task branch is carried onto a moved base, the stored hashes of the files the checks name come from the new head, so a file the new base changed is no longer put back to its old content. A decision line names each file whose hash changed.

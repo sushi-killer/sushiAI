@@ -70,9 +70,18 @@ const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not tou
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
 
-const PROTECTED_BLOCK: &str = "## Protected files\n\nThese files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: an attempt that changes one fails and orchd puts it back.\n\n";
+const PROTECTED_BLOCK: &str = "## Protected files\n\nThese files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: orchd discards any change to them and the checks run on the originals. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.\n\n";
 
 const IMPOSSIBLE_BLOCK: &str = "## A criterion that cannot be met\n\nWhen a criterion cannot be met as written (its premise is wrong, or it contradicts another criterion), do not work around it: end your final message with a fenced block naming it by its `[N]` index and the evidence, and stop.\n\n```sushi-impossible\n{\"criterion\": <index>, \"evidence\": \"...\"}\n```\n";
+
+/// Added to the brief of the attempt after one whose edits to protected files
+/// were discarded.
+pub fn discarded_block(files: &[String]) -> String {
+    format!(
+        "## Your edits to protected files were discarded\n\nYour edits to {} (acceptance tests / files the checks run) were discarded; checks run on the originals. If a test is wrong, say so in your report (`\"testClaims\":[{{\"path\":\"<file>\",\"reason\":\"<why it is wrong>\"}}]`) with the reason instead of editing it.\n\n",
+        files.join(", ")
+    )
+}
 
 /// The name a held-out check goes by everywhere its command must not
 /// appear: decision lines, the attempt's verify list, failure details.
@@ -185,6 +194,10 @@ pub fn build_resume_brief(
         ));
     }
     out.push_str(messages);
+    if !task.planner_tests.discarded.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&discarded_block(&task.planner_tests.discarded));
+    }
     let answers: Vec<_> = task
         .question_history
         .iter()
@@ -264,6 +277,9 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
             out.push_str(&format!("- `{path}`\n"));
         }
         out.push('\n');
+    }
+    if !task.planner_tests.discarded.is_empty() {
+        out.push_str(&discarded_block(&task.planner_tests.discarded));
     }
     out.push_str(IMPOSSIBLE_BLOCK);
     out.push('\n');
@@ -753,6 +769,40 @@ pub struct Report {
     pub question: String,
     #[serde(default, deserialize_with = "lenient_disputes")]
     pub disputes: Vec<Dispute>,
+    /// Protected tests the agent says are wrong, with the reason.
+    #[serde(default, rename = "testClaims", deserialize_with = "lenient_claims")]
+    pub test_claims: Vec<TestClaim>,
+}
+
+/// "This protected test is wrong", from the implementer's report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestClaim {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Entries without a path and a reason are dropped; anything but an array is
+/// empty.
+fn lenient_claims<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<TestClaim>, D::Error> {
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    let serde_json::Value::Array(entries) = v else {
+        return Ok(Vec::new());
+    };
+    let text = |e: &serde_json::Value, key: &str| {
+        e.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|e| {
+            Some(TestClaim {
+                path: text(e, "path")?,
+                reason: text(e, "reason")?,
+            })
+        })
+        .collect())
 }
 
 /// Disputes of review findings: entries that are not objects, or lack a

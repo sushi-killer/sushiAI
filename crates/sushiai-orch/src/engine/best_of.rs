@@ -113,15 +113,6 @@ pub(super) fn prepare_run(
             }
             allow.extend(tools.allowed().into_iter().map(serde_json::Value::String));
         }
-        // The planner's tests and the files the checks name: no edit tool
-        // may touch them (a Bash write is caught by the post-attempt guard).
-        if let Some(deny) = claude_settings["permissions"]["deny"].as_array_mut() {
-            for abs in protected_abs_paths(task, worktree) {
-                for tool in ["Edit", "Write"] {
-                    deny.push(json!(format!("{tool}(/{abs})")));
-                }
-            }
-        }
         let _ = store::write_json_private(&settings_path, &claude_settings);
         let ctx = HookContext::new(task, attempt_n, worktree, task.work_base());
         app.register_hook(&token, &ctx, run_dir);

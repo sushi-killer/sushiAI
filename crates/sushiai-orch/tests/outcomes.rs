@@ -53,22 +53,11 @@ fn fake(dir: &Path, review: &str, implement: &str) -> PathBuf {
     fake_harness_script(dir, "fake-claude.sh", &body)
 }
 
-/// A fake codex that answers in prose, so a review routed to codex gives no
-/// verdict. Without it a no-verdict review reaches the real codex binary.
-fn fake_codex(dir: &Path) -> PathBuf {
-    let item = json!({"type": "item.completed",
-        "item": {"type": "agent_message", "text": "Looks fine to me."}});
-    let body = format!("#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{item}'\n");
-    fake_harness_script(dir, "fake-codex.sh", &body)
-}
-
 fn spawn(scripts: &Path, review: &str, implement: &str, env: &[(&str, &str)]) -> Daemon {
     let harness = fake(scripts, review, implement);
-    let codex = fake_codex(scripts);
     let log = scripts.to_str().unwrap();
     let mut vars = vec![
         ("ORCHD_CLAUDE_BIN", harness.to_str().unwrap()),
-        ("ORCHD_CODEX_BIN", codex.to_str().unwrap()),
         ("LOG_DIR", log),
     ];
     vars.extend_from_slice(env);

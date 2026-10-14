@@ -176,6 +176,10 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
         .env("RUSTC_WRAPPER", "")
         .stdout(log.try_clone().unwrap())
         .stderr(log);
+    // No test daemon reaches the real codex binary: a review routed to codex
+    // (a no-verdict review is retried there) gets this prose stub, unless the
+    // test names its own codex in `extra_env`, which is set after this.
+    cmd.env("ORCHD_CODEX_BIN", fake_codex_script(home));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -525,6 +529,13 @@ pub fn raw_request_with_params(
 /// `kill(pid, 0)`: true iff a process with this pid exists and is signalable by us.
 pub fn is_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A stand-in codex that answers in prose, so a review routed to codex gives
+/// no verdict, written into `dir` as `fake-codex.sh`.
+pub fn fake_codex_script(dir: &Path) -> PathBuf {
+    let body = "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Looks fine to me.\"}}'\n";
+    fake_harness_script(dir, "fake-codex.sh", body)
 }
 
 pub fn fake_harness_script(dir: &Path, name: &str, body: &str) -> PathBuf {

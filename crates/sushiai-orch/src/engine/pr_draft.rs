@@ -205,6 +205,27 @@ fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: bool) {
 }
 
 /// Replaces each secret value with `${NAME}` and the home directory with `~`.
+/// The body that is published: the unreviewed line and the waived-failures
+/// section are put back by code, whatever the drafter or the body check wrote.
+fn final_body(
+    task: &Task,
+    checked: String,
+    secrets: &std::collections::HashMap<String, String>,
+    home: Option<&str>,
+) -> String {
+    let source = if task.unreviewed && !checked.starts_with(pr::UNREVIEWED_LINE) {
+        format!("{}\n\n{checked}", pr::UNREVIEWED_LINE)
+    } else {
+        checked
+    };
+    let waived = redact_pr_text(&pr::waived_section(task), secrets, home);
+    let source = pr::without_waived_section(&source);
+    truncate_chars(
+        &redact_pr_text(&source, secrets, home),
+        MAX_BODY_CHARS.saturating_sub(waived.chars().count()),
+    ) + &waived
+}
+
 fn redact_pr_text(
     text: &str,
     secrets: &std::collections::HashMap<String, String>,
@@ -623,15 +644,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                     drafted
                 }
             };
-            let source = if task.unreviewed && !checked.starts_with(pr::UNREVIEWED_LINE) {
-                format!("{}\n\n{checked}", pr::UNREVIEWED_LINE)
-            } else {
-                checked
-            };
-            let body = truncate_chars(
-                &redact_pr_text(&source, &secrets, home.as_deref()),
-                MAX_BODY_CHARS,
-            );
+            let body = final_body(&task, checked, &secrets, home.as_deref());
             let plan = PrPlan {
                 branch: task.branch.clone(),
                 title,
@@ -942,6 +955,36 @@ async fn run_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::test_support::task_with_status;
+
+    #[test]
+    fn the_waived_section_survives_a_drafted_and_a_rewritten_body() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.assumptions.push(Assumption {
+            question: "q".into(),
+            answer: WAIVED.into(),
+            evidence: "alpha fails on the base".into(),
+            by: WAIVER_BY.into(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: Some(1),
+            commands: vec!["check".into()],
+            overturned: false,
+            owner_answer: None,
+        });
+        let none = std::collections::HashMap::new();
+        for drafted in [
+            "Why this change\n",
+            "Why\n\n## Waived base failures\n\n- invented\n",
+        ] {
+            let body = final_body(&task, drafted.to_string(), &none, None);
+            assert_eq!(body.matches("## Waived base failures").count(), 1, "{body}");
+            assert!(body.contains("- check: alpha fails on the base"), "{body}");
+            assert!(!body.contains("invented"), "{body}");
+        }
+        task.unreviewed = true;
+        let body = final_body(&task, "Why\n".into(), &none, None);
+        assert!(body.starts_with(pr::UNREVIEWED_LINE) && body.contains("alpha fails"));
+    }
 
     #[test]
     fn a_schema_checked_reply_is_read_and_anything_else_fails_the_turn() {

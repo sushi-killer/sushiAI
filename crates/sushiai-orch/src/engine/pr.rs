@@ -67,6 +67,50 @@ pub(super) fn unreviewed_part_line(child: &Task) -> String {
     )
 }
 
+const WAIVED_HEADING: &str = "## Waived base failures";
+
+/// The section that tells the reviewer which failing base checks the task
+/// was let through on (empty when none): put back by code after any drafted
+/// body, so no turn can drop it.
+pub(super) fn waived_section(task: &Task) -> String {
+    let waived: Vec<&Assumption> = task
+        .assumptions
+        .iter()
+        .filter(|a| a.by == WAIVER_BY && a.answer == WAIVED && !a.overturned)
+        .collect();
+    if waived.is_empty() {
+        return String::new();
+    }
+    let mut section = format!("\n{WAIVED_HEADING}\n\n");
+    for a in waived {
+        let command = a.commands.join(", ");
+        section.push_str(&format!("- {command}: {}\n", a.evidence.trim()));
+    }
+    section
+}
+
+/// `body` without any waived-failures section of its own, so the one `code`
+/// writes is the only one.
+pub(super) fn without_waived_section(body: &str) -> String {
+    let mut kept = Vec::new();
+    let mut skipping = false;
+    for line in body.lines() {
+        if line.trim_end() == WAIVED_HEADING {
+            skipping = true;
+        } else if skipping && line.starts_with("## ") {
+            skipping = false;
+        }
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    let mut text = kept.join("\n");
+    if body.ends_with('\n') && !text.is_empty() {
+        text.push('\n');
+    }
+    text
+}
+
 pub(super) fn pr_body(task: &Task) -> String {
     let mark = if task.unreviewed { " " } else { "x" };
     let mut body = String::new();
@@ -94,18 +138,7 @@ pub(super) fn pr_body(task: &Task) -> String {
         body.push_str(report.trim());
         body.push('\n');
     }
-    let waived: Vec<&Assumption> = task
-        .assumptions
-        .iter()
-        .filter(|a| a.by == WAIVER_BY && a.answer == WAIVED && !a.overturned)
-        .collect();
-    if !waived.is_empty() {
-        body.push_str("\n## Waived base failures\n\n");
-        for a in waived {
-            let command = a.commands.join(", ");
-            body.push_str(&format!("- {command}: {}\n", a.evidence.trim()));
-        }
-    }
+    body.push_str(&waived_section(task));
     body
 }
 
@@ -787,5 +820,28 @@ mod refusal_tests {
         assert!(body.contains("- check: alpha fails on the base"), "{body}");
         task.assumptions[0].overturned = true;
         assert!(!pr_body(&task).contains("Waived"));
+    }
+
+    #[test]
+    fn a_drafted_body_gets_the_waived_section_by_code_and_only_once() {
+        let mut task = task_with_status(TaskStatus::Done);
+        task.assumptions.push(Assumption {
+            question: "q".into(),
+            answer: WAIVED.into(),
+            evidence: "alpha fails on the base".into(),
+            by: WAIVER_BY.into(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: Some(1),
+            commands: vec!["check".into()],
+            overturned: false,
+            owner_answer: None,
+        });
+        let section = waived_section(&task);
+        assert!(section.contains("- check: alpha fails on the base"));
+        let own = "Intro\n\n## Waived base failures\n\n- invented\n\n## Notes\n\nkept\n";
+        let stripped = without_waived_section(own);
+        assert!(!stripped.contains("invented") && !stripped.contains("Waived"));
+        assert!(stripped.contains("Intro") && stripped.contains("## Notes\n\nkept"));
+        assert_eq!(without_waived_section("plain\n"), "plain\n");
     }
 }

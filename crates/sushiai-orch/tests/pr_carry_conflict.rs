@@ -36,6 +36,12 @@ cat "$dir/plan.json"
 ;;
 *"## Conflict-only attempt"*)
 printf '%s' "$brief" > "$dir/resolve-brief.md"
+if [ -f "$dir/remote" ] && [ ! -f "$dir/pushed" ]; then
+touch "$dir/pushed"
+t=$(mktemp -d)
+git clone -q "$(cat "$dir/remote")" "$t"
+(cd "$t" && echo theirs2 > pr.txt && git -c user.name=o -c user.email=o@example.invalid commit -qam second && git push -q origin HEAD:refs/heads/main)
+fi
 if [ -f .need-setup ] && [ ! -f "$(git rev-parse --git-dir)/setup-ran" ]; then echo nosetup > pr.txt; else cat "$dir/resolution" > pr.txt; fi
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-fake"}'
 printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"resolved\",\"decisions\":[],\"question\":\"\"}\n```"}'
@@ -363,5 +369,34 @@ fn task_pr_keeps_the_owners_title_through_a_resolution_attempt() {
         "{}",
         s.gh_log()
     );
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_second_conflict_after_the_resolution_ends_the_task_failed_with_one_notice() {
+    let s = setup(true, &[]);
+    std::fs::write(
+        s.tools.path().join("remote"),
+        s.remote.path().to_str().unwrap(),
+    )
+    .unwrap();
+    s.advance_origin(&[("pr.txt", "theirs\n")]);
+    let id = s.create("test -f pr.txt");
+    let task = s.wait_task(&id, "the task never failed", |t| t["status"] == "failed");
+    assert!(task["prUrl"].is_null(), "{task}");
+    assert!(
+        task["decisions"]
+            .to_string()
+            .contains("still conflicts with origin/main after its resolution attempt"),
+        "{task}"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!s.gh_log().contains("pr create"), "{}", s.gh_log());
+    let notices = s
+        .chat()
+        .into_iter()
+        .filter(|t| t.contains("Add pr file") && t.contains("failed"))
+        .count();
+    assert_eq!(notices, 1, "{:?}", s.chat());
     s.daemon.shutdown_and_wait();
 }

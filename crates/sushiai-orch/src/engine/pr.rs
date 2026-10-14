@@ -101,10 +101,10 @@ pub(super) fn pr_body(task: &Task) -> String {
 /// Task ids with a `task.pr` running: a second call is refused.
 static IN_FLIGHT: StdMutex<Option<HashSet<String>>> = StdMutex::new(None);
 
-struct InFlight(String);
+pub(super) struct InFlight(String);
 
 impl InFlight {
-    fn take(id: &str) -> Result<InFlight, String> {
+    pub(super) fn take(id: &str) -> Result<InFlight, String> {
         let mut guard = IN_FLIGHT.lock().unwrap();
         if !guard
             .get_or_insert_with(HashSet::new)

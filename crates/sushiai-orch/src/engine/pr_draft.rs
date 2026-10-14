@@ -357,13 +357,14 @@ pub(super) enum PrCarry {
 
 /// Waits for the finished loop of `id` to leave `controls`, so that starting
 /// the task again is not a no-op.
-async fn loop_gone(app: &App, id: &str) {
-    for _ in 0..100 {
+async fn loop_gone(app: &App, id: &str) -> bool {
+    for _ in 0..600 {
         if !app.controls.lock().unwrap().contains_key(id) {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    false
 }
 
 /// The PR carry conflicted: the task gets one conflict-only attempt on the
@@ -386,6 +387,16 @@ async fn resolve_conflict(
         let reason =
             format!("the work still conflicts with {upstream} after its resolution attempt");
         return Ok(PrCarry::Failed(fail_unresolved(app, id, reason).await));
+    }
+    // The work conflicts, but only a task started from this very base branch
+    // can resolve it in its own worktree; others keep the old outcome.
+    if task.base_ref.as_deref() != Some(base) {
+        return Err(format!(
+            "the work conflicts with {upstream} and the task did not start from {base}, so orchd cannot resolve it"
+        ));
+    }
+    if !loop_gone(app, id).await {
+        return Err("the task loop is still running; try again later".to_string());
     }
     let repo = PathBuf::from(&task.repo);
     let tip = pr::run_cmd("git", &["rev-parse", &upstream], &repo, pr::GIT_TIMEOUT).await?;
@@ -421,8 +432,7 @@ async fn resolve_conflict(
     task.updated_at = now_ms();
     app.save_task_logged(&task);
     app.broadcast_task(&task);
-    loop_gone(app, id).await;
-    app.start_task(id, Starter::Owner);
+    app.spawn_task_loop(id.to_string(), true);
     Ok(PrCarry::Resolving(files))
 }
 
@@ -477,7 +487,19 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         }
     }
     // Never push from a stale base: carry onto the newest one first.
-    match carry_for_pr(app, &task, None).await {
+    // A manual `task.pr` carries in the same checkout: one at a time.
+    let guard = loop {
+        match pr::InFlight::take(id) {
+            Ok(guard) => break guard,
+            Err(_) if owed(app, id).is_some() => {
+                tokio::time::sleep(Duration::from_millis(200)).await
+            }
+            Err(_) => return record(app, id, Vec::new(), 0.0, true),
+        }
+    };
+    let carried = carry_for_pr(app, &task, None).await;
+    drop(guard);
+    match carried {
         Ok(PrCarry::Ready) => {}
         // One decision line was saved; there is no pull request to open.
         Ok(PrCarry::Contained) => return record(app, id, Vec::new(), 0.0, true),

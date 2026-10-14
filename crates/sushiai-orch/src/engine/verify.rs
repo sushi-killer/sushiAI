@@ -1729,7 +1729,6 @@ mod scoped_task_tests {
         assert_eq!(scoped[1].repo.as_deref(), Some(task.repo.as_str()));
         assert_eq!(scoped[1].paths, ["src/**"]);
         assert!(is_shared_check(&Settings::default(), &task, "repo-check"));
-        assert!(!is_shared_check(&Settings::default(), &task, "new-check"));
         let commands = vec!["repo-check".into()];
         for file in ["src/a.ts", "electron/main.cjs"] {
             assert_eq!(

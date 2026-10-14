@@ -424,7 +424,7 @@ async fn resolve_conflict(
         match carry_onto_newest_base(app, &mut task, &wt, &CancelToken::new()).await {
             BaseCarry::Conflict(_) => Ok(()),
             BaseCarry::Ready => Err(format!("the carry onto {upstream} left no conflict")),
-            BaseCarry::Failed(reason) => Err(reason),
+            BaseCarry::Failed(reason) | BaseCarry::Skipped(reason) => Err(reason),
         }
     }
     .await;

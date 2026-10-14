@@ -459,6 +459,9 @@ pub struct App {
     base_preflights: StdMutex<HashMap<String, Arc<PreflightJob>>>,
     /// Which harness CLIs the last probe found (`availability.rs`).
     harness_avail: StdMutex<HashMap<Harness, bool>>,
+    /// Tasks the timer already resumed from a missing harness; a spawn that
+    /// fails again asks the owner instead of resuming every tick.
+    harness_resumed: StdMutex<std::collections::HashSet<String>>,
     /// Live task-loop limit. Shrinking retires free permits first, then
     /// held permits as their owners finish.
     slots: Arc<ResizableSlots>,
@@ -720,6 +723,7 @@ impl App {
             base_cancel: CancelToken::new(),
             base_preflights: StdMutex::new(HashMap::new()),
             harness_avail: StdMutex::new(HashMap::new()),
+            harness_resumed: StdMutex::new(std::collections::HashSet::new()),
             slots,
             check_slots,
             check_load: RwLock::new(verify::machine_load),

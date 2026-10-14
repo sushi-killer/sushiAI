@@ -494,24 +494,33 @@ pub(super) async fn run_task_loop(
             && !task.brief_check.missing_tool_asked
         {
             if let Some(missing) = task.brief_check.missing_tool.clone() {
-                task.question = Some(permissions::missing_tool_question(&task, &missing));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let Some(answer) = wait_for_answer(
-                    &app,
-                    &task_id,
-                    &mut task,
-                    &pending_answer,
-                    &cancel,
-                    &mut permit,
-                )
-                .await
-                else {
-                    drop(permit);
-                    app.finish_task_loop(&task_id);
-                    return;
-                };
-                permissions::apply_missing_answer(&app, &mut task, &missing, &answer);
+                // Only enabling a connected tool is the owner's to allow;
+                // without one the task goes on without the capability.
+                if missing.tool_id.is_none() {
+                    task.decisions.push(format!(
+                        "Orchestrator: no tool exists for {}; the task goes on without it",
+                        missing.capability
+                    ));
+                } else {
+                    task.question = Some(permissions::missing_tool_question(&task, &missing));
+                    task.status = TaskStatus::Waiting;
+                    task.updated_at = now_ms();
+                    let Some(answer) = wait_for_answer(
+                        &app,
+                        &task_id,
+                        &mut task,
+                        &pending_answer,
+                        &cancel,
+                        &mut permit,
+                    )
+                    .await
+                    else {
+                        drop(permit);
+                        app.finish_task_loop(&task_id);
+                        return;
+                    };
+                    permissions::apply_missing_answer(&app, &mut task, &missing, &answer);
+                }
                 task.brief_check.missing_tool_asked = true;
                 task.brief_check.missing_tool = None;
                 task.updated_at = now_ms();
@@ -1401,6 +1410,11 @@ pub(super) async fn run_task_loop(
             .iter()
             .flat_map(|m| m.keys().cloned())
             .collect();
+        for line in permissions::scratch_lines(&worktree, &outcome) {
+            if !task.decisions.contains(&line) {
+                task.decisions.push(line);
+            }
+        }
         let refused = permissions::unhandled_denials(&handled, &worktree, &outcome, &protected_now);
         if !refused.is_empty() {
             let (wt, own) = (worktree.clone(), task.own_diff());
@@ -1619,7 +1633,11 @@ pub(super) async fn run_task_loop(
             // `No tool: <capability>`: a retry cannot give the agent a tool,
             // so the owner decides, and only the owner.
             if let Some(capability) = permissions::missing_tool_claim(&question_text) {
-                task.question = Some(permissions::no_tool_question(&app, &task, &capability));
+                let enable = permissions::tool_to_enable(&app, &task, &capability);
+                task.question = Some(permissions::no_tool_question(
+                    &capability,
+                    enable.as_deref(),
+                ));
                 task.status = TaskStatus::Waiting;
                 task.updated_at = now_ms();
                 let Some(answer) = wait_for_answer(
@@ -2978,7 +2996,10 @@ fn rebase_conflict_note(
 pub(super) enum BaseCarry {
     Ready,
     Conflict(String),
+    /// Carrying went wrong in a way that may pass on another try.
     Failed(String),
+    /// Carrying was left out on purpose; trying again changes nothing.
+    Skipped(String),
 }
 
 /// Carries committed and uncommitted task work onto the current base head;
@@ -2992,7 +3013,7 @@ pub(super) async fn carry_onto_newest_base(
     let Some(base_ref) = task.base_ref.clone() else {
         let reason = "Rebase: cannot carry the work without a base branch".to_string();
         task.decisions.push(reason.clone());
-        return BaseCarry::Failed(reason);
+        return BaseCarry::Skipped(reason);
     };
     let (wt, mut snapshot, r) = (worktree.to_path_buf(), task.clone(), base_ref.clone());
     let carried = tokio::task::spawn_blocking(move || {
@@ -3073,7 +3094,7 @@ pub(super) async fn carry_onto_newest_base(
         Ok((git::Rebase::Skipped { reason }, _, _)) => {
             let detail = format!("Rebase: not carried onto {base_ref}: {reason}");
             task.decisions.push(detail.clone());
-            BaseCarry::Failed(detail)
+            BaseCarry::Skipped(detail)
         }
         Err(e) => {
             let detail = format!("Rebase: carrying onto {base_ref} failed: {e}");
@@ -3088,6 +3109,19 @@ const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
 /// How often that wait fetches the base from `origin`: the base often moves
 /// only by a merge on the remote, which the local branch never sees itself.
 const BASE_FETCH_EVERY: Duration = Duration::from_secs(60);
+/// How many times a failed carry is retried before the agent gets it as a
+/// conflict to fix.
+const CARRY_RETRIES: u32 = 3;
+
+/// The pause before a failed carry is tried again; `ORCHD_CARRY_RETRY_MS`
+/// shortens it for tests.
+fn carry_retry_pause() -> Duration {
+    let ms = std::env::var("ORCHD_CARRY_RETRY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15_000);
+    Duration::from_millis(ms)
+}
 /// The longest a task waits for its base to move, in seconds; after it the
 /// baseline rule judges the check against the base as it is. A test run may
 /// shorten it with `ORCHD_BASE_WAIT_SECS`.
@@ -3163,6 +3197,7 @@ pub(super) async fn carry_after_base_moves(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> BaseRetry {
+    let mut failed_carries = 0;
     loop {
         if let Some(base_ref) = task.base_ref.clone() {
             let mut noted = false;
@@ -3236,7 +3271,7 @@ pub(super) async fn carry_after_base_moves(
         match carry_onto_newest_base(app, task, worktree, cancel).await {
             BaseCarry::Ready => return BaseRetry::Ready,
             BaseCarry::Conflict(detail) => return BaseRetry::Conflict(detail),
-            BaseCarry::Failed(reason) => {
+            BaseCarry::Skipped(reason) => {
                 task.question = Some(Question::new(
                     format!("{reason}. Fix the carry problem, then retry, or stop?"),
                     vec!["retry".to_string(), "stop".to_string()],
@@ -3257,6 +3292,24 @@ pub(super) async fn carry_after_base_moves(
                     app.save_task_logged(task);
                     app.broadcast_task(task);
                     return BaseRetry::Stopped;
+                }
+            }
+            BaseCarry::Failed(reason) => {
+                failed_carries += 1;
+                if failed_carries > CARRY_RETRIES {
+                    return BaseRetry::Conflict(format!(
+                        "Carrying the work onto the newest base failed {failed_carries} times: {reason}. Bring the work up to date with the base yourself."
+                    ));
+                }
+                task.decisions.push(format!(
+                    "Orchestrator: the carry failed ({failed_carries} of {CARRY_RETRIES} retries), trying again after the next fetch"
+                ));
+                task.updated_at = now_ms();
+                app.save_task_logged(task);
+                app.broadcast_task(task);
+                tokio::select! {
+                    _ = cancel.cancelled() => return BaseRetry::Stopped,
+                    _ = tokio::time::sleep(carry_retry_pause()) => {}
                 }
             }
         }
@@ -4157,5 +4210,71 @@ mod follow_origin_tests {
         git_in(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
         follow_origin(&repo, "main").await;
         assert_eq!(git_in(&repo, &["rev-parse", "main"]), local);
+    }
+}
+
+#[cfg(test)]
+mod carry_retry_tests {
+    use super::*;
+    use crate::engine::test_support::{task_with_status, test_app};
+
+    #[tokio::test(start_paused = true)]
+    async fn a_carry_that_keeps_failing_becomes_a_conflict_attempt_and_asks_nobody() {
+        let (app, dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.repo = dir.path().to_string_lossy().into_owned();
+        task.base_ref = Some("main".into());
+        task.worktree = dir.path().join("missing").to_string_lossy().into_owned();
+        app.store.save_task(&task).unwrap();
+        let worktree = PathBuf::from(&task.worktree);
+        let pending = Arc::new(StdMutex::new(None));
+        let result = carry_after_base_moves(
+            &app,
+            &mut task,
+            &worktree,
+            &pending,
+            &CancelToken::new(),
+            &mut None,
+        )
+        .await;
+        match result {
+            BaseRetry::Conflict(detail) => assert!(detail.contains("failed 4 times"), "{detail}"),
+            _ => panic!("expected a conflict attempt"),
+        }
+        assert!(task.question.is_none());
+        assert_eq!(
+            task.decisions
+                .iter()
+                .filter(|d| d.contains("trying again after the next fetch"))
+                .count(),
+            CARRY_RETRIES as usize
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_carry_left_out_on_purpose_is_not_retried_and_asks_the_owner() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.base_ref = None;
+        app.store.save_task(&task).unwrap();
+        let worktree = PathBuf::from(&task.worktree);
+        let pending = Arc::new(StdMutex::new(None));
+        let cancel = CancelToken::new();
+        let waiting = tokio::time::timeout(
+            Duration::from_secs(5),
+            carry_after_base_moves(&app, &mut task, &worktree, &pending, &cancel, &mut None),
+        )
+        .await;
+        assert!(waiting.is_err(), "the owner is asked");
+        let saved = app.store.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Waiting);
+        assert_eq!(
+            saved.question.unwrap().options,
+            vec!["retry".to_string(), "stop".to_string()]
+        );
+        assert!(!saved
+            .decisions
+            .iter()
+            .any(|d| d.contains("trying again after the next fetch")));
     }
 }

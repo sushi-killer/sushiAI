@@ -537,6 +537,35 @@ struct TriageRun {
     cost_usd: Option<f64>,
 }
 
+/// A planner question the planner called routine: triage reads it and either
+/// settles it (`Some((answer, reason))`) or the caller asks the owner. Triage
+/// that fails or escalates settles nothing, and so does a closed or spent
+/// answer policy.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn triage_settles(
+    app: &Arc<App>,
+    task_id: &str,
+    attempt_n: u32,
+    task: &mut Task,
+    worktree: &Path,
+    asked: &Question,
+    cancel: &CancelToken,
+) -> Option<(String, String)> {
+    if !policy_open(app, task, asked) {
+        return None;
+    }
+    let (question, options) = (asked.text.as_str(), asked.options.as_slice());
+    let TriageRun { decision, cost_usd } = run_triage(
+        app, task_id, attempt_n, task, worktree, question, options, true, cancel,
+    )
+    .await?;
+    if let Some(cost) = cost_usd {
+        task.cost_usd += cost;
+    }
+    matches!(decision.action, brief::TriageAction::Answer)
+        .then(|| (decision.answer, decision.reason))
+}
+
 /// One fresh, read-only session on the `orchestrator` route, asked to
 /// answer or escalate a question that would otherwise go straight to the
 /// owner. `None` means "don't triage this one" -- the route is off or names

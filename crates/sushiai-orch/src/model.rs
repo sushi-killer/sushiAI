@@ -946,9 +946,10 @@ pub struct Variant {
     /// The planner marks each question with a recommended option and whether
     /// it is blocking (irreversible or consequential). Non-blocking ones are
     /// not asked: each becomes an assumption on the task and the task goes
-    /// on; blocking ones go to triage and the owner as one question. Left
-    /// out of the JSON while off.
-    #[serde(skip_serializing_if = "is_false")]
+    /// on; blocking ones go to triage and the owner as one question. On
+    /// unless explicitly disabled, including on tasks saved before this
+    /// switch was on by default.
+    #[serde(skip_serializing_if = "is_true")]
     pub batch_questions: bool,
     /// 2 = on, 0/1 = off. On the hard tier the first implement attempt runs
     /// twice at once (the task's worktree and a sibling `-b` one, on the
@@ -994,7 +995,7 @@ impl Default for Variant {
             tier_routes: BTreeMap::new(),
             max_cost_usd: 0.0,
             max_attempt_cost_usd: 0.0,
-            batch_questions: false,
+            batch_questions: true,
             best_of: 0,
             best_of_route: None,
             land: false,
@@ -1598,6 +1599,11 @@ pub struct PlannerTests {
     /// on; a claim is judged once per file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled: Vec<String>,
+    /// The commands the planner wrote into the plan (verify, finalVerify,
+    /// checks, the held-out check), recorded when the plan is stored. Only
+    /// these may be dropped without the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// The implementer's own work: the diff from the task's base without the
@@ -1652,6 +1658,32 @@ impl Task {
                 .map(|t| t.path.clone())
                 .collect(),
         }
+    }
+}
+
+impl Task {
+    /// Records the commands now in the plan as the planner's: verify,
+    /// finalVerify, the checks, the held-out check and the `-- check:` part
+    /// of each criterion.
+    pub fn record_planner_commands(&mut self) {
+        self.planner_tests.commands = self
+            .verify
+            .iter()
+            .chain(&self.final_verify)
+            .chain(
+                self.checks
+                    .iter()
+                    .chain(self.held_out.as_ref())
+                    .map(|c| &c.run),
+            )
+            .cloned()
+            .chain(
+                self.criteria
+                    .iter()
+                    .filter_map(|c| c.split_once("-- check:"))
+                    .map(|(_, command)| command.trim().to_string()),
+            )
+            .collect();
     }
 }
 

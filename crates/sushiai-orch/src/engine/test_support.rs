@@ -45,6 +45,15 @@ pub(super) fn test_app_fitting_sandbox() -> (Arc<App>, tempfile::TempDir) {
     (app, dir)
 }
 
+/// Marks `command` as written by the planner for a test file `path`.
+pub(crate) fn planner_made(task: &mut Task, command: &str, path: &str) {
+    task.planner_tests.files.push(PlannedTest {
+        path: path.to_string(),
+        content: String::new(),
+    });
+    task.planner_tests.commands.push(command.to_string());
+}
+
 pub(crate) fn task_with_status(status: TaskStatus) -> Task {
     Task {
         id: uuid::Uuid::new_v4().to_string(),

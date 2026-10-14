@@ -383,6 +383,7 @@ fn a_planner_question_is_asked_by_plan_and_recorded_when_answered() {
         json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "add dark mode to the settings screen",
+            "variant": {"batchQuestions": false},
             "start": true,
         }),
     );

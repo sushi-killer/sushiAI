@@ -444,6 +444,8 @@ enum Gate {
     /// A protected path the owner allowed: the write goes to staging.
     Stage(String),
     Ask(Subject),
+    /// Decided by the settings; the call is refused with this reason.
+    Deny(String),
 }
 
 /// `a/./b/../c` without touching the disk.
@@ -572,12 +574,36 @@ fn gate_for(app: &App, ctx: &HookContext, tool: &str, input: Option<&serde_json:
     if WEB_TOOLS.contains(&tool) {
         if granted(&rules, &subject.rule())
             || ctx.run_grants.lock().unwrap().contains(&subject.rule())
+            || web_allowed(&app.settings.read().unwrap().allowed_domains, tool, input)
         {
             return Gate::Allow;
         }
-        return Gate::Ask(subject);
+        return Gate::Deny(format!(
+            "{tool} is limited to the allowed domains in the settings and this call is outside them. Meet the task without it, or report `blocked` and say what you could not read."
+        ));
     }
     Gate::Pass
+}
+
+/// Whether the allowed domains cover a web call: `*` covers everything, a
+/// `WebFetch` is covered by its host, and a `WebSearch` has no host.
+fn web_allowed(domains: &[String], tool: &str, input: Option<&serde_json::Value>) -> bool {
+    if domains.iter().any(|d| d.trim() == "*") {
+        return true;
+    }
+    let host = (tool == "WebFetch")
+        .then(|| input.and_then(|i| i.get("url")).and_then(|u| u.as_str()))
+        .flatten()
+        .and_then(|url| url::Url::parse(url).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    let Some(host) = host else {
+        return false;
+    };
+    domains.iter().any(|d| {
+        let d = d.trim().trim_start_matches("*.").to_ascii_lowercase();
+        !d.is_empty() && (host == d || host.ends_with(&format!(".{d}")))
+    })
 }
 
 fn decision(kind: &str, reason: &str) -> serde_json::Value {
@@ -740,6 +766,7 @@ pub(super) async fn decide_call(
             ctx.staged.lock().unwrap().insert(rel.clone());
             return decision("deny", &staging_reason(ctx, &rel));
         }
+        Gate::Deny(reason) => return decision("deny", &reason),
         Gate::Ask(subject) => subject,
     };
     // One question at a time; a call that waited behind another may find its
@@ -751,6 +778,7 @@ pub(super) async fn decide_call(
             ctx.staged.lock().unwrap().insert(rel.clone());
             return decision("deny", &staging_reason(ctx, &rel));
         }
+        Gate::Deny(reason) => return decision("deny", &reason),
         _ => {}
     }
     if ctx.run_denied.lock().unwrap().contains(&subject.rule()) {
@@ -857,6 +885,46 @@ pub(super) fn staging_lines(applied: &[String]) -> Vec<String> {
 
 /// The calls a finished run was refused that orchd never decided: the tool or
 /// path, so they can be asked about once instead of retried.
+/// A write the run was refused outside its worktree, into a temp directory:
+/// scratch work that needs no owner and loses nothing.
+fn scratch_file<'a>(worktree: &Path, denial: &'a harness::PermissionDenial) -> Option<&'a str> {
+    let file = ["file_path", "notebook_path", "path"]
+        .iter()
+        .find_map(|k| denial.input.get(k).and_then(|v| v.as_str()))?;
+    // The system temp dir and the POSIX ones, each also by its resolved path
+    // (a symlinked /tmp resolves elsewhere on some systems).
+    let roots = [std::env::temp_dir(), "/tmp".into(), "/var/tmp".into()];
+    let in_temp = roots.iter().any(|root| {
+        Path::new(file).starts_with(root)
+            || root
+                .canonicalize()
+                .is_ok_and(|real| Path::new(file).starts_with(real))
+    });
+    (EDIT_TOOLS.contains(&denial.tool.as_str())
+        && Path::new(file).is_absolute()
+        && relative_to_worktree(worktree, file).is_none()
+        && in_temp)
+        .then_some(file)
+}
+
+/// The decision lines for scratch writes the run was refused: recorded for
+/// the next attempt, which works inside its worktree instead.
+pub(super) fn scratch_lines(worktree: &Path, outcome: &harness::RunOutcome) -> Vec<String> {
+    let files: BTreeSet<&str> = outcome
+        .permission_denials
+        .iter()
+        .filter_map(|d| scratch_file(worktree, d))
+        .collect();
+    files
+        .into_iter()
+        .map(|file| {
+            format!(
+                "Orchestrator: a write to {file} outside the worktree was refused; keep scratch files inside the worktree and out of the commit"
+            )
+        })
+        .collect()
+}
+
 pub(super) fn unhandled_denials(
     handled: &BTreeSet<String>,
     worktree: &Path,
@@ -867,6 +935,9 @@ pub(super) fn unhandled_denials(
     let mut out = Vec::new();
     for denial in &outcome.permission_denials {
         let tool = denial.tool.as_str();
+        if scratch_file(worktree, denial).is_some() {
+            continue;
+        }
         let subject = if EDIT_TOOLS.contains(&tool) {
             let input = Some(&denial.input);
             let file = ["file_path", "notebook_path", "path"]
@@ -1080,19 +1151,29 @@ pub(super) async fn stop_for_denials(
     LoopSignal::Continue
 }
 
-/// The question for an agent's `No tool: <capability>` report.
-pub(super) fn no_tool_question(app: &App, task: &Task, capability: &str) -> Question {
+/// The connected tool the owner could switch on for an agent's
+/// `No tool: <capability>` report, when one matches.
+pub(super) fn tool_to_enable(app: &App, task: &Task, capability: &str) -> Option<String> {
     let settings = app.settings.read().unwrap();
     let lower = capability.to_lowercase();
-    let off = settings.chat_tools.iter().find(|c| {
-        !c.enabled
-            && !rules_for(app, &task.repo, &task.id).contains(&format!("enable:{}", c.id))
-            && (lower.contains(&c.id.to_lowercase()) || lower.contains(&c.label.to_lowercase()))
-    });
-    let mut options = Vec::new();
-    if let Some(cfg) = off {
-        options.push(format!("Enable {} for this task", cfg.id));
-    }
+    settings
+        .chat_tools
+        .iter()
+        .find(|c| {
+            !c.enabled
+                && !rules_for(app, &task.repo, &task.id).contains(&format!("enable:{}", c.id))
+                && (lower.contains(&c.id.to_lowercase()) || lower.contains(&c.label.to_lowercase()))
+        })
+        .map(|c| c.id.clone())
+}
+
+/// The question for an agent's `No tool: <capability>` report; `enable` is
+/// the connected tool the owner could switch on, when one matches.
+pub(super) fn no_tool_question(capability: &str, enable: Option<&str>) -> Question {
+    let mut options: Vec<String> = enable
+        .map(|id| format!("Enable {id} for this task"))
+        .into_iter()
+        .collect();
     options.push(OWNER_ACTION.to_string());
     options.push("stop".to_string());
     Question::new(
@@ -1160,6 +1241,23 @@ mod tests {
     }
 
     #[test]
+    fn only_a_connected_tool_that_is_off_can_be_offered_for_a_no_tool_claim() {
+        let (app, _dir) = crate::engine::test_support::test_app();
+        let task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        assert_eq!(tool_to_enable(&app, &task, "move an Asana task"), None);
+        app.settings.write().unwrap().chat_tools = vec![serde_json::from_value(json!({
+            "id": "asana", "label": "Asana", "enabled": false,
+            "server": {"type": "http", "url": "https://example.invalid/mcp"}
+        }))
+        .unwrap()];
+        assert_eq!(
+            tool_to_enable(&app, &task, "move an Asana task").as_deref(),
+            Some("asana")
+        );
+        assert_eq!(tool_to_enable(&app, &task, "send an email"), None);
+    }
+
+    #[test]
     fn a_no_tool_claim_needs_its_prefix_and_a_capability() {
         assert_eq!(
             missing_tool_claim("No tool: move an Asana task").as_deref(),
@@ -1201,6 +1299,83 @@ mod tests {
                 Subject::Path(".claude/a.md".into())
             ]
         );
+    }
+
+    #[test]
+    fn web_calls_are_decided_by_the_allowed_domains() {
+        let fetch = |url: &str| json!({"url": url});
+        let open = vec!["*".to_string()];
+        let some = vec!["docs.rs".to_string(), "*.example.org".to_string()];
+        assert!(web_allowed(&open, "WebSearch", None));
+        assert!(web_allowed(
+            &some,
+            "WebFetch",
+            Some(&fetch("https://docs.rs/serde/latest"))
+        ));
+        assert!(web_allowed(
+            &some,
+            "WebFetch",
+            Some(&fetch("https://api.Example.org:8443/x?y#z"))
+        ));
+        assert!(!web_allowed(
+            &some,
+            "WebFetch",
+            Some(&fetch("https://evil.test/docs.rs"))
+        ));
+        assert!(!web_allowed(
+            &some,
+            "WebFetch",
+            Some(&fetch("https://notdocs.rs/"))
+        ));
+        assert!(!web_allowed(
+            &some,
+            "WebFetch",
+            Some(&fetch("https://u@evil.test/"))
+        ));
+        for url in [
+            "https://evil.test\\@docs.rs/",
+            "https://evil.test\\.docs.rs/",
+            "not a url",
+            "ftp://docs.rs/x",
+        ] {
+            assert!(!web_allowed(&some, "WebFetch", Some(&fetch(url))), "{url}");
+        }
+        assert!(web_allowed(
+            &open,
+            "WebFetch",
+            Some(&fetch("https://anything.example/x"))
+        ));
+        assert!(!web_allowed(&some, "WebSearch", None));
+        assert!(!web_allowed(
+            &[],
+            "WebFetch",
+            Some(&fetch("https://docs.rs/"))
+        ));
+    }
+
+    #[test]
+    fn a_refused_write_to_a_temp_dir_is_recorded_and_raises_no_question() {
+        let outcome = harness::RunOutcome {
+            permission_denials: vec![
+                denial("Write", json!({"file_path": "/tmp/scratch/notes.txt"})),
+                denial("Write", json!({"file_path": "/tmp/scratch/notes.txt"})),
+                denial("Write", json!({"file_path": "/etc/hosts"})),
+                denial("Write", json!({"file_path": "/wt/docs/b.md"})),
+                denial("Bash", json!({"file_path": "/tmp/x"})),
+            ],
+            ..Default::default()
+        };
+        let none = BTreeSet::new();
+        assert_eq!(
+            unhandled_denials(&none, Path::new("/wt"), &outcome, &[]),
+            vec![
+                Subject::Path("/etc/hosts".into()),
+                Subject::Path("docs/b.md".into())
+            ]
+        );
+        let lines = scratch_lines(Path::new("/wt"), &outcome);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("/tmp/scratch/notes.txt"));
     }
 
     #[test]

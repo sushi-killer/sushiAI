@@ -25,6 +25,7 @@ fn drafting_task_asks_its_planner_question_then_implements_and_passes() {
         serde_json::json!({
             "repo": repo.path().to_str().unwrap(),
             "request": "add dark mode to the settings screen",
+            "variant": {"batchQuestions": false},
             "start": true,
         }),
     );

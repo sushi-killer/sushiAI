@@ -1025,7 +1025,7 @@ impl App {
         self.verify_like(like.as_deref(), &task, &p.answer)?;
         if caller != AnsweredBy::Owner {
             if let Some(q) = task.question.as_ref().filter(|q| owner_only(q.kind)) {
-                if !is_refusal(q, &p.answer) {
+                if !is_refusal(q, &p.answer) && !is_recheck(q, &p.answer) {
                     return Err(format!(
                         "this {:?} question is the owner's to allow: an agent can only stop or deny it",
                         q.kind
@@ -1717,6 +1717,25 @@ mod answer_caller_tests {
     }
 
     #[tokio::test]
+    async fn a_retry_that_only_asks_to_look_again_is_open_to_agents_on_a_harness_or_daily_budget_wait(
+    ) {
+        let (app, _dir) = test_app();
+        for (kind, options, allow) in [
+            (QuestionKind::HarnessMissing, &["retry"][..], "retry"),
+            (
+                QuestionKind::DailyBudget,
+                &["run anyway", "stop"][..],
+                "run anyway",
+            ),
+        ] {
+            let id = waiting(&app, kind, options);
+            let _rx = park_permission(&app, &id);
+            let err = answer(&app, &id, allow, Some("mcp")).await;
+            assert_eq!(err.is_ok(), allow == "retry", "{kind:?}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn an_mcp_allow_on_an_owner_only_question_is_refused_and_it_stays_pending() {
         let (app, _dir) = test_app();
         for (kind, options, allow) in [
@@ -1736,7 +1755,6 @@ mod answer_caller_tests {
                 &["run anyway", "stop"][..],
                 "run anyway",
             ),
-            (QuestionKind::HarnessMissing, &["retry"][..], "retry"),
         ] {
             let id = waiting(&app, kind, options);
             let mut rx = park_permission(&app, &id);
@@ -1819,12 +1837,34 @@ mod answer_caller_tests {
         let id = waiting_base_check(&app, "npm run ci", None);
         answer(&app, &id, drop, None).await.unwrap();
         let id = waiting_base_check(&app, "node --test tests/planner-made.test.cjs", None);
+        let mut task = app.store.load_task(&id).unwrap().unwrap();
+        planner_made(
+            &mut task,
+            "node --test tests/planner-made.test.cjs",
+            "tests/planner-made.test.cjs",
+        );
+        app.store.save_task(&task).unwrap();
         answer(&app, &id, drop, Some("overseer")).await.unwrap();
+        // The same command is the owner's when the planner did not write it.
+        let id = waiting_base_check(&app, "node --test tests/planner-made.test.cjs", None);
+        assert!(answer(&app, &id, drop, Some("overseer")).await.is_err());
+        for command in ["cargo nextest run", "go test ./...", "npm run test:daemon"] {
+            let id = waiting_base_check(&app, command, None);
+            assert!(
+                answer(&app, &id, drop, Some("overseer")).await.is_err(),
+                "{command}"
+            );
+        }
     }
 
     #[test]
-    fn a_ci_entry_is_found_through_flags_cd_env_pipes_and_chains() {
-        let (settings, task) = (Settings::default(), task_with_status(TaskStatus::Waiting));
+    fn every_check_is_the_owners_except_one_the_planner_wrote_for_its_own_file() {
+        let (settings, mut task) = (Settings::default(), task_with_status(TaskStatus::Waiting));
+        planner_made(
+            &mut task,
+            "node --test tests/one.test.cjs",
+            "tests/one.test.cjs",
+        );
         let shared = |c: &str| answer_policy::is_shared_check(&settings, &task, c);
         for command in [
             "npm run ci --silent",
@@ -1836,17 +1876,17 @@ mod answer_caller_tests {
             "(cd web && npm test)",
             "env CI=1 npm test",
             "timeout 900 cargo test",
+            "cargo nextest run",
+            "go test ./...",
+            "pytest",
+            "just ci",
+            "./gradlew test",
+            "npm run test:daemon",
+            "node --test tests/other.test.cjs",
         ] {
             assert!(shared(command), "{command}");
         }
-        for command in [
-            "node --test tests/one.test.cjs",
-            "npm run test:desktop",
-            "echo npm run ci",
-            "grep -r 'cargo test' docs",
-        ] {
-            assert!(!shared(command), "{command}");
-        }
+        assert!(!shared("node --test tests/one.test.cjs"));
     }
 
     #[tokio::test]
@@ -1857,6 +1897,11 @@ mod answer_caller_tests {
             "npm run ci".into(),
             "node --test tests/mine.test.cjs".into(),
         ];
+        planner_made(
+            &mut task,
+            "node --test tests/mine.test.cjs",
+            "tests/mine.test.cjs",
+        );
         task.final_verify = vec!["cargo test".into()];
         app.store.save_task(&task).unwrap();
         let id = task.id.clone();
@@ -1922,6 +1967,11 @@ mod answer_caller_tests {
         let settings = Settings::default();
         let mut task = task_with_status(TaskStatus::Waiting);
         task.criteria = vec!["A -- check: cargo test".into()];
+        planner_made(
+            &mut task,
+            "node --test tests/mine.test.cjs",
+            "tests/mine.test.cjs",
+        );
         task.verify = vec![
             "npm run ci".into(),
             "node --test tests/mine.test.cjs".into(),
@@ -2024,7 +2074,8 @@ mod answer_caller_tests {
             .iter()
             .any(|d| d.contains("only the owner may drop")));
         // A task-specific criterion can be reworded.
-        task.criteria[1] = "Docs -- check: grep -q docs d.md".into();
+        task.criteria[1] = "Docs -- check: grep -q d.md".into();
+        planner_made(&mut task, "grep -q d.md", "d.md");
         assert!(healing::amend_criterion_for_test(
             &settings,
             &mut task,
@@ -2051,20 +2102,25 @@ mod answer_caller_tests {
             let mut s = app.settings.write().unwrap();
             s.after_land.push(AfterLand {
                 repo: "/repo/a".to_string(),
-                run: "just rebuild".to_string(),
+                run: "node --test tests/rb.test.cjs".to_string(),
             });
             s.clone()
         };
+        planner_made(
+            &mut task,
+            "node --test tests/rb.test.cjs",
+            "tests/rb.test.cjs",
+        );
         assert!(answer_policy::is_shared_check(
             &settings,
             &task,
-            "just rebuild"
+            "node --test tests/rb.test.cjs"
         ));
         task.repo = "/repo/b".to_string();
         assert!(!answer_policy::is_shared_check(
             &settings,
             &task,
-            "just rebuild"
+            "node --test tests/rb.test.cjs"
         ));
     }
 

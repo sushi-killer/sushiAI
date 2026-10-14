@@ -256,6 +256,22 @@ pub(super) fn agent_may_restart(task: &Task) -> bool {
     task.status != TaskStatus::Failed || !task.decisions.iter().any(|d| d == AGENT_RESTART_LINE)
 }
 
+/// Whether a failed top-level task ended on the environment by the typed
+/// cause of its last implement attempt, and no agent restarted it yet.
+pub(super) fn restartable_on_environment(task: &Task) -> bool {
+    task.status == TaskStatus::Failed
+        && task.parent.is_none()
+        && !task.archived
+        && !task.queue.stopped_explicitly
+        && agent_may_restart(task)
+        && task
+            .attempts
+            .iter()
+            .rev()
+            .find(|a| a.stage == Stage::Implement)
+            .is_some_and(|a| a.cause == Some(Blame::Environment))
+}
+
 /// A parent is unreviewed while any landed, unarchived subtask is: derived
 /// each time it is read, never cleared, so the parent's own attempt cannot
 /// land that work on the default branch.
@@ -405,6 +421,26 @@ impl App {
         if task.status != TaskStatus::Failed || task.parent.is_some() || task.archived {
             return;
         }
+        // An environment failure is restarted once by code, like a dependency;
+        // the owner hears of it only if the restart cannot start or fails again.
+        if restartable_on_environment(task) && tokio::runtime::Handle::try_current().is_ok() {
+            let (app, id) = (self.arc(), task.id.clone());
+            tokio::spawn(async move {
+                let started = app
+                    .handle_task_start(json!({"id": id, "source": "orchd"}))
+                    .await;
+                if started.is_err() {
+                    if let Ok(Some(failed)) = app.store.load_task(&id) {
+                        app.announce_task_failed(&failed);
+                    }
+                }
+            });
+            return;
+        }
+        self.announce_task_failed(task);
+    }
+
+    fn announce_task_failed(&self, task: &Task) {
         let key = format!("{}|task_failed|{}", task.id, task.failed_count);
         if self
             .notice_log()
@@ -788,5 +824,48 @@ mod tests {
         let text = crate::brief::build_plan_continue_brief(&variant, true);
         assert!(text.contains("cut off"), "{text}");
         assert!(!text.contains("did not contain"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_environment_failure_of_a_top_level_task_is_restarted_once_by_code() {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Failed);
+        task.repo = std::env::temp_dir().display().to_string();
+        task.attempts = vec![attempt_with_failure(1, "verify:check")];
+        task.attempts[0].stage = Stage::Implement;
+        // Only the typed cause counts: the failure text says nothing.
+        assert!(!restartable_on_environment(&task));
+        task.attempts[0].cause = Some(Blame::Environment);
+        assert!(restartable_on_environment(&task));
+        app.store.save_task(&task).unwrap();
+        let restarts = |app: &App| {
+            app.store
+                .load_task(&task.id)
+                .unwrap()
+                .unwrap()
+                .decisions
+                .iter()
+                .filter(|d| *d == AGENT_RESTART_LINE)
+                .count()
+        };
+
+        app.notify_task_failed(&task);
+        for _ in 0..200 {
+            if restarts(&app) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(restarts(&app), 1);
+
+        // Failed again: no second restart, the owner is told.
+        let mut again = app.store.load_task(&task.id).unwrap().unwrap();
+        again.mark_failed();
+        app.store.save_task(&again).unwrap();
+        assert!(!restartable_on_environment(&again));
+        app.notify_task_failed(&again);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(restarts(&app), 1);
+        app.shutdown();
     }
 }

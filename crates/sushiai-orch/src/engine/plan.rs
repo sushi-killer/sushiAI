@@ -453,6 +453,7 @@ fn new_plan_attempt(n: u32, route: &Route, reason: &str) -> Attempt {
         advisor_fingerprint: None,
         candidates: vec![],
         criteria_results: vec![],
+        cause: None,
         diff_stat: None,
     }
 }

@@ -185,6 +185,7 @@ pub(super) fn attempt_with_failure(n: u32, signature: &str) -> Attempt {
         advisor_fingerprint: None,
         candidates: vec![],
         criteria_results: vec![],
+        cause: None,
         diff_stat: None,
     }
 }

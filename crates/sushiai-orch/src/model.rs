@@ -2761,9 +2761,23 @@ pub struct Attempt {
     /// entry per criterion, recomputed after its checks and each review.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria_results: Vec<CriterionResult>,
+    /// Whose failure the attribution turn found when this attempt's final
+    /// check was red on the base too; `None` when no turn ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Blame>,
     /// The worktree against the task's base when the attempt ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<DiffStat>,
+}
+
+/// Whose failure a red check is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Blame {
+    Introduced,
+    Inherited,
+    Environment,
+    Incomplete,
 }
 
 /// Files changed and lines added and removed; a binary file counts as a

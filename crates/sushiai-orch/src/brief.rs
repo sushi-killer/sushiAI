@@ -2660,6 +2660,7 @@ mod tests {
             advisor_fingerprint: None,
             candidates: vec![],
             criteria_results: vec![],
+            cause: None,
             diff_stat: None,
         }
     }
@@ -2885,6 +2886,7 @@ mod tests {
             advisor_fingerprint: None,
             candidates: vec![],
             criteria_results: vec![],
+            cause: None,
             diff_stat: None,
         });
         let brief = build_brief(&task, "", "");
@@ -3306,6 +3308,7 @@ mod tests {
             advisor_fingerprint: None,
             candidates: vec![],
             criteria_results: vec![],
+            cause: None,
             diff_stat: None,
         });
         let brief = build_triage_brief(
@@ -4157,6 +4160,7 @@ mod tests {
             advisor_fingerprint: None,
             candidates: vec![],
             criteria_results: vec![],
+            cause: None,
             diff_stat: None,
         };
         attempt.changed_files = vec!["a.txt".into()];

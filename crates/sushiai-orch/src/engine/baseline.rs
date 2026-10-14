@@ -106,7 +106,7 @@ pub(super) async fn judge_against_base(
     // A fail-fast run is not comparable: take full runs of both sides, or
     // give up (never a waiver).
     let Some(full) = no_fail_fast(&failed.command) else {
-        return BaseVerdict::Unclear;
+        return settle_unclear(app, task, failed, base_run, cancel).await;
     };
     let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let ran = run_verify_commands(
@@ -136,9 +136,65 @@ pub(super) async fn judge_against_base(
         (Some(t), Some(b)) if usable(t) && usable(b) && !t.stopped_early && !b.stopped_early => {
             judge_pair(app, task, t, b, worktree, run_dir, cancel).await
         }
-        _ => BaseVerdict::Unclear,
+        _ => settle_unclear(app, task, failed, base_run, cancel).await,
     }
 }
+
+/// Reads a pair the comparison cannot settle with one attribution turn. A
+/// turn that gives no valid verdict leaves the question to the owner.
+/// `introduced`, or a check the task is meant to turn green, is an ordinary
+/// failure; a verified `inherited` waives it as an assumption the owner can
+/// overturn; `environment` and `incomplete` stay a question.
+async fn settle_unclear(
+    app: &Arc<App>,
+    task: &mut Task,
+    failed: &VerifyOutcome,
+    base_run: &VerifyOutcome,
+    cancel: &CancelToken,
+) -> BaseVerdict {
+    let Some(att) = attribute(app, task, failed, base_run, cancel).await else {
+        return BaseVerdict::Unclear;
+    };
+    if let Some(attempt) = task
+        .attempts
+        .iter_mut()
+        .rev()
+        .find(|a| a.stage == Stage::Implement)
+    {
+        attempt.cause = Some(att.cause);
+    }
+    if att.target || att.cause == Blame::Introduced {
+        return BaseVerdict::NewFailures(failed.clone());
+    }
+    if att.cause != Blame::Inherited {
+        return BaseVerdict::Unclear;
+    }
+    waive(task, failed, &att.pre_existing, false);
+    let commands = vec![failed.command.clone()];
+    if !task
+        .assumptions
+        .iter()
+        .any(|a| a.commands == commands && a.by == WAIVER_BY)
+    {
+        task.assumptions.push(Assumption {
+            question: format!("{} fails on the base too: waive it?", failed.command),
+            answer: WAIVED.to_string(),
+            evidence: att.evidence,
+            by: WAIVER_BY.to_string(),
+            kind: Some(QuestionKind::PreexistingFailure),
+            attempt: task.attempts.last().map(|a| a.n),
+            commands,
+            overturned: false,
+            owner_answer: None,
+        });
+    }
+    BaseVerdict::Waived
+}
+
+/// The answer and author of the assumption a verified `inherited` verdict
+/// records; the pull request lists these.
+pub(super) const WAIVED: &str = "waived as pre-existing";
+pub(super) const WAIVER_BY: &str = "judge";
 
 /// `command` with `--no-fail-fast`, only for a plain `cargo test ...` it is
 /// safe to append to.
@@ -166,7 +222,7 @@ async fn judge_pair(
             waive(task, failed, &tests, false);
             return BaseVerdict::Waived;
         }
-        Compared::Unparsed => return BaseVerdict::Unclear,
+        Compared::Unparsed => return settle_unclear(app, task, failed, base_run, cancel).await,
         Compared::New(_) => {}
     }
     // New failures: one re-run tells a flaky failure from the task's own. It
@@ -334,5 +390,19 @@ mod tests {
         let (base, task) = (run(1, a), run(1, b));
         assert_eq!(base.passing, ["src/a.test.ts"]);
         assert!(matches!(compare(&task, &base), Compared::Covered(_)));
+    }
+
+    #[test]
+    fn a_ci_gate_named_only_in_a_criterion_check_is_still_waived_on_equal_names() {
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Running);
+        task.criteria = vec!["Checks pass -- check: npm run ci".into()];
+        // Not the task's target, so nothing keeps the gate from a waiver ...
+        assert!(!base_check::is_task_target(&task, "npm run ci", &[]));
+        // ... and every failing name is in the base run.
+        let base = run(1, BASE);
+        assert!(matches!(
+            compare(&run(1, BASE), &base),
+            Compared::Covered(_)
+        ));
     }
 }

@@ -312,14 +312,12 @@ fn project_mcp_selection_excludes_worktree_and_unenabled_connected_tools() {
         "should-be-replaced"
     );
     let allow = allow_list(&env, 1);
-    for read in [
-        "mcp__fake__get_item",
-        "mcp__fake__find_item",
-        "mcp__fake__post_quiet",
-    ] {
+    // Only a declared read-only hint makes a read: the name `find_item` does not.
+    for read in ["mcp__fake__get_item", "mcp__fake__post_quiet"] {
         assert!(allow.contains(&read.to_string()), "{read} in {allow:?}");
     }
     assert!(!allow.iter().any(|a| a.contains("send_note")), "{allow:?}");
+    assert!(!allow.iter().any(|a| a.contains("find_item")), "{allow:?}");
     let brief = env.gate_file("brief_1");
     assert!(brief.contains("fake: read tools"), "{brief}");
     assert!(

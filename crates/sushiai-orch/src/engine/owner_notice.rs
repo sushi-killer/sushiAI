@@ -501,13 +501,17 @@ mod tests {
 
     #[test]
     fn the_key_is_task_kind_and_sorted_options() {
+        // One asked_at for every question: the key includes it, and two
+        // Question::new calls can land in different milliseconds.
         let q = |options: &[&str]| {
-            Question::new(
+            let mut q = Question::new(
                 "Which?",
                 options.iter().map(|o| o.to_string()).collect(),
                 QuestionKind::PlanQuestion,
                 AskedBy::Plan,
-            )
+            );
+            q.asked_at = Some(1_000);
+            q
         };
         let a = decision_key("t1", &q(&["B", "A"]));
         assert_eq!(a, decision_key("t1", &q(&["A", "B"])));

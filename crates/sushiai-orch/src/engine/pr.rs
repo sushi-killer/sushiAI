@@ -577,6 +577,12 @@ impl App {
             super::pr_draft::PrCarry::Failed(reason) => {
                 return Err(PrRefusal::CarryFailed(reason).into());
             }
+            super::pr_draft::PrCarry::Environment(reason) => {
+                return Err(PrRefusal::CarryFailed(format!(
+                    "the setup of the carry worktree failed (environment): {reason}"
+                ))
+                .into());
+            }
         }
         // Read after the carry, which moves the task's branch.
         let local_sha = run_cmd(

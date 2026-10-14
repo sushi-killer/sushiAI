@@ -877,6 +877,68 @@ fn a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push() {
     s.daemon.shutdown_and_wait();
 }
 
+/// Commits a worktree setup to main and origin, moves origin's main on, and
+/// returns the task request whose check needs what the setup creates.
+fn setup_and_moved_base(s: &Setup, setup: &str) -> serde_json::Value {
+    std::fs::create_dir_all(s.repo.path().join(".sushiai")).unwrap();
+    std::fs::write(
+        s.repo.path().join(".sushiai/setup.json"),
+        serde_json::json!({ "setup": setup }).to_string(),
+    )
+    .unwrap();
+    git_out(s.repo.path(), &["add", "."]);
+    git_out(s.repo.path(), &["commit", "-q", "-m", "add setup"]);
+    git_out(s.repo.path(), &["push", "-q", "origin", "main"]);
+    let other = tempfile::tempdir().unwrap();
+    git_out(
+        other.path(),
+        &["clone", "-q", s._remote.path().to_str().unwrap(), "."],
+    );
+    git_out(
+        other.path(),
+        &["config", "user.email", "other@example.invalid"],
+    );
+    git_out(other.path(), &["config", "user.name", "other"]);
+    std::fs::write(other.path().join("newer.txt"), "newer\n").unwrap();
+    git_out(other.path(), &["add", "."]);
+    git_out(other.path(), &["commit", "-q", "-m", "newer main"]);
+    git_out(other.path(), &["push", "-q", "origin", "main"]);
+    serde_json::json!({"verify": ["test -f pr.txt && test -f .env-ready"]})
+}
+
+#[test]
+fn the_carry_worktree_gets_the_repos_setup_before_its_checks_rerun() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[]);
+    let extra = setup_and_moved_base(&s, "touch .env-ready");
+    let id = s.create(extra);
+    done(&s, &id);
+    assert_eq!(s.pr_url(&id).as_deref(), Some(URL), "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn a_setup_failure_in_the_carry_worktree_is_the_environment_with_one_notice() {
+    let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[]);
+    let extra = setup_and_moved_base(
+        &s,
+        "case \"$PWD\" in *pr-carry*) echo broken >&2; exit 4;; esac; touch .env-ready",
+    );
+    let id = s.create(extra);
+    done(&s, &id);
+    let task = wait_decision(&s, &id, "setup of the carry worktree failed");
+    assert!(
+        !task["decisions"]
+            .to_string()
+            .contains("could not be carried"),
+        "{task}"
+    );
+    wait_notice(&s, &id);
+    settle();
+    assert_eq!(notices(&s, &id), 1);
+    assert!(!s.gh_log().contains("pr create"), "{}", s.gh_log());
+    s.daemon.shutdown_and_wait();
+}
+
 #[test]
 fn a_workflow_scope_rejection_is_permanent_with_one_try_and_one_note() {
     let s = setup_full("{}", Pr::Default, false, false, FAKE_GH, &[FAST_RETRY]);

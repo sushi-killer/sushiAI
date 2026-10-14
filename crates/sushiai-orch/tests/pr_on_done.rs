@@ -629,7 +629,7 @@ fn landing_a_done_task_while_its_pull_request_is_drafted_cancels_the_pull_reques
         !task["decisions"].to_string().contains("PR: not opened"),
         "{task}"
     );
-    assert!(s.gh_log().is_empty(), "{}", s.gh_log());
+    assert!(!s.gh_log().contains("pr "), "{}", s.gh_log());
     assert_eq!(notices(&s, &id), 0);
     s.daemon.shutdown_and_wait();
 }
@@ -682,22 +682,46 @@ fn a_repo_without_an_origin_is_noted_once_with_no_draft_and_no_notice() {
 }
 
 #[test]
-fn a_remote_that_is_no_github_host_gets_one_notice_for_the_repo() {
+fn a_remote_that_is_no_github_host_gets_no_draft_and_no_push() {
     let gh = GH_FAILING.replace(
-        "echo \"To get started with GitHub CLI, please run:  gh auth login\" >&2",
-        "echo \"none of the git remotes configured for this repository point to a known GitHub host\" >&2",
+        "case \"$1 $2\" in",
+        "case \"$1 $2\" in\n  \"repo view\") echo \"none of the git remotes configured for this repository point to a known GitHub host\" >&2; exit 1 ;;",
     );
     let s = setup_full("{}", Pr::Default, false, false, &gh, &[FAST_RETRY]);
-    std::fs::write(s.tools.path().join("auth-broken"), "").unwrap();
     let first = s.create(serde_json::json!({}));
     done(&s, &first);
     wait_decision(&s, &first, "known GitHub host");
-    wait_notice(&s, &first);
     let second = s.create(serde_json::json!({"title": "Second"}));
     done(&s, &second);
     wait_decision(&s, &second, "known GitHub host");
     settle();
-    assert_eq!(notices(&s, &first), 1);
-    assert_eq!(s.gh_log().matches("pr list").count(), 2, "{}", s.gh_log());
+    assert!(
+        !s.tools.path().join("drafts.log").exists(),
+        "a draft ran for a non-GitHub remote"
+    );
+    assert_eq!(s.gh_log().matches("pr list").count(), 0, "{}", s.gh_log());
+    let heads = git_out(s._remote.path(), &["for-each-ref", "refs/heads"]);
+    assert_eq!(heads.lines().count(), 1, "pushed: {heads}");
+    assert_eq!(notices(&s, &first), 0);
+    s.daemon.shutdown_and_wait();
+}
+
+#[test]
+fn the_overseer_cannot_open_a_pull_request_orchd_owns() {
+    let reply = "{\"branch\":\"feature/own\",\"title\":\"t\",\"body\":\"b\"}";
+    let s = setup_full(reply, Pr::Default, true, false, FAKE_GH, &[]);
+    let id = s.create(serde_json::json!({}));
+    done(&s, &id);
+    wait_for(&s.tools.path().join("draft-started"));
+    let err = s.daemon.request_error(
+        "task.pr",
+        serde_json::json!({"id": id, "source": "overseer"}),
+    );
+    assert!(err.contains("orchd opens this task"), "{err}");
+    assert!(!s.gh_log().contains("pr "), "{}", s.gh_log());
+    // The owner may still open it.
+    let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
+    assert_eq!(opened["prUrl"], URL, "{opened}");
+    std::fs::write(s.tools.path().join("go"), "").unwrap();
     s.daemon.shutdown_and_wait();
 }

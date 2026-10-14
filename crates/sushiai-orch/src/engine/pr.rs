@@ -9,10 +9,10 @@ use tokio::process::Command;
 
 pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
-const GH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const GH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The `gh` binary; `ORCHD_GH_BIN` lets a test point it at a fake script.
-fn gh_bin() -> String {
+pub(super) fn gh_bin() -> String {
     std::env::var("ORCHD_GH_BIN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -188,6 +188,12 @@ impl App {
         }
         if task.status != TaskStatus::Done {
             return Err("only a done task can open a pull request".to_string());
+        }
+        if task.pr_pending && p.source.as_deref() == Some("overseer") {
+            return Err(
+                "orchd opens this task's pull request itself; do not call task_pr while prPending is set"
+                    .to_string(),
+            );
         }
         if task.archived {
             return Err("task is archived; unarchive it first".to_string());

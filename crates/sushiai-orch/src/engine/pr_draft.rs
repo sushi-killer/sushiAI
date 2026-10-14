@@ -106,9 +106,6 @@ fn is_no_github_host(error: &str) -> bool {
     e.contains("known github host") || e.contains("no github host")
 }
 
-/// Repos that already got the "not a GitHub remote" notice in this run.
-static NO_HOST_NOTICED: StdMutex<Option<std::collections::HashSet<String>>> = StdMutex::new(None);
-
 /// Tells the owner in the repo's chat, off the caller's path: the chat can be
 /// busy with a live turn, so a refused post is tried again a few times.
 pub(super) fn notify_owner(app: &Arc<App>, repo: &str, text: String) {
@@ -219,6 +216,19 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         let line = "PR: not opened: the repo has no origin remote".to_string();
         return record(app, id, vec![line], 0.0, true);
     }
+    // A remote `gh` does not know (GitLab, a bare path): no draft, no push.
+    if let Err(e) = pr::run_cmd(
+        &pr::gh_bin(),
+        &["repo", "view", "--json", "url"],
+        &repo,
+        pr::GH_TIMEOUT,
+    )
+    .await
+    {
+        if is_no_github_host(&e) {
+            return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
+        }
+    }
     // A restart reuses what the first run chose and drafts nothing again.
     let plan = match task.pr_plan.clone() {
         Some(plan) => plan,
@@ -305,22 +315,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             return record(app, id, Vec::new(), 0.0, true);
         }
         if is_no_github_host(&e) {
-            record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
-            let first = NO_HOST_NOTICED
-                .lock()
-                .unwrap()
-                .get_or_insert_with(Default::default)
-                .insert(task.repo.clone());
-            if first {
-                notify_owner(
-                    app,
-                    &task.repo,
-                    format!(
-                        "Pull requests are not opened for this repo: its remote is not a GitHub host ({e}). The finished work stays on each task's own branch."
-                    ),
-                );
-            }
-            return;
+            return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
         }
         let permanent = is_permanent(&e);
         if permanent || tries >= delays.len() {

@@ -69,6 +69,7 @@ impl FoParked {
 async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
     app.store.save_task(&task).unwrap();
     let id = task.id.clone();
+    let repo = task.repo.clone();
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
     let handle = tokio::spawn({
@@ -78,12 +79,19 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
         }
     });
     // The park-time wake runs right after the one-shot is installed and
-    // either holds the question or hands it to the owner.
+    // either holds the question, hands it to the owner, or defers it to the
+    // morning. A deferring turn holds and releases the question between two
+    // polls, so its log entry is the only trace it leaves.
     let woken = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let installed = pending.lock().unwrap().is_some();
             let q = app.store.load_task(&id).ok().flatten().and_then(|t| t.question);
-            if installed && q.is_some_and(|q| q.held_for_overseer || q.for_owner) {
+            let deferred = || {
+                crate::overseer::read(&app.data_dir, Some(&repo), None)
+                    .iter()
+                    .any(|e| e.text == owner_notice::DEFERRED)
+            };
+            if installed && (q.is_some_and(|q| q.held_for_overseer || q.for_owner) || deferred()) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

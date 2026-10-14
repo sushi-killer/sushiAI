@@ -325,10 +325,15 @@ function notReady(state, name) {
   return error;
 }
 
-/** The error for a daemon that answers without the `orch` capability: it is
- * older than this app, or its Orchestrator module is not enabled. */
-function missingCapability(name) {
-  const error = new Error(`Update sushiai on ${name}`);
+/** The error for a daemon that answers without the `orch` capability. It names
+ * an update only when the host is flagged for one; otherwise the module is
+ * just not turned on there. */
+function missingCapability(name, update) {
+  const error = new Error(
+    update
+      ? `Update sushiai on ${name}`
+      : `The orchestrator is not turned on on ${name}.`,
+  );
   error.code = "ORCH_MISSING";
   return error;
 }
@@ -464,6 +469,7 @@ class OrchestratorService {
     this.readyTimeoutMs = readyTimeoutMs;
     this.preflight = null;
     this.lastRetryAt = 0;
+    this.enableFailure = null;
     // Keys of notices already raised (see #notifyTransition): a task
     // re-entering a state with the same question never re-notifies.
     this.notified = new Set();
@@ -500,7 +506,7 @@ class OrchestratorService {
     if (!state) throw new Error("The orchestrator host is not connected.");
     if (state.state !== "ready") throw notReady(state, this.name);
     if (!state.capabilities?.includes(ORCH_CAPABILITY))
-      throw missingCapability(this.name);
+      throw missingCapability(this.name, state.update);
     return state;
   }
 
@@ -526,13 +532,14 @@ class OrchestratorService {
     if (state?.state !== "ready") throw notReady(state, this.name);
     // A ready daemon without the module: the owner turned the Orchestrator on
     // after this host's daemon started, so the host is enabled now.
-    if (!hasOrch(state) && this.moduleSwitch && reach) {
+    if (hasOrch(state)) this.enableFailure = null;
+    else if (this.moduleSwitch && reach) {
       try {
         await this.moduleSwitch.enable(this.host);
+        this.enableFailure = null;
       } catch (error) {
-        throw new Error(
-          `Could not enable the orchestrator on ${this.name}: ${error.message}`,
-        );
+        this.enableFailure = `Could not enable the orchestrator on ${this.name}: ${error.message}`;
+        throw new Error(this.enableFailure);
       }
     }
     return this.#usable();
@@ -803,14 +810,24 @@ class OrchestratorService {
 }
 
 /** The daemon manager's state as the panel's host record. */
-function hostRecord(id, name, state, enabled) {
+function hostRecord(id, name, state, enabled, enableFailure = null) {
   const base = { id, name, enabled };
   if (!state) return { ...base, state: "idle" };
   switch (state.state) {
     case "ready":
-      return state.capabilities?.includes(ORCH_CAPABILITY)
-        ? { ...base, state: "ready" }
-        : { ...base, state: "error", detail: `Update sushiai on ${name}` };
+      if (state.capabilities?.includes(ORCH_CAPABILITY))
+        return { ...base, state: "ready" };
+      // An update-flagged daemon without the module needs the update; any
+      // other one is turned on by its first request.
+      if (state.update)
+        return { ...base, state: "error", detail: `Update sushiai on ${name}` };
+      if (enableFailure)
+        return { ...base, state: "error", detail: enableFailure };
+      return {
+        ...base,
+        state: "connecting",
+        detail: `Turning on the orchestrator on ${name}`,
+      };
     case "connecting":
       return { ...base, state: "connecting" };
     case "offline":
@@ -1111,12 +1128,24 @@ class OrchestratorHosts {
     const stateOf = (host) => states.find((state) => state.host === host);
     const profiles = this.getConnections?.()?.list() ?? [];
     return [
-      hostRecord(LOCAL_HOST, "Local", stateOf(LOCAL_HOST), true),
+      hostRecord(
+        LOCAL_HOST,
+        "Local",
+        stateOf(LOCAL_HOST),
+        true,
+        this.local?.enableFailure,
+      ),
       ...profiles.map((profile) => {
         const id = `ssh:${profile.id}`;
         const service = this.services.get(id);
         return {
-          ...hostRecord(id, profile.name, stateOf(profile.id), !!service),
+          ...hostRecord(
+            id,
+            profile.name,
+            stateOf(profile.id),
+            !!service,
+            service?.enableFailure,
+          ),
           preflight: service?.preflight ?? null,
         };
       }),

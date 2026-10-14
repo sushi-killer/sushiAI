@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useOrchestratorClient, useOrchestratorHost } from "./hostContext";
 import { hostOf } from "./hosts";
+import { readComposerDraft, writeComposerDraft } from "./composerDraft";
 import {
   groupSessions,
   matchesQuery,
@@ -330,7 +331,14 @@ function Conversation({
   onClear: () => void;
 }) {
   const orchestratorClient = useOrchestratorClient();
-  const [draft, setDraft] = useState("");
+  const host = useOrchestratorHost();
+  const [draft, setDraftState] = useState(() =>
+    readComposerDraft(host, cwd, "chat"),
+  );
+  const setDraft = (text: string) => {
+    setDraftState(text);
+    writeComposerDraft(host, cwd, "chat", text);
+  };
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(
     null,
   );

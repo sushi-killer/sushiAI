@@ -28,7 +28,7 @@ pub(super) enum Compared {
     Covered(Vec<String>),
     /// Tests failing here and not on the base.
     New(BTreeSet<String>),
-    /// Not comparable: no parsed run, a crash, a cut list, an early stop or
+    /// Not comparable: no parsed run, a crash, an early stop or
     /// output beyond the test lines that differs.
     Unparsed,
 }
@@ -42,7 +42,7 @@ pub(super) fn compare(run: &VerifyOutcome, base: &VerifyOutcome) -> Compared {
     if run.stopped_early || base.stopped_early {
         return Compared::Unparsed;
     }
-    if run.truncated || base.truncated || run.crashed || base.crashed {
+    if run.crashed || base.crashed {
         return Compared::Unparsed;
     }
     if run.failing.is_empty() || base.failing.is_empty() {
@@ -211,7 +211,6 @@ mod tests {
             tail: output.into(),
             failing: report.failing,
             passing: report.passing,
-            truncated: report.truncated,
             crashed: report.crashed,
             stopped_early: report.stopped_early,
             output_key: report.rest_key,
@@ -264,12 +263,16 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_list_is_not_comparable() {
-        let many: String = (0..600).map(|i| format!("not ok {i} - t{i}\n")).collect();
-        let base = run(1, &many);
-        let task = run(1, &format!("{many}not ok 900 - new\n"));
-        assert!(base.truncated);
-        assert_eq!(compare(&task, &base), Compared::Unparsed);
+    fn a_suite_of_600_passing_tests_with_a_base_identical_failure_is_covered() {
+        let passing: String = (0..600).map(|i| format!("ok {i} - t{i}\n")).collect();
+        let output = format!("{passing}not ok 600 - bad\n");
+        let base = run(1, &output);
+        let task = run(1, &output);
+        assert_eq!(compare(&task, &base), Compared::Covered(vec!["bad".into()]));
+        let new = run(1, &format!("{output}not ok 601 - new\n"));
+        assert!(matches!(compare(&new, &base), Compared::New(_)));
+        let lost = run(1, "not ok 600 - bad\n");
+        assert_eq!(compare(&lost, &base), Compared::Unparsed);
     }
 
     #[test]

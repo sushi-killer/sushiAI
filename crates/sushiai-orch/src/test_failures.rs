@@ -8,16 +8,11 @@
 
 use std::collections::BTreeSet;
 
-/// Most names kept per list for one run; a run with more is marked truncated.
-pub const MAX_NAMES: usize = 500;
-
 /// One parsed run.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Report {
     pub failing: Vec<String>,
     pub passing: Vec<String>,
-    /// A list held more than [`MAX_NAMES`] names and was cut.
-    pub truncated: bool,
     /// The output shows a crash, an abort or a build that did not finish.
     pub crashed: bool,
     /// A cargo run that stopped at its first failing test binary: tests of
@@ -283,11 +278,9 @@ pub fn parse(output: &str, cwd: &str) -> Report {
             fnv(&mut hash, if digit { b'#' } else { byte });
         }
     }
-    let truncated = failing.len() > MAX_NAMES || passing.len() > MAX_NAMES;
     Report {
-        failing: failing.into_iter().take(MAX_NAMES).collect(),
-        passing: passing.into_iter().take(MAX_NAMES).collect(),
-        truncated,
+        failing: failing.into_iter().collect(),
+        passing: passing.into_iter().collect(),
         crashed,
         stopped_early: first_stop && !all_targets,
         rest_key: format!("{hash:016x}"),
@@ -368,12 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn more_than_the_cap_marks_the_run_truncated() {
-        let many: String = (0..=MAX_NAMES)
-            .map(|i| format!("not ok {i} - t{i}\n"))
+    fn a_long_run_keeps_every_name() {
+        let many: String = (0..1200)
+            .map(|i| format!("not ok {i} - t{i}\nok {i} - p{i}\n"))
             .collect();
         let report = parse(&many, "");
-        assert!(report.truncated);
-        assert_eq!(report.failing.len(), MAX_NAMES);
+        assert_eq!(report.failing.len(), 1200);
+        assert_eq!(report.passing.len(), 1200);
     }
 }

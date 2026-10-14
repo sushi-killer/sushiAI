@@ -2293,16 +2293,13 @@ pub struct VerifyOutcome {
     /// A high-load timeout occurred, even if its single retry exited non-zero.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub load_timeout: bool,
-    /// The failing tests the full output named (capped); empty for a passing
+    /// The failing tests the full output named; empty for a passing
     /// run or an output no known runner format matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<String>,
-    /// The passing tests the full output named (capped).
+    /// The passing tests the full output named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passing: Vec<String>,
-    /// A test list was cut at its cap: the run cannot be compared.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
     /// The output shows a crash, an abort or a build that did not finish.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed: bool,

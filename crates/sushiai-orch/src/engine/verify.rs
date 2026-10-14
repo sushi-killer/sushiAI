@@ -1360,7 +1360,6 @@ pub async fn run_verify_command(
         tail,
         failing: report.failing,
         passing: report.passing,
-        truncated: report.truncated,
         crashed: report.crashed,
         stopped_early: report.stopped_early,
         output_key: report.rest_key,

@@ -86,6 +86,8 @@ const PROBES: [&str; 6] = ["grep", "egrep", "fgrep", "rg", "test", "["];
 /// The path-like words of each simple command of `command`, with whether that
 /// command is a pure content probe.
 fn check_words(command: &str) -> Vec<(String, bool)> {
+    // A substitution can feed a file's content anywhere: nothing is a probe.
+    let substituted = command.contains("$(") || command.contains('`') || command.contains("<(");
     let mut out = Vec::new();
     for segment in command.split([';', '|', '&', '\n']) {
         let words = command_words(segment);
@@ -94,8 +96,50 @@ fn check_words(command: &str) -> Vec<(String, bool)> {
             .find(|w| *w != "!")
             .cloned()
             .unwrap_or_default();
-        let probe = PROBES.contains(&head.as_str());
-        out.extend(words.into_iter().map(|w| (w, probe)));
+        let probe = !substituted && PROBES.contains(&head.as_str());
+        let patterns = if probe {
+            pattern_files(segment)
+        } else {
+            Vec::new()
+        };
+        out.extend(words.into_iter().map(|w| {
+            let probe = probe && !patterns.contains(&w);
+            (w, probe)
+        }));
+    }
+    out
+}
+
+/// The files a grep-like command reads its patterns from (`-f FILE`,
+/// `--file FILE`, `--file=FILE`, `-qxFf FILE`): their content is the expected
+/// result, not the text searched.
+fn pattern_files(segment: &str) -> Vec<String> {
+    let clean = |t: &str| clean_test_path(t.trim_matches(|c| c == '"' || c == '\'')).ok();
+    let mut out = Vec::new();
+    let mut next_is_file = false;
+    for token in segment.split_whitespace() {
+        if std::mem::take(&mut next_is_file) {
+            out.extend(clean(token));
+        } else if token == "--file" {
+            next_is_file = true;
+        } else if let Some(value) = token.strip_prefix("--file=") {
+            out.extend(clean(value));
+        } else if token.starts_with('-') && !token.starts_with("--") {
+            for (i, c) in token.char_indices().skip(1) {
+                if c == 'f' {
+                    let rest = &token[i + 1..];
+                    if rest.is_empty() {
+                        next_is_file = true;
+                    } else {
+                        out.extend(clean(rest));
+                    }
+                    break;
+                }
+                if c == 'e' {
+                    break;
+                }
+            }
+        }
     }
     out
 }
@@ -812,6 +856,40 @@ mod tests {
         ];
         let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
         assert_eq!(kept, vec!["tests/golden/expected.md"]);
+    }
+
+    #[test]
+    fn a_document_read_as_a_pattern_file_or_through_a_substitution_stays_protected() {
+        let (_dir, repo) = repo_with(&[
+            ("tests/golden/expected.md", "expected\n"),
+            ("docs/guide.md", "old\n"),
+        ]);
+        for run in [
+            "render | grep -qxFf tests/golden/expected.md",
+            "render | grep -f tests/golden/expected.md",
+            "render | grep --file tests/golden/expected.md",
+            "render | rg --file=tests/golden/expected.md",
+            "[ \"$(render)\" = \"$(cat tests/golden/expected.md)\" ]",
+            "grep -q \"$(cat tests/golden/expected.md)\" out.txt",
+            "grep -q `cat tests/golden/expected.md` out.txt",
+        ] {
+            let mut task = task_with_status(TaskStatus::Running);
+            task.checks = vec![Check {
+                criterion: 0,
+                run: run.into(),
+                baseline: None,
+            }];
+            let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
+            assert_eq!(kept, vec!["tests/golden/expected.md"], "{run}");
+        }
+        // The searched file of a plain probe stays writable.
+        let mut task = task_with_status(TaskStatus::Running);
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "grep -qE 'x' docs/guide.md".into(),
+            baseline: None,
+        }];
+        assert!(protected_hashes(&repo, "HEAD", &task).is_empty());
     }
 
     #[tokio::test]

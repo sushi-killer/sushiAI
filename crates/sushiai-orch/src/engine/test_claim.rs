@@ -147,6 +147,13 @@ async fn planner_run(
     Ok(outcome.final_text.unwrap_or_default())
 }
 
+/// A throwaway checkout next to the task's worktree. It must stay outside the
+/// data dir, which the read-only runs may not read: that would include their
+/// own working directory.
+fn scratch_path(task: &Task, name: &str) -> PathBuf {
+    PathBuf::from(format!("{}-{name}", task.worktree))
+}
+
 /// Whether `new` drops most of the lines that carry `old`'s checking: fewer
 /// than half of its non-blank lines are left.
 fn weakens(old: &str, new: &str) -> bool {
@@ -191,7 +198,7 @@ async fn still_fails_on_base(
     }
     let repo = PathBuf::from(&task.repo);
     let run_dir = app.store.task_dir(&task.id).join("runs/claim-base");
-    let path = run_dir.join("tree");
+    let path = scratch_path(task, "claim-base");
     let (r, p, sha) = (repo.clone(), path.clone(), task.base_sha.clone());
     let made = tokio::task::spawn_blocking(move || {
         git::remove_worktree(&r, &p);
@@ -321,7 +328,7 @@ pub(super) async fn rule_on_claims(
     let task_id = task.id.clone();
     // The judge and the planner read a checkout of the tests commit, never
     // the agent's worktree: what the agent wrote there is not an instruction.
-    let scratch = app.store.task_dir(&task.id).join("runs/claim-tests");
+    let scratch = scratch_path(task, "claim-tests");
     let mut scratch_made = false;
     for claim in claims {
         let Ok(path) = clean_test_path(&claim.path) else {
@@ -445,6 +452,30 @@ pub(super) async fn rule_on_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_judge_checkout_is_not_under_a_path_the_run_may_not_read() {
+        let (app, _dir) = test_app();
+        let repo = app.home.join("some-repo");
+        let mut task = task_with_status(TaskStatus::Running);
+        task.worktree = git::worktree_path(&repo, &app.home, "", "task/x")
+            .to_string_lossy()
+            .to_string();
+        let deny_read = PathBuf::from(&app.data_dir);
+        for name in ["claim-tests", "claim-base"] {
+            assert!(!scratch_path(&task, name).starts_with(&deny_read));
+            assert_eq!(
+                scratch_path(&task, name).parent(),
+                Path::new(&task.worktree).parent()
+            );
+        }
+        // The old place, inside the task's data dir, would have been denied.
+        assert!(app
+            .store
+            .task_dir(&task.id)
+            .join("runs/claim-tests")
+            .starts_with(&deny_read));
+    }
 
     #[test]
     fn a_rewrite_that_drops_most_lines_is_weaker() {

@@ -166,10 +166,10 @@ pub struct Settings {
     /// attempt; `""` turns the check off.
     #[serde(default = "default_brief_check_route")]
     pub brief_check_route: String,
-    /// Route id of the plan review: one read-only run on another model
-    /// family that judges the planner's draft once per task; `""` turns it
-    /// off. A missing or unavailable route skips the review, with no
-    /// fallback.
+    /// Route id of the plan review: one read-only run that judges the
+    /// planner's draft once per task. The review always runs: a `""`, missing
+    /// or unavailable route falls back to the planner's route, with a
+    /// `Plan gate:` decision line that says why.
     #[serde(default = "default_plan_review")]
     pub plan_review: String,
     /// Route the orchestrator agent runs on: its chat with the owner and,
@@ -585,7 +585,7 @@ pub struct PlanGate {
     /// The planner already ran again because of a critical finding.
     #[serde(default)]
     pub replanned: bool,
-    /// The cross-family plan review has run (or been skipped for good).
+    /// The plan review has run once; it never runs again for this task.
     #[serde(default)]
     pub reviewed: bool,
     /// Findings left after the gate; the implementer's brief lists them.

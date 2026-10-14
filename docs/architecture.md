@@ -289,20 +289,22 @@ drop it, or stop.
 ### Plan gate
 
 `engine/plan_gate.rs` runs after the planner's draft is stored and before any
-plan question or split. Code checks produce findings with a severity: a
-criterion about the agent's report or process (CRITICAL `report-only`), a
-request item no criterion proves with a runnable check (CRITICAL `coverage`),
-a shared check named in the request but dropped from verify (CRITICAL
-`shared-check`), a check that names no command (HIGH `untestable`), a verify
-command whose script, test target or file does not exist (HIGH
-`verify-missing`), a whole-repo command in `verify` (MEDIUM `verify-cost`,
-moved to `finalVerify`) and overlapping subtask paths (LOW `overlap`). One
-read-only review by another model family (`planReview`, default `codex`;
-skipped with a decision line when its route is missing, never a fallback) adds
-findings once per task, and the brief check's contradiction counts as a
-critical finding. Any critical finding replans once: the planner runs again
-with a `## Plan gate findings` block and the request is never edited. A
-report-only criterion that survives is removed. Other findings are stored in
+plan question or split. One read-only plan review always runs, once per task:
+on `planReview` when that route is configured and its CLI is available, else on
+the planner's route, with a decision line that names the route and why. The
+review is an agent turn. It returns typed findings: `kind` is
+`missing-requirement`, `report-only`, `untestable`, `wrong-split` or
+`wrong-approach`; `severity` is `critical`, `high` or `medium`. A reply that
+does not match that schema is an unusable reply: the decision line says so and
+the gate goes on without review findings. Code keeps only the checks that are
+certain: a shared check named in the request but dropped from verify and
+finalVerify (CRITICAL `shared-check`), a criterion index the draft does not
+have (the reply is then unusable), and the dependency-cycle and overlapping-path
+rules of the merge. A typed `report-only` finding removes the criterion it
+names, with a decision line; nothing else removes a criterion. The brief
+check's contradiction counts as a critical finding. Any critical finding other
+than `report-only` replans once: the planner runs again with a
+`## Plan gate findings` block and the request is never edited. Other findings are stored in
 `planGate.findings` and reach the implementer as `## Plan notes`.
 
 Incomplete overlapping subtasks and parts with no paths or targeted check
@@ -429,7 +431,7 @@ flowchart LR
 ```mermaid
 flowchart TD
   plan["Plan<br/>planner route (Opus) drafts goal, criteria, verify"]
-  plangate["Plan gate<br/>code checks, one plan review by another model family,<br/>brief check; a critical finding replans once"]
+  plangate["Plan gate<br/>one typed plan review (planReview, else planner route),<br/>brief check; a critical finding replans once"]
   split["Plan lint: a whole-repo suite in verify (npm run ci,<br/>cargo test --workspace, ...) moves to finalVerify;<br/>verify entries that are not shell commands become review criteria"]
   baseline["Baseline, before attempt 1<br/>planner's tests are committed first; planner's checks and held-out check run on that commit;<br/>pass = not grounded, exit 126/127 = env, fail = gated;<br/>worktree restored afterwards"]
   basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]

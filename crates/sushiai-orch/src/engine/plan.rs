@@ -1159,21 +1159,29 @@ pub(super) async fn run_plan_stage(
 
         let mut asked: Vec<&brief::PlanQuestion> = draft.questions.iter().take(3).collect();
         if task.variant().batch_questions {
-            // Non-blocking questions with a usable recommendation are not
-            // asked: each becomes an assumption and planning goes on.
-            let (assumed, blocking): (Vec<_>, Vec<_>) = asked
+            // A non-blocking question with a usable recommendation goes to
+            // triage first; only one triage settles becomes an assumption,
+            // the rest are asked with the blocking ones.
+            let (routine, mut blocking): (Vec<_>, Vec<_>) = asked
                 .into_iter()
                 .partition(|q| !q.blocking && q.usable_recommendation().is_some());
             if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
                 task = reloaded;
             }
-            for q in assumed {
+            for q in routine {
                 // Planning reruns until a plan attempt passes, so the same
                 // question can come back after an interruption: record it once.
                 if task.assumptions.iter().any(|a| a.question == q.text) {
                     continue;
                 }
-                let answer = q.usable_recommendation().unwrap_or_default().to_string();
+                let Some((answer, reason)) = triage_settles(
+                    app, task_id, attempt_n, &mut task, &worktree, &q.text, &q.options, cancel,
+                )
+                .await
+                else {
+                    blocking.push(q);
+                    continue;
+                };
                 app.broadcast_log(
                     task_id,
                     attempt_n,
@@ -1182,7 +1190,7 @@ pub(super) async fn run_plan_stage(
                 task.assumptions.push(Assumption {
                     question: q.text.clone(),
                     answer,
-                    evidence: q.evidence.clone(),
+                    evidence: format!("{} Triage: {reason}", q.evidence),
                     by: "planner".to_string(),
                     kind: None,
                     attempt: None,
@@ -1288,7 +1296,8 @@ pub(super) async fn run_plan_stage(
         // asked only when the repo offers none.
         if task.verify.is_empty() {
             let mut options = verify_options(&worktree);
-            if options.is_empty() {
+            let known = options.iter().position(|o| answer_policy::runs_ci_entry(o));
+            if known.is_none() {
                 match ask_plan_question(
                     app,
                     task_id,
@@ -1311,7 +1320,7 @@ pub(super) async fn run_plan_stage(
                     None => return end_plan_stage(app, task_id, Some(idx)).await,
                 }
             } else if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-                let command = options.swap_remove(0);
+                let command = options.swap_remove(known.unwrap_or_default());
                 let question = "Which command proves this task?".to_string();
                 app.broadcast_log(
                     task_id,
@@ -1321,7 +1330,9 @@ pub(super) async fn run_plan_stage(
                 t.assumptions.push(Assumption {
                     question,
                     answer: command.clone(),
-                    evidence: "the first verification command found in the repo".into(),
+                    evidence:
+                        "the first verification command found in the repo that runs the whole suite"
+                            .into(),
                     by: "planner".to_string(),
                     kind: None,
                     attempt: None,

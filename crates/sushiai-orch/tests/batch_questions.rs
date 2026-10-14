@@ -17,6 +17,10 @@ fn setup(plan: serde_json::Value, dir: &Path) -> std::path::PathBuf {
         "result": format!("```sushi-plan\n{plan}\n```"),
     });
     std::fs::write(dir.join("plan.jsonl"), format!("{result}\n")).unwrap();
+    triage(
+        dir,
+        json!({"action": "escalate", "question": "Sharpened one", "options": ["x", "y"], "reason": "needs the owner"}),
+    );
     let body = format!(
         r#"#!/bin/sh
 input="$(cat)"
@@ -27,7 +31,7 @@ case "$input" in
     ;;
   *sushi-triage*)
     printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-triage"}}'
-    printf '%s\n' '{{"type":"result","total_cost_usd":0.01,"usage":{{"input_tokens":1,"output_tokens":1}},"result":"```sushi-triage\n{{\"action\":\"escalate\",\"question\":\"Sharpened one\",\"options\":[\"x\",\"y\"],\"reason\":\"needs the owner\"}}\n```"}}'
+    cat {d}/triage.jsonl
     ;;
   *)
     echo changed > CHANGED_MARKER.txt
@@ -40,6 +44,20 @@ esac
     );
     fake_harness_script(dir, "fake-planner.sh", &body)
 }
+
+/// What the fake triage replies from now on.
+fn triage(dir: &Path, decision: serde_json::Value) {
+    let result = json!({
+        "type": "result",
+        "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "result": format!("```sushi-triage\n{decision}\n```"),
+    });
+    std::fs::write(dir.join("triage.jsonl"), format!("{result}\n")).unwrap();
+}
+
+const SETTLES: fn() -> serde_json::Value =
+    || json!({"action": "answer", "answer": "go with the recommendation", "reason": "routine"});
 
 fn plan(questions: serde_json::Value) -> serde_json::Value {
     json!({
@@ -87,6 +105,7 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
         ])),
         dir.path(),
     );
+    triage(dir.path(), SETTLES());
     let daemon = spawn(&script, false);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, true);
@@ -96,10 +115,40 @@ fn non_blocking_questions_become_assumptions_and_never_wait() {
     let assumptions = settled["assumptions"].as_array().unwrap();
     assert_eq!(assumptions.len(), 2, "{settled}");
     assert_eq!(assumptions[0]["question"], "Which default theme?");
-    assert_eq!(assumptions[0]["answer"], "dark");
-    assert_eq!(assumptions[0]["evidence"], "the app is dark already");
+    assert_eq!(assumptions[0]["answer"], "go with the recommendation");
+    assert!(assumptions[0]["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("the app is dark already Triage: routine"));
     assert_eq!(assumptions[0]["by"], "planner");
     assert_eq!(assumptions[0]["overturned"], false);
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
+fn a_non_blocking_question_triage_escalates_is_asked_not_assumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = setup(
+        plan(json!([
+            {"text": "Also remove the legacy endpoint?", "options": ["yes", "no"], "recommended": "no", "evidence": "e", "blocking": false},
+        ])),
+        dir.path(),
+    );
+    let daemon = spawn(&script, false);
+    let repo = init_git_repo();
+    let task = create(&daemon, repo.path(), true, true);
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, finished);
+    assert_eq!(waiting["status"], "waiting", "{waiting}");
+    assert!(
+        waiting["question"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Also remove the legacy endpoint?"),
+        "{waiting}"
+    );
+    assert!(waiting.get("assumptions").is_none(), "{waiting}");
     daemon.shutdown_and_wait();
     remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
@@ -134,6 +183,7 @@ fn a_task_created_without_a_variant_assumes_a_non_blocking_question() {
         ])),
         dir.path(),
     );
+    triage(dir.path(), SETTLES());
     let daemon = spawn(&script, false);
     let repo = init_git_repo();
     let task = daemon.request(
@@ -147,7 +197,10 @@ fn a_task_created_without_a_variant_assumes_a_non_blocking_question() {
     let id = task["id"].as_str().unwrap().to_string();
     let stopped = poll_until(&daemon, &id, finished);
     assert_eq!(stopped["status"], "stopped", "{stopped}");
-    assert_eq!(stopped["assumptions"][0]["answer"], "dark", "{stopped}");
+    assert_eq!(
+        stopped["assumptions"][0]["answer"], "go with the recommendation",
+        "{stopped}"
+    );
     daemon.shutdown_and_wait();
     remove_dir_retrying(task["worktree"].as_str().unwrap());
 }
@@ -183,6 +236,42 @@ fn a_plan_without_a_verify_command_takes_the_first_one_the_repo_offers() {
 }
 
 #[test]
+fn a_plan_without_a_verify_command_asks_when_the_repo_offers_no_whole_suite() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut empty = plan(json!([]));
+    empty["verify"] = json!([]);
+    let script = setup(empty, dir.path());
+    let daemon = spawn(&script, false);
+    let repo = init_git_repo();
+    std::fs::write(
+        repo.path().join("package.json"),
+        r#"{"scripts":{"pretest":"x","test:update-snapshots":"y"}}"#,
+    )
+    .unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-qm", "scripts"]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let task = create(&daemon, repo.path(), true, false);
+    let id = task["id"].as_str().unwrap().to_string();
+    let waiting = poll_until(&daemon, &id, finished);
+    assert_eq!(waiting["status"], "waiting", "{waiting}");
+    assert!(
+        waiting["question"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No verification command was found"),
+        "{waiting}"
+    );
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(task["worktree"].as_str().unwrap());
+}
+
+#[test]
 fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     let dir = tempfile::tempdir().unwrap();
     let script = setup(
@@ -204,8 +293,8 @@ fn two_blocking_questions_escalated_by_triage_become_one_owner_question() {
     assert!(text.contains("Rename the public endpoint?"), "{text}");
     assert!(text.contains("recommended: no"), "{text}");
     assert!(!text.contains("Sharpened one"), "{text}");
-    assert!(!text.contains("Which colour?"), "{text}");
-    assert_eq!(waiting["assumptions"].as_array().unwrap().len(), 1);
+    assert!(text.contains("Which colour?"), "{text}");
+    assert!(waiting.get("assumptions").is_none(), "{waiting}");
 
     daemon.request("task.answer", json!({"id": id, "answer": "no to both"}));
     let settled = poll_until(&daemon, &id, |s| matches!(s, "done" | "failed" | "stopped"));
@@ -223,6 +312,7 @@ fn overturn_marks_the_assumption_and_reaches_the_next_attempt() {
         ])),
         dir.path(),
     );
+    triage(dir.path(), SETTLES());
     let daemon = spawn(&script, false);
     let repo = init_git_repo();
     let task = create(&daemon, repo.path(), true, false);

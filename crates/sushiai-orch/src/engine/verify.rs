@@ -1332,18 +1332,39 @@ pub async fn run_verify_command(
     } else {
         let _ = tokio::task::spawn_blocking(move || crate::procs::stop_processes_under(&dir)).await;
     }
+    let mut full = String::new();
     let (code, tail) = match outcome {
         Outcome::Done(Ok((status, out_buf, err_buf))) => {
+            if status.code() != Some(0) {
+                full = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out_buf),
+                    String::from_utf8_lossy(&err_buf)
+                );
+            }
             (status.code(), verify_tail(&out_buf, &err_buf))
         }
         Outcome::Done(Err(e)) => (None, format!("{INTERNAL_ERROR_PREFIX}{e}")),
         Outcome::TimedOut => (None, timed_out_tail(timeout)),
         Outcome::Cancelled => (None, CANCELLED_TAIL.to_string()),
     };
+    // The tail is truncated; the baseline diff reads the whole output.
+    let (failing, output_key) = if full.is_empty() {
+        (Vec::new(), String::new())
+    } else {
+        (
+            crate::test_failures::failing_tests(&full)
+                .into_iter()
+                .collect(),
+            crate::test_failures::output_key(&full),
+        )
+    };
     VerifyOutcome {
         command: cmd.to_string(),
         code,
         tail,
+        failing,
+        output_key,
         ms: start.elapsed().as_millis() as u64,
         ..Default::default()
     }

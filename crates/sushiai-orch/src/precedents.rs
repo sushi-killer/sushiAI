@@ -227,10 +227,7 @@ fn failing_lines(tail: &str) -> Vec<&str> {
 }
 
 fn failing_tests(tail: &str) -> BTreeSet<String> {
-    failing_lines(tail)
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    crate::test_failures::failing_tests(tail)
 }
 
 /// File-looking words (`a/b.ts`) in the failing lines of a tail.

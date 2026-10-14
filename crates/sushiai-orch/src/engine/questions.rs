@@ -42,10 +42,11 @@ pub(super) async fn wait_for_exhausted_answer(
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) -> Option<Answered> {
-    if task.queue.park.is_some() {
+    if task.queue.park.is_some() || task.status == TaskStatus::Failed {
         task.updated_at = now_ms();
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
+        wake_orchestrator_for_stuck(app, task);
         app.advance_queue(&task.repo);
         return None;
     }

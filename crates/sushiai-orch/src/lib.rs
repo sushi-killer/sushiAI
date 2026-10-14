@@ -27,6 +27,7 @@ pub mod report;
 pub mod sandbox;
 pub mod skill;
 pub mod store;
+pub mod test_failures;
 pub mod timeline;
 pub mod worktree_env;
 

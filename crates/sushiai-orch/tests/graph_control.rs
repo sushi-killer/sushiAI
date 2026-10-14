@@ -54,6 +54,7 @@ fn daemon(gates: &Path) -> (Daemon, tempfile::TempDir) {
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("GATES", gates.to_str().unwrap()),
+        ("ORCHD_STUCK_PAUSE_SECS", "1"),
     ]);
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("");
@@ -273,19 +274,16 @@ fn conflicting_base_commit_gives_one_attempt_with_the_conflict_in_the_brief() {
             && markers.contains("part change"),
         "{markers}"
     );
-    let parked = wait_until("the failed conflict attempt to park", || {
+    // The failed conflict attempt no longer parks the task for good: it
+    // pauses for a timed retry and says so.
+    let paused = wait_until("the failed conflict attempt to pause", || {
         let task = get(&daemon, &part);
-        task["park"].is_object().then_some(task)
+        decision_contains(&task, "Retry later: the base carry conflict attempt failed")
+            .then_some(task)
     });
-    assert_eq!(parked["status"], "queued", "{parked}");
-    assert!(parked["question"].is_null(), "{parked}");
-    assert_eq!(parked["attempts"].as_array().unwrap().len(), 2, "{parked}");
-    assert_eq!(parked["attempts"][1]["routeId"], "claude-cheap");
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        std::fs::read_to_string(gates.path().join("count_part")).unwrap(),
-        "2"
-    );
+    assert!(paused["park"].is_null(), "{paused}");
+    assert!(paused["question"].is_null(), "{paused}");
+    assert_eq!(paused["attempts"][1]["routeId"], "claude-cheap");
 }
 
 #[test]
@@ -578,7 +576,7 @@ fn rpc_answers_are_labelled_with_their_source() {
 }
 
 #[test]
-fn third_retry_on_the_same_failure_parks_the_task() {
+fn a_third_retry_on_the_same_failure_pauses_twice_and_then_fails_instead_of_parking() {
     let gates = tempfile::tempdir().unwrap();
     configure(gates.path(), "failure", "fail", "failure.txt", false);
     let (daemon, _scripts) = daemon(gates.path());
@@ -609,21 +607,30 @@ fn third_retry_on_the_same_failure_parks_the_task() {
             .then_some(())
         });
     }
-    let parked = wait_until("the repeated failure to park", || {
+    // No eternal park: the task pauses, tries again twice, then fails with
+    // its reason.
+    let failed = wait_until("the repeated failure to end the task", || {
         let task = get(&daemon, &id);
-        task["park"].is_object().then_some(task)
+        (task["status"] == "failed").then_some(task)
     });
-    assert_eq!(parked["status"], "queued");
-    assert!(parked["question"].is_null());
+    assert!(failed["park"].is_null(), "{failed}");
+    assert!(failed["question"].is_null());
+    let retries = failed["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d.as_str().unwrap().starts_with("Retry later: "))
+        .count();
+    assert_eq!(retries, 2, "{failed}");
     assert!(
-        parked["park"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("failed again after 3 retries"),
-        "{parked}"
+        failed["decisions"].as_array().unwrap().iter().any(|d| {
+            let d = d.as_str().unwrap();
+            d.starts_with("Failed: ") && d.contains("failed again after 3 retries")
+        }),
+        "{failed}"
     );
-    assert_eq!(parked["questionHistory"].as_array().unwrap().len(), 3);
-    for answer in parked["questionHistory"].as_array().unwrap() {
+    assert_eq!(failed["questionHistory"].as_array().unwrap().len(), 3);
+    for answer in failed["questionHistory"].as_array().unwrap() {
         assert_eq!(answer["failureSignature"], signature);
     }
 }

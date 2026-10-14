@@ -314,15 +314,7 @@ pub(super) fn advance_after_failure(
     if task.queue.carry_conflict_attempt == Some(last.n) {
         let reason =
             "the base carry conflict attempt failed; fix the conflicts, then start it".to_string();
-        task.queue.park = Some(ParkRecord {
-            reason: reason.clone(),
-            until: None,
-            by: AnswerSource::Policy,
-        });
-        task.decisions.push(format!("Park: {reason} (by policy)"));
-        task.question = None;
-        task.status = TaskStatus::Queued;
-        return false;
+        return retry_or_fail(task, &reason);
     }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]
@@ -381,15 +373,7 @@ pub(super) fn advance_after_failure(
                     "{} failed again after 3 retries; fix the cause, then start it",
                     signature_phrase(&signature)
                 );
-                task.queue.park = Some(ParkRecord {
-                    reason: reason.clone(),
-                    until: None,
-                    by: AnswerSource::Policy,
-                });
-                task.decisions.push(format!("Park: {reason} (by policy)"));
-                task.question = None;
-                task.status = TaskStatus::Queued;
-                return false;
+                return retry_or_fail(task, &reason);
             }
             let mut options: Vec<String> = vec!["continue".into(), "change approach".into()];
             if accept_offered(&task.attempts[task.attempts.len() - 1], protected_paths) {

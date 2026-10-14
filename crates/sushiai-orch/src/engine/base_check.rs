@@ -402,6 +402,10 @@ pub(super) fn record_base_retry(
 /// A retry remains pending until its exact base moves, including after a
 /// restart and when the answer came from the policy.
 pub(super) fn base_retry_requested(task: &Task, commands: &[String], base_sha: &str) -> bool {
+    // A wait that ran out its bound is not asked for again on the same base.
+    if base_waited_out(task, base_sha) {
+        return false;
+    }
     commands.iter().any(|command| {
         if task.decisions.contains(&base_retry_line(command, base_sha)) {
             return true;

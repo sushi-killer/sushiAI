@@ -367,6 +367,28 @@ async fn parent_finals_on_base(
         app.broadcast_task(task);
     }
     on_base.retain(|b| !kept.contains(&b.command) && !is_kept(task, &b.command));
+    // The base is red too: only a failure the base lacks is the parent's.
+    let wt = PathBuf::from(&task.worktree);
+    let mut unclear: Vec<VerifyOutcome> = Vec::new();
+    let mut judged: Vec<String> = Vec::new();
+    for base_run in on_base {
+        let Some(failed) = failing_finals
+            .iter()
+            .find(|f| f.command == base_run.command)
+        else {
+            continue;
+        };
+        match judge_against_base(app, task, failed, &base_run, &wt, &dir, cancel).await {
+            BaseVerdict::Waived => judged.push(base_run.command.clone()),
+            BaseVerdict::NewFailures => {}
+            BaseVerdict::Unclear => unclear.push(base_run),
+        }
+    }
+    let on_base = unclear;
+    let results: Vec<VerifyOutcome> = results
+        .into_iter()
+        .filter(|v| !judged.contains(&v.command))
+        .collect();
     if on_base.is_empty() {
         return ParentGate::Go(results);
     }

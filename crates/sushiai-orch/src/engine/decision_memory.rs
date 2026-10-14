@@ -577,6 +577,7 @@ mod tests {
             cores: 1,
             load_timeout: false,
             decisions: vec![],
+            ..Default::default()
         }];
         task.attempts.push(attempt);
         record_answer_for(&mut task, Some(&q), RETRY, AnsweredBy::Owner, None, None);
@@ -603,6 +604,7 @@ mod tests {
             cores: 1,
             load_timeout: false,
             decisions: vec![],
+            ..Default::default()
         };
         let attempt = |n, outcome| {
             let mut a = attempt_with_failure(n, "s");

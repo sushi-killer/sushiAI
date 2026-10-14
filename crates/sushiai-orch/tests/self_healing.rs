@@ -241,7 +241,9 @@ fn a_final_only_command_is_not_judged_before_the_first_attempt() {
     let feasibility =
         js("{\"verdict\":\"unrelated\",\"reason\":\"the lint config is broken on main\"}");
     let s = setup(&[("JUDGE_FEASIBILITY", &feasibility)], "");
-    let check = "echo broken lint; exit 3";
+    // The worktree prints one more line than the base: not the base's failure alone.
+    let check =
+        "case \"$PWD\" in */base-runs/*);; *) echo worktree;; esac; echo broken lint; exit 3";
     let id = create(&s, json!({"finalVerify": [check]}));
     let task = finished(&s, &id);
     // The attempt ran first; only then does the final fail on the worktree

@@ -158,7 +158,12 @@ pub(super) fn spawn_pr_on_done(app: &App, task: &Task) {
         let _ = app.update_task(&id, |t| t.pr_pending = false);
         return;
     }
-    let app = app.arc();
+    spawn_open_pr(app, &id);
+}
+
+/// Runs the flow in the background, without its caller waiting.
+pub(super) fn spawn_open_pr(app: &App, id: &str) {
+    let (app, id) = (app.arc(), id.to_string());
     tokio::spawn(async move { open_pr_on_done(&app, &id).await });
 }
 
@@ -168,7 +173,8 @@ fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: bool) {
     let _ = app.update_task(id, |task| {
         task.decisions.extend(lines);
         task.cost_usd += cost;
-        if ends {
+        // A task sent back for its resolution keeps its flag and plan.
+        if ends && task.status == TaskStatus::Done {
             task.pr_pending = false;
             task.pr_plan = None;
             task.queue.pr_conflict_tried = false;
@@ -401,6 +407,19 @@ async fn resolve_conflict(
     let repo = PathBuf::from(&task.repo);
     let tip = pr::run_cmd("git", &["rev-parse", &upstream], &repo, pr::GIT_TIMEOUT).await?;
     task.fresh_base = Some(FreshBase { tip: Some(tip) });
+    // Saved before the carry leaves conflict markers in the worktree: a
+    // restart in between finds a task that owes a resolution, never a done
+    // task with a dirty worktree.
+    task.queue.pr_conflict_tried = true;
+    // The owner's choices for a manual pull request survive the attempt.
+    if plan.is_some() {
+        task.pr_pending = true;
+        task.pr_plan = plan;
+    }
+    task.status = TaskStatus::Queued;
+    task.updated_at = now_ms();
+    app.save_task_logged(&task);
+    app.broadcast_task(&task);
     let setup = async {
         let recreated = app.ensure_worktree(&mut task).await?;
         let wt = PathBuf::from(&task.worktree);
@@ -422,13 +441,6 @@ async fn resolve_conflict(
         "PR: the work conflicts with {upstream} in {}; one conflict-resolution attempt runs on the new base before the pull request opens",
         files.join(", ")
     ));
-    task.queue.pr_conflict_tried = true;
-    // The owner's choices for a manual pull request survive the attempt.
-    if plan.is_some() {
-        task.pr_pending = true;
-        task.pr_plan = plan;
-    }
-    task.status = TaskStatus::Queued;
     task.updated_at = now_ms();
     app.save_task_logged(&task);
     app.broadcast_task(&task);
@@ -609,9 +621,12 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             return record(app, id, Vec::new(), 0.0, true);
         }
         let result = app
-            .handle_task_pr(serde_json::json!({
-                "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
-            }))
+            .open_pr(
+                serde_json::json!({
+                    "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
+                }),
+                true,
+            )
             .await;
         let Err(e) = result else {
             return record(app, id, Vec::new(), 0.0, true);

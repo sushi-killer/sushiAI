@@ -278,7 +278,13 @@ fn task_pr_carries_the_branch_onto_the_newest_base_like_the_automatic_pull_reque
     let id = s.create("test -f pr.txt");
     poll_until(&s.daemon, &id, |st| st == "done");
     let newer = s.advance_origin(&[("newer.txt", "newer\n")]);
-    let opened = s.daemon.request("task.pr", json!({"id": id}));
+    // The reply comes before the carry: the pull request opens afterwards.
+    let reply = s.daemon.request("task.pr", json!({"id": id}));
+    assert!(reply["prUrl"].is_null(), "{reply}");
+    assert_eq!(reply["prPending"], true, "{reply}");
+    let opened = s.wait_task(&id, "no pull request after the carry", |t| {
+        t["prUrl"].is_string()
+    });
     assert_eq!(opened["prUrl"], URL, "{opened}");
     let pushed = s.pushed(&opened);
     git_out(
@@ -357,10 +363,10 @@ fn task_pr_keeps_the_owners_title_through_a_resolution_attempt() {
     let id = s.create("test -f pr.txt");
     poll_until(&s.daemon, &id, |st| st == "done");
     s.advance_origin(&[("pr.txt", "theirs\n")]);
-    let refused = s
+    let reply = s
         .daemon
-        .request_error("task.pr", json!({"id": id, "title": "Owner chosen title"}));
-    assert!(refused.contains("conflict"), "{refused}");
+        .request("task.pr", json!({"id": id, "title": "Owner chosen title"}));
+    assert!(reply["prUrl"].is_null(), "{reply}");
     s.wait_task(&id, "no pull request after the resolution", |t| {
         t["prUrl"].is_string()
     });

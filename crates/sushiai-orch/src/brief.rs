@@ -11,7 +11,7 @@ use crate::model::{
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 13;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 14;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -66,7 +66,11 @@ const DECLINES_BLOCK: &str = "\nThe last attempt failed review. If a review find
 
 const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\",\"risk\":[]}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).\n";
+/// One line for the implement and plan briefs: build output and dependency
+/// folders are huge, and `rg` skips what `.gitignore` lists.
+const SEARCH_RULE: &str = "Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.";
+
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).\n";
 
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
@@ -1324,6 +1328,7 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
         extra.push_str(&format!("\n\n{PLAN_BATCH_QUESTIONS}"));
     }
     extra.push_str(&format!("\n\n{PLAN_PATHS}"));
+    extra.push_str(&format!("\n\n{SEARCH_RULE}"));
     extra.push_str(&format!("\n\n{PLAN_FINAL_VERIFY}"));
     extra.push_str(&format!("\n\n{PLAN_CHECKS} {PLAN_TESTS}"));
     if split {
@@ -2711,6 +2716,13 @@ mod tests {
         assert!(plain.risk.is_empty());
         assert!(REPORT_FORMAT_BLOCK.contains("\"risk\":[]"));
         assert!(RULES_BLOCK.contains("`risk`"));
+    }
+
+    #[test]
+    fn the_implement_and_plan_briefs_tell_the_agent_to_search_with_rg() {
+        assert!(RULES_BLOCK.contains(SEARCH_RULE));
+        let plan = build_plan_brief("req", &Variant::default(), "");
+        assert!(plan.contains(SEARCH_RULE));
     }
 
     #[test]

@@ -106,7 +106,9 @@ fn a_slow_final_check_that_fails_on_the_base_still_gates_landing() {
     let log = scripts.path().join("order.log");
     let daemon = spawn(scripts.path(), &log);
     let repo = init_git_repo();
-    let check = "case \"$PWD\" in */base-runs/*) sleep 2;; esac; echo boom; exit 3";
+    // The worktree prints one more line than the base: not the base's failure alone.
+    let check =
+        "case \"$PWD\" in */base-runs/*) sleep 2;; *) echo worktree;; esac; echo boom; exit 3";
     let head_before = git_out(repo.path(), &["rev-parse", "HEAD"]);
     let id = start(&daemon, repo.path(), "true", check);
 

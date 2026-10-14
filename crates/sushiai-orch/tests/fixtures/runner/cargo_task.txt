@@ -1,0 +1,25 @@
+   Compiling cr v0.1.0 (/work/cr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.64s
+     Running unittests src/lib.rs (target/debug/deps/cr-9cdeb411950a20d4)
+
+running 2 tests
+test tests::y ... ok
+test tests::x ... FAILED
+
+failures:
+
+---- tests::x stdout ----
+
+thread 'tests::x' (46661945) panicked at src/lib.rs:2:42:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::x
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

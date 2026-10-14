@@ -67,7 +67,11 @@ fn a_final_check_that_fails_twice_on_base_is_asked_after_the_first_attempt_and_l
     let log = scripts.path().join("ran.log");
     let daemon = spawn(scripts.path());
     let repo = init_git_repo();
-    let check = format!("echo ran >> {}; echo boom; exit 3", log.display());
+    // The worktree prints one more line than the base: not the base's failure alone.
+    let check = format!(
+        "echo ran >> {}; echo boom; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 3",
+        log.display()
+    );
     let id = start(&daemon, repo.path(), &check);
 
     let task = waiting_with_attempts(&daemon, &id, 1);
@@ -104,7 +108,10 @@ fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     let scripts = tempfile::tempdir().unwrap();
     let mut daemon = spawn(scripts.path());
     let repo = init_git_repo();
-    let (first, second) = ("echo one; exit 3", "echo two; exit 4");
+    let (first, second) = (
+        "echo one; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 3",
+        "echo two; case \"$PWD\" in */base-runs/*);; *) echo changed;; esac; exit 4",
+    );
     let mut settings = daemon.request("settings.get", json!({}));
     settings["review"] = json!("claude-opus");
     daemon.request("settings.set", json!({"settings": settings}));

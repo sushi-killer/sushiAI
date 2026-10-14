@@ -79,13 +79,11 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
             .any(|other| {
                 other.id != task.id
                     && !other.archived
-                    && matches!(
-                        other.status,
-                        TaskStatus::Queued
-                            | TaskStatus::Running
-                            | TaskStatus::Waiting
-                            | TaskStatus::Landing
-                    )
+                    // Only a task that can really land moves the base; one
+                    // that waits (for an answer, or for this very move)
+                    // moves nothing, so two red tasks never wait on each other.
+                    && matches!(other.status, TaskStatus::Running | TaskStatus::Landing)
+                    && !waits_for_base_move(other)
                     && crate::model::same_repo_path(&other.repo, &task.repo)
                     && other.base_ref.as_ref() == Some(base_ref)
             })
@@ -1276,5 +1274,59 @@ mod base_moves_tests {
             .insert(task.repo.clone(), true);
         let (_, base_moves) = policy_base_context(&app, &task, &question);
         assert!(base_moves, "another live task may land on main");
+    }
+
+    #[test]
+    fn only_a_task_that_can_land_counts_as_moving_the_base() {
+        let (app, dir) = test_app();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        git_in(&repo, &["branch", "-M", "main"]);
+        app.settings
+            .write()
+            .unwrap()
+            .land_on_default_repos
+            .insert(repo.display().to_string(), true);
+        let on_main = |id: &str, status| {
+            let mut task = task_with_status(status);
+            task.id = id.into();
+            task.repo = repo.display().to_string();
+            task.worktree = task.repo.clone();
+            task.base_ref = Some("main".into());
+            task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+            task
+        };
+        let red = on_main("red", TaskStatus::Waiting);
+        app.store.save_task(&red).unwrap();
+        let question = Question::new(
+            "make verify already fails on base",
+            vec![base_check::PRE_EXISTING_RETRY.into(), "stop".into()],
+            QuestionKind::PreexistingFailure,
+            AskedBy::Verify,
+        );
+        let moves = |app: &App| policy_base_context(app, &red, &question).1;
+
+        // Another red task, waiting for an answer, queued, or in the bounded
+        // wait for this very move, can land nothing.
+        let mut asking = on_main("asking", TaskStatus::Waiting);
+        let queued = on_main("queued", TaskStatus::Queued);
+        let mut in_wait = on_main("in_wait", TaskStatus::Running);
+        in_wait.queue.wait = Some(Wait::Dependency {
+            titles: vec![format!("{} main (retrying)", BASE_WAIT_TITLE)],
+        });
+        asking.question = Some(question.clone());
+        for other in [&asking, &queued, &in_wait] {
+            app.store.save_task(other).unwrap();
+        }
+        assert!(!moves(&app), "two red tasks must not wait on each other");
+
+        let running = on_main("running", TaskStatus::Running);
+        app.store.save_task(&running).unwrap();
+        assert!(moves(&app), "a running task can land");
+        let mut landing = running.clone();
+        landing.status = TaskStatus::Landing;
+        app.store.save_task(&landing).unwrap();
+        assert!(moves(&app), "a landing task moves the base");
     }
 }

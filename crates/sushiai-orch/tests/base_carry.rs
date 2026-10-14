@@ -544,8 +544,34 @@ fn an_orchestrator_retry_still_waits_for_the_base_after_a_restart() {
 }
 
 #[test]
-fn a_policy_retry_still_waits_for_the_base_after_a_restart() {
-    retry_survives_restart(false, true, false, true, true);
+fn two_red_tasks_asking_about_one_base_do_not_make_the_policy_wait_for_each_other() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
+    configure(&daemon.socket, true);
+    let repo = repo();
+    // Both tasks sit on the same question: neither can move the base, so the
+    // policy must not tell either of them to wait for the other.
+    let first = create(&daemon.socket, repo.path(), false);
+    preexisting_question(&daemon.socket, &first);
+    let second = create(&daemon.socket, repo.path(), false);
+    let waiting = preexisting_question(&daemon.socket, &second);
+    std::thread::sleep(Duration::from_secs(2));
+    for id in [&first, &second] {
+        let task = get(&daemon.socket, id);
+        assert_eq!(task["status"], "waiting", "{task}");
+        assert!(task["question"].is_object(), "{task}");
+        assert!(
+            decisions(&task).iter().all(|d| !d.contains("to move past")),
+            "{task}"
+        );
+    }
+    assert_eq!(preexisting_count(&waiting), 0, "{waiting}");
+    let worktrees = clean_worktrees(&daemon.socket, repo.path());
+    daemon.shutdown_and_wait();
+    for wt in worktrees {
+        remove_dir_retrying(wt);
+    }
 }
 
 #[test]
@@ -586,31 +612,14 @@ fn a_targeted_final_keeps_the_check_and_retries_on_the_unchanged_base() {
             .any(|d| d.contains("kept check") && d.contains("task is meant to make it pass")),
         "{finished}"
     );
-    assert!(
-        decisions(&finished)
-            .iter()
-            .any(|d| d.starts_with("Policy:") && d.contains("-> keep all")),
-        "{finished}"
-    );
-    assert!(
-        finished["questionHistory"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| {
-                entry["kind"] == "preexisting_failure"
-                    && entry["answer"] == "keep all"
-                    && entry["answeredBy"] == "policy"
-            }),
-        "{finished}"
-    );
+    // The rule keeps the check by itself: no question, no waiting for the base.
     assert!(
         !decisions(&finished)
             .iter()
-            .any(|d| d.contains("waiting for work to move")),
+            .any(|d| d.contains("to move past")),
         "{finished}"
     );
-    assert_eq!(preexisting_count(&finished), 1, "{finished}");
+    assert_eq!(preexisting_count(&finished), 0, "{finished}");
     let worktrees = clean_worktrees(&daemon.socket, repo.path());
     daemon.shutdown_and_wait();
     for wt in worktrees {
@@ -643,7 +652,7 @@ fn an_untargeted_final_on_an_idle_base_stays_open_for_the_overseer() {
     assert!(
         decisions(&waiting)
             .iter()
-            .all(|d| !d.contains("waiting for work to move")),
+            .all(|d| !d.contains("to move past")),
         "{waiting}"
     );
     assert!(

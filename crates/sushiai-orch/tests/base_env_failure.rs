@@ -111,7 +111,7 @@ fn an_install_failure_is_retried_fresh_before_a_plain_base_failure_is_quoted() {
         scripts.path(),
         "check.sh",
         &format!(
-            "#!/bin/sh\ncase \"$PWD\" in */base-runs/*)\n echo \"$PWD\" >> {log}\n if [ \"$(wc -l < {log})\" -eq 1 ]; then echo 'npm ERR! eExIsT'; exit 1; fi;;\nesac\necho 'plain base failure'; exit 1\n",
+            "#!/bin/sh\ncase \"$PWD\" in */base-runs/*)\n echo \"$PWD\" >> {log}\n if [ \"$(wc -l < {log})\" -eq 1 ]; then echo 'npm ERR! eExIsT'; exit 1; fi;;\nesac\ncase \"$PWD\" in */base-runs/*);; *) echo worktree;; esac\necho 'plain base failure'; exit 1\n",
             log = log.display(),
         ),
     );
@@ -190,7 +190,7 @@ fn a_persisted_install_failure_is_discarded_after_a_restart() {
     let env = [("ORCHD_CLAUDE_BIN", harness.to_str().unwrap())];
     let log = scripts.path().join("base.log");
     let check = format!(
-        "case \"$PWD\" in */base-runs/*) echo \"$PWD\" >> {};; esac; echo 'plain failure'; exit 1",
+        "case \"$PWD\" in */base-runs/*) echo \"$PWD\" >> {};; esac; case \"$PWD\" in */base-runs/*);; *) echo worktree;; esac; echo 'plain failure'; exit 1",
         log.display(),
     );
     let mut daemon = Daemon::spawn(&env);
@@ -252,7 +252,7 @@ fn base_worktree_setup_errors_get_one_fresh_retry() {
         std::fs::write(repo.path().join(".sushiai/setup.json"), setup.to_string()).unwrap();
         git_out(repo.path(), &["add", ".sushiai/setup.json"]);
         git_out(repo.path(), &["commit", "-q", "-m", "add setup"]);
-        let check = "echo 'plain failure'; exit 1";
+        let check = "case \"$PWD\" in */base-runs/*);; *) echo worktree;; esac; echo 'plain failure'; exit 1";
         let id = create(&daemon, repo.path(), check);
         let task = waiting(&daemon, &id);
         if always_fails {

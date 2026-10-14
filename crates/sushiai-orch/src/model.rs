@@ -2277,6 +2277,25 @@ pub struct VerifyOutcome {
     /// A high-load timeout occurred, even if its single retry exited non-zero.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub load_timeout: bool,
+    /// The failing tests the full output named (capped); empty for a passing
+    /// run or an output no known runner format matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<String>,
+    /// The passing tests the full output named (capped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passing: Vec<String>,
+    /// A test list was cut at its cap: the run cannot be compared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// The output shows a crash, an abort or a build that did not finish.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crashed: bool,
+    /// A cargo run that stopped at its first failing test binary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_early: bool,
+    /// A digit-blind fingerprint of the output without its test lines.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_key: String,
     /// Returned to the task owner as well as published while the check waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<String>,

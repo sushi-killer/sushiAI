@@ -3091,6 +3091,40 @@ const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
 /// How often that wait fetches the base from `origin`: the base often moves
 /// only by a merge on the remote, which the local branch never sees itself.
 const BASE_FETCH_EVERY: Duration = Duration::from_secs(60);
+/// The longest a task waits for its base to move, in seconds; after it the
+/// baseline rule judges the check against the base as it is. A test run may
+/// shorten it with `ORCHD_BASE_WAIT_SECS`.
+const BASE_WAIT_MAX_SECS: u64 = 2 * 3600;
+/// Starts the `wait` title of a task that waits for its base to move (the UI
+/// shows a dependency wait as "after <title>").
+pub(super) const BASE_WAIT_TITLE: &str = "a new commit on ";
+
+fn base_wait_max() -> Duration {
+    let secs = std::env::var("ORCHD_BASE_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(BASE_WAIT_MAX_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Whether `task` sits in the bounded wait for its base to move: it can move
+/// nothing itself, so it is no reason for another task to wait.
+pub(super) fn waits_for_base_move(task: &Task) -> bool {
+    matches!(
+        &task.queue.wait,
+        Some(Wait::Dependency { titles }) if titles.iter().any(|t| t.starts_with(BASE_WAIT_TITLE))
+    )
+}
+
+/// The decision line that ends the wait on `base_sha` for good.
+fn base_waited_out_line(base_sha: &str) -> String {
+    format!("Orchestrator: waited out base {base_sha}; not waiting for it to move again")
+}
+
+/// Whether the wait on `base_sha` already ran out its bound.
+pub(super) fn base_waited_out(task: &Task, base_sha: &str) -> bool {
+    task.decisions.contains(&base_waited_out_line(base_sha))
+}
 
 /// Fetches `origin/<base_ref>` and fast-forwards the local branch to it (only
 /// in a clean checkout, never a diverged branch). Best effort: offline or no
@@ -3136,6 +3170,9 @@ pub(super) async fn carry_after_base_moves(
         if let Some(base_ref) = task.base_ref.clone() {
             let mut noted = false;
             let mut fetched_at: Option<tokio::time::Instant> = None;
+            let waited_from = tokio::time::Instant::now();
+            let resume_status = task.status;
+            let mut timed_out = false;
             loop {
                 if fetched_at.is_none_or(|at| at.elapsed() >= BASE_FETCH_EVERY) {
                     fetched_at = Some(tokio::time::Instant::now());
@@ -3149,9 +3186,23 @@ pub(super) async fn carry_after_base_moves(
                 if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
                     break;
                 }
+                if waited_from.elapsed() >= base_wait_max() {
+                    timed_out = true;
+                    break;
+                }
                 if !noted {
                     noted = true;
                     permit.take();
+                    // Shown as waiting, with its reason; the claim on files
+                    // goes, so a task that waits blocks no one.
+                    app.leases.lock().unwrap().remove(&task.id);
+                    task.status = TaskStatus::Queued;
+                    task.queue.wait = Some(Wait::Dependency {
+                        titles: vec![format!(
+                            "{BASE_WAIT_TITLE}{base_ref} (retrying; waits at most {} min)",
+                            base_wait_max().as_secs() / 60
+                        )],
+                    });
                     task.decisions.push(format!(
                         "Orchestrator: waiting for {base_ref} to move past {} before the retry",
                         short_sha(&task.base_sha)
@@ -3159,12 +3210,28 @@ pub(super) async fn carry_after_base_moves(
                     task.updated_at = now_ms();
                     app.save_task_logged(task);
                     app.broadcast_task(task);
+                    app.advance_queue(&task.repo);
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return BaseRetry::Stopped,
                     _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
                 }
             }
+            if noted {
+                task.queue.wait = None;
+                task.status = resume_status;
+            }
+            if timed_out {
+                task.decisions.push(format!(
+                    "Orchestrator: {base_ref} did not move past {} in {} min; the check is judged against the base as it is",
+                    short_sha(&task.base_sha),
+                    base_wait_max().as_secs() / 60
+                ));
+                task.decisions.push(base_waited_out_line(&task.base_sha));
+            }
+            task.updated_at = now_ms();
+            app.save_task_logged(task);
+            app.broadcast_task(task);
         }
         if cancel.is_cancelled() {
             return BaseRetry::Stopped;
@@ -3534,10 +3601,25 @@ pub(super) async fn finish_after_review(
         let kept = keep_planned_checks(app, task, &names);
         let mut pre_existing: Vec<VerifyOutcome> = Vec::new();
         for (failed, base_run) in on_base {
+            // A check the task is meant to turn green is never waived.
+            if !kept.contains(&failed.command)
+                && !is_kept(task, &failed.command)
+                && (command_named_by_task(task, &failed.command)
+                    || failing_test_named_by_task(task, &base_run.failing))
+            {
+                task.decisions
+                    .push(kept_check_line(&failed.command, KEPT_BY_TASK_TARGET));
+            }
             if kept.contains(&failed.command) || is_kept(task, &failed.command) {
                 ordinary.push(failed);
-            } else {
-                pre_existing.push(base_run);
+                continue;
+            }
+            // The base is red too: only a failure the base lacks is the task's.
+            match judge_against_base(app, task, &failed, &base_run, worktree, run_dir, cancel).await
+            {
+                BaseVerdict::Waived => {}
+                BaseVerdict::NewFailures(own) => ordinary.push(own),
+                BaseVerdict::Unclear => pre_existing.push(base_run),
             }
         }
         if !kept.is_empty() {

@@ -161,29 +161,6 @@ fn weakens(old: &str, new: &str) -> bool {
     lines(new) * 2 < lines(old)
 }
 
-/// The single planner tests commit on `base_sha`, rebuilt with `files`: the
-/// agent's own commits are undone first (their changes stay in the tree, as
-/// uncommitted work), and only the planner's paths go into the new commit, so
-/// it keeps the shape the carry onto a moved base requires.
-fn rebuild_tests_commit(
-    wt: &Path,
-    base_sha: &str,
-    files: &[PlannedTest],
-    title: &str,
-    task_id: &str,
-) -> Result<String, String> {
-    for f in files {
-        let target = wt.join(&f.path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&target, &f.content).map_err(|e| e.to_string())?;
-    }
-    git::uncommit_to(wt, base_sha).map_err(|e| e.to_string())?;
-    let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
-    git::commit_paths(wt, &paths, &planner_tests_title(title), task_id).map_err(|e| e.to_string())
-}
-
 /// The tests-first rule for a rewrite: on a clean checkout of the base with
 /// `files` written, every check that gated the task before must still fail.
 async fn still_fails_on_base(

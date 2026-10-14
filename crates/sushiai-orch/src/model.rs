@@ -1593,6 +1593,10 @@ pub struct PlannerTests {
     /// on; a claim is judged once per file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled: Vec<String>,
+    /// The planner files were run through the repo's formatter and the tests
+    /// commit rebuilt when they were not clean (once per task).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub format_checked: bool,
 }
 
 impl Task {

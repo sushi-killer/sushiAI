@@ -550,6 +550,10 @@ pub(super) async fn run_task_loop(
             app.save_task_logged(&task);
             app.broadcast_task(&task);
         }
+        {
+            let wt = PathBuf::from(&task.worktree);
+            repair_protection(&app, &mut task, &wt, &cancel).await;
+        }
         let dependencies_before = task.depends_on.clone();
         apply_pending_amendment(&app, &mut task, &pending_amend, &cancel).await;
         if task.depends_on != dependencies_before && completed_implement_attempts(&task) == 0 {

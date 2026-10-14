@@ -23,6 +23,8 @@ case "$brief" in
   emit '"```sushi-review\n{\"verdict\":\"PASS\",\"findings\":[]}\n```"' ;;
 *"You check a coding task brief"*)
   emit '"{\"contradiction\": false, \"conflict\": \"\"}"' ;;
+*"sushi-attribution"*)
+  emit '"```sushi-attribution\n{\"cause\":\"environment\",\"evidence\":\"the base fails the same way\"}\n```"' ;;
 *"You judge"*)
   emit '"{\"verdict\": \"feasible\", \"reason\": \"ok\"}"' ;;
 *)

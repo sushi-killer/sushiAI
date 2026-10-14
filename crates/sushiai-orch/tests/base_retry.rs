@@ -103,7 +103,7 @@ fn a_retry_starts_no_attempt_until_the_base_branch_moves() {
 }
 
 #[test]
-fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() {
+fn a_base_retry_keeps_the_stored_planner_tests_and_implementation_work() {
     let scripts = tempfile::tempdir().unwrap();
     let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let plan_reply = scripts.path().join("plan.json");
@@ -144,11 +144,16 @@ fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() 
         waiting["question"]["kind"], "preexisting_failure",
         "{waiting}"
     );
-    let old_tests = waiting["plannerTests"]["commit"].as_str().unwrap();
-    assert_ne!(old_tests, waiting["baseSha"].as_str().unwrap());
+    // The planner's tests live in the task store, not in a commit.
+    assert!(waiting["plannerTests"]["commit"].is_null(), "{waiting}");
+    let files = json!([{"path": "tests/planner-check.sh", "content": test_content}]);
+    assert_eq!(waiting["plannerTests"]["files"], files, "{waiting}");
     let protected = waiting["plannerTests"]["protected"].clone();
     let worktree = Path::new(waiting["worktree"].as_str().unwrap());
-    assert_eq!(git_out(worktree, &["rev-parse", "HEAD"]), old_tests);
+    assert_eq!(
+        git_out(worktree, &["rev-parse", "HEAD"]),
+        waiting["baseSha"].as_str().unwrap()
+    );
 
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
     wait_until("the base retry to wait for a moved branch", || {
@@ -179,15 +184,19 @@ fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() 
     });
     assert_eq!(done["status"], "done", "{done}");
     assert_eq!(done["baseSha"], new_base, "{done}");
-    let tests = done["plannerTests"]["commit"].as_str().unwrap();
-    assert_ne!(tests, old_tests);
+    assert!(done["plannerTests"]["commit"].is_null(), "{done}");
+    assert_eq!(done["plannerTests"]["files"], files, "{done}");
     // A done task's worktree is removed: read the result from its branch.
     let repo_path = repo.path();
     let branch = done["branch"].as_str().unwrap();
     let show = |file: &str| git_out(repo_path, &["show", &format!("{branch}:{file}")]);
     assert_eq!(
-        git_out(repo_path, &["rev-parse", &format!("{tests}^")]),
-        new_base
+        git_out(
+            repo_path,
+            &["rev-list", "--count", &format!("{new_base}..{branch}")]
+        ),
+        "1",
+        "one task commit on the moved base"
     );
     assert_eq!(done["plannerTests"]["protected"], protected);
     assert_eq!(show("tests/planner-check.sh"), test_content.trim_end());
@@ -196,8 +205,8 @@ fn a_base_retry_carries_the_planner_test_commit_and_keeps_implementation_work() 
         repo_path,
         &["cat-file", "-e", &format!("{branch}:FIXED.txt")],
     );
-    let diff = git_out(repo_path, &["diff", "--name-only", tests, branch]);
-    assert_eq!(diff, "CHANGED_MARKER.txt");
+    let diff = git_out(repo_path, &["diff", "--name-only", &new_base, branch]);
+    assert_eq!(diff, "CHANGED_MARKER.txt\ntests/planner-check.sh");
     let worktree = worktree.to_path_buf();
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);

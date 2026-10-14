@@ -16,6 +16,9 @@ case "$input" in
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-check"}'
     printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"'"$CHECK_RESULT"'"}'
     ;;
+  *"You review a coding task plan"*)
+    printf '%s\n' '{"type":"result","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"result":"{\"findings\": []}"}'
+    ;;
   *sushi-plan*)
     echo plan >> "$CALLS_LOG"
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'

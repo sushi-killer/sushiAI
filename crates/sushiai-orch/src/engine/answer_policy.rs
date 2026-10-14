@@ -917,6 +917,8 @@ mod tests {
             "pytest tests new/test_x.py",
             "node --test tests new/x.test.cjs",
             "pytest $(git ls-files tests) new/test_x.py",
+            "pytest new/$(x)/a.py",
+            "pytest new/`x`/a.py",
         ];
         task.planner_tests.commands = droppable
             .iter()

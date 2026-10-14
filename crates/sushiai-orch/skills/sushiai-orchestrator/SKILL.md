@@ -89,8 +89,9 @@ For Codex, add the same command/args under `[mcp_servers.sushiai-orchestrator]` 
 
 ## Owner-only
 
-Pushing, opening a PR (the task view's **Open PR** button), merging, deleting tasks and changing
-settings are the owner's. Never put secrets in a goal, a criterion or a message.
+Pushing, merging, deleting tasks and changing settings are the owner's. A pull request is opened by
+orchd when the owner's setting allows it; otherwise the owner opens it (the task view's **Open PR** button),
+and an agent's `task_pr` is refused while that setting is off. Never put secrets in a goal, a criterion or a message.
 
 ## Prompts
 

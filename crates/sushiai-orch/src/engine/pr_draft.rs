@@ -1,10 +1,12 @@
 //! A done top-level task whose work did not land on its base gets a pull
 //! request, with no help from the overseer. One read-only helper drafts the
-//! branch name, title and body by the repo's own rules; orchd then opens it
-//! through `task.pr`. A transient failure (network, `gh`) is retried with a
-//! growing delay; an auth or permanent failure sends the owner one notice. The
-//! run holds no slot, never blocks the task loop and never changes the task's
-//! status: it stays done, and `task.pr` can open the pull request later.
+//! title and body by the repo's own rules; a second checks the body against
+//! the final diff and the check results before anything is pushed. orchd then
+//! opens it through `task.pr`, on the task's own branch. A transient failure
+//! (network, `gh`) is retried with a growing delay; an auth or permanent
+//! failure sends the owner one notice. The run holds no slot, never blocks the
+//! task loop and never changes the task's status: it stays done, and `task.pr`
+//! can open the pull request later.
 
 use super::*;
 
@@ -13,19 +15,30 @@ const MAX_DIFF_CHARS: usize = 20_000;
 /// Longest pull request body sent to GitHub, in characters.
 const MAX_BODY_CHARS: usize = 20_000;
 
-/// What the drafter replied; an empty field falls back to the task's own.
+/// What the drafter replied: the title and body of the pull request. An empty
+/// field falls back to the task's own.
 #[derive(Debug, Default, PartialEq, Deserialize)]
 struct Draft {
-    #[serde(default)]
-    branch: String,
     #[serde(default)]
     title: String,
     #[serde(default)]
     body: String,
 }
 
+/// What the body check replied. `ok` is required: a reply without a verdict
+/// is a failed turn, not a pass.
+#[derive(Debug, PartialEq, Deserialize)]
+struct BodyCheck {
+    ok: bool,
+    #[serde(default)]
+    corrections: Vec<String>,
+    /// The whole corrected body, when `ok` is false.
+    #[serde(default)]
+    body: Option<String>,
+}
+
 /// The JSON object in a reply, with or without a code fence or prose around it.
-fn parse_draft(text: &str) -> Option<Draft> {
+fn parse_reply<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
     let (start, end) = (text.find('{')?, text.rfind('}')?);
     serde_json::from_str(text.get(start..=end)?).ok()
 }
@@ -46,11 +59,34 @@ fn retry_delays() -> Vec<Duration> {
         .collect()
 }
 
-/// Whether a failed attempt can only repeat (auth, a missing remote, a
+/// What a failed attempt means for the retry.
+enum PrFailure {
+    /// May pass on its own: retried, up to the bound.
+    Transient,
+    /// Can only repeat: one try and one owner notice. `hint` is what the
+    /// owner does about it.
+    Permanent(&'static str),
+    /// `gh` knows no GitHub host among the repo's remotes: a note, no notice.
+    NoGithubHost,
+}
+
+/// An orchd refusal is decided by its variant; an outside failure is read by
+/// [`classify_external`], the one place that reads git or gh text.
+fn failure_of(error: &pr::PrError) -> PrFailure {
+    match error {
+        pr::PrError::Refused(refusal) if refusal.permanent() => PrFailure::Permanent(""),
+        pr::PrError::Refused(_) => PrFailure::Transient,
+        pr::PrError::External(text) => classify_external(text),
+    }
+}
+
+/// Whether a git or gh failure can only repeat (auth, a missing remote, a
 /// protected branch, a refused name) or may pass on its own (network, a busy
-/// service, a rate limit, a timeout). A transient marker wins: a 403 that says
-/// "rate limit" is not a refusal.
-fn is_permanent(error: &str) -> bool {
+/// service, a rate limit, a timeout). `gh` exits 1 for every failure, so its
+/// message is the only signal. A transient marker wins: a 403 that says "rate
+/// limit" is not a refusal.
+fn classify_external(error: &str) -> PrFailure {
+    const NO_HOST: [&str; 2] = ["known github host", "no github host"];
     const TRANSIENT: [&str; 14] = [
         "rate limit",
         "secondary rate",
@@ -67,7 +103,7 @@ fn is_permanent(error: &str) -> bool {
         "network is unreachable",
         "early eof",
     ];
-    const PERMANENT: [&str; 25] = [
+    const PERMANENT: [&str; 16] = [
         "not logged in",
         "gh auth login",
         "authentication failed",
@@ -82,38 +118,28 @@ fn is_permanent(error: &str) -> bool {
         "no such remote",
         "no such file or directory",
         "command not found",
-        "no default branch",
-        "no commits beyond",
-        "already open",
-        "not a valid branch name",
-        "no longer exists",
-        "not part of this task",
-        "is a base branch",
-        "already landed",
-        "is archived",
         "repository not found",
         "refusing to allow",
     ];
     let e = error.to_lowercase();
+    if NO_HOST.iter().any(|h| e.contains(h)) {
+        return PrFailure::NoGithubHost;
+    }
     if TRANSIENT.iter().any(|t| e.contains(t)) {
-        return false;
+        return PrFailure::Transient;
     }
-    PERMANENT.iter().any(|p| e.contains(p)) || e.contains("http 401") || e.contains("http 404")
-}
-
-/// What the owner does about a push GitHub refused for the token's scope.
-fn scope_hint(error: &str) -> &'static str {
-    if error.to_lowercase().contains("refusing to allow") {
-        " The token needs the `workflow` scope, or the owner pushes the branch."
+    let refused =
+        PERMANENT.iter().any(|p| e.contains(p)) || e.contains("http 401") || e.contains("http 404");
+    if !refused {
+        return PrFailure::Transient;
+    }
+    if e.contains("refusing to allow") {
+        PrFailure::Permanent(
+            " The token needs the `workflow` scope, or the owner pushes the branch.",
+        )
     } else {
-        ""
+        PrFailure::Permanent("")
     }
-}
-
-/// `gh` found no GitHub host among the repo's remotes (GitLab, a bare path).
-fn is_no_github_host(error: &str) -> bool {
-    let e = error.to_lowercase();
-    e.contains("known github host") || e.contains("no github host")
 }
 
 /// Tells the owner in the repo's chat, off the caller's path: the chat can be
@@ -235,7 +261,9 @@ pub(super) async fn carry_for_pr(
             .await
             .map_err(|e| e.to_string())?
     };
-    let base = pr::pr_base(task, &repo, default).await?;
+    let base = pr::pr_base(task, &repo, default)
+        .await
+        .map_err(|e| e.to_string())?;
     pr::run_cmd("git", &["fetch", "origin", &base], &repo, pr::GIT_TIMEOUT).await?;
     let (upstream, local) = (
         format!("origin/{base}"),
@@ -494,7 +522,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
     )
     .await
     {
-        if is_no_github_host(&e) {
+        if matches!(classify_external(&e), PrFailure::NoGithubHost) {
             return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
         }
     }
@@ -519,22 +547,22 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         Ok(PrCarry::Resolving(_) | PrCarry::Failed(_)) => return,
         Err(e) => {
             record(
-            app,
-            id,
-            vec![format!(
-                "PR: not opened: the work could not be carried onto the newest base ({e}); nothing was pushed"
-            )],
-            0.0,
-            true,
-        );
+                app,
+                id,
+                vec![format!(
+                    "PR: not opened: the work could not be carried onto the newest base ({e}); nothing was pushed"
+                )],
+                0.0,
+                true,
+            );
             notify_owner(
-            app,
-            &task.repo,
-            format!(
-                "Task \"{}\" is done but its pull request was not opened: the work could not be carried onto the newest base ({e}). Nothing was pushed; the work is on branch {}. Carry it by hand, then open it with task_pr.",
-                task.title, task.branch
-            ),
-        );
+                app,
+                &task.repo,
+                format!(
+                    "Task \"{}\" is done but its pull request was not opened: the work could not be carried onto the newest base ({e}). Nothing was pushed; the work is on branch {}. Carry it by hand, then open it with task_pr.",
+                    task.title, task.branch
+                ),
+            );
             return;
         }
     }
@@ -551,7 +579,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                 Ok((route, draft)) => (vec![format!("PR: drafted by {route}")], draft),
                 Err(reason) => (
                     vec![format!(
-                        "PR: draft failed ({reason}); opened with the task's own title and branch"
+                        "PR: draft failed ({reason}); opened with the task's own title and body"
                     )],
                     Draft::default(),
                 ),
@@ -565,44 +593,51 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                 }
                 return record(app, id, lines, cost, true);
             };
-            let mut branch = task.branch.clone();
-            let drafted = draft.branch.trim();
-            if !drafted.is_empty() && drafted != task.branch {
-                match pr::check_draft_branch(&task, drafted).await {
-                    Ok(()) => branch = drafted.to_string(),
-                    Err(why) => lines.push(format!(
-                        "PR: drafted branch {drafted} refused ({why}); using {}",
-                        task.branch
-                    )),
-                }
-            }
             let secrets = match run_secrets(app, id) {
                 Ok(secrets) => secrets.redaction,
                 Err(e) => {
-                    let line = format!("PR: not opened: {e}");
-                    lines.push(line);
+                    lines.push(format!("PR: not opened: {e}"));
                     return record(app, id, lines, cost, true);
                 }
             };
             let home = std::env::var("HOME").ok();
             let title = redact_pr_text(&draft.title, &secrets, home.as_deref());
             // The task's own body when the draft has none: it is published too.
-            let source = if draft.body.trim().is_empty() {
-                super::pr::pr_body(&task)
+            let drafted = if draft.body.trim().is_empty() {
+                pr::pr_body(&task)
             } else {
                 draft.body.clone()
             };
-            let source = if task.unreviewed && !source.starts_with(super::pr::UNREVIEWED_LINE) {
-                format!("{}\n\n{source}", super::pr::UNREVIEWED_LINE)
+            // One agent turn checks the body against the final diff and the
+            // check results before anything is pushed. A failed turn keeps the
+            // drafted body; the owner reads the line either way.
+            let checked = match check_body(app, &task, &drafted, &mut cost).await {
+                Ok(check) if check.ok => drafted,
+                Ok(check) => {
+                    lines.push(format!("PR: body check: {}", check.corrections.join("; ")));
+                    check
+                        .body
+                        .filter(|b| !b.trim().is_empty())
+                        .unwrap_or(drafted)
+                }
+                Err(reason) => {
+                    lines.push(format!(
+                        "PR: body check failed ({reason}); opened as drafted"
+                    ));
+                    drafted
+                }
+            };
+            let source = if task.unreviewed && !checked.starts_with(pr::UNREVIEWED_LINE) {
+                format!("{}\n\n{checked}", pr::UNREVIEWED_LINE)
             } else {
-                source
+                checked
             };
             let body = truncate_chars(
                 &redact_pr_text(&source, &secrets, home.as_deref()),
                 MAX_BODY_CHARS,
             );
             let plan = PrPlan {
-                branch,
+                branch: task.branch.clone(),
                 title,
                 body,
             };
@@ -620,32 +655,33 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         if owed(app, id).is_none() {
             return record(app, id, Vec::new(), 0.0, true);
         }
-        let result = app
-            .open_pr(
-                serde_json::json!({
-                    "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
-                }),
-                true,
-            )
-            .await;
-        let Err(e) = result else {
+        let params = pr::PrParams {
+            id: id.to_string(),
+            title: Some(plan.title.clone()),
+            branch: Some(plan.branch.clone()),
+            body: Some(plan.body.clone()),
+            source: None,
+        };
+        let Err(e) = app.open_pr(params, true).await else {
             return record(app, id, Vec::new(), 0.0, true);
         };
         // Opened or landed meanwhile: nothing to report.
         if owed(app, id).is_none() {
             return record(app, id, Vec::new(), 0.0, true);
         }
-        if is_no_github_host(&e) {
-            return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
-        }
-        let permanent = is_permanent(&e);
+        let (permanent, hint) = match failure_of(&e) {
+            PrFailure::NoGithubHost => {
+                return record(app, id, vec![format!("PR: not opened: {e}")], 0.0, true);
+            }
+            PrFailure::Permanent(hint) => (true, hint),
+            PrFailure::Transient => (false, ""),
+        };
         if permanent || tries >= delays.len() {
             let tried = if permanent {
                 String::new()
             } else {
                 format!(" after {} tries", tries + 1)
             };
-            let hint = scope_hint(&e);
             record(
                 app,
                 id,
@@ -690,10 +726,27 @@ impl Drop for TempWorktree {
     }
 }
 
-/// Runs the helper in the task's worktree, else in a temporary detached
-/// worktree of its branch. Returns the route id and the parsed draft; `cost`
-/// gets the run's spend.
-async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String, Draft), String> {
+/// The cost stage both PR helper turns book under (`costs::STAGES`); the body
+/// check is part of drafting the pull request.
+const STAGE: &str = "pr_draft";
+
+/// What one read-only helper turn runs with.
+struct HelperRun<'a> {
+    route: &'a Route,
+    settings: &'a Settings,
+    worktree: &'a Path,
+    brief: &'a str,
+}
+
+/// Runs a helper turn in the task's worktree, else in a temporary detached
+/// worktree of its branch. `make_brief` gets the diff against the base.
+/// Returns the route id and the reply text; `cost` gets the spend.
+async fn helper_turn(
+    app: &Arc<App>,
+    task: &Task,
+    make_brief: impl FnOnce(&str) -> String,
+    cost: &mut f64,
+) -> Result<(String, String), String> {
     let settings = app.settings.read().unwrap().clone();
     let route = settings
         .pr_draft_route()
@@ -728,34 +781,76 @@ async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String
     let worktree = temp
         .as_ref()
         .map_or_else(|| PathBuf::from(&task.worktree), |t| t.path.clone());
-    let draft = run_draft(app, task, &settings, &route, &worktree, cost).await;
-    drop(temp);
-    draft.map(|draft| (route.id, draft))
-}
-
-async fn run_draft(
-    app: &Arc<App>,
-    task: &Task,
-    settings: &Settings,
-    route: &Route,
-    worktree: &Path,
-    cost: &mut f64,
-) -> Result<Draft, String> {
-    let (wt, base) = (worktree.to_path_buf(), task.base_sha.clone());
+    let (wt, base) = (worktree.clone(), task.base_sha.clone());
     let diff = tokio::task::spawn_blocking(move || {
         git::diff_full(&wt, &base, MAX_DIFF_CHARS).unwrap_or_default()
     })
     .await
     .unwrap_or_default();
-    let brief_text = brief::build_pr_draft_brief(task, &diff);
+    let brief = make_brief(&diff);
+    let run = HelperRun {
+        route: &route,
+        settings: &settings,
+        worktree: &worktree,
+        brief: &brief,
+    };
+    let reply = run_helper(app, task, run, cost).await;
+    drop(temp);
+    reply.map(|reply| (route.id, reply))
+}
 
+/// Drafts the title and body of the pull request; `cost` gets the spend.
+async fn draft_pr(app: &Arc<App>, task: &Task, cost: &mut f64) -> Result<(String, Draft), String> {
+    let (route, reply) = helper_turn(
+        app,
+        task,
+        |diff| brief::build_pr_draft_brief(task, diff),
+        cost,
+    )
+    .await?;
+    let draft = parse_reply::<Draft>(&reply).ok_or("the reply was not a JSON object")?;
+    Ok((route, draft))
+}
+
+/// Checks the drafted body against the final diff and the check results; the
+/// reply is the verdict. `cost` gets the spend.
+async fn check_body(
+    app: &Arc<App>,
+    task: &Task,
+    body: &str,
+    cost: &mut f64,
+) -> Result<BodyCheck, String> {
+    let (_, reply) = helper_turn(
+        app,
+        task,
+        |diff| brief::build_pr_truth_brief(task, body, diff),
+        cost,
+    )
+    .await?;
+    parse_reply::<BodyCheck>(&reply).ok_or_else(|| "the reply was not a body check".to_string())
+}
+
+/// One read-only agent turn with the brief, in the run's worktree; returns the
+/// reply text. `cost` gets the spend, also when the run fails.
+async fn run_helper(
+    app: &Arc<App>,
+    task: &Task,
+    run: HelperRun<'_>,
+    cost: &mut f64,
+) -> Result<String, String> {
+    let HelperRun {
+        route,
+        settings,
+        worktree,
+        brief,
+    } = run;
     let run_dir = app
         .store
-        .claim_helper_run_dir(&task.id, "pr-draft", None)
+        .claim_helper_run_dir(&task.id, STAGE, None)
         .map_err(|e| e.to_string())?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let _ = std::fs::write(run_dir.join("brief.md"), brief);
     let events_path = run_dir.join("events.jsonl");
     let settings_path = run_dir.join("settings.json");
     let key_path = run_dir.join("key");
@@ -794,11 +889,11 @@ async fn run_draft(
         RunTrack::No,
         worktree,
         &req,
-        CostTag::task("pr_draft", &route.id),
-        &brief_text,
+        CostTag::task(STAGE, &route.id),
+        brief,
         &events_path,
         &CancelToken::new(),
-        Guard::helper("pr-draft", app.helper_timeout()),
+        Guard::helper(STAGE, app.helper_timeout()),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
@@ -807,15 +902,14 @@ async fn run_draft(
         Err(RunError::Cancelled) => return Err("the run was stopped".to_string()),
         Err(RunError::Io(e) | RunError::NotFound(e)) => return Err(e),
     };
-    *cost = outcome.cost_usd.unwrap_or(0.0);
+    *cost += outcome.cost_usd.unwrap_or(0.0);
     if outcome.timed_out {
         return Err("the run timed out".to_string());
     }
     if let Some(error) = outcome.error {
         return Err(error);
     }
-    parse_draft(&outcome.final_text.unwrap_or_default())
-        .ok_or_else(|| "the reply was not a JSON object".to_string())
+    Ok(outcome.final_text.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -825,15 +919,29 @@ mod tests {
     #[test]
     fn parses_plain_fenced_and_surrounded_json() {
         let want = Draft {
-            branch: "feat/x".into(),
             title: "feat: x".into(),
             body: "Why\n".into(),
         };
-        let json = r#"{"branch":"feat/x","title":"feat: x","body":"Why\n"}"#;
-        assert_eq!(parse_draft(json), Some(want));
+        let json = r#"{"title":"feat: x","body":"Why\n"}"#;
+        assert_eq!(parse_reply::<Draft>(json), Some(want));
         let fenced = format!("```json\n{json}\n```");
-        assert!(parse_draft(&fenced).is_some());
-        assert!(parse_draft(&format!("Here you go: {json} done")).is_some());
+        assert!(parse_reply::<Draft>(&fenced).is_some());
+        assert!(parse_reply::<Draft>(&format!("Here you go: {json} done")).is_some());
+    }
+
+    #[test]
+    fn a_body_check_needs_an_explicit_verdict() {
+        let fixed = parse_reply::<BodyCheck>(
+            r#"{"ok":false,"corrections":["the diff adds no tests"],"body":"Fixed"}"#,
+        )
+        .unwrap();
+        assert!(!fixed.ok);
+        assert_eq!(
+            fixed.corrections,
+            vec!["the diff adds no tests".to_string()]
+        );
+        assert_eq!(fixed.body.as_deref(), Some("Fixed"));
+        assert_eq!(parse_reply::<BodyCheck>(r#"{"corrections":[]}"#), None);
     }
 
     #[test]
@@ -861,28 +969,51 @@ mod tests {
             "git ls-remote timed out after 60s",
             "gh pr failed: HTTP 502: Bad Gateway, try again later",
             "git push failed: Could not resolve host: example.invalid",
+            "gh pr failed: connection reset by peer",
         ] {
-            assert!(!is_permanent(e), "{e}");
+            assert!(matches!(classify_external(e), PrFailure::Transient), "{e}");
         }
         for e in [
             "gh pr failed: To get started, please run:  gh auth login",
             "git push failed: Permission denied (publickey)",
             "git push failed: remote: error: GH006: Protected branch update failed",
             "gh pr failed: HTTP 401: Bad credentials",
-            "remote: error: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
-            "remote: refusing to allow an OAuth App to create or update workflow `ci.yml` without `workflow` scope",
             "git fetch failed: fatal: 'origin' does not appear to be a git repository",
         ] {
-            assert!(is_permanent(e), "{e}");
+            assert!(
+                matches!(classify_external(e), PrFailure::Permanent(_)),
+                "{e}"
+            );
         }
+        let scope = "remote: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope";
+        let PrFailure::Permanent(hint) = classify_external(scope) else {
+            panic!("a scope refusal is permanent");
+        };
+        assert!(hint.contains("workflow"), "{hint}");
+        assert!(matches!(
+            classify_external("none of the git remotes point to a known GitHub host"),
+            PrFailure::NoGithubHost
+        ));
+    }
+
+    #[test]
+    fn an_orchd_refusal_is_decided_by_its_variant_not_its_text() {
+        let carry = pr::PrError::Refused(pr::PrRefusal::CarryFailed(
+            "could not reach origin; try again later".into(),
+        ));
+        assert!(matches!(failure_of(&carry), PrFailure::Permanent(_)));
+        let busy = pr::PrError::Refused(pr::PrRefusal::InFlight);
+        assert!(matches!(failure_of(&busy), PrFailure::Transient));
+        let push = pr::PrError::External("git push failed: connection reset".into());
+        assert!(matches!(failure_of(&push), PrFailure::Transient));
     }
 
     #[test]
     fn rejects_text_without_a_json_object_and_defaults_missing_fields() {
-        assert_eq!(parse_draft("no json here"), None);
-        assert_eq!(parse_draft("} backwards {"), None);
-        assert_eq!(parse_draft(r#"{"title":5}"#), None);
-        let draft = parse_draft(r#"{"title":"t"}"#).unwrap();
-        assert_eq!((draft.title.as_str(), draft.branch.as_str()), ("t", ""));
+        assert_eq!(parse_reply::<Draft>("no json here"), None);
+        assert_eq!(parse_reply::<Draft>("} backwards {"), None);
+        assert_eq!(parse_reply::<Draft>(r#"{"title":5}"#), None);
+        let draft = parse_reply::<Draft>(r#"{"title":"t"}"#).unwrap();
+        assert_eq!((draft.title.as_str(), draft.body.as_str()), ("t", ""));
     }
 }

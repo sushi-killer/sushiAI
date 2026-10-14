@@ -349,11 +349,22 @@ fn two_proxies_on_an_empty_home_start_exactly_one_daemon() {
     let mut b = sandbox.proxy();
     assert_eq!(a.hello()["protocol"], 1);
     assert_eq!(b.hello()["protocol"], 1);
-    // The loser waits for the home lock for a few seconds before it gives up.
-    wait_until("the second daemon to give up", || {
-        sandbox.daemon_pids().len() == 1
-    });
+    // The loser waits for the home lock for a few seconds before it gives up. The lock file
+    // names one pid whatever the loser does, so count the daemon processes themselves: they
+    // are children of the two proxies, which are alive here. Leaving before the loser exits
+    // would let it take the lock when the home is shut down and outlive the test.
+    let proxies = [a.child.id(), b.child.id()];
+    let daemons = || {
+        common::processes()
+            .into_iter()
+            .filter(|(_, parent, argv)| {
+                proxies.contains(parent) && argv.ends_with("sushiai daemon")
+            })
+            .count()
+    };
+    wait_until("the second daemon to give up", || daemons() == 1);
     sleep(Duration::from_millis(500));
+    assert_eq!(daemons(), 1);
     assert_eq!(sandbox.daemon_pids().len(), 1);
 }
 

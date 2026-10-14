@@ -858,13 +858,55 @@ pub(super) async fn capture_screenshots(
 // 4. Review scope after the first attempt
 // ---------------------------------------------------------------------------
 
+/// The reviewer's own findings that the diff did not cause, shown by their
+/// scenario: the reviewer says `causedByDiff` is false and the scenario's
+/// `run` also fails on the base. Anything else stays blocking.
+pub(super) async fn findings_old_on_base(
+    app: &Arc<App>,
+    task: &Task,
+    review: &ReviewResult,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Vec<usize> {
+    let own = review.severities.len().min(review.findings.len());
+    let mut old = Vec::new();
+    for (i, detail) in review.details.iter().enumerate().take(own) {
+        let run = detail
+            .scenario
+            .as_ref()
+            .map(|s| s.run.trim().to_string())
+            .filter(|run| !run.is_empty());
+        let Some(run) = run.filter(|_| detail.caused_by_diff == Some(false)) else {
+            continue;
+        };
+        let ran = base_check::run_on_base(
+            app,
+            Some(&task.id),
+            &task.repo,
+            &task.base_sha,
+            &[run],
+            &run_dir.join("finding-base"),
+            cancel,
+        )
+        .await;
+        if let Ok(results) = ran {
+            if results
+                .first()
+                .is_some_and(|r| r.code.is_some_and(|c| c != 0) && !is_interrupted(r))
+            {
+                old.push(i);
+            }
+        }
+    }
+    old
+}
+
 /// After the first attempt only a P0/P1 finding about the task's own work
-/// blocks: an unmet criterion, a P0, a finding that came back or that the
-/// reviewer says the diff caused (a missing `causedByDiff` counts as true).
-/// Everything else (P2/P3, a P1 about a problem that was already there) is
-/// moved out of `review.findings` and returned as follow-ups; a review left
-/// with no blocking finding becomes a PASS.
-pub(super) fn scope_review(review: &mut ReviewResult) -> Vec<String> {
+/// blocks: an unmet criterion, a P0, a finding that came back, or a P1 that
+/// is not in `old_on_base`. Everything else (P2/P3, a P1 whose scenario also
+/// fails on the base) is moved out of `review.findings` and returned as
+/// follow-ups; a review left with no blocking finding becomes a PASS.
+pub(super) fn scope_review(review: &mut ReviewResult, old_on_base: &[usize]) -> Vec<String> {
     let own = review.severities.len().min(review.findings.len());
     let mut unmet = review.criteria.iter().filter(|r| r.met != Some(true));
     let mut keep_findings = Vec::new();
@@ -886,10 +928,7 @@ pub(super) fn scope_review(review: &mut ReviewResult) -> Vec<String> {
         } else {
             match severity {
                 Some(0) => true,
-                Some(1) | None => {
-                    review.repeated.contains(finding)
-                        || detail.and_then(|d| d.caused_by_diff).unwrap_or(true)
-                }
+                Some(1) | None => review.repeated.contains(finding) || !old_on_base.contains(&i),
                 Some(_) => false,
             }
         };
@@ -1157,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn a_p1_the_diff_caused_blocks_even_when_it_names_only_an_untouched_caller() {
+    fn only_a_p1_shown_old_on_the_base_is_demoted_and_the_rest_block() {
         let mut review = scoped(
             &[
                 (
@@ -1165,15 +1204,17 @@ mod tests {
                     Some(true),
                 ),
                 ("P1: pre-existing.rs:2 - was already broken", Some(false)),
+                ("P1: claimed old, not shown", Some(false)),
                 ("P1: no mark at all", None),
             ],
             Vec::new(),
         );
-        let follow_ups = scope_review(&mut review);
+        let follow_ups = scope_review(&mut review, &[1]);
         assert_eq!(
             review.findings,
             [
                 "P1: callers/untouched.rs:9 - breaks after the change",
+                "P1: claimed old, not shown",
                 "P1: no mark at all"
             ]
         );
@@ -1191,12 +1232,12 @@ mod tests {
                 ruling(2, Some(true)),
             ],
         );
-        let follow_ups = scope_review(&mut review);
+        let follow_ups = scope_review(&mut review, &[]);
         assert_eq!(review.findings, ["P0: crash", "criterion finding: c0"]);
         assert_eq!(follow_ups, ["P2: smell", "criterion finding: c1"]);
         assert_eq!(review.verdict, Verdict::Fail);
         let mut only_pre_existing = scoped(&[("P1: old", Some(false))], Vec::new());
-        scope_review(&mut only_pre_existing);
+        scope_review(&mut only_pre_existing, &[0]);
         assert_eq!(only_pre_existing.verdict, Verdict::Pass);
     }
 
@@ -1204,7 +1245,7 @@ mod tests {
     fn a_finding_that_came_back_blocks_whoever_caused_it() {
         let mut review = scoped(&[("P1: back [F-1]", Some(false))], Vec::new());
         review.repeated = vec!["P1: back [F-1]".into()];
-        assert!(scope_review(&mut review).is_empty());
+        assert!(scope_review(&mut review, &[0]).is_empty());
         assert_eq!(review.findings.len(), 1);
     }
 

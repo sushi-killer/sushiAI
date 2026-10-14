@@ -647,6 +647,30 @@ fn a_no_tool_report_goes_to_the_owner_instead_of_a_retry() {
     env.daemon.shutdown_and_wait();
 }
 
+#[test]
+fn a_no_tool_report_with_no_tool_to_enable_still_asks_the_owner() {
+    let t = spawn();
+    let mut settings = t.daemon.request("settings.get", json!({}));
+    settings["chatTools"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tool| tool["id"] != "asana");
+    t.daemon
+        .request("settings.set", json!({"settings": settings}));
+    t.gate("mode_1", "notool");
+    let id = t.create(&[]);
+    t.start(&id);
+    let waiting = t.until(&id, "waiting");
+    let question = &waiting["question"];
+    assert_eq!(question["kind"], "permission");
+    assert_eq!(
+        question["options"],
+        json!(["I will do it: drop the criterion", "stop"])
+    );
+    assert!(!decisions(&waiting).contains("the owner will do the part"));
+    t.daemon.shutdown_and_wait();
+}
+
 /// The brief check run: answers by what it is asked.
 const CHECK_SCRIPT: &str = r##"#!/bin/sh
 input="$(cat)"
@@ -701,7 +725,8 @@ fn a_criterion_with_no_tool_to_enable_is_continued_without_a_question() {
     let id = created["id"].as_str().unwrap().to_string();
     let done = poll_until(&daemon, &id, |s| matches!(s, "done" | "waiting" | "failed"));
     assert_eq!(done["status"], "done", "{done}");
-    assert!(decisions(&done).contains("the owner let the task run without move the Asana task"));
+    assert!(decisions(&done)
+        .contains("no tool exists for move the Asana task; the task goes on without it"));
     daemon.shutdown_and_wait();
 }
 

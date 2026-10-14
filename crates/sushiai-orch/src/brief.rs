@@ -63,9 +63,9 @@ fn attempt_outcome_label(attempt: &Attempt) -> &'static str {
 
 const DISPUTES_BLOCK: &str = "\nThe last attempt failed review. If you believe a review finding is wrong, add a `disputes` array to the report instead of working around a real finding: `\"disputes\":[{\"finding\":\"<the finding, quoted>\",\"rebuttal\":\"<why it is wrong>\",\"evidence\":[\"<file:line, command output or an artifacts/ path>\"]}]`. A repeated finding you dispute is judged by a reviewer on another harness; a finding that is real still has to be fixed.\n";
 
-const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\",\"options\":[]}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
+const REPORT_FORMAT_BLOCK: &str = "## Report format\n\nEnd your final message with:\n\n```sushi-report\n{\"outcome\":\"complete|partial|blocked\",\"summary\":\"...\",\"handoff\":\"...\",\"decisions\":[],\"question\":\"\"}\n```\n\n`handoff` is for whoever continues this task if the attempt fails verification or review: what is done, what you tried that did not work, what to do next.\n";
 
-const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. A blocked report gives two or three answers in `options` and marks the safest, reversible one with \"(cautious)\"; an unanswered question can then take it.\n";
+const RULES_BLOCK: &str = "## Rules\n\n- Work only in this directory; do not touch other checkouts.\n- Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.\n- Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.\n- Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`.\n";
 
 /// The checks that fail on the base are part of the contract.
 const CHECKS_BLOCK: &str = "## Checks\n\nThese commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.\n\n";
@@ -767,9 +767,6 @@ pub struct Report {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub question: String,
-    /// Answers to a blocked `question`; the safest one carries "(cautious)".
-    #[serde(default)]
-    pub options: Vec<String>,
     #[serde(default, deserialize_with = "lenient_disputes")]
     pub disputes: Vec<Dispute>,
     /// Protected tests the agent says are wrong, with the reason.
@@ -2700,18 +2697,6 @@ mod tests {
             parse_report("sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\"}")
                 .unwrap();
         assert_eq!(report.outcome, Outcome::Blocked);
-        assert!(report.options.is_empty());
-    }
-
-    #[test]
-    fn a_blocked_report_carries_its_options_and_the_brief_asks_for_them() {
-        let report = parse_report(
-            "sushi-report\n{\"outcome\":\"blocked\",\"question\":\"Which?\",\"options\":[\"A\",\"B (cautious)\"]}",
-        )
-        .unwrap();
-        assert_eq!(report.options, vec!["A", "B (cautious)"]);
-        assert!(RULES_BLOCK.contains("\"(cautious)\""));
-        assert!(REPORT_FORMAT_BLOCK.contains("\"options\":[]"));
     }
 
     #[test]

@@ -1002,8 +1002,8 @@ pub(super) fn apply_answer(app: &App, task: &mut Task, subjects: &[Subject], ans
 
 // -- preflight ----------------------------------------------------------------
 
-pub(super) const OWNER_ACTION: &str = "I will do it: drop the criterion";
-pub(super) const CONTINUE_ANYWAY: &str = "Continue anyway";
+const OWNER_ACTION: &str = "I will do it: drop the criterion";
+const CONTINUE_ANYWAY: &str = "Continue anyway";
 
 pub(super) fn missing_tool_question(task: &Task, missing: &MissingTool) -> Question {
     let criterion = task
@@ -1169,22 +1169,24 @@ pub(super) fn tool_to_enable(app: &App, task: &Task, capability: &str) -> Option
         .map(|c| c.id.clone())
 }
 
-/// The question for an agent's `No tool: <capability>` report that a tool
-/// could answer.
-pub(super) fn no_tool_question(capability: &str, enable: &str) -> Question {
+/// The question for an agent's `No tool: <capability>` report; `enable` is
+/// the connected tool the owner could switch on, when one matches.
+pub(super) fn no_tool_question(capability: &str, enable: Option<&str>) -> Question {
+    let mut options: Vec<String> = enable
+        .map(|id| format!("Enable {id} for this task"))
+        .into_iter()
+        .collect();
+    options.push(OWNER_ACTION.to_string());
+    options.push("stop".to_string());
     Question::new(
         format!("The agent has no tool for {capability}; a retry cannot give it one."),
-        vec![
-            format!("Enable {enable} for this task"),
-            OWNER_ACTION.to_string(),
-            "stop".to_string(),
-        ],
+        options,
         QuestionKind::Permission,
         AskedBy::Implement,
     )
 }
 
-/// Applies the answer to a [`no_tool_question`], or [`OWNER_ACTION`] when no tool could be enabled.
+/// Applies the owner's answer to a [`no_tool_question`].
 pub(super) fn apply_no_tool_answer(app: &App, task: &mut Task, capability: &str, answer: &str) {
     if let Some(id) = answer
         .trim()

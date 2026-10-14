@@ -52,34 +52,32 @@ pub(super) async fn run_cmd(
 pub(super) const UNREVIEWED_LINE: &str = "Unreviewed: no review route gave a verdict";
 
 /// The PR body: goal, criteria as a checklist, then the report summary.
-/// The decision a parent records for a subtask that landed unreviewed; the
-/// pull request names it.
-pub(super) fn unreviewed_part_line(child: &Task) -> String {
-    format!(
-        "{UNREVIEWED_PART} \"{}\" ({}) landed unreviewed: no review route gave a verdict",
-        child.title, child.id
-    )
+/// What the pull request and the decision say of a subtask that landed
+/// unreviewed.
+fn unreviewed_part_text(id: &str, title: &str) -> String {
+    format!("subtask \"{title}\" ({id}) landed unreviewed: no review route gave a verdict")
 }
 
-const UNREVIEWED_PART: &str = "Orchestrator: subtask";
+/// The decision a parent records for a subtask that landed unreviewed.
+pub(super) fn unreviewed_part_line(child: &Task) -> String {
+    format!(
+        "Orchestrator: {}",
+        unreviewed_part_text(&child.id, &child.title)
+    )
+}
 
 pub(super) fn pr_body(task: &Task) -> String {
     let mark = if task.unreviewed { " " } else { "x" };
     let mut body = String::new();
     if task.unreviewed {
         body.push_str(&format!("{UNREVIEWED_LINE}\n\n"));
-        for d in task
-            .decisions
-            .iter()
-            .filter(|d| d.starts_with(UNREVIEWED_PART))
-        {
-            body.push_str(&format!("- {d}\n"));
+        for part in &task.loop_state.unreviewed_parts {
+            body.push_str(&format!(
+                "- Orchestrator: {}\n",
+                unreviewed_part_text(&part.id, &part.title)
+            ));
         }
-        if task
-            .decisions
-            .iter()
-            .any(|d| d.starts_with(UNREVIEWED_PART))
-        {
+        if !task.loop_state.unreviewed_parts.is_empty() {
             body.push('\n');
         }
     }
@@ -530,7 +528,10 @@ mod unreviewed_tests {
         let mut parent = task_with_status(TaskStatus::Done);
         parent.goal = "Whole".into();
         parent.unreviewed = true;
-        parent.decisions.push(unreviewed_part_line(&child));
+        parent.loop_state.unreviewed_parts.push(UnreviewedPart {
+            id: child.id.clone(),
+            title: child.title.clone(),
+        });
         let body = pr_body(&parent);
         assert!(body.starts_with(UNREVIEWED_LINE), "{body}");
         assert!(body.contains("subtask \"Part\""), "{body}");

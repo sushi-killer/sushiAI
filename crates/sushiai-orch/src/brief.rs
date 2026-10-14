@@ -2582,6 +2582,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,

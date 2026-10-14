@@ -12,31 +12,23 @@ pub(super) fn policy_on(app: &App) -> bool {
     app.settings.read().unwrap().answer_policy
 }
 
-/// The criterion number in the text of an impossible question.
-fn impossible_criterion(text: &str) -> Option<usize> {
-    text.strip_prefix("Criterion ")?
-        .split_once(" cannot be met as written")?
-        .0
-        .parse()
-        .ok()
-}
-
-/// Whether an earlier automatic answer was about the same cause as `question`:
-/// the same check commands, the same criterion; any other question of one
-/// kind shares its cause.
+/// Whether an earlier automatic answer was about the same check commands as
+/// `question`; any other question of one kind shares its cause.
 fn same_cause(earlier: &Assumption, question: &Question) -> bool {
-    if !question.commands.is_empty() {
-        return earlier.commands == question.commands;
-    }
-    if question.kind == QuestionKind::Impossible {
-        return impossible_criterion(&earlier.question) == impossible_criterion(&question.text);
-    }
-    true
+    question.commands.is_empty() || earlier.commands == question.commands
 }
 
 /// Questions of `question`'s kind and cause answered so far by the policy (a
-/// rule or the judge).
+/// rule or the judge); an impossible question's cause is its criterion.
 fn policy_answers(task: &Task, question: &Question) -> usize {
+    if question.kind == QuestionKind::Impossible {
+        return task
+            .loop_state
+            .impossible_answers
+            .iter()
+            .filter(|c| Some(**c) == question.criterion)
+            .count();
+    }
     task.assumptions
         .iter()
         .filter(|a| {
@@ -62,20 +54,6 @@ pub(super) fn policy_open(app: &App, task: &Task, question: &Question) -> bool {
         && policy_answers(task, question) < MAX_POLICY_ANSWERS
 }
 
-fn quoted_base_tail(question: &Question, command: &str) -> String {
-    let listed = format!("- {command}: ");
-    question
-        .text
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix(&listed).map(str::to_string).or_else(|| {
-                line.strip_prefix(&format!("{command} already fails on base "))
-                    .and_then(|rest| rest.split_once(": ").map(|(_, tail)| tail.to_string()))
-            })
-        })
-        .unwrap_or_default()
-}
-
 /// Context needed by the pre-existing-failure policy. Keep filesystem and
 /// store reads here so the answer rule itself remains deterministic.
 fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool>, bool) {
@@ -84,11 +62,13 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
     let targeted = question
         .commands
         .iter()
-        .map(|command| {
+        .enumerate()
+        .map(|(i, command)| {
             let output = base_runs
                 .get(&(task.base_sha.clone(), command.clone()))
                 .map(|run| run.tail.clone())
-                .unwrap_or_else(|| quoted_base_tail(question, command));
+                .or_else(|| question.base_tails.get(i).cloned())
+                .unwrap_or_default();
             base_check::is_task_target(task, command, &output, &changed)
         })
         .collect();
@@ -578,6 +558,11 @@ pub(super) fn record_policy_answer(
         overturned: false,
         owner_answer: None,
     });
+    if question.kind == QuestionKind::Impossible {
+        task.loop_state
+            .impossible_answers
+            .extend(question.criterion);
+    }
     task.decisions
         .push(policy_answer_line(&question.text, answer, by, evidence));
     let answered_by = if by == "judge" {
@@ -599,6 +584,16 @@ pub(super) fn record_answered_question(
     if question.kind == QuestionKind::PreexistingFailure {
         let base_sha = task.base_sha.clone();
         base_check::record_base_retry(task, &question.commands, &base_sha, answer);
+    }
+    // The owner's answers do not count against the orchestrator's continues.
+    if question.kind == QuestionKind::AttemptsFailing
+        && matches!(
+            answered_by,
+            AnsweredBy::Orchestrator | AnsweredBy::Overseer | AnsweredBy::Lead
+        )
+        && !is_option(answer, "stop")
+    {
+        task.loop_state.non_owner_continues += 1;
     }
     task.question_history.push(AnsweredQuestion {
         question: question.text.clone(),
@@ -671,9 +666,7 @@ pub(super) async fn try_policy_answer(
 
 /// The criterion number and the agent's evidence of an impossible question.
 fn impossible_parts(question: &Question) -> Option<(usize, String)> {
-    let n = impossible_criterion(&question.text)?;
-    let evidence = question.text.split_once(". Evidence: ")?.1.to_string();
-    Some((n, evidence))
+    Some((question.criterion?, question.evidence.clone()?))
 }
 
 enum Judgement {
@@ -955,16 +948,16 @@ mod tests {
 
     #[test]
     fn the_impossible_question_yields_its_criterion_and_evidence() {
-        let q = Question::new(
-            "Criterion 1 cannot be met as written: x. Evidence: the file is gone",
-            vec![],
-            QuestionKind::Impossible,
-            AskedBy::Implement,
-        );
-        assert_eq!(
-            impossible_parts(&q),
-            Some((1, "the file is gone".to_string()))
-        );
+        let mut task = task_with_status(TaskStatus::Running);
+        task.criteria = vec!["zero".into(), "one".into()];
+        // The evidence holds the old separator: it is not parsed back.
+        let evidence = "see a. Evidence: b";
+        let claim = brief::Impossible {
+            criterion: 1,
+            evidence: evidence.into(),
+        };
+        let q = impossible_question(&task, &claim);
+        assert_eq!(impossible_parts(&q), Some((1, evidence.to_string())));
     }
 
     #[test]
@@ -1213,12 +1206,11 @@ mod timeout_tests {
     async fn answer_judge_timed_out_leaves_the_decision_to_the_owner() {
         let (app, _dir, mut task, _) = slow_helper_task();
         let criteria = task.criteria.clone();
-        let question = Question::new(
-            "Criterion 0 cannot be met as written: Keep the API. Evidence: the file is gone",
-            vec!["retry".into(), "drop criterion".into()],
-            QuestionKind::Impossible,
-            AskedBy::Implement,
-        );
+        let claim = brief::Impossible {
+            criterion: 0,
+            evidence: "the file is gone".into(),
+        };
+        let question = impossible_question(&task, &claim);
         assert!(
             judge_impossible(&app, &mut task, &question, 1, &CancelToken::new())
                 .await
@@ -1345,12 +1337,14 @@ mod base_moves_tests {
 
         // Other kinds still have their own budget, the judge's included.
         let impossible = |n: usize| {
-            Question::new(
+            let mut q = Question::new(
                 format!("Criterion {n} cannot be met as written: x. Evidence: y"),
                 vec!["retry".into(), "drop criterion".into()],
                 QuestionKind::Impossible,
                 AskedBy::Implement,
-            )
+            );
+            q.criterion = Some(n);
+            q
         };
         assert!(policy_open(&app, &task, &impossible(0)));
         let attempts = Question::new(

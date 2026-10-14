@@ -784,6 +784,14 @@ impl App {
                 copy.question = None;
                 copy.queue.park = stored.queue.park;
                 copy.queue.stopped_explicitly = stored.queue.stopped_explicitly;
+                let (mine, theirs) = (&mut copy.loop_state, stored.loop_state);
+                mine.agent_restarted |= theirs.agent_restarted;
+                mine.non_owner_continues = mine.non_owner_continues.max(theirs.non_owner_continues);
+                for part in theirs.unreviewed_parts {
+                    if !mine.unreviewed_parts.contains(&part) {
+                        mine.unreviewed_parts.push(part);
+                    }
+                }
                 for line in stored.decisions {
                     if !copy.decisions.contains(&line) {
                         copy.decisions.push(line);

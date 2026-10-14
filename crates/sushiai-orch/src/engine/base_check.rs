@@ -61,6 +61,7 @@ fn base_check_question(failed: &[VerifyOutcome], base_sha: &str, options: [&str;
         AskedBy::Verify,
     );
     q.commands = failed.iter().map(|f| f.command.clone()).collect();
+    q.base_tails = failed.iter().map(|f| f.tail.trim().to_string()).collect();
     q
 }
 

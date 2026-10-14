@@ -836,9 +836,10 @@ mod tests {
         let mut task = waiting_task(&repo, exhausted_q());
         task.decisions
             .push(format!("{EXHAUSTED_ANSWER_PREFIX} -> continue (r)"));
+        task.loop_state.non_owner_continues = 1;
         let (answer, task) = park(&app, task).await;
         assert_eq!(answer.as_deref(), Some("continue"));
-        assert_eq!(non_owner_continues(&task), 2);
+        assert_eq!(task.loop_state.non_owner_continues, 2);
         assert!(task
             .decisions
             .iter()

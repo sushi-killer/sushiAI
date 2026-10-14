@@ -1696,6 +1696,15 @@ pub struct Question {
     pub commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_signature: Option<String>,
+    /// The criterion an impossible question is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<usize>,
+    /// The agent's evidence for an impossible question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// What each of `commands` printed on the base, in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_tails: Vec<String>,
 }
 
 /// How long a question stays held for the overseer.
@@ -1731,6 +1740,9 @@ impl Question {
             held_at: None,
             commands: Vec::new(),
             failure_signature: None,
+            criterion: None,
+            evidence: None,
+            base_tails: Vec::new(),
         }
     }
 }
@@ -2148,8 +2160,83 @@ pub struct Task {
     /// on it, so a restart that fails again is told once more.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub failed_count: u32,
+    /// What the task loop remembers about itself. Decision lines are for the
+    /// owner to read; nothing parses them back into state.
+    #[serde(flatten)]
+    pub loop_state: LoopState,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// The `LoopState::state_version` a task written today carries; a task with a
+/// lower one is migrated once, when the store loads it (`store.rs`).
+pub const STATE_VERSION: u32 = 1;
+
+fn legacy_state_version() -> u32 {
+    0
+}
+
+impl Default for LoopState {
+    fn default() -> Self {
+        LoopState {
+            state_version: STATE_VERSION,
+            unreviewed_attempt: None,
+            agent_restarted: false,
+            approach_changed_after: None,
+            stuck_retries: 0,
+            rereviews: 0,
+            non_owner_continues: 0,
+            dependency_restarted: false,
+            unreviewed_parts: Vec::new(),
+            impossible_answers: Vec::new(),
+        }
+    }
+}
+
+/// A landed subtask that no review read, as its parent's pull request names it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnreviewedPart {
+    pub id: String,
+    pub title: String,
+}
+
+/// Typed task-loop state, flat in the task JSON. A task file without
+/// `stateVersion` predates it; a new task starts at [`STATE_VERSION`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LoopState {
+    #[serde(default = "legacy_state_version", skip_serializing_if = "is_zero_u32")]
+    pub state_version: u32,
+    /// The implement attempt committed unreviewed while its review question
+    /// was retired and the relaunched loop still has to finish it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreviewed_attempt: Option<u32>,
+    /// An agent already restarted this task after it failed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_restarted: bool,
+    /// The attempt after which the failure ladder changed the approach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approach_changed_after: Option<u32>,
+    /// Pauses a stuck task has taken since it was last started.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub stuck_retries: u32,
+    /// Times the landing in progress sent the work back to verify and the
+    /// review; reset when the landing completes.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub rereviews: u32,
+    /// Extensions of the attempt budget that a chat, the overseer or a lead
+    /// gave, not the owner.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub non_owner_continues: u32,
+    /// A dependency of this task already got its one automatic restart.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dependency_restarted: bool,
+    /// Landed subtasks that no review read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed_parts: Vec<UnreviewedPart>,
+    /// The criterion of each impossible question the answer policy answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub impossible_answers: Vec<usize>,
 }
 
 /// What `pr_pending` opens: the remote branch, the title (empty: the task's
@@ -3202,6 +3289,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3471,6 +3559,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3546,6 +3635,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,
@@ -3651,6 +3741,7 @@ mod tests {
             overseer_woken: false,
             unreviewed: false,
             failed_count: 0,
+            loop_state: Default::default(),
             planned_tier: None,
             planned_by_parent: false,
             tier_fallback: None,

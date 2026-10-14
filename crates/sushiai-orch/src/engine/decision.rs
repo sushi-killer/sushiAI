@@ -459,7 +459,7 @@ const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
 
 /// The owner question for a `sushi-impossible` claim.
 pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Question {
-    Question::new(
+    let mut question = Question::new(
         format!(
             "Criterion {} cannot be met as written: {}. Evidence: {}",
             claim.criterion, task.criteria[claim.criterion], claim.evidence
@@ -467,7 +467,10 @@ pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Que
         IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
         QuestionKind::Impossible,
         AskedBy::Implement,
-    )
+    );
+    question.criterion = Some(claim.criterion);
+    question.evidence = Some(claim.evidence.clone());
+    question
 }
 
 /// The criterion an [`impossible_question`] is about, and whether `answer`
@@ -476,13 +479,7 @@ pub(super) fn impossible_drop_target(question: &Question, answer: &str) -> Optio
     if !answer.trim().eq_ignore_ascii_case("drop criterion") {
         return None;
     }
-    question
-        .text
-        .strip_prefix("Criterion ")?
-        .split_once(" cannot be met as written")?
-        .0
-        .parse()
-        .ok()
+    question.criterion
 }
 
 #[cfg(test)]

@@ -1307,12 +1307,8 @@ pub(super) async fn carry_and_check(
             // judging another tree: verify and the review run again.
             if let Some(idx) = idx {
                 let files = carry_changed_reviewed(worktree, &task.attempts[idx], &new_sha).await;
-                let reruns = task
-                    .decisions
-                    .iter()
-                    .filter(|d| d.starts_with(REREVIEW_LINE))
-                    .count() as u32;
-                if !files.is_empty() && reruns < MAX_REREVIEWS {
+                if !files.is_empty() && task.loop_state.rereviews < MAX_REREVIEWS {
+                    task.loop_state.rereviews += 1;
                     task.decisions.push(format!(
                         "{REREVIEW_LINE} onto {branch} changed {} which the review saw; verify and the review run again on the carried tree",
                         files.join(", ")
@@ -1691,10 +1687,7 @@ impl App {
     ) -> bool {
         let deps: Vec<&Task> = all.iter().filter(|t| ended.contains(&t.id)).collect();
         if deps.is_empty()
-            || task
-                .decisions
-                .iter()
-                .any(|d| d == ladder::DEPENDENCY_RESTART_LINE)
+            || task.loop_state.dependency_restarted
             || deps.iter().any(|d| {
                 d.status != TaskStatus::Failed
                     || !ladder::agent_may_restart(d)
@@ -1718,6 +1711,7 @@ impl App {
             return true;
         }
         if let Err(e) = self.update_task(&task.id, |t| {
+            t.loop_state.dependency_restarted = true;
             t.decisions
                 .push(ladder::DEPENDENCY_RESTART_LINE.to_string())
         }) {

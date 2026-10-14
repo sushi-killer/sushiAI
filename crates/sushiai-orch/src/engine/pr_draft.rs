@@ -133,7 +133,8 @@ pub(super) fn mark_pr_pending(app: &App, task: &mut Task) {
         && task.pr_url.is_none()
         && task.landed_sha.is_none()
         && !task.archived
-        && app.settings.read().unwrap().may_open_pr_on_done(&task.repo);
+        && (task.queue.pr_conflict_tried
+            || app.settings.read().unwrap().may_open_pr_on_done(&task.repo));
 }
 
 /// Starts the draft and the pull request for a done task that owes one
@@ -146,12 +147,18 @@ pub(super) fn spawn_pr_on_done(app: &App, task: &Task) {
     let id = task.id.clone();
     if task.pr_url.is_some()
         || task.archived
-        || !app.settings.read().unwrap().may_open_pr_on_done(&task.repo)
+        || !(task.queue.pr_conflict_tried
+            || app.settings.read().unwrap().may_open_pr_on_done(&task.repo))
     {
         let _ = app.update_task(&id, |t| t.pr_pending = false);
         return;
     }
-    let app = app.arc();
+    spawn_open_pr(app, &id);
+}
+
+/// Runs the flow in the background, without its caller waiting.
+pub(super) fn spawn_open_pr(app: &App, id: &str) {
+    let (app, id) = (app.arc(), id.to_string());
     tokio::spawn(async move { open_pr_on_done(&app, &id).await });
 }
 
@@ -161,9 +168,11 @@ fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: bool) {
     let _ = app.update_task(id, |task| {
         task.decisions.extend(lines);
         task.cost_usd += cost;
-        if ends {
+        // A task sent back for its resolution keeps its flag and plan.
+        if ends && task.status == TaskStatus::Done {
             task.pr_pending = false;
             task.pr_plan = None;
+            task.queue.pr_conflict_tried = false;
         }
     });
 }
@@ -207,8 +216,13 @@ fn owed(app: &App, id: &str) -> Option<Task> {
 /// pushed, with the task's checks run again when the base moved, as landing
 /// does. A branch on an old base would show newer base files (a workflow, a
 /// signature) as the task's own change. The branch moves only when the carry
-/// and the checks pass; the decisions are saved either way.
-async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
+/// and the checks pass; the decisions are saved either way. A carry that
+/// conflicts is not a dead end: see [`resolve_conflict`].
+pub(super) async fn carry_for_pr(
+    app: &Arc<App>,
+    task: &Task,
+    plan: Option<PrPlan>,
+) -> Result<PrCarry, String> {
     let repo = PathBuf::from(&task.repo);
     let default = {
         let repo = repo.clone();
@@ -231,7 +245,7 @@ async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
     .await
     .is_ok();
     if contains {
-        return Ok(());
+        return Ok(PrCarry::Ready);
     }
     let old = pr::run_cmd("git", &["rev-parse", &local], &repo, pr::GIT_TIMEOUT).await?;
     let path = git::worktree_path(&repo, &app.home, "", &format!("pr-carry-{}", task.id));
@@ -269,6 +283,14 @@ async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
         &CancelToken::new(),
     )
     .await;
+    let conflicted = matches!(
+        &outcome,
+        Err(Landing::Failed {
+            kind: FailureKind::Conflict,
+            ..
+        })
+    );
+    let contained = matches!(outcome, Ok(true));
     let committed = match outcome {
         Ok(false) => {
             let (wt, title, tid, n) = (
@@ -302,7 +324,9 @@ async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
         Err(e) => Err(e.clone()),
     };
     drop(temp);
-    let (lines, ok) = (work.decisions[before..].to_vec(), moved.is_ok());
+    // On `contained` the carry's own line is the one decision line.
+    let lines = work.decisions[before..].to_vec();
+    let ok = moved.is_ok();
     let _ = app.update_task(&task.id, move |t| {
         t.decisions.extend(lines);
         if ok {
@@ -310,7 +334,132 @@ async fn carry_for_pr(app: &Arc<App>, task: &Task) -> Result<(), String> {
             t.planner_tests = work.planner_tests;
         }
     });
-    moved.map(|_| ())
+    if contained {
+        return Ok(PrCarry::Contained);
+    }
+    if conflicted {
+        return resolve_conflict(app, &task.id, &base, plan).await;
+    }
+    moved.map(|_| PrCarry::Ready)
+}
+
+/// What the carry of a done task onto the newest base came to.
+pub(super) enum PrCarry {
+    /// The branch holds the newest base; the pull request can be pushed.
+    Ready,
+    /// The newest base already holds the work: there is nothing to open.
+    Contained,
+    /// The work conflicts with the newest base and the task went back for its
+    /// one resolution attempt; it opens the pull request itself when done.
+    Resolving(Vec<String>),
+    /// The task ended `failed`, with a report and a notice; the reason.
+    Failed(String),
+}
+
+/// Waits for the finished loop of `id` to leave `controls`, so that starting
+/// the task again is not a no-op.
+async fn loop_gone(app: &App, id: &str) -> bool {
+    for _ in 0..600 {
+        if !app.controls.lock().unwrap().contains_key(id) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// The PR carry conflicted: the task gets one conflict-only attempt on the
+/// newest base (the loop's own, with its checks and review), and opens the
+/// pull request when it is done again. The conflict is carried into the task's
+/// own worktree, as the loop carries one onto a moved base. A second conflict,
+/// or a carry that cannot be set up, ends the task `failed` with a report and
+/// one notice.
+async fn resolve_conflict(
+    app: &Arc<App>,
+    id: &str,
+    base: &str,
+    plan: Option<PrPlan>,
+) -> Result<PrCarry, String> {
+    let Some(mut task) = app.store.load_task(id).ok().flatten() else {
+        return Err("task not found".to_string());
+    };
+    let upstream = format!("origin/{base}");
+    if task.queue.pr_conflict_tried {
+        let reason =
+            format!("the work still conflicts with {upstream} after its resolution attempt");
+        return Ok(PrCarry::Failed(fail_unresolved(app, id, reason).await));
+    }
+    // The work conflicts, but only a task started from this very base branch
+    // can resolve it in its own worktree; others keep the old outcome.
+    if task.base_ref.as_deref() != Some(base) {
+        return Err(format!(
+            "the work conflicts with {upstream} and the task did not start from {base}, so orchd cannot resolve it"
+        ));
+    }
+    if !loop_gone(app, id).await {
+        return Err("the task loop is still running; try again later".to_string());
+    }
+    let repo = PathBuf::from(&task.repo);
+    let tip = pr::run_cmd("git", &["rev-parse", &upstream], &repo, pr::GIT_TIMEOUT).await?;
+    task.fresh_base = Some(FreshBase { tip: Some(tip) });
+    // Saved before the carry leaves conflict markers in the worktree: a
+    // restart in between finds a task that owes a resolution, never a done
+    // task with a dirty worktree.
+    task.queue.pr_conflict_tried = true;
+    // The owner's choices for a manual pull request survive the attempt.
+    if plan.is_some() {
+        task.pr_pending = true;
+        task.pr_plan = plan;
+    }
+    task.status = TaskStatus::Queued;
+    task.updated_at = now_ms();
+    app.save_task_logged(&task);
+    app.broadcast_task(&task);
+    let setup = async {
+        let recreated = app.ensure_worktree(&mut task).await?;
+        let wt = PathBuf::from(&task.worktree);
+        // A recreated worktree has none of its dependencies yet.
+        app.ensure_worktree_setup(&task, recreated, &CancelToken::new())
+            .await?;
+        match carry_onto_newest_base(app, &mut task, &wt, &CancelToken::new()).await {
+            BaseCarry::Conflict(_) => Ok(()),
+            BaseCarry::Ready => Err(format!("the carry onto {upstream} left no conflict")),
+            BaseCarry::Failed(reason) => Err(reason),
+        }
+    }
+    .await;
+    if let Err(e) = setup {
+        return Ok(PrCarry::Failed(fail_unresolved(app, id, e).await));
+    }
+    let files = task.queue.carry_conflicts.clone();
+    task.decisions.push(format!(
+        "PR: the work conflicts with {upstream} in {}; one conflict-resolution attempt runs on the new base before the pull request opens",
+        files.join(", ")
+    ));
+    task.updated_at = now_ms();
+    app.save_task_logged(&task);
+    app.broadcast_task(&task);
+    app.spawn_task_loop(id.to_string(), true);
+    Ok(PrCarry::Resolving(files))
+}
+
+/// Ends a done task whose pull request cannot be reached: `failed`, with the
+/// reason in its decisions and report, and one notice. The reason is returned.
+async fn fail_unresolved(app: &Arc<App>, id: &str, reason: String) -> String {
+    let line = format!("PR: not opened: {reason}; the work stays on its branch");
+    let _ = app.update_task(id, |t| {
+        t.decisions.push(line);
+        t.pr_pending = false;
+        t.pr_plan = None;
+        t.mark_failed();
+    });
+    if let Ok(Some(mut task)) = app.store.load_task(id) {
+        app.write_report(&mut task).await;
+        app.save_task_logged(&task);
+        app.broadcast_task(&task);
+        app.notify_task_failed(&task);
+    }
+    reason
 }
 
 pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
@@ -345,8 +494,26 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
         }
     }
     // Never push from a stale base: carry onto the newest one first.
-    if let Err(e) = carry_for_pr(app, &task).await {
-        record(
+    // A manual `task.pr` carries in the same checkout: one at a time.
+    let guard = loop {
+        match pr::InFlight::take(id) {
+            Ok(guard) => break guard,
+            Err(_) if owed(app, id).is_some() => {
+                tokio::time::sleep(Duration::from_millis(200)).await
+            }
+            Err(_) => return record(app, id, Vec::new(), 0.0, true),
+        }
+    };
+    let carried = carry_for_pr(app, &task, None).await;
+    drop(guard);
+    match carried {
+        Ok(PrCarry::Ready) => {}
+        // One decision line was saved; there is no pull request to open.
+        Ok(PrCarry::Contained) => return record(app, id, Vec::new(), 0.0, true),
+        // The task is back in its loop and opens the pull request when done.
+        Ok(PrCarry::Resolving(_) | PrCarry::Failed(_)) => return,
+        Err(e) => {
+            record(
             app,
             id,
             vec![format!(
@@ -355,7 +522,7 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             0.0,
             true,
         );
-        notify_owner(
+            notify_owner(
             app,
             &task.repo,
             format!(
@@ -363,7 +530,8 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
                 task.title, task.branch
             ),
         );
-        return;
+            return;
+        }
     }
     let Some(fresh) = owed(app, id) else {
         return record(app, id, Vec::new(), 0.0, true);
@@ -448,9 +616,12 @@ pub(super) async fn open_pr_on_done(app: &Arc<App>, id: &str) {
             return record(app, id, Vec::new(), 0.0, true);
         }
         let result = app
-            .handle_task_pr(serde_json::json!({
-                "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
-            }))
+            .open_pr(
+                serde_json::json!({
+                    "id": id, "branch": plan.branch, "title": plan.title, "body": plan.body,
+                }),
+                true,
+            )
             .await;
         let Err(e) = result else {
             return record(app, id, Vec::new(), 0.0, true);

@@ -159,6 +159,18 @@ pub(super) async fn run_task_loop(
         // so no planning is spent on a part that cannot start yet.
         if !needs_planning(&task) || task.parent.is_some() {
             let all = app.repo_tasks(&task.repo);
+            // A carry left conflicts in a parent's own tree: its one
+            // conflict-only attempt runs before any check, as for a part.
+            if parent_failure.is_none()
+                && !task.queue.carry_conflicts.is_empty()
+                && is_parent(&task, &all)
+            {
+                parent_conflict_only = true;
+                parent_failure = Some(format!(
+                    "The carry onto the newest base left conflicts in {}.",
+                    task.queue.carry_conflicts.join(", ")
+                ));
+            }
             if is_parent(&task, &all)
                 && parent_failure.is_none()
                 && (completed_implement_attempts(&task) == 0

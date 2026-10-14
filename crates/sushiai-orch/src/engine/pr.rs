@@ -102,10 +102,10 @@ pub(super) fn pr_body(task: &Task) -> String {
 /// Task ids with a `task.pr` running: a second call is refused.
 static IN_FLIGHT: StdMutex<Option<HashSet<String>>> = StdMutex::new(None);
 
-struct InFlight(String);
+pub(super) struct InFlight(String);
 
 impl InFlight {
-    fn take(id: &str) -> Result<InFlight, String> {
+    pub(super) fn take(id: &str) -> Result<InFlight, String> {
         let mut guard = IN_FLIGHT.lock().unwrap();
         if !guard
             .get_or_insert_with(HashSet::new)
@@ -214,9 +214,21 @@ pub(super) async fn pr_base(
 }
 
 impl App {
+    /// The RPC entry: a branch that needs the newest base is carried off the
+    /// request path, so a slow carry never stalls the connection.
     pub(super) async fn handle_task_pr(
         &self,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.open_pr(params, false).await
+    }
+
+    /// `inline`: only the in-process pull request flow sets it; it carries
+    /// onto the newest base before the push, as part of its own background run.
+    pub(super) async fn open_pr(
+        &self,
+        params: serde_json::Value,
+        inline: bool,
     ) -> Result<serde_json::Value, String> {
         #[derive(Deserialize)]
         struct P {
@@ -343,7 +355,55 @@ impl App {
                 "{branch} is a base branch; pick another remote branch name for the pull request"
             ));
         }
+        // The same carry as the automatic pull request: never push a stale base.
+        let owner_plan = PrPlan {
+            branch: branch.clone(),
+            title: p.title.clone().unwrap_or_default(),
+            body: p.body.clone().unwrap_or_default(),
+        };
         run_cmd("git", &["fetch", "origin", &base], &repo, GIT_TIMEOUT).await?;
+        let up_to_date = run_cmd(
+            "git",
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &format!("origin/{base}"),
+                &local,
+            ],
+            &repo,
+            GIT_TIMEOUT,
+        )
+        .await
+        .is_ok();
+        if !inline && !up_to_date {
+            // Stored with the owner's choices; the flow carries, resolves,
+            // pushes and opens, then the task shows the pull request.
+            let queued = self.update_task(&p.id, move |t| {
+                t.pr_pending = true;
+                t.pr_plan = Some(owner_plan);
+                t.decisions.push(
+                    "PR: carrying onto the newest base; the pull request opens when done"
+                        .to_string(),
+                );
+            })?;
+            super::pr_draft::spawn_open_pr(self, &p.id);
+            return serde_json::to_value(&queued).map_err(|e| e.to_string());
+        }
+        match super::pr_draft::carry_for_pr(&self.arc(), &task, Some(owner_plan)).await? {
+            super::pr_draft::PrCarry::Ready => {}
+            super::pr_draft::PrCarry::Contained => {
+                return Err(format!(
+                    "origin/{base} already contains this work; nothing to open a pull request for"
+                ));
+            }
+            super::pr_draft::PrCarry::Resolving(files) => {
+                return Err(format!(
+                    "the work conflicts with origin/{base} in {}; one conflict-resolution attempt runs now and the pull request opens when it is done",
+                    files.join(", ")
+                ));
+            }
+            super::pr_draft::PrCarry::Failed(reason) => return Err(reason),
+        }
         let count = run_cmd(
             "git",
             &["rev-list", "--count", &format!("origin/{base}..{local}")],
@@ -443,6 +503,7 @@ impl App {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         task.pr_url = Some(url.clone());
+        task.queue.pr_conflict_tried = false;
         task.pr_branch = Some(branch.clone());
         task.decisions.push(format!("PR: {verb} {url}"));
         task.updated_at = now_ms();

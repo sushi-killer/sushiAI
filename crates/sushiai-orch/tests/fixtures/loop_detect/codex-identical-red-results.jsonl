@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"loop-fixture"}
+{"type":"item.started","item":{"id":"call-1","type":"command_execution","command":"cargo test check_1"}}
+{"type":"item.completed","item":{"id":"call-1","type":"command_execution","command":"cargo test check_1","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"item.started","item":{"id":"call-2","type":"command_execution","command":"cargo test check_2"}}
+{"type":"item.completed","item":{"id":"call-2","type":"command_execution","command":"cargo test check_2","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"item.started","item":{"id":"call-3","type":"command_execution","command":"cargo test check_3"}}
+{"type":"item.completed","item":{"id":"call-3","type":"command_execution","command":"cargo test check_3","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"item.started","item":{"id":"call-4","type":"command_execution","command":"cargo test check_4"}}
+{"type":"item.completed","item":{"id":"call-4","type":"command_execution","command":"cargo test check_4","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}

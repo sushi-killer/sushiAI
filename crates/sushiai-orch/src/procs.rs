@@ -333,7 +333,7 @@ mod tests {
         let mut inside = spawn_insider(&wt);
         let mut outside = spawn_sleep(Path::new("/bin/sleep"));
         let (inside_pid, outside_pid) = (inside.id() as i32, outside.id() as i32);
-        crate::git::remove_task_worktree(repo.path(), &wt);
+        crate::delivery::git::recovery::remove_task_worktree(repo.path(), &wt);
         let _ = inside.wait();
         let spared = alive(outside_pid);
         let _ = outside.kill();

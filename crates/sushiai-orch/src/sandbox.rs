@@ -76,6 +76,52 @@ fn deny_except(root: &Path, keep: &[&Path], denied: &mut Vec<PathBuf>) {
     }
 }
 
+fn denied_roots(
+    inputs: &Inputs<'_>,
+    repo: &Path,
+    worktree: &Path,
+    data_dir: &Path,
+    home: &Path,
+) -> Vec<PathBuf> {
+    let mut denied_read_roots = vec![
+        data_dir.to_path_buf(),
+        resolved(inputs.sushiai_home).join("worktrees.noindex"),
+        home.join(".claude/projects"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
+    ];
+    for project in std::iter::once(inputs.repo_root)
+        .chain(inputs.known_project_folders.iter().map(PathBuf::as_path))
+    {
+        denied_read_roots.push(crate::git::worktree::worktree_path(
+            project,
+            inputs.sushiai_home,
+            inputs.worktree_root,
+            "",
+        ));
+    }
+    // Existing tasks retain their paths when worktreeRoot changes.
+    denied_read_roots.extend(
+        inputs
+            .known_task_worktrees
+            .iter()
+            .map(|path| resolved(path))
+            .filter(|path| *path != worktree),
+    );
+    for project in inputs.known_project_folders {
+        let project = resolved(project);
+        if project == repo || project == worktree {
+            continue;
+        }
+        if repo.starts_with(&project) {
+            deny_except(&project, &[repo, worktree], &mut denied_read_roots);
+        } else {
+            denied_read_roots.push(project);
+        }
+    }
+    denied_read_roots
+}
+
 impl TaskSandbox {
     /// Builds from explicit inputs and a read-only snapshot of their paths;
     /// no app state, process environment or files are changed.
@@ -122,42 +168,7 @@ impl TaskSandbox {
             write_roots.push(resolved(&modules));
         }
 
-        let mut denied_read_roots = vec![
-            data_dir.clone(),
-            resolved(inputs.sushiai_home).join("worktrees.noindex"),
-            home.join(".claude/projects"),
-            home.join(".codex/sessions"),
-            home.join(".codex/archived_sessions"),
-        ];
-        for project in std::iter::once(inputs.repo_root)
-            .chain(inputs.known_project_folders.iter().map(PathBuf::as_path))
-        {
-            denied_read_roots.push(crate::git::worktree_path(
-                project,
-                inputs.sushiai_home,
-                inputs.worktree_root,
-                "",
-            ));
-        }
-        // Existing tasks retain their paths when worktreeRoot changes.
-        denied_read_roots.extend(
-            inputs
-                .known_task_worktrees
-                .iter()
-                .map(|path| resolved(path))
-                .filter(|path| *path != worktree),
-        );
-        for project in inputs.known_project_folders {
-            let project = resolved(project);
-            if project == repo || project == worktree {
-                continue;
-            }
-            if repo.starts_with(&project) {
-                deny_except(&project, &[&repo, &worktree], &mut denied_read_roots);
-            } else {
-                denied_read_roots.push(project);
-            }
-        }
+        let mut denied_read_roots = denied_roots(&inputs, &repo, &worktree, &data_dir, &home);
         write_roots = write_roots.iter().map(|path| resolved(path)).collect();
         denied_read_roots = denied_read_roots
             .iter()
@@ -226,13 +237,46 @@ impl TaskSandbox {
     }
 }
 
+/// Seatbelt's later rules reopen this run and worktree under denied roots.
+pub fn to_sbpl(sandbox: &TaskSandbox) -> String {
+    let quoted = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    for path in &sandbox.denied_read_roots {
+        profile.push_str(&format!("(deny file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_exceptions {
+        profile.push_str(&format!("(allow file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_metadata_paths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (literal {}))\n",
+            quoted(path)
+        ));
+    }
+    for path in &sandbox.read_metadata_subpaths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (subpath {}))\n",
+            quoted(path)
+        ));
+    }
+    profile.push_str("(deny file-write* (subpath \"/\"))\n");
+    for path in &sandbox.write_roots {
+        profile.push_str(&format!("(allow file-write* (subpath {}))\n", quoted(path)));
+    }
+    profile.push_str(&format!(
+        "(deny network-outbound (remote unix-socket (path-literal {})))\n",
+        quoted(&sandbox.daemon_socket),
+    ));
+    profile
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        engine::task_sandbox_profile,
         harness,
-        model::{SandboxMode, Settings},
+        policy::settings::{SandboxMode, Settings},
+        sandbox::to_sbpl as task_sandbox_profile,
     };
 
     fn policy(root: &Path, projects: &[PathBuf]) -> TaskSandbox {
@@ -311,7 +355,8 @@ mod tests {
             ".tasks",
             absolute.to_str().unwrap(),
         ] {
-            let worktree = crate::git::worktree_path(&repo, &sushiai_home, setting, "task/own");
+            let worktree =
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, "task/own");
             let built = TaskSandbox::build(Inputs {
                 repo_root: &repo,
                 worktree: &worktree,
@@ -330,8 +375,8 @@ mod tests {
             });
             for denied in [
                 sushiai_home.join("worktrees.noindex"),
-                crate::git::worktree_path(&repo, &sushiai_home, setting, ""),
-                crate::git::worktree_path(&sibling, &sushiai_home, setting, ""),
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, ""),
+                crate::git::worktree::worktree_path(&sibling, &sushiai_home, setting, ""),
                 retained.clone(),
             ] {
                 assert!(
@@ -386,7 +431,7 @@ mod tests {
             let worktree = if setting == "orchestrator/worktrees" {
                 data.join("worktrees/own")
             } else {
-                crate::git::worktree_path(&repo, &sushiai_home, setting, "task/own")
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, "task/own")
             };
             let sibling = worktree.with_file_name("task-other");
             let foreign = sushiai_home.join("worktrees.noindex/other-repo/task-other");

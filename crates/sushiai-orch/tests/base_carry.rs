@@ -3,7 +3,15 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -426,6 +434,29 @@ fn a_parent_keeps_carried_children_when_landing_on_the_default_branch_is_refused
     }
 }
 
+fn assert_finished_retry(repo: &Path, finished: &Value, parent: bool, answered_by: &str) {
+    if parent {
+        assert!(attempts(finished).is_empty(), "{finished}");
+        for (file, expected) in [("README.md", "child"), ("second.txt", "second")] {
+            assert_eq!(
+                git_out(
+                    repo,
+                    &[
+                        "show",
+                        &format!("{}:{file}", finished["branch"].as_str().unwrap())
+                    ]
+                ),
+                expected,
+                "{finished}"
+            );
+        }
+    }
+    assert_eq!(
+        finished["questionHistory"][0]["answeredBy"], answered_by,
+        "{finished}"
+    );
+}
+
 fn retry_survives_restart(
     parent: bool,
     policy: bool,
@@ -508,22 +539,6 @@ fn retry_survives_restart(
     let finished = done(&socket, &id);
     assert_eq!(finished["baseSha"], base, "{finished}");
     assert_eq!(preexisting_count(&finished), 1, "{finished}");
-    if parent {
-        assert!(attempts(&finished).is_empty(), "{finished}");
-        for (file, expected) in [("README.md", "child"), ("second.txt", "second")] {
-            assert_eq!(
-                git_out(
-                    repo.path(),
-                    &[
-                        "show",
-                        &format!("{}:{file}", finished["branch"].as_str().unwrap())
-                    ]
-                ),
-                expected,
-                "{finished}"
-            );
-        }
-    }
     let expected = if policy {
         "policy"
     } else if agent {
@@ -531,10 +546,7 @@ fn retry_survives_restart(
     } else {
         "owner"
     };
-    assert_eq!(
-        finished["questionHistory"][0]["answeredBy"], expected,
-        "{finished}"
-    );
+    assert_finished_retry(repo.path(), &finished, parent, expected);
     let worktrees = clean_worktrees(&socket, repo.path());
     stop_daemon(&socket);
     let _ = wait_for_exit(second);

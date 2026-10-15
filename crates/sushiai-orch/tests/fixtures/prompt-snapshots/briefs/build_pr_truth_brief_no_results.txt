@@ -1,6 +1,6 @@
 ## Pull request body check
 
-The pull request body below is about to be published for this finished task. Read-only: do not edit files. Check each claim in the body against the diff and the check results. A claim is false when the diff does not show it: a file, test, behaviour or result the diff does not contain, or a check that did not pass. Do not judge wording or style.
+The pull request body below is about to be published for this finished task. Read-only: do not edit files. Check each implementation claim in the body against the diff. Do not add claims about running or not running checks; the application appends validation from its own records. A claim is false when the diff does not show it: a file, test, behaviour or result the diff does not contain, or a check that did not pass. Do not judge wording or style.
 
 Reply with ONLY one JSON object and nothing else: {"ok":true,"corrections":[]} when every claim holds. Otherwise {"ok":false,"corrections":["..."],"body":"..."}, where each correction names one false claim and body is the complete corrected body with those claims fixed or removed.
 

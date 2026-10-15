@@ -2,7 +2,12 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::{poll_task_status, poll_until, wait_until};
+use common::process::{sushiai_bin, Daemon};
+use common::protocol::raw_request_with_params;
+use common::repository::{git_out, init_git_repo};
+
 use std::path::Path;
 use std::process::Command;
 
@@ -240,6 +245,43 @@ fn delete_removes_the_worktree_and_the_branch() {
     daemon.shutdown_and_wait();
 }
 
+fn restore_worktree(repo: &Path, task: &serde_json::Value) {
+    git_out(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            task["worktree"].as_str().unwrap(),
+            task["branch"].as_str().unwrap(),
+        ],
+    );
+}
+
+fn gc_action(v: &serde_json::Value, path: &str) -> String {
+    v["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| canon(Path::new(e["path"].as_str().unwrap())) == canon(Path::new(path)))
+        .map(|e| e["action"].as_str().unwrap().to_string())
+        .unwrap_or_default()
+}
+
+fn gc_cli(daemon: &Daemon, dry_run: bool) -> serde_json::Value {
+    let mut command = Command::new(sushiai_bin());
+    command.args(["orch", "gc"]);
+    if dry_run {
+        command.arg("--dry-run");
+    }
+    let result = command
+        .env("SUSHIAI_HOME", daemon.home.path())
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    serde_json::from_slice(&result.stdout).expect("gc prints its report as JSON")
+}
+
 #[test]
 fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     let flag_dir = tempfile::tempdir().unwrap();
@@ -247,28 +289,13 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     std::fs::write(&flag, "").unwrap();
     let (daemon, _scripts) = spawn(&switchable(&flag));
     let repo = init_git_repo();
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}");
-    };
-
     // A done task whose worktree is back, as an older orchd left it.
     let done = create(&daemon, repo.path(), "Done", true);
     let done_id = done["id"].as_str().unwrap().to_string();
     let done_wt = done["worktree"].as_str().unwrap().to_string();
     let settled = poll_task_status(&daemon, &done_id);
     assert_eq!(settled["status"], "done", "{settled}");
-    git(&[
-        "worktree",
-        "add",
-        "-q",
-        &done_wt,
-        done["branch"].as_str().unwrap(),
-    ]);
+    restore_worktree(repo.path(), &done);
     std::fs::remove_file(&flag).unwrap();
 
     // A task that is still running keeps its worktree.
@@ -288,13 +315,7 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
     archive_stopped(&daemon, &stopped_id);
     assert!(!Path::new(&stopped_wt).exists());
-    git(&[
-        "worktree",
-        "add",
-        "-q",
-        &stopped_wt,
-        stopped["branch"].as_str().unwrap(),
-    ]);
+    restore_worktree(repo.path(), &stopped);
     std::fs::write(Path::new(&stopped_wt).join("big.bin"), vec![7u8; 50_000]).unwrap();
 
     // A worktree no task knows about.
@@ -302,58 +323,43 @@ fn gc_removes_done_and_archived_worktrees_but_never_running_or_unknown_ones() {
         .home
         .path()
         .join("worktrees.noindex/stray-repo/unknown");
-    git(&[
-        "worktree",
-        "add",
-        "-q",
-        "-b",
-        "stray",
-        unknown.to_str().unwrap(),
-    ]);
+    git_out(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "stray",
+            unknown.to_str().unwrap(),
+        ],
+    );
 
     let dry = daemon.request("worktrees.gc", serde_json::json!({"dryRun": true}));
-    let action = |v: &serde_json::Value, path: &str| -> String {
-        v["worktrees"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| canon(Path::new(e["path"].as_str().unwrap())) == canon(Path::new(path)))
-            .map(|e| e["action"].as_str().unwrap().to_string())
-            .unwrap_or_default()
-    };
-    assert_eq!(action(&dry, &stopped_wt), "would-remove", "{dry}");
-    assert_eq!(action(&dry, &running_wt), "kept", "{dry}");
-    assert_eq!(action(&dry, &done_wt), "would-remove", "{dry}");
-    assert_eq!(action(&dry, unknown.to_str().unwrap()), "unknown", "{dry}");
+    assert_eq!(gc_action(&dry, &stopped_wt), "would-remove", "{dry}");
+    assert_eq!(gc_action(&dry, &running_wt), "kept", "{dry}");
+    assert_eq!(gc_action(&dry, &done_wt), "would-remove", "{dry}");
+    assert_eq!(
+        gc_action(&dry, unknown.to_str().unwrap()),
+        "unknown",
+        "{dry}"
+    );
     assert!(dry["freedBytes"].as_u64().unwrap() >= 50_000, "{dry}");
     assert!(Path::new(&stopped_wt).exists(), "dry run changes nothing");
 
     // The CLI reaches the same RPC.
-    let cli = Command::new(sushiai_bin())
-        .args(["orch", "gc", "--dry-run"])
-        .env("SUSHIAI_HOME", daemon.home.path())
-        .output()
-        .unwrap();
-    assert!(cli.status.success(), "{cli:?}");
-    let printed: serde_json::Value =
-        serde_json::from_slice(&cli.stdout).expect("gc prints its report as JSON");
+    let printed = gc_cli(&daemon, true);
     assert_eq!(printed["dryRun"], true);
     assert!(Path::new(&stopped_wt).exists());
 
-    let real = Command::new(sushiai_bin())
-        .args(["orch", "gc"])
-        .env("SUSHIAI_HOME", daemon.home.path())
-        .output()
-        .unwrap();
-    assert!(real.status.success(), "{real:?}");
-    let report: serde_json::Value = serde_json::from_slice(&real.stdout).unwrap();
-    assert_eq!(action(&report, &stopped_wt), "removed", "{report}");
+    let report = gc_cli(&daemon, false);
+    assert_eq!(gc_action(&report, &stopped_wt), "removed", "{report}");
     assert!(report["freedBytes"].as_u64().unwrap() >= 50_000, "{report}");
     assert!(!Path::new(&stopped_wt).exists());
     assert!(Path::new(&running_wt).exists(), "a running task keeps it");
     assert!(unknown.exists(), "an unknown worktree is never removed");
     assert!(!Path::new(&done_wt).exists());
-    assert_eq!(action(&report, &done_wt), "removed", "{report}");
+    assert_eq!(gc_action(&report, &done_wt), "removed", "{report}");
     let wip = format!("refs/orchd/wip/{stopped_id}");
     assert_eq!(
         git_out(repo.path(), &["show", &format!("{wip}:big.bin")]).len(),

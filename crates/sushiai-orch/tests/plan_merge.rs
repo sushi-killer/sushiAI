@@ -4,7 +4,10 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
 
 /// Plans the request as `$PARTS` (a ready `subtasks` JSON array body), plans
 /// a child from its `PART_` marker, and implements by writing the lines the

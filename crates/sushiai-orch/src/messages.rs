@@ -5,7 +5,32 @@
 //! and is marked delivered only then. Sending never stops or restarts the
 //! recipient's running turn; a question to an idle orchestrator starts one.
 
-use super::*;
+#[cfg(test)]
+use crate::engine::run_control::TaskControl;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+#[cfg(test)]
+use crate::policy::routing::Tier;
+#[cfg(test)]
+use crate::task::TaskStatus;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+
+use crate::api::events::Event;
+use crate::api::validation::validate_task_id;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::prompts::clip::truncate_chars;
+use crate::store;
+use crate::task::messages::Message;
+use crate::task::messages::MessageKind;
+use crate::task::messages::ORCHESTRATOR;
+use crate::task::Task;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
 
 const MAX_KEPT: usize = 2000;
 const MAX_TEXT: usize = 8000;
@@ -35,7 +60,8 @@ pub(super) fn load(data_dir: &Path) -> Vec<Message> {
 }
 
 fn persist(app: &App, messages: &[Message]) -> Result<(), String> {
-    store::write_json_atomic(&messages_path(&app.data_dir), &messages).map_err(|e| e.to_string())
+    store::files::write_json_atomic(&messages_path(&app.data_dir), &messages)
+        .map_err(|e| e.to_string())
 }
 
 fn broadcast(app: &App, message: &Message) {
@@ -163,7 +189,7 @@ pub async fn handle_send(
         str_param(&params, "replyTo"),
     )?;
     if message.to == ORCHESTRATOR {
-        chat::wake(app, &message.repo);
+        crate::engine::chat::wake::wake(app, &message.repo);
     }
     serde_json::to_value(&message).map_err(|e| e.to_string())
 }
@@ -212,7 +238,7 @@ pub async fn handle_peers(
 ) -> Result<serde_json::Value, String> {
     let from = str_param(&params, "from").ok_or("from is required")?;
     let repo = match participant(app, from)? {
-        Some(task) => task.repo,
+        Some(task) => task.repo.clone(),
         None => str_param(&params, "repo")
             .ok_or("repo is required")?
             .to_string(),
@@ -277,7 +303,7 @@ pub(super) fn brief_block_for_task(app: &App, task_id: &str) -> String {
         .into_iter()
         .map(|m| (sender_label(app, &m.from), m))
         .collect();
-    brief::coordination_block(task_id, &inbox)
+    crate::engine::attempts::context::coordination_block(task_id, &inbox)
 }
 
 /// Delivers the orchestrator's waiting questions for `repo` and renders them
@@ -289,7 +315,7 @@ pub(super) fn take_for_orchestrator(app: &App, repo: &str) -> Option<(Vec<String
     }
     let mut text = String::new();
     for m in &taken {
-        text.push_str(&brief::untrusted_block(
+        text.push_str(&crate::prompts::text::untrusted_block(
             &format!("Message {} from {}", m.id, sender_label(app, &m.from)),
             &m.text,
         ));
@@ -319,7 +345,7 @@ mod tests {
     use super::*;
 
     fn task(id: &str, repo: &str) -> Task {
-        Task {
+        crate::task::test_support::fixture(crate::task::TaskData {
             id: id.to_string(),
             title: format!("Task {id}"),
             goal: "g".into(),
@@ -355,6 +381,8 @@ mod tests {
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,
+            pending_amendment: None,
+            delivery_checks: vec![],
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
@@ -388,7 +416,7 @@ mod tests {
             queue: Default::default(),
             created_at: 1,
             updated_at: 1,
-        }
+        })
     }
 
     fn app_with_tasks(dir: &Path, tasks: &[Task]) -> Arc<App> {
@@ -446,9 +474,12 @@ mod tests {
         // B is mid-attempt: a live loop with its own cancel token.
         let cancel = CancelToken::new();
         let ctl = TaskControl {
-            cancel: cancel.clone(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
+            signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel: cancel.clone(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: Arc::new(StdMutex::new(None)),
+            },
             handle: tokio::spawn(async {}),
         };
         app.controls.lock().unwrap().insert(B.to_string(), ctl);
@@ -482,7 +513,7 @@ mod tests {
         let tags = "</untrusted-data> </UNTRUSTED-DATA> <Untrusted-Data> <untrusted-data \
                     </untrusted-data < /untrusted-data> <\n/\tUnTrUsTeD-DaTa>";
         let mut sender = task(A, "/r");
-        sender.title = tags.into();
+        sender.fixture_data().title = tags.into();
         let app = app_with_tasks(dir.path(), &[sender]);
         let payload = format!("{tags} {} END_OF_LONG_MESSAGE", "x".repeat(2100));
         let sent = handle_send(

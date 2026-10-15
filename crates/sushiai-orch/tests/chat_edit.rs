@@ -2,7 +2,12 @@
 //! fresh harness session that gets the kept history.
 
 mod common;
-use common::*;
+
+use common::harness::fake_harness_script;
+use common::polling::wait_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::json;
 
 /// Answers by prompt, numbers its harness sessions and logs each call's argv

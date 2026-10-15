@@ -3,7 +3,7 @@
 //! (`evolution.adopt`). Prints the daemon's JSON answer; exits 1 on an error and 2 on bad
 //! usage.
 
-use crate::mcp::Caller;
+use crate::api::mcp::Caller;
 use serde_json::json;
 
 fn parse(args: &[String]) -> Result<Option<String>, String> {

@@ -12,8 +12,29 @@ const SRC = path.join(CRATE, "src");
 // A string constant this long is prompt text; so is a multi-line one this long.
 const LONG_CONST = 100;
 const LONG_MULTILINE_CONST = 40;
-// brief.rs only assembles briefs: a literal this long there is instruction text.
+// Brief assemblers keep instruction text in the compiled YAML blocks.
 const LONG_BRIEF_LITERAL = 100;
+const BRIEF_SOURCES = [
+  "engine/attempts/advisor.rs",
+  "engine/attempts/brief.rs",
+  "engine/attempts/context.rs",
+  "engine/attempts/dependencies.rs",
+  "engine/attempts/pick.rs",
+  "engine/attempts/report.rs",
+  "engine/attempts/resume.rs",
+  "engine/planning/draft.rs",
+  "engine/planning/prompt.rs",
+  "engine/planning/serde.rs",
+  "verify/review/brief.rs",
+  "verify/review/reply.rs",
+  "verify/review/routing.rs",
+  "verify/evidence.rs",
+  "delivery/brief.rs",
+  "engine/audit/brief.rs",
+  "prompts/evolution/proposal.rs",
+  "prompts/reply.rs",
+  "prompts/text.rs",
+];
 const CONST_DECLARATION =
   /(?:const|static)\s+[A-Z][A-Z0-9_]*\s*:\s*&\s*(?:'static\s+)?str\s*=\s*$/;
 const RAW_STRING = /^b?r(#*)"/;
@@ -36,7 +57,12 @@ function rustFiles(directory) {
 function shippedFiles() {
   return rustFiles(SRC).filter((file) => {
     const rel = path.relative(SRC, file).split(path.sep).join("/");
-    return !rel.startsWith("engine/tests/") && rel !== "engine/test_support.rs";
+    return (
+      !rel.split("/").includes("tests") &&
+      !rel.endsWith("/tests.rs") &&
+      rel !== "engine/test_support.rs" &&
+      !rel.endsWith("/test_fixtures.rs")
+    );
   });
 }
 
@@ -130,8 +156,11 @@ function promptTexts(file, everyLiteral) {
   });
 }
 
-test("brief.rs keeps no prompt text in its string literals", () => {
-  assert.deepEqual(promptTexts(path.join(SRC, "brief.rs"), true), []);
+test("brief assemblers keep no prompt text in their string literals", () => {
+  assert.deepEqual(
+    BRIEF_SOURCES.flatMap((file) => promptTexts(path.join(SRC, file), true)),
+    [],
+  );
 });
 
 test("the orchestrator crate keeps no prompt text in a string constant", () => {

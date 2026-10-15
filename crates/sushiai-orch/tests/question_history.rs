@@ -4,7 +4,13 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{poll_until, remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit, Daemon};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::init_git_repo;
+
 use serde_json::{json, Value};
 
 /// One fake plays every role, told apart by the brief. `$LOG_DIR` counts the

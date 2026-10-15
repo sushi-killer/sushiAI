@@ -1,7 +1,12 @@
 //! Repo-declared policy shares the settings filters and is pinned to the base.
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::{remove_dir_retrying, settle};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -216,7 +221,7 @@ fn the_reader_uses_the_commit_and_rejects_unknown_keys() {
     }
     assert!(sushiai_orch::worktree_env::scoped_checks_at(repo.path(), "bad-revision").is_err());
     assert!(
-        sushiai_orch::git::show_file(repo.path(), &base, "absent.json")
+        sushiai_orch::git::history::show_file(repo.path(), &base, "absent.json")
             .unwrap()
             .is_none()
     );

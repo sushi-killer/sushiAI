@@ -1,7 +1,15 @@
 //! Running graph controls exercised through the daemon and a gated harness.
 mod common;
 
-use common::*;
+use common::polling::settle;
+
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{poll_until, wait_until};
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -10,6 +18,14 @@ const FAKE: &str = r###"#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
 brief = sys.stdin.read()
 gates = pathlib.Path(os.environ['GATES'])
+if brief.startswith('## Pull request'):
+    (gates / 'pr_helper_called').write_text(brief)
+if brief.startswith('## Route the review'):
+    print(json.dumps({'type': 'result', 'result': '```sushi-route\n' + json.dumps({'lenses': {'seams': True, 'code': True, 'tests': True, 'errors': True, 'docs': True}, 'reason': 'Synthetic review routing'}) + '\n```', 'total_cost_usd': 0.01}))
+    sys.exit(0)
+if brief.startswith('## Review'):
+    print(json.dumps({'type': 'result', 'result': '```sushi-review\n' + json.dumps({'verdict': 'PASS', 'findings': []}) + '\n```', 'total_cost_usd': 0.01}))
+    sys.exit(0)
 if 'You review a coding task plan' in brief:
     print(json.dumps({'type': 'result', 'result': json.dumps({'findings': []})}))
     sys.exit(0)
@@ -32,7 +48,13 @@ count.write_text(str(n))
 (gates / ('head_' + name + '_' + str(n))).write_text(subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
 file = pathlib.Path(config.get('file', name + '.txt'))
 mode = config.get('mode', 'complete')
-if mode == 'conflict':
+if mode == 'resolve_conflict':
+    if '## Base moved' in brief:
+        (gates / 'conflict_markers').write_text(file.read_text())
+        file.write_text('base change\npart change\n')
+    else:
+        file.write_text('part change\n')
+elif mode == 'conflict':
     if n == 1:
         file.write_text('part change\n')
     elif '## Base moved' in brief:
@@ -109,23 +131,15 @@ fn started(gates: &Path, name: &str, n: u32) {
     });
 }
 
-fn create(
-    daemon: &Daemon,
-    repo: &Path,
-    name: &str,
-    paths: &[&str],
-    parent: Option<&str>,
-    deps: &[&str],
-    verify: &str,
-) -> String {
-    let task = daemon.request(
-        "task.create",
-        json!({
-            "repo": repo, "title": name, "goal": format!("CASE_{name}: implement the change"),
-            "verify": [verify], "paths": paths, "parent": parent, "dependsOn": deps, "start": false,
-        }),
-    );
-    task["id"].as_str().unwrap().to_string()
+fn create(daemon: &Daemon, repo: &Path, name: &str, mut params: Value) -> String {
+    params["repo"] = json!(repo);
+    params["title"] = json!(name);
+    params["goal"] = json!(format!("CASE_{name}: implement the change"));
+    params["start"] = json!(false);
+    daemon.request("task.create", params)["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn get(daemon: &Daemon, id: &str) -> Value {
@@ -155,8 +169,18 @@ fn graph(
     paths: &[&str],
     verify: &str,
 ) -> (String, String) {
-    let parent = create(daemon, repo, "parent", &[], None, &[], "true");
-    let part = create(daemon, repo, name, paths, Some(&parent), &[], verify);
+    let parent = create(
+        daemon,
+        repo,
+        "parent",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
+    let part = create(
+        daemon,
+        repo,
+        name,
+        json!({"paths": paths, "parent": &parent, "dependsOn": [], "verify": [verify]}),
+    );
     (parent, part)
 }
 
@@ -345,10 +369,7 @@ fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
         &daemon,
         repo.path(),
         "dependent",
-        &[],
-        None,
-        &[&part],
-        "true",
+        json!({"paths": [], "parent": null, "dependsOn": [&part], "verify": ["true"]}),
     );
     let parked = daemon.request(
         "task.park",
@@ -398,8 +419,18 @@ fn park_until_resumes_when_that_task_lands() {
     }
     let (daemon, _scripts) = daemon(gates.path());
     let repo = repo();
-    let paused = create(&daemon, repo.path(), "paused", &[], None, &[], "true");
-    let fixer = create(&daemon, repo.path(), "fixer", &[], None, &[], "true");
+    let paused = create(
+        &daemon,
+        repo.path(),
+        "paused",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
+    let fixer = create(
+        &daemon,
+        repo.path(),
+        "fixer",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     daemon.request(
         "task.park",
         json!({"id": paused, "reason": "waits for the fix", "until": fixer}),
@@ -411,7 +442,12 @@ fn park_until_resumes_when_that_task_lands() {
     assert_eq!(settle(&daemon, &fixer)["status"], "done");
     started(gates.path(), "paused", 1);
     assert!(get(&daemon, &paused)["park"].is_null());
-    let manual = create(&daemon, repo.path(), "manual", &[], None, &[], "true");
+    let manual = create(
+        &daemon,
+        repo.path(),
+        "manual",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     start(&daemon, &manual);
     started(gates.path(), "manual", 1);
     daemon.request("task.park", json!({"id": manual, "reason": "pause"}));
@@ -452,11 +488,21 @@ fn stopped_holder_never_blocks_a_waiter() {
     configure(gates.path(), "waiter", "complete", "waiter.txt", true);
     let (daemon, _scripts) = daemon(gates.path());
     let repo = repo();
-    let holder = create(&daemon, repo.path(), "holder", &[], None, &[], "true");
+    let holder = create(
+        &daemon,
+        repo.path(),
+        "holder",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     start(&daemon, &holder);
     // The holder has really changed `shared.txt` by the time it holds.
     started(gates.path(), "holder", 1);
-    let waiter = create(&daemon, repo.path(), "waiter", &[], None, &[], "true");
+    let waiter = create(
+        &daemon,
+        repo.path(),
+        "waiter",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     start(&daemon, &waiter);
     started(gates.path(), "waiter", 1);
     let token = hook_token(&daemon, &waiter);
@@ -533,7 +579,12 @@ fn rpc_answers_are_labelled_with_their_source() {
         ),
     ] {
         configure(gates.path(), name, "blocked", &format!("{name}.txt"), false);
-        let id = create(&daemon, repo.path(), name, &[], None, &[], "true");
+        let id = create(
+            &daemon,
+            repo.path(),
+            name,
+            json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+        );
         start(&daemon, &id);
         let task = waiting(&daemon, &id);
         let next = task["attempts"].as_array().unwrap().last().unwrap()["n"]
@@ -568,7 +619,12 @@ fn rpc_answers_are_labelled_with_their_source() {
         ("lead_answer_stop", Some("lead"), "Lead: stop (RPC)"),
     ] {
         configure(gates.path(), name, "blocked", &format!("{name}.txt"), false);
-        let id = create(&daemon, repo.path(), name, &[], None, &[], "true");
+        let id = create(
+            &daemon,
+            repo.path(),
+            name,
+            json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+        );
         start(&daemon, &id);
         waiting(&daemon, &id);
         let mut params = json!({"id": id, "answer": "stop"});
@@ -587,13 +643,23 @@ fn stop_clears_the_question() {
     configure(gates.path(), "idle", "blocked", "idle.txt", false);
     let (mut daemon, scripts) = daemon(gates.path());
     let repo = repo();
-    let live = create(&daemon, repo.path(), "live", &[], None, &[], "true");
+    let live = create(
+        &daemon,
+        repo.path(),
+        "live",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     start(&daemon, &live);
     waiting(&daemon, &live);
     let stopped = daemon.request("task.stop", json!({"id": live}));
     assert_eq!(stopped["status"], "stopped");
     assert!(stopped["question"].is_null());
-    let idle = create(&daemon, repo.path(), "idle", &[], None, &[], "true");
+    let idle = create(
+        &daemon,
+        repo.path(),
+        "idle",
+        json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
+    );
     start(&daemon, &idle);
     waiting(&daemon, &idle);
     let script = scripts.path().join("fake.py");
@@ -657,3 +723,6 @@ fn base_sync_preserves_relay_work_between_attempts() {
     assert_eq!(settle(&daemon, id)["status"], "done");
     assert_eq!(settle(&daemon, parent_id)["status"], "done");
 }
+
+#[path = "graph_control/parent_landing.rs"]
+mod parent_landing_tests;

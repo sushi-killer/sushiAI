@@ -5,7 +5,13 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{deadline, poll_until, remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit, Daemon};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -104,6 +110,46 @@ fn a_final_check_that_fails_twice_on_base_is_asked_after_the_first_attempt_and_l
     remove_dir_retrying(worktree);
 }
 
+fn assert_dropped_base_checks(task: &Value, done: &Value, checks: &[&str]) {
+    let decisions = done["decisions"].as_array().unwrap();
+    for check in checks {
+        let dropped = format!("Orchestrator: dropped check {check}");
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|d| d.as_str() == Some(dropped.as_str()))
+                .count(),
+            1,
+            "{decisions:?}"
+        );
+        let recorded = format!(
+            "Owner: base check {check} on {} -> drop all",
+            &task["baseSha"].as_str().unwrap()[..7]
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|d| d.as_str() == Some(recorded.as_str()))
+                .count(),
+            1,
+            "{decisions:?}"
+        );
+    }
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|d| d.as_str() == Some("Owner: drop all"))
+            .count(),
+        1,
+        "{decisions:?}"
+    );
+    assert_eq!(
+        done["questionHistory"].as_array().unwrap().len(),
+        1,
+        "{done}"
+    );
+}
+
 #[test]
 fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     let scripts = tempfile::tempdir().unwrap();
@@ -170,43 +216,7 @@ fn two_finals_failing_on_base_ask_one_question_after_the_first_attempt() {
     );
     let attempts = done["attempts"].as_array().unwrap();
     assert!(attempts.last().unwrap()["failure"].is_null(), "{done}");
-    let decisions = done["decisions"].as_array().unwrap();
-    for check in [first, second] {
-        let dropped = format!("Orchestrator: dropped check {check}");
-        assert_eq!(
-            decisions
-                .iter()
-                .filter(|d| d.as_str() == Some(dropped.as_str()))
-                .count(),
-            1,
-            "{decisions:?}"
-        );
-        let recorded = format!(
-            "Owner: base check {check} on {} -> drop all",
-            &task["baseSha"].as_str().unwrap()[..7]
-        );
-        assert_eq!(
-            decisions
-                .iter()
-                .filter(|d| d.as_str() == Some(recorded.as_str()))
-                .count(),
-            1,
-            "{decisions:?}"
-        );
-    }
-    assert_eq!(
-        decisions
-            .iter()
-            .filter(|d| d.as_str() == Some("Owner: drop all"))
-            .count(),
-        1,
-        "{decisions:?}"
-    );
-    assert_eq!(
-        done["questionHistory"].as_array().unwrap().len(),
-        1,
-        "{done}"
-    );
+    assert_dropped_base_checks(&task, &done, &[first, second]);
 
     let worktree = task["worktree"].as_str().unwrap().to_string();
     daemon.shutdown_and_wait();

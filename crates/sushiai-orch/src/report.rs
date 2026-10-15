@@ -3,9 +3,9 @@
 //! records and a few git facts, with no model call. `build` is pure; the
 //! engine gathers `Facts` and stores the result (`engine/report.rs`).
 
-use crate::brief;
-use crate::costs::CostRecord;
-use crate::model::{AttemptStatus, Stage, Task, TaskStatus, Verdict};
+use crate::store::costs::CostRecord;
+
+use crate::task::{AttemptStatus, Stage, Task, TaskStatus, Verdict};
 use std::collections::{BTreeMap, HashSet};
 
 /// What git says about the work; empty when the repository cannot tell.
@@ -91,7 +91,7 @@ pub fn graph_of<'a>(top: &'a Task, all: &'a [Task]) -> Vec<&'a Task> {
 }
 
 /// The last implement attempt that reached a review, if any.
-fn last_review(task: &Task) -> Option<&crate::model::ReviewResult> {
+fn last_review(task: &Task) -> Option<&crate::task::ReviewResult> {
     task.attempts
         .iter()
         .rev()
@@ -130,7 +130,7 @@ fn criterion_status(task: &Task, i: usize) -> Vec<String> {
             out.push(format!("grounded check {verdict}: `{}`", check.run));
         }
     }
-    let held = brief::held_out_label(i);
+    let held = crate::task::checks::commands::held_out_label(i);
     if let Some(v) = outcomes.iter().find(|v| v.command == held) {
         let verdict = if v.code == Some(0) {
             "passed"
@@ -255,6 +255,19 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         out.push_str(&format!("{}\n\n", top.goal.trim()));
     }
 
+    let wall = push_outcome(&mut out, top);
+    push_work(&mut out, top, graph, facts);
+    push_assumptions(&mut out, graph);
+    push_cost(&mut out, graph, records, &wall);
+    out.push_str("\n## Attempts\n\n");
+    for task in graph {
+        out.push_str(&attempts_line(task, graph.len() > 1, facts));
+    }
+    push_follow_ups(&mut out, graph);
+    out
+}
+
+fn push_outcome(out: &mut String, top: &Task) -> String {
     out.push_str("## Outcome\n\n");
     let status = match top.status {
         TaskStatus::Done => "done",
@@ -291,6 +304,10 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         None => out.push_str("- Lead touch: unknown\n"),
     }
 
+    wall
+}
+
+fn push_work(out: &mut String, top: &Task, graph: &[&Task], facts: &Facts) {
     out.push_str("\n## What changed\n\n");
     if facts.commits.is_empty() && facts.files.is_empty() {
         out.push_str("- Nothing recorded.\n");
@@ -319,7 +336,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         if graph.len() > 1 {
             out.push_str(&format!("**{}**\n\n", task.title));
         }
-        push_criteria(&mut out, task, facts, &mut used);
+        push_criteria(out, task, facts, &mut used);
         out.push('\n');
     }
     let loose: Vec<&String> = facts.images.iter().filter(|i| !used.contains(*i)).collect();
@@ -342,7 +359,9 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         }
         out.push('\n');
     }
+}
 
+fn push_assumptions(out: &mut String, graph: &[&Task]) {
     let many = graph.len() > 1;
     out.push_str("## Assumptions and automatic answers\n\n");
     let mut any = false;
@@ -374,7 +393,9 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if !any {
         out.push_str("- None.\n");
     }
+}
 
+fn push_cost(out: &mut String, graph: &[&Task], records: &[CostRecord], wall: &str) {
     out.push_str("\n## Cost\n\n");
     let ids: HashSet<&str> = graph.iter().map(|t| t.id.as_str()).collect();
     let mine: Vec<&CostRecord> = records
@@ -389,14 +410,12 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if mine.is_empty() {
         out.push_str("No cost records.\n");
     } else {
-        cost_tables(&mut out, &mine);
+        cost_tables(out, &mine);
     }
+}
 
-    out.push_str("\n## Attempts\n\n");
-    for task in graph {
-        out.push_str(&attempts_line(task, many, facts));
-    }
-
+fn push_follow_ups(out: &mut String, graph: &[&Task]) {
+    let many = graph.len() > 1;
     out.push_str("\n## Follow-ups\n\n");
     let mut any = false;
     for task in graph {
@@ -420,7 +439,6 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if !any {
         out.push_str("- None.\n");
     }
-    out
 }
 
 #[cfg(test)]
@@ -437,22 +455,22 @@ mod tests {
     #[test]
     fn a_criterion_status_follows_its_ruling_by_index() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
-        task.criteria = vec!["Beta".into(), "Beta works".into()];
+        task.fixture_data().criteria = vec!["Beta".into(), "Beta works".into()];
         let mut attempt = crate::engine::test_support::attempt_with_failure(1, "x");
-        attempt.review = Some(crate::model::ReviewResult {
+        attempt.review = Some(crate::task::ReviewResult {
             verdict: Verdict::Fail,
             findings: Vec::new(),
             repeated: Vec::new(),
             severities: Vec::new(),
             details: Vec::new(),
-            criteria: vec![crate::model::CriterionRuling {
+            criteria: vec![crate::task::CriterionRuling {
                 criterion: "Beta works".into(),
                 index: Some(1),
                 met: Some(false),
                 evidence: None,
             }],
         });
-        task.attempts = vec![attempt];
+        task.fixture_data().attempts = vec![attempt];
         assert_eq!(criterion_status(&task, 1)[0], "unmet (review)");
         assert_eq!(criterion_status(&task, 0)[0], "not met at the last review");
     }
@@ -466,9 +484,9 @@ mod tests {
     #[test]
     fn unlanded_work_is_reported_and_absent_when_not_set() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
-        task.branch = "task/feature".into();
-        task.base_ref = Some("work".into());
-        task.unlanded = Some(crate::model::Unlanded {
+        task.fixture_data().branch = "task/feature".into();
+        task.fixture_data().base_ref = Some("work".into());
+        task.fixture_data().unlanded = Some(crate::task::Unlanded {
             commits: 2,
             base: "work".into(),
         });
@@ -478,7 +496,7 @@ mod tests {
         assert_eq!(serialized["unlanded"]["commits"], 2);
         assert_eq!(serialized["unlanded"]["base"], "work");
 
-        task.unlanded = None;
+        task.fixture_data().unlanded = None;
         let report = build(&task, &[&task], &[], &Facts::default());
         assert!(!report.contains("Not landed:"));
         assert!(serde_json::to_value(&task)

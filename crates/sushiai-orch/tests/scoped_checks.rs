@@ -3,7 +3,12 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::{remove_dir_retrying, settle};
+use common::repository::init_git_repo;
+
 use serde_json::{json, Value};
 
 /// The implementer writes `$IMPL_FILE` (creating its directory) and reports

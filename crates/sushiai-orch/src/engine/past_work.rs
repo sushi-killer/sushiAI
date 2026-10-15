@@ -3,10 +3,11 @@
 //! that, talk about the same things). Built from orchd's own records, with no
 //! model call.
 
-use super::plan::overlapping_path;
-use crate::brief::untrusted_block;
-use crate::model::*;
+use crate::engine::planning::graph::overlapping_path;
 use crate::prompts::engine_text;
+use crate::prompts::text::untrusted_block;
+use crate::task::notes::RepoNote;
+use crate::task::{Attempt, FailureKind, Stage, Task, TaskStatus};
 use std::collections::HashSet;
 
 /// The section, header included, is never longer than this many characters.

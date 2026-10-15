@@ -60,8 +60,8 @@ test("docs/MAP.md names the key entry files and rule owners", () => {
     "crates/sushiai/src/main.rs",
     "crates/sushiai-orch/src/engine",
     "crates/sushiai-orch/src/engine/mod.rs",
-    "crates/sushiai-orch/src/brief.rs",
-    "crates/sushiai-orch/src/model.rs",
+    "crates/sushiai-orch/src/engine/attempts/brief.rs",
+    "crates/sushiai-orch/src/policy/settings.rs",
     "crates/sushiai-orch/prompts/orchestrator.yaml",
     "tests",
     "scripts/check-conventions.mjs",
@@ -89,10 +89,10 @@ test("docs/MAP.md answers the common where-is questions", () => {
       ?.split(/^## /m)[0] ?? "";
   assert.ok(section, "docs/MAP.md has no '## Where is ...' section");
   for (const answer of [
-    "crates/sushiai-orch/src/model.rs",
+    "crates/sushiai-orch/src/policy/settings.rs",
     "electron/preload.cjs",
     "electron/ipc",
-    "crates/sushiai-orch/src/brief.rs",
+    "crates/sushiai-orch/src/engine/attempts/brief.rs",
     "scripts/check-conventions.mjs",
     "node --test tests/",
     "cargo test -p ",

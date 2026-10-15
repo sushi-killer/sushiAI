@@ -1,4 +1,14 @@
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::engine::state::App;
+use crate::task::Deliverable;
+use crate::task::Task;
+use serde::Deserialize;
+use serde_json::json;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::time::Duration;
 
 /// Largest single deliverable that is copied out of a worktree.
 const MAX_DELIVERABLE_BYTES: u64 = 64 * 1024 * 1024;
@@ -50,7 +60,7 @@ pub(super) fn collect(task: &Task, dest_root: &Path) -> Vec<Deliverable> {
                 || !inside
                 || meta.len() > MAX_DELIVERABLE_BYTES
                 || crate::report::is_image(&rel)
-                || git::is_committed_clean(worktree, &rel)
+                || crate::git::changes::is_committed_clean(worktree, &rel)
             {
                 continue;
             }
@@ -76,8 +86,8 @@ pub(super) fn collect(task: &Task, dest_root: &Path) -> Vec<Deliverable> {
         for d in list.iter_mut().filter(|d| d.placed.is_none()) {
             let target = repo.join(&d.path);
             if std::fs::symlink_metadata(&target).is_ok()
-                || git::is_tracked(repo, &d.path)
-                || !git::is_git_ignored(repo, &d.path)
+                || crate::git::changes::is_tracked(repo, &d.path)
+                || !crate::git::bootstrap::is_git_ignored(repo, &d.path)
             {
                 continue;
             }
@@ -103,7 +113,7 @@ impl App {
             .await
             .unwrap_or_else(|_| task.deliverables.clone());
         if list != task.deliverables {
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Deliverables: {}",
                 list.iter()
                     .map(|d| match &d.placed {
@@ -113,7 +123,7 @@ impl App {
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
-            task.deliverables = list;
+            task.record_deliverables(list);
         }
     }
 }

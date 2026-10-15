@@ -3,7 +3,12 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::wait_until;
+use common::process::Daemon;
+use common::protocol::raw_request_with_params;
+use common::repository::init_git_repo;
+
 use std::path::{Path, PathBuf};
 
 /// A fake harness for `repo.audit`: records its argv and brief next to the

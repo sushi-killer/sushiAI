@@ -1,4 +1,6 @@
-use super::*;
+use crate::task::checks::commands::is_assignment;
+use crate::task::checks::commands::runs_ci_entry;
+use std::path::Path;
 
 pub(super) struct ScopedRun {
     pub commands: Vec<String>,

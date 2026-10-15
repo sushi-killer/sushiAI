@@ -1,6 +1,6 @@
 #[test]
 fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
-    let part = |key: &str, deps: &[&str]| brief::PlanSubtask {
+    let part = |key: &str, deps: &[&str]| crate::engine::planning::draft::PlanSubtask {
         key: key.into(),
         title: key.to_uppercase(),
         request: format!("do {key}"),
@@ -10,21 +10,15 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
     };
     assert!(check_subtasks(&[part("a", &[]), part("b", &["a"])]).is_ok());
     assert!(check_subtasks(&[part("a", &[])]).is_err());
-    assert!(
-        check_subtasks(&[part("a", &["b"]), part("b", &["a"])])
-            .unwrap_err()
-            .contains("cycle")
-    );
-    assert!(
-        check_subtasks(&[part("a", &[]), part("b", &["z"])])
-            .unwrap_err()
-            .contains("unknown key")
-    );
-    assert!(
-        check_subtasks(&[part("a", &[]), part("a", &[])])
-            .unwrap_err()
-            .contains("duplicate")
-    );
+    assert!(check_subtasks(&[part("a", &["b"]), part("b", &["a"])])
+        .unwrap_err()
+        .contains("cycle"));
+    assert!(check_subtasks(&[part("a", &[]), part("b", &["z"])])
+        .unwrap_err()
+        .contains("unknown key"));
+    assert!(check_subtasks(&[part("a", &[]), part("a", &[])])
+        .unwrap_err()
+        .contains("duplicate"));
     let many: Vec<_> = (0..=MAX_SUBTASKS)
         .map(|i| part(&i.to_string(), &[]))
         .collect();
@@ -34,17 +28,16 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
 #[test]
 fn a_subtask_request_carries_the_whole_and_what_was_decided() {
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.decisions = vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
+    parent.fixture_data().decisions =
+        vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
     let text = subtask_request(&parent, "  write the toggle ");
-    assert!(
-        text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\"")
-    );
+    assert!(text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\""));
     assert!(text.contains("- Owner: Which default? -> dark"));
     assert!(!text.contains("Planner: x"));
 }
 
-fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> brief::PlanSubtask {
-    brief::PlanSubtask {
+fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> crate::engine::planning::draft::PlanSubtask {
+    crate::engine::planning::draft::PlanSubtask {
         key: key.into(),
         title: key.to_uppercase(),
         request: format!("do {key}"),
@@ -146,8 +139,8 @@ fn normalized_dependencies_are_checked_before_contracting_the_merged_group() {
     let c = pathed("c", &[], &[]);
     let parts = vec![a, b, c];
     assert_eq!(
-        plan_gate::merge_parts(&parts),
-        plan_gate::MergePlan {
+        plan_gate::grouping::merge_parts(&parts),
+        plan_gate::grouping::MergePlan {
             separate: vec![1],
             merged: vec![0, 2],
         }
@@ -164,7 +157,7 @@ fn normalized_dependencies_are_checked_before_contracting_the_merged_group() {
     // The policy instead keeps their acyclic order in one checklist.
     assert_eq!(
         plan.merge,
-        plan_gate::MergePlan {
+        plan_gate::grouping::MergePlan {
             separate: vec![],
             merged: vec![0, 1, 2],
         }
@@ -178,7 +171,7 @@ fn plan_route_counts_unicode_distinct_paths_and_excludes_urls() {
     let variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
     let request = "Fix café `src/a.rs` [src/a.rs] 'README.md' https://example.test/a.txt";
-    task.request = Some(request.into());
+    task.fixture_data().request = Some(request.into());
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-sonnet");
     assert_eq!(
@@ -202,7 +195,7 @@ fn plan_route_counts_unicode_distinct_paths_and_excludes_urls() {
         .1
         .contains("2 paths > 1"));
 
-    task.request = Some("a.12345678 a.123456789 a.a-b a. a/".into());
+    task.fixture_data().request = Some("a.12345678 a.123456789 a.a-b a. a/".into());
     settings.small_plan_max_paths = 3;
     assert!(variant
         .plan_route_for(&settings, &task)
@@ -215,16 +208,16 @@ fn plan_route_uses_subtask_paths_only_when_nonempty_and_parented() {
     let settings = Settings::default();
     let variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.request = Some("Edit a.rs b.rs c.rs d.rs".into());
-    task.parent = Some("parent".into());
-    task.paths = vec!["src/a".into(), "src/a".into(), "src/b".into()];
+    task.fixture_data().request = Some("Edit a.rs b.rs c.rs d.rs".into());
+    task.fixture_data().parent = Some("parent".into());
+    task.fixture_data().paths = vec!["src/a".into(), "src/a".into(), "src/b".into()];
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-sonnet");
     assert!(line.contains("2 paths <= 3"), "{line}");
-    task.paths.clear();
+    task.fixture_data().paths.clear();
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
-    task.paths = vec!["src/a".into()];
-    task.parent = None;
+    task.fixture_data().paths = vec!["src/a".into()];
+    task.fixture_data().parent = None;
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
 }
 
@@ -238,7 +231,7 @@ fn plan_route_rejects_two_list_items_but_accepts_nonlists_and_one_item() {
         "- first\n * second",
         "+ first\n\t- second",
     ] {
-        task.request = Some(request.into());
+        task.fixture_data().request = Some(request.into());
         let (id, line) = variant.plan_route_for(&settings, &task);
         assert_eq!(id, "claude-opus", "{request}");
         assert!(line.contains("not small: 2 list items >= 2"), "{line}");
@@ -249,7 +242,7 @@ fn plan_route_rejects_two_list_items_but_accepts_nonlists_and_one_item() {
         "- \n* ",
         "a - first\nb - second",
     ] {
-        task.request = Some(request.into());
+        task.fixture_data().request = Some(request.into());
         assert_eq!(
             variant.plan_route_for(&settings, &task).0,
             "claude-sonnet",
@@ -263,7 +256,7 @@ fn plan_route_honors_off_override_and_missing_standard() {
     let mut settings = Settings::default();
     let mut variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.request = Some("Fix a.rs".into());
+    task.fixture_data().request = Some("Fix a.rs".into());
     settings.small_plan_max_chars = 0;
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-opus");
@@ -296,93 +289,4 @@ fn plan_route_honors_off_override_and_missing_standard() {
     settings.planner = "claude-opus".into();
     variant.planner_route = Some("claude-opus".into());
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
-}
-
-fn prose_and_real_checks() -> serde_json::Value {
-    json!([
-        {"criterion": 0, "run": "cargo test -p x foo"},
-        {"criterion": 1, "run": "Amendment{criteria: Some(vec![...])}.apply(&mut task)"},
-    ])
-}
-
-#[test]
-fn store_draft_keeps_no_prose_check() {
-    let (app, dir) = test_app();
-    let mut task = task_with_status(TaskStatus::Drafting);
-    task.attempts = vec![attempt_with_failure(1, "failure")];
-    let draft: brief::PlanDraft = serde_json::from_value(json!({
-        "title": "T",
-        "goal": "G",
-        "criteria": ["one", "two"],
-        "checks": prose_and_real_checks(),
-        "heldOut": {"criterion": 1, "run": "the parser keeps the last row"},
-    }))
-    .unwrap();
-    let settings = app.settings.read().unwrap().clone();
-    store_draft(&app, &mut task, 0, &draft, &settings, dir.path());
-    assert_eq!(task.criteria.len(), 2);
-    assert_eq!(task.checks.len(), 1);
-    assert_eq!(task.checks[0].run, "cargo test -p x foo");
-    assert!(task.held_out.is_none());
-    let lines = task
-        .decisions
-        .iter()
-        .filter(|d| d.contains("has no check"))
-        .count();
-    assert_eq!(lines, 2, "{:?}", task.decisions);
-}
-
-#[tokio::test]
-async fn a_drafted_subtask_part_keeps_no_prose_check() {
-    let (app, dir) = test_app();
-    let repo = dir.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    init_git_repo(&repo);
-    let mut parent = task_with_status(TaskStatus::Running);
-    parent.repo = repo.to_string_lossy().into();
-    parent.worktree = parent.repo.clone();
-    parent.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
-    parent.base_ref = git::branch_of(&repo, "HEAD");
-    parent.branch = parent.base_ref.clone().unwrap_or_default();
-    app.store.save_task(&parent).unwrap();
-    let part = |key: &str, deps: &[&str]| -> brief::PlanSubtask {
-        serde_json::from_value(json!({
-            "key": key,
-            "title": key,
-            "request": format!("do {key}"),
-            "goal": "g",
-            "criteria": ["one", "two"],
-            "verify": ["npm test"],
-            "check": "npm test",
-            "dependsOn": deps,
-            "paths": [format!("src/{key}.rs")],
-            "checks": prose_and_real_checks(),
-            "heldOut": {"criterion": 1, "run": "the parser keeps the last row"},
-        }))
-        .unwrap()
-    };
-    let plan = prepare_subtasks(&[part("a", &[]), part("b", &["a"])]);
-    split_into_subtasks(&app, &parent.id, &plan, false)
-        .await
-        .unwrap();
-    let children: Vec<Task> = app
-        .store
-        .list_tasks()
-        .unwrap()
-        .into_iter()
-        .filter(|t| t.parent.as_deref() == Some(parent.id.as_str()))
-        .collect();
-    assert_eq!(children.len(), 2);
-    for child in &children {
-        assert!(child.criteria.len() >= 2);
-        assert_eq!(child.checks.len(), 1, "{:?}", child.checks);
-        assert_eq!(child.checks[0].run, "cargo test -p x foo");
-        assert!(child.held_out.is_none());
-        let lines = child
-            .decisions
-            .iter()
-            .filter(|d| d.contains("has no check"))
-            .count();
-        assert_eq!(lines, 2, "{:?}", child.decisions);
-    }
 }

@@ -1,4 +1,4 @@
-use super::*;
+use crate::policy::variant::Variant;
 
 /// `overrides` is a partial `Variant` object; its keys replace the defaults'.
 pub(super) fn resolve_variant(

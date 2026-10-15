@@ -1,7 +1,12 @@
 //! Subtasks run derived checks in their own tree; parents keep the full gate.
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::{remove_dir_retrying, settle};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -123,6 +128,41 @@ fn plan_reply(dir: &Path, name: &str, plan: Value) -> PathBuf {
 /// Runs one subtask at its parent. With a `check` the planner splits the
 /// parent into a part that names it; without one the subtask is created by
 /// hand and has no planner check.
+fn settle_graph(
+    daemon: &Daemon,
+    repo: &Path,
+    command: &str,
+    planned: bool,
+    parent_lists_check: bool,
+) -> (Value, Value) {
+    if planned {
+        let parent = daemon.request(
+            "task.create",
+            json!({"repo": repo.to_str().unwrap(), "request": "combine the parts", "start": true}),
+        );
+        let parent = settle(daemon, parent["id"].as_str().unwrap());
+        let listed = daemon.request("task.list", json!({"repo": parent["repo"]}));
+        let child = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["parent"] == parent["id"] && t["title"] == "Part")
+            .unwrap_or_else(|| panic!("the planner created a child: {listed}"))
+            .clone();
+        (parent, settle(daemon, child["id"].as_str().unwrap()))
+    } else {
+        let parent = daemon.request("task.create", json!({
+            "repo":repo.to_str().unwrap(), "title":"Parent", "goal":"Combined tree", "verify":["true"],
+            "finalVerify": if parent_lists_check { vec![command] } else { vec![] }, "start":false,
+        }));
+        let child = daemon.request("task.create", json!({
+            "repo":repo.to_str().unwrap(), "title":"Part", "goal":"Write files", "verify":[command], "parent":parent["id"],
+        }));
+        let child = settle(daemon, child["id"].as_str().unwrap());
+        (settle(daemon, parent["id"].as_str().unwrap()), child)
+    }
+}
+
 fn run(
     files: &str,
     command: &str,
@@ -189,32 +229,13 @@ fn run(
     settings["sandbox"] = json!("host");
     settings["gateAt"] = json!({repo.path().to_str().unwrap(): gate_at});
     daemon.request("settings.set", json!({"settings":settings}));
-    let (parent, child) = if check.is_some() {
-        let parent = daemon.request(
-            "task.create",
-            json!({"repo": repo.path().to_str().unwrap(), "request": "combine the parts", "start": true}),
-        );
-        let parent = settle(&daemon, parent["id"].as_str().unwrap());
-        let listed = daemon.request("task.list", json!({"repo": parent["repo"]}));
-        let child = listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["parent"] == parent["id"] && t["title"] == "Part")
-            .unwrap_or_else(|| panic!("the planner created a child: {listed}"))
-            .clone();
-        (parent, settle(&daemon, child["id"].as_str().unwrap()))
-    } else {
-        let parent = daemon.request("task.create", json!({
-            "repo":repo.path().to_str().unwrap(), "title":"Parent", "goal":"Combined tree", "verify":["true"],
-            "finalVerify": if parent_lists_check { vec![command] } else { vec![] }, "start":false,
-        }));
-        let child = daemon.request("task.create", json!({
-            "repo":repo.path().to_str().unwrap(), "title":"Part", "goal":"Write files", "verify":[command], "parent":parent["id"],
-        }));
-        let child = settle(&daemon, child["id"].as_str().unwrap());
-        (settle(&daemon, parent["id"].as_str().unwrap()), child)
-    };
+    let (parent, child) = settle_graph(
+        &daemon,
+        repo.path(),
+        command,
+        check.is_some(),
+        parent_lists_check,
+    );
     assert_eq!(child["status"], "done", "{child}");
     assert_eq!(parent["status"], "done", "{parent}");
     let log = std::fs::read_to_string(&check_log).unwrap();

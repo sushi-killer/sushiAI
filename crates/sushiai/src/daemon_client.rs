@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use serde_json::{json, Value};
-use sushiai_orch::mcp::Caller;
+use sushiai_orch::api::mcp::Caller;
 use sushiai_protocol::{encode, Decoder, Frame, Message, Request, PROTOCOL_VERSION};
 
 pub enum CallError {

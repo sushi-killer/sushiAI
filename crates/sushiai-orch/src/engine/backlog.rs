@@ -1,14 +1,25 @@
 //! The planning backlog: tasks parked in a `next` or `later` bucket until the
 //! owner (`task.start`) or the autopilot starts them.
 
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::clock::now_ms;
+use crate::engine::decision::implement_attempt_count;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::task::graph::is_parent;
+use crate::task::graph::own_waits_state;
+use crate::task::graph::Waits;
+use crate::task::Backlog;
+use crate::task::BacklogBucket;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde::Deserialize;
+use std::sync::atomic::Ordering;
 
-/// Who starts a task; decides the decision line recorded for a backlog task.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Starter {
-    Owner,
-    Autopilot,
-}
+use crate::task::queue::operations::Starter;
 
 /// `task.create`'s `backlog` parameter.
 #[derive(Deserialize)]
@@ -17,6 +28,10 @@ pub(super) struct BacklogIn {
     #[serde(default)]
     pub(super) order: Option<i64>,
 }
+
+#[cfg(test)]
+#[path = "backlog/tests.rs"]
+mod start_tests;
 
 impl App {
     /// A top-level task that has not implemented anything and has no live
@@ -109,7 +124,7 @@ impl App {
                 Some(bucket) => Some(self.backlog_slot(&task.repo, Some(&id), bucket, order)?),
                 None => None,
             };
-            self.update_task(&id, |task| task.queue.backlog = backlog)?
+            self.update_task(&id, |task| task.set_backlog(backlog))?
         };
         let value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         self.advance_autopilot();
@@ -120,47 +135,27 @@ impl App {
     /// leaves the backlog with a decision line saying who started it.
     pub(super) fn start_task(&self, id: &str, by: Starter) {
         let mut cancellations = self.cancellations.lock().unwrap();
-        if let Ok(Some(mut task)) = self.store.load_task(id) {
+        let started = self.update_task_checked(id, |task| {
             if by == Starter::Autopilot
                 && (task.queue.park.is_some() || task.queue.stopped_explicitly)
             {
-                return;
+                return Err("autopilot cannot start a parked or explicitly stopped task".into());
             }
-            if by == Starter::Owner
+            let restart_children = by == Starter::Owner
                 && task.status != TaskStatus::Landing
-                && is_parent(&task, &self.repo_tasks(&task.repo))
-            {
-                task.queue.restart_children = true;
-                task.question = None;
-            }
-            if matches!(task.status, TaskStatus::Stopped | TaskStatus::Failed)
-                || task.queue.restart_children
-            {
-                task.status = TaskStatus::Queued;
-            }
-            let resumed = task.queue.park.take().is_some();
-            task.queue.stopped_explicitly = false;
+                && is_parent(task, &self.repo_tasks(&task.repo));
+            task.start_queued(by, restart_children, now_ms());
             if let Some(end) = cancellations.get_mut(id) {
                 end.restart = true;
                 end.restart_children = task.queue.restart_children;
             }
-            if resumed {
-                task.decisions.push("Owner: resumed a parked task".into());
-            }
-            if task.queue.backlog.take().is_some() {
-                task.decisions.push(
-                    match by {
-                        Starter::Owner => "Owner: started from the backlog",
-                        Starter::Autopilot => "Autopilot: started from the next backlog",
-                    }
-                    .to_string(),
-                );
-            }
-            task.updated_at = now_ms();
-            self.save_task_logged(&task);
-            self.broadcast_task(&task);
-        }
+            Ok(())
+        });
         drop(cancellations);
+        if let Err(error) = started {
+            eprintln!("orch: starting task {id} failed: {error}");
+            return;
+        }
         self.spawn_task_loop(id.to_string(), true);
     }
 
@@ -218,11 +213,11 @@ mod tests {
         let (app, _dir) = test_app();
         app.settings.write().unwrap().autopilot = true;
         let mut task = task_with_status(TaskStatus::Stopped);
-        task.queue.backlog = Some(Backlog {
+        task.fixture_data().queue.backlog = Some(Backlog {
             bucket: BacklogBucket::Next,
             order: 0,
         });
-        task.queue.stopped_explicitly = true;
+        task.fixture_data().queue.stopped_explicitly = true;
         app.store.save_task(&task).unwrap();
         app.advance_autopilot();
         assert!(!app.controls.lock().unwrap().contains_key(&task.id));

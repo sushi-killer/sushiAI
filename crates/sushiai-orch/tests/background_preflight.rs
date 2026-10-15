@@ -4,7 +4,11 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::{poll_until, wait_until};
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -125,7 +129,7 @@ fn a_slow_final_check_that_fails_on_the_base_still_gates_landing() {
         if t["status"] == "waiting" && t["attempts"].as_array().unwrap().len() == 1 {
             break t;
         }
-        assert!(start_at.elapsed() < common::deadline(), "{t}");
+        assert!(start_at.elapsed() < common::polling::deadline(), "{t}");
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(

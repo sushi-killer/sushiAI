@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::{poll_task_status, remove_dir_retrying};
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::{json, Value};
 
 const ALPHA: &str = "Alpha is done";

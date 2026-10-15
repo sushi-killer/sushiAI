@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"session-b"}
+{"type":"turn.completed","usage":{"input_tokens":400,"output_tokens":80,"cached_input_tokens":20}}
+{"type":"item.completed","item":{"id":"b","type":"agent_message","text":"report-b"}}

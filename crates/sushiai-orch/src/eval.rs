@@ -15,10 +15,10 @@
 //! that are not eval tasks. It never edits a set: a person (or the lead)
 //! promotes a candidate into one, adding a `check` if it has a way to grade.
 
-use crate::git;
-use crate::mcp::Caller;
-use crate::model::{Task, TaskStatus};
+use crate::api::mcp::Caller;
+
 use crate::store::Store;
+use crate::task::{Task, TaskStatus};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -114,9 +114,42 @@ fn arms(o: &Options) -> Result<Vec<Option<Value>>, String> {
 /// Every `task.create` param object to send, fully validated (set file
 /// read, names known, bases resolved) before any of them is sent.
 fn plan(o: &Options, adhoc_name: &str) -> Result<Vec<Value>, String> {
-    let repo = git::repo_toplevel(&o.repo).map_err(|e| e.to_string())?;
+    let repo = crate::git::history::repo_toplevel(&o.repo).map_err(|e| e.to_string())?;
     let repo_str = repo.to_string_lossy().to_string();
     let arms = arms(o)?;
+    let jobs = jobs(o, adhoc_name)?;
+    let mut out = vec![];
+    // Resolve each base once so every arm and repeat starts from one commit.
+    let mut resolved: Vec<String> = vec![];
+    for (_, name, base, _, _) in &jobs {
+        let sha = crate::git::history::resolve_commit(&repo, base)
+            .map_err(|e| format!("task \"{name}\": base \"{base}\" does not resolve: {e}"))?;
+        resolved.push(sha);
+    }
+    for arm in &arms {
+        for ((set, name, _, request, check), sha) in jobs.iter().zip(&resolved) {
+            for _ in 0..o.repeat {
+                let mut p = json!({
+                    "repo": repo_str,
+                    "base": sha,
+                    "request": request,
+                    "evalSet": set,
+                    "evalName": name,
+                });
+                if let Some(c) = check {
+                    p["evalCheck"] = json!(c);
+                }
+                if let Some(v) = arm {
+                    p["variant"] = v.clone();
+                }
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn jobs(o: &Options, adhoc_name: &str) -> Result<Vec<Job>, String> {
     // (set, name, base, request, check)
     let mut jobs: Vec<Job> = vec![];
     if let Some(request) = &o.request {
@@ -184,35 +217,7 @@ fn plan(o: &Options, adhoc_name: &str) -> Result<Vec<Value>, String> {
             .filter(|j| o.only.is_empty() || o.only.contains(&j.1))
             .collect();
     }
-    let mut out = vec![];
-    // Resolve each base once so every arm and repeat starts from one commit.
-    let mut resolved: Vec<String> = vec![];
-    for (_, name, base, _, _) in &jobs {
-        let sha = git::resolve_commit(&repo, base)
-            .map_err(|e| format!("task \"{name}\": base \"{base}\" does not resolve: {e}"))?;
-        resolved.push(sha);
-    }
-    for arm in &arms {
-        for ((set, name, _, request, check), sha) in jobs.iter().zip(&resolved) {
-            for _ in 0..o.repeat {
-                let mut p = json!({
-                    "repo": repo_str,
-                    "base": sha,
-                    "request": request,
-                    "evalSet": set,
-                    "evalName": name,
-                });
-                if let Some(c) = check {
-                    p["evalCheck"] = json!(c);
-                }
-                if let Some(v) = arm {
-                    p["variant"] = v.clone();
-                }
-                out.push(p);
-            }
-        }
-    }
-    Ok(out)
+    Ok(jobs)
 }
 
 fn create_all(o: &Options, adhoc_name: &str, call: &Caller) -> Result<Value, String> {
@@ -263,7 +268,7 @@ fn harvest_candidates(
             .clone()
             .filter(|r| !r.trim().is_empty())
             .unwrap_or_else(|| t.goal.clone());
-        let mut name = git::slugify(&t.title, 40);
+        let mut name = crate::git::branches::slugify(&t.title, 40);
         if !names.insert(name.clone()) {
             name = format!("{name}-{}", t.id.chars().take(8).collect::<String>());
             names.insert(name.clone());
@@ -285,7 +290,7 @@ fn harvest(args: &[String]) -> Result<usize, String> {
     let data = PathBuf::from(need("--data")?);
     let repo = PathBuf::from(need("--repo")?);
     let out = PathBuf::from(need("--out")?);
-    let root = git::repo_toplevel(&repo).map_err(|e| e.to_string())?;
+    let root = crate::git::history::repo_toplevel(&repo).map_err(|e| e.to_string())?;
     if !data.join("tasks").is_dir() {
         return Err(format!("no task store at {}", data.display()));
     }
@@ -306,7 +311,7 @@ fn harvest(args: &[String]) -> Result<usize, String> {
         .filter_map(|e| e.get("source").and_then(Value::as_str).map(String::from))
         .collect();
     let repo_str = root.to_string_lossy().to_string();
-    let landed = |t: &Task| git::resolve_commit(&root, &t.branch).ok();
+    let landed = |t: &Task| crate::git::history::resolve_commit(&root, &t.branch).ok();
     let fresh = harvest_candidates(&tasks, &repo_str, &seen, &landed);
     let added = fresh.len();
     entries.extend(fresh);
@@ -375,23 +380,23 @@ mod tests {
             "status": "queued", "tier": "standard", "createdAt": created, "updatedAt": created
         }))
         .unwrap();
-        t.status = status;
+        t.fixture_data().status = status;
         t
     }
 
     #[test]
     fn harvest_keeps_finished_non_eval_tasks_of_the_repo_once() {
         let mut with_request = task("a1", "Add CSV export!", TaskStatus::Done, 1);
-        with_request.request = Some("export csv please".into());
+        with_request.fixture_data().request = Some("export csv please".into());
         let failed = task("a2", "Fix login", TaskStatus::Failed, 2);
         let stopped = task("a3", "Try a thing", TaskStatus::Stopped, 3);
         let running = task("a4", "Still going", TaskStatus::Running, 4);
         let mut eval = task("a5", "An eval run", TaskStatus::Done, 5);
-        eval.eval_set = Some("set-1".into());
+        eval.fixture_data().eval_set = Some("set-1".into());
         let mut no_base = task("a6", "No base", TaskStatus::Done, 6);
-        no_base.base_sha = String::new();
+        no_base.fixture_data().base_sha = String::new();
         let mut other_repo = task("a7", "Elsewhere", TaskStatus::Done, 7);
-        other_repo.repo = "/other".into();
+        other_repo.fixture_data().repo = "/other".into();
         let already = task("a8", "Already there", TaskStatus::Done, 8);
         let twin = task("a9", "Add CSV export", TaskStatus::Done, 9);
         let tasks = vec![

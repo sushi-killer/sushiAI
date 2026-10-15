@@ -1,6 +1,42 @@
 ## Failed checks
 
-Continue in this session and fix the failed checks on the kept worktree.
+Continue in this session on the kept worktree. Diagnose the previous failure and meet the current plan below.
+
+## Current plan
+
+These criteria and commands replace the earlier plan in this session. Follow this plan when deciding what remains to do.
+
+## Acceptance criteria
+
+- [0] The settings dialog shows a Save button -- check: `npm test -- settings`
+- [1] Clicking Save writes settings.json -- check: `npm test -- save`
+
+## Verification commands
+
+- `npm test -- settings`
+- `npm run lint`
+
+## Targeted check
+
+The planner named this check for this part alone. The full CI runs once on the combined result at the parent.
+
+- `npm test -- settings`
+
+## Checks
+
+These commands fail on the current code. The orchestrator runs them after the verification commands, and the attempt fails until each one exits 0. They are part of the contract: make them pass by meeting the criterion, not by editing them.
+
+- criterion [0]: `npm test -- settings`
+
+## Final checks
+
+The orchestrator runs these alongside review, after the fast gates pass. They are slow: do not run them yourself.
+
+- `npm run ci`
+
+## Previous attempt evidence (history)
+
+This evidence describes the previous attempt and may refer to commands or criteria that have since changed. Only the current plan above defines the work still required.
 
 `npm test -- save` exited 1.
 expected settings.json to exist

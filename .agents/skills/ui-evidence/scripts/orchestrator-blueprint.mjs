@@ -23,7 +23,7 @@ const git = (...args) =>
   execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 
 const report = { screenshots: {}, widths: {}, pageErrors: [] };
-const profile = await fs.mkdtemp(`${root}/artifacts/sushiai-evidence-`);
+const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const daemonHome = `${profile}/sushiai`;
 const dataDir = `${daemonHome}/orchestrator`;
 const queuedId = randomUUID();
@@ -132,6 +132,11 @@ try {
   git("worktree", "add", "-b", queuedBranch, queuedWorktree, "HEAD");
   worktreeAdded = true;
   branchAdded = true;
+  // The pipeline fixture does not need the repo's full dependency install.
+  await fs.writeFile(
+    `${queuedWorktree}/.sushiai/setup.json`,
+    JSON.stringify({ setup: "true" }),
+  );
   await writeTask(
     taskJson(
       {
@@ -364,10 +369,23 @@ try {
   await taskDetail.getByLabel("Preset").selectOption({ label: "Fast" });
   await page
     .waitForFunction(
-      () =>
-        document.querySelector('select[aria-label="Preset"]')?.value === "fast",
-      null,
-      { timeout: 10000 },
+      async (id) => {
+        const task = await window.bridge.orchestrator("task.get", { id });
+        const pipeline = await window.bridge.orchestrator("pipeline.describe", {
+          taskId: id,
+        });
+        return (
+          task.variant?.maxAttempts === 2 &&
+          task.variant?.briefCheckRoute === "" &&
+          pipeline.presetId === "fast" &&
+          pipeline.stages.find((stage) => stage.id === "implement")
+            ?.maxAttempts === 2 &&
+          pipeline.stages.find((stage) => stage.id === "brief-check")
+            ?.enabled === false
+        );
+      },
+      queuedId,
+      { timeout: 10000, polling: 100 },
     )
     .catch(async () => {
       const alert = await page
@@ -390,6 +408,7 @@ try {
       `no running Implement stage: ${error.message}\n${seen.slice(0, 1500)}`,
     );
   }
+  await taskDetail.getByText("attempt 1/2", { exact: false }).waitFor();
   await save("blueprint-running-wide", taskDetail);
   await fit(NARROW, "narrow");
   await save("blueprint-running-narrow", taskDetail);
@@ -400,6 +419,9 @@ try {
   await taskDetail.getByText("Stopped", { exact: true }).waitFor({
     timeout: 30000,
   });
+  await save("blueprint-stopped-wide", taskDetail);
+  await fit(NARROW, "narrow");
+  await save("blueprint-stopped-narrow", taskDetail);
 } catch (error) {
   report.error = String(error?.message ?? error);
 } finally {

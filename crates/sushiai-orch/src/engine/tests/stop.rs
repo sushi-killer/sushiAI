@@ -1,10 +1,11 @@
 fn stop_waiting_task() -> Task {
     let mut task = task_with_status(TaskStatus::Waiting);
-    task.question = Some(Question::new(
+    task.fixture_data().question = Some(Question::new(
         "Which implementation should I use?",
         vec!["continue".into(), "stop".into()],
         QuestionKind::AgentQuestion,
         AskedBy::Implement,
+        crate::clock::now_ms(),
     ));
     task
 }
@@ -22,9 +23,12 @@ fn hold_stop_control(app: &App, task: &Task) -> CancelToken {
     app.controls.lock().unwrap().insert(
         task.id.clone(),
         TaskControl {
-            cancel: cancel.clone(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
+            signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel: cancel.clone(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: Arc::new(StdMutex::new(None)),
+            },
             handle: tokio::spawn(async {}),
         },
     );
@@ -41,25 +45,32 @@ async fn start_stop_question_wait(app: &Arc<App>, mut task: Task) -> oneshot::Re
     let loop_pending = pending_answer.clone();
     let id = task.id.clone();
     let handle = tokio::spawn(async move {
-        let id = task.id.clone();
-        assert!(wait_for_answer(
-            &loop_app,
-            &id,
-            &mut task,
-            &loop_pending,
-            &loop_cancel,
-            &mut None,
-        )
-        .await
-        .is_none());
+        let _id = task.id.clone();
+        assert!(matches!(
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: loop_cancel.clone(),
+                    pending_answer: loop_pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None))
+                },
+                &mut None
+            )
+            .answer(&loop_app, &mut task)
+            .await,
+            Err(WaitEnd::Stopped)
+        ));
         let _ = done.send(task);
     });
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {
-            cancel,
-            pending_answer,
-            pending_amend: Arc::new(StdMutex::new(None)),
+            signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel,
+                pending_answer,
+                pending_amend: Arc::new(StdMutex::new(None)),
+            },
             handle,
         },
     );
@@ -137,7 +148,7 @@ async fn a_stopped_task_by_answer_releases_its_leases() {
         (Some("overseer"), AnsweredBy::Overseer),
     ] {
         let mut task = stop_waiting_task();
-        task.paths = vec!["src/declared.rs".into()];
+        task.fixture_data().paths = vec!["src/declared.rs".into()];
         app.store.save_task(&task).unwrap();
         let result = start_stop_question_wait(&app, task.clone()).await;
         assert!(app.acquire_lease(&task, &task.paths, false).is_none());
@@ -167,10 +178,7 @@ async fn a_stopped_task_by_answer_releases_its_leases() {
             assert!(stop_close_lines(task).is_empty());
             assert_eq!(task.question_history.len(), 1);
             assert_eq!(task.question_history[0].answer, "stop");
-            assert_eq!(
-                task.question_history[0].answered_by,
-                answered_by
-            );
+            assert_eq!(task.question_history[0].answered_by, answered_by);
         }
     }
 }
@@ -180,7 +188,7 @@ async fn a_stopped_task_child_of_a_stopped_parent_has_no_question() {
     let (app, _dir) = test_app();
     let parent = task_with_status(TaskStatus::Running);
     let mut child = stop_waiting_task();
-    child.parent = Some(parent.id.clone());
+    child.fixture_data().parent = Some(parent.id.clone());
     app.store.save_task(&parent).unwrap();
     app.store.save_task(&child).unwrap();
 
@@ -204,9 +212,9 @@ async fn a_stopped_task_dependency_keeps_its_parent_waiting_and_its_child_idle()
     app.settings.write().unwrap().answer_policy = false;
     let dependency = stop_waiting_task();
     let mut parent = task_with_status(TaskStatus::Queued);
-    parent.depends_on = vec![dependency.id.clone()];
+    parent.fixture_data().depends_on = vec![dependency.id.clone()];
     let mut child = task_with_status(TaskStatus::Queued);
-    child.parent = Some(parent.id.clone());
+    child.fixture_data().parent = Some(parent.id.clone());
     for task in [&dependency, &parent, &child] {
         app.store.save_task(task).unwrap();
     }
@@ -237,14 +245,14 @@ async fn a_stopped_task_dependency_keeps_its_parent_waiting_and_its_child_idle()
 async fn a_stopped_task_holds_no_lease_and_another_task_can_lease_the_file() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Running);
-    task.base_ref = Some("main".into());
-    task.paths = vec!["src/declared.rs".into()];
+    task.fixture_data().base_ref = Some("main".into());
+    task.fixture_data().paths = vec!["src/declared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
     assert!(app.acquire_lease(&task, &task.paths, false).is_none());
     assert!(app.lease_file(&task.id, "src/edited.rs").is_none());
     let mut next = task_with_status(TaskStatus::Running);
-    next.base_ref = task.base_ref.clone();
+    next.fixture_data().base_ref = task.base_ref.clone();
     app.store.save_task(&next).unwrap();
     hold_stop_control(&app, &next);
     for file in ["src/declared.rs", "src/edited.rs"] {
@@ -274,11 +282,11 @@ async fn a_stopped_task_holds_no_lease_and_another_task_can_lease_the_file() {
 async fn a_stopped_task_keeps_no_question_after_a_restart() {
     let (app, _dir) = test_app();
     let mut task = stop_waiting_task();
-    task.status = TaskStatus::Stopped;
+    task.fixture_data().status = TaskStatus::Stopped;
     app.store.save_task(&task).unwrap();
     let mut archived = task.clone();
-    archived.id = uuid::Uuid::new_v4().to_string();
-    archived.archived = true;
+    archived.fixture_data().id = uuid::Uuid::new_v4().to_string();
+    archived.fixture_data().archived = true;
     app.store.save_task(&archived).unwrap();
     let mut events = app.subscribe();
 
@@ -319,11 +327,11 @@ async fn a_stopped_task_keeps_no_question_after_a_restart() {
 async fn a_stopped_task_with_an_unfinished_attempt_is_not_requeued_after_a_restart() {
     let (app, _dir) = test_app();
     let mut task = stop_waiting_task();
-    task.status = TaskStatus::Stopped;
+    task.fixture_data().status = TaskStatus::Stopped;
     let mut attempt = attempt_with_failure(1, "unused");
     attempt.status = AttemptStatus::Running;
     attempt.failure = None;
-    task.attempts.push(attempt);
+    task.fixture_data().attempts.push(attempt);
     app.store.save_task(&task).unwrap();
     let mut events = app.subscribe();
 
@@ -377,7 +385,7 @@ async fn a_stopped_task_cleanup_does_not_close_a_question_on_daemon_shutdown() {
 async fn a_stopped_task_with_a_cancelled_control_is_pruned_even_while_landing() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Landing);
-    task.paths = vec!["src/shared.rs".into()];
+    task.fixture_data().paths = vec!["src/shared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
     assert!(app.acquire_lease(&task, &task.paths, false).is_none());
@@ -400,6 +408,7 @@ async fn a_stopped_task_closes_a_plan_question_but_shutdown_keeps_it() {
         app.store.save_task(&task).unwrap();
         let cancel = hold_stop_control(&app, &task);
         let pending = app.controls.lock().unwrap()[&task.id]
+            .signals
             .pending_answer
             .clone();
         let loop_app = app.clone();
@@ -409,11 +418,23 @@ async fn a_stopped_task_closes_a_plan_question_but_shutdown_keeps_it() {
             ask_plan_question(
                 &loop_app,
                 &id,
-                "Which plan?",
-                vec![],
-                (Vec::new(), None),
-                &pending,
-                &cancel,
+                crate::task::Question {
+                    risk: Vec::new(),
+                    default_option: None,
+                    ..crate::task::Question::new(
+                        "Which plan?",
+                        vec![],
+                        crate::task::QuestionKind::PlanQuestion,
+                        crate::task::AskedBy::Plan,
+                        crate::clock::now_ms(),
+                    )
+                },
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
                 &mut None,
             )
             .await
@@ -452,7 +473,7 @@ async fn a_stopped_task_closes_a_plan_question_but_shutdown_keeps_it() {
 async fn a_stopped_task_close_line_truncates_the_question_at_character_boundaries() {
     let (app, _dir) = test_app();
     let mut task = stop_waiting_task();
-    task.question.as_mut().unwrap().text = "é".repeat(250);
+    task.fixture_data().question.as_mut().unwrap().text = "é".repeat(250);
     app.store.save_task(&task).unwrap();
 
     app.handle_task_stop(json!({"id": task.id})).await.unwrap();
@@ -471,7 +492,7 @@ async fn a_stopped_task_close_line_truncates_the_question_at_character_boundarie
 async fn a_stopped_task_cleanup_does_not_stop_a_live_loop_when_its_run_ends() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Running);
-    task.paths = vec!["src/declared.rs".into()];
+    task.fixture_data().paths = vec!["src/declared.rs".into()];
     app.store.save_task(&task).unwrap();
     let cancel = hold_stop_control(&app, &task);
     assert!(app.acquire_lease(&task, &task.paths, false).is_none());
@@ -481,7 +502,7 @@ async fn a_stopped_task_cleanup_does_not_stop_a_live_loop_when_its_run_ends() {
     let run_app = app.clone();
     let mut events = app.subscribe();
     let call = tokio::spawn(async move {
-        permissions::decide_call(
+        crate::engine::permissions::hook::decide_call(
             &run_app,
             &run_ctx,
             &json!({"tool_name": "mcp__example__write", "tool_input": {}}),
@@ -533,7 +554,7 @@ async fn a_stopped_task_closes_a_held_tool_question_but_shutdown_keeps_it() {
         let loop_app = app.clone();
         let mut events = app.subscribe();
         let call = tokio::spawn(async move {
-            permissions::decide_call(
+            crate::engine::permissions::hook::decide_call(
                 &loop_app,
                 &loop_ctx,
                 &json!({"tool_name": "mcp__example__write", "tool_input": {}}),
@@ -620,13 +641,13 @@ async fn a_start_after_a_stop_is_not_frozen_by_the_stale_save_guard() {
     app.store.save_task(&task).unwrap();
     app.handle_task_stop(json!({"id": task.id})).await.unwrap();
     app.update_task(&task.id, |t| {
-        t.status = TaskStatus::Queued;
-        t.queue.stopped_explicitly = false;
+        t.fixture_data().status = TaskStatus::Queued;
+        t.fixture_data().queue.stopped_explicitly = false;
     })
     .unwrap();
 
     let mut running = task.clone();
-    running.status = TaskStatus::Running;
+    running.fixture_data().status = TaskStatus::Running;
     app.save_task_logged(&running);
     let saved = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(saved.status, TaskStatus::Running);
@@ -645,8 +666,8 @@ async fn a_stale_save_over_a_parked_task_keeps_it_queued_with_its_park() {
     assert!(parked.queue.park.is_some());
 
     let mut stale = task.clone();
-    stale.status = TaskStatus::Waiting;
-    stale.question = stop_waiting_task().question;
+    stale.fixture_data().status = TaskStatus::Waiting;
+    stale.fixture_data().question = stop_waiting_task().question.clone();
     app.save_task_logged(&stale);
     let saved = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(saved.status, TaskStatus::Queued);

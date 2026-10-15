@@ -1,4 +1,32 @@
-use super::*;
+#[cfg(test)]
+use crate::task::AttemptStatus;
+#[cfg(test)]
+use crate::task::FailureKind;
+
+use crate::clock::now_ms;
+#[cfg(test)]
+use crate::engine::decision::completed_implement_attempts;
+#[cfg(test)]
+use crate::engine::decision::implement_attempt_count;
+use crate::engine::questions::parking::QuestionSlot;
+#[cfg(test)]
+use crate::engine::run_control::TaskSignals;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::attempt_with_failure;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::harness;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+use crate::prompts::clip::truncate_chars;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Backoff for consecutive usage or rate limit pauses, in minutes; the last
 /// step repeats.
@@ -30,61 +58,46 @@ pub(super) fn rate_limit_wait_secs(failure: harness::ProviderFailure, pauses: u3
 /// Implement attempts that count toward `maxAttempts`: not an interrupted
 /// one, nor a harness error that changed no file.
 pub(super) fn counted_attempts(task: &Task) -> u32 {
-    task.attempts
-        .iter()
-        .filter(|a| a.stage == Stage::Implement)
-        .filter(|a| a.status != AttemptStatus::Interrupted)
-        .filter(|a| {
-            !(a.changed_files.is_empty()
-                && a.failure.as_ref().map(|f| f.kind) == Some(FailureKind::Error))
-        })
-        .count() as u32
+    crate::task::attempts::counted_implement_count(task)
 }
 
 /// Pauses a task whose attempt hit a usage or rate limit: the attempt is
 /// interrupted (not a failure), the task shows when it resumes and holds no
 /// slot meanwhile. `false` when the task was stopped during the pause.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn pause_for_rate_limit(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
-    idx: usize,
     error: &str,
     wait_secs: u64,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> bool {
+    let idx = task.attempts.len() - 1;
     let attempt_n = task.attempts[idx].n;
-    task.attempts[idx].status = AttemptStatus::Interrupted;
-    task.attempts[idx].ended_at = Some(now_ms());
-    task.queue.rate_pauses += 1;
-    task.queue.paused_attempts += 1;
-    task.queue.paused_until = Some(now_ms() + wait_secs as i64 * 1000);
+    let now = now_ms();
+    crate::task::transitions::pause_for_limit(task, idx, now + wait_secs as i64 * 1000, now);
     let line = format!(
         "Paused: usage or rate limit ({}); resuming in {} min, this is not a failed attempt",
         truncate_chars(error.trim(), 120),
         wait_secs.div_ceil(60)
     );
-    app.broadcast_log(task_id, attempt_n, line.clone());
-    task.decisions.push(line);
-    task.status = TaskStatus::Queued;
-    task.updated_at = now_ms();
+    app.broadcast_log(&task.id, attempt_n, line.clone());
+    task.record_decision(line);
+    task.resume_phase(TaskStatus::Queued, now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
-    permit.take();
-    let resumed = tokio::select! {
-        _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => true,
+    let resumed = slot.pause(Duration::from_secs(wait_secs)).await;
+    let outcome = if resumed {
+        crate::task::transitions::PauseEnd::Elapsed
+    } else {
+        crate::task::transitions::PauseEnd::Cancelled {
+            shutting_down: app.shutting_down.load(Ordering::SeqCst),
+        }
     };
-    // A shutdown keeps the mark: the next daemon serves the rest of the pause.
-    if resumed || !app.shutting_down.load(Ordering::SeqCst) {
-        task.queue.paused_until = None;
-    }
+    crate::task::transitions::end_limit_pause(task, outcome, now_ms());
     if !resumed {
         app.apply_cancellation(task);
     }
-    task.updated_at = now_ms();
+    task.touch(now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
     resumed
@@ -131,7 +144,7 @@ mod tests {
         edited_error.failure.as_mut().unwrap().kind = FailureKind::Error;
         edited_error.changed_files = vec!["a.rs".into()];
         let verify = attempt_with_failure(4, "verify:z");
-        task.attempts = vec![interrupted, error, edited_error, verify];
+        task.fixture_data().attempts = vec![interrupted, error, edited_error, verify];
         assert_eq!(implement_attempt_count(&task), 4);
         assert_eq!(counted_attempts(&task), 2);
         assert_eq!(completed_implement_attempts(&task), 3);
@@ -141,11 +154,10 @@ mod tests {
     async fn a_pause_shows_when_it_ends_holds_no_slot_and_is_no_failed_attempt() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = vec![attempt_with_failure(1, "x")];
-        task.attempts[0].status = AttemptStatus::Running;
-        task.attempts[0].failure = None;
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "x")];
+        task.fixture_data().attempts[0].status = AttemptStatus::Running;
+        task.fixture_data().attempts[0].failure = None;
         app.store.save_task(&task).unwrap();
-        let id = task.id.clone();
         let cancel = CancelToken::new();
         let mut permit = Some(app.slots.clone().acquire_owned().await.unwrap());
         let before = app.slots.available_permits();
@@ -154,13 +166,16 @@ mod tests {
             tokio::spawn(async move {
                 let ok = pause_for_rate_limit(
                     &app,
-                    &id,
                     &mut task,
-                    0,
                     "rate limit hit",
                     1,
-                    &cancel,
-                    &mut permit,
+                    &mut QuestionSlot::new(
+                        &TaskSignals {
+                            cancel: cancel.clone(),
+                            ..TaskSignals::new()
+                        },
+                        &mut permit,
+                    ),
                 )
                 .await;
                 (ok, task)
@@ -182,29 +197,31 @@ mod tests {
     }
 
     fn paused_id(app: &App) -> String {
-        app.store.list_tasks().unwrap().remove(0).id
+        app.store.list_tasks().unwrap().remove(0).id.clone()
     }
 
     #[tokio::test]
     async fn a_pause_cut_short_by_a_shutdown_keeps_its_mark() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = vec![attempt_with_failure(1, "x")];
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "x")];
         app.store.save_task(&task).unwrap();
-        let id = task.id.clone();
         let cancel = CancelToken::new();
         let waiter = {
             let (app, cancel) = (app.clone(), cancel.clone());
             tokio::spawn(async move {
                 let ok = pause_for_rate_limit(
                     &app,
-                    &id,
                     &mut task,
-                    0,
                     "rate limit",
                     600,
-                    &cancel,
-                    &mut None,
+                    &mut QuestionSlot::new(
+                        &TaskSignals {
+                            cancel: cancel.clone(),
+                            ..TaskSignals::new()
+                        },
+                        &mut None,
+                    ),
                 )
                 .await;
                 (ok, task)

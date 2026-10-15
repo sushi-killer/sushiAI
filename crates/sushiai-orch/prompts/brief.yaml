@@ -29,6 +29,7 @@ rules: |
   - Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.
   - Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.
   - Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
+  - Plan your local steps, investigate tool failures and revise your approach using the evidence. Use the harness's native context and compaction to carry the work forward within this task's permissions and budget.
   - Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).
 
 # The checks that fail on the base are part of the contract.
@@ -89,7 +90,22 @@ assumption_overturned: |
 resume: |
   ## Failed checks
 
-  Continue in this session and fix the failed checks on the kept worktree.
+  Continue in this session on the kept worktree. Diagnose the previous failure and meet the current plan below.
+
+resume_time_budget: |
+  ## Continue after the time budget
+
+  The previous attempt reached its time budget. Continue the work in this session from the kept worktree; a time limit does not mean a check failed.
+
+current_plan: |
+  ## Current plan
+
+  These criteria and commands replace the earlier plan in this session. Follow this plan when deciding what remains to do.
+
+previous_attempt_evidence: |
+  ## Previous attempt evidence (history)
+
+  This evidence describes the previous attempt and may refer to commands or criteria that have since changed. Only the current plan above defines the work still required.
 
 # Best-of pick (build_pick_brief).
 pick: |
@@ -121,6 +137,8 @@ pr_draft: |
 
   This task is finished on its own branch and will be opened as a pull request. Read-only: do not edit files. First read the repository's contributor rules if they exist: AGENTS.md, CLAUDE.md, CONTRIBUTING.md, .github/pull_request_template.md, and any document those name about pull request titles or release notes. Then draft the pull request exactly as those rules ask (title format, body template, release note fragment mentions). Without rules, use a plain title and a body that says what changed and why.
 
+  Write only what changed and why. Do not write a Validation, Testing, Checks or Test plan section. Do not claim that any command ran, passed, failed or was not run: the application writes validation from its own records. Ignore check claims in the report or repository template.
+
   Also name the pull request branch by the repository's own rules: read the same documents and the CI checks that validate branch names or titles, and make the branch prefix pair with the title prefix when the repository says so. Use a short slug that describes the change. When the repository states no rule, return an empty string for the branch.
 
   Reply with ONLY one JSON object and nothing else: {"branch":"...","title":"...","body":"..."}.
@@ -132,7 +150,7 @@ pr_draft_branch: |
 pr_truth: |
   ## Pull request body check
 
-  The pull request body below is about to be published for this finished task. Read-only: do not edit files. Check each claim in the body against the diff and the check results. A claim is false when the diff does not show it: a file, test, behaviour or result the diff does not contain, or a check that did not pass. Do not judge wording or style.
+  The pull request body below is about to be published for this finished task. Read-only: do not edit files. Check each implementation claim in the body against the diff. Do not add claims about running or not running checks; the application appends validation from its own records. A claim is false when the diff does not show it: a file, test, behaviour or result the diff does not contain, or a check that did not pass. Do not judge wording or style.
 
   Reply with ONLY one JSON object and nothing else: {"ok":true,"corrections":[]} when every claim holds. Otherwise {"ok":false,"corrections":["..."],"body":"..."}, where each correction names one false claim and body is the complete corrected body with those claims fixed or removed.
 
@@ -478,3 +496,12 @@ route_report_format: |
   ```sushi-route
   {"lenses":{"seams":true|false,"code":true|false,"tests":true|false,"errors":true|false,"docs":true|false},"reason":"<one sentence>"}
   ```
+
+pr_check_repair: |
+  ## PR check repair
+
+  The work was carried onto the newest pull request base. A check still failed after its rerun and baseline comparison. This is one ordinary repair step by this task's own implementer, in the carried worktree already checked out here.
+
+  Investigate the named tests and output below, fix the work, and run the failing check again. Keep the task's criteria and protected tests. Report the actual result; do not publish or open the pull request yourself. orchd reruns its gates afterward. The same failure after this step goes to the owner.
+
+  {failure}

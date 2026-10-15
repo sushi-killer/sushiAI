@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use serde_json::{json, Value};
-use sushiai_orch::mcp::{serve_stdio, Caller};
+use sushiai_orch::api::mcp::{serve_stdio, Caller};
 
 type Calls = Rc<RefCell<Vec<(String, Value)>>>;
 

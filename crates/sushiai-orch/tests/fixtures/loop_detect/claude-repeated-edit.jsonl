@@ -1,0 +1,16 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-1","name":"Edit","input":{"file_path":"src/check.rs","old_string":"0","new_string":"1"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-2","name":"Edit","input":{"file_path":"src/check.rs","old_string":"1","new_string":"2"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-3","name":"Edit","input":{"file_path":"src/check.rs","old_string":"2","new_string":"3"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-3","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-4","name":"Edit","input":{"file_path":"src/check.rs","old_string":"3","new_string":"4"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-4","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-5","name":"Edit","input":{"file_path":"src/check.rs","old_string":"4","new_string":"5"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-5","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-6","name":"Edit","input":{"file_path":"src/check.rs","old_string":"5","new_string":"6"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-6","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-7","name":"Edit","input":{"file_path":"src/check.rs","old_string":"6","new_string":"7"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-7","content":"File updated successfully.","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-8","name":"Edit","input":{"file_path":"src/check.rs","old_string":"7","new_string":"8"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-8","content":"File updated successfully.","is_error":false}]}}

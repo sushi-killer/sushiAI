@@ -3,7 +3,12 @@
 //! server that logs every tool call.
 
 mod common;
-use common::*;
+
+use common::harness::fake_harness_script;
+use common::polling::wait_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::json;
 
 const FAKE_CLAUDE: &str = r##"#!/bin/sh

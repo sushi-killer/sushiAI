@@ -4,7 +4,28 @@
 //! evidence means the failure is the task's, and a verdict that lowers
 //! caution holds only when the test names it gives appear in the base output.
 
-use super::*;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::baseline::Comparison;
+use crate::engine::review::native::review_request;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
+use crate::engine::state::App;
+use crate::engine::verification::runner::CheckRunner;
+use crate::git::paths::short_sha;
+use crate::harness;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::policy::routing::Harness;
+use crate::prompts::text::tail_chars;
+use crate::task::Blame;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::VerifyOutcome;
+use serde::Deserialize;
+use std::path::Path;
+use std::sync::Arc;
+
 use crate::engine::finding_judge::resolve_judge_route;
 use std::hash::{Hash, Hasher};
 
@@ -35,13 +56,12 @@ pub(super) type AttributionKey = (String, String, String, String, String, String
 
 /// A hash of the task's changes against its base, so a verdict is not reused
 /// for another task or another diff.
-fn diff_hash(task: &Task) -> String {
-    let worktree = Path::new(&task.worktree);
+fn diff_hash(task: &Task, worktree: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    git::diff_full(worktree, &task.base_sha, usize::MAX)
+    crate::git::changes::diff_full(worktree, &task.base_sha, usize::MAX)
         .unwrap_or_default()
         .hash(&mut h);
-    git::changed_files(worktree, &task.base_sha)
+    crate::git::changes::changed_files(worktree, &task.base_sha)
         .unwrap_or_default()
         .hash(&mut h);
     format!("{:016x}", h.finish())
@@ -49,7 +69,11 @@ fn diff_hash(task: &Task) -> String {
 
 /// The reply's last `sushi-attribution` block, else its outermost `{...}`.
 pub(super) fn parse_attribution(text: &str) -> Option<Attribution> {
-    serde_json::from_str(&brief::tagged_json(text, "sushi-attribution")?).ok()
+    serde_json::from_str(&crate::prompts::reply::tagged_json(
+        text,
+        "sushi-attribution",
+    )?)
+    .ok()
 }
 
 /// Whether `name` is a whole line of `tail`, or the end of one after
@@ -131,17 +155,21 @@ fn head_tail(text: &str) -> String {
     }
     format!(
         "{}\n[...]\n{}",
-        review::head_chars(text, RUN_HEAD_CHARS),
+        crate::engine::review::native::head_chars(text, RUN_HEAD_CHARS),
         tail_chars(text, RUN_TAIL_CHARS)
     )
 }
 
-fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) -> String {
-    let worktree = Path::new(&task.worktree);
-    let changed = git::changed_files(worktree, &task.base_sha)
+fn attribution_brief(
+    task: &Task,
+    failed: &VerifyOutcome,
+    base: &VerifyOutcome,
+    worktree: &Path,
+) -> String {
+    let changed = crate::git::changes::changed_files(worktree, &task.base_sha)
         .unwrap_or_default()
         .join("\n");
-    let stat = git::diff_stat(worktree, &task.base_sha).unwrap_or_default();
+    let stat = crate::git::changes::diff_stat(worktree, &task.base_sha).unwrap_or_default();
     let ask = task
         .request
         .iter()
@@ -158,13 +186,16 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
     let mut out = format!(
         "{}\n\n{}{}{}{}{}{}{}{}",
         crate::prompts::get("attribution"),
-        brief::untrusted_block("The task's request and goal", &ask),
-        brief::untrusted_block("The acceptance criteria", &criteria),
-        brief::untrusted_block("Changed files", &changed),
-        brief::untrusted_block("Diffstat", &stat),
-        brief::untrusted_block("The check command", &failed.command),
-        brief::untrusted_block("The task's run (head and tail)", &head_tail(&failed.tail)),
-        brief::untrusted_block(
+        crate::prompts::text::untrusted_block("The task's request and goal", &ask),
+        crate::prompts::text::untrusted_block("The acceptance criteria", &criteria),
+        crate::prompts::text::untrusted_block("Changed files", &changed),
+        crate::prompts::text::untrusted_block("Diffstat", &stat),
+        crate::prompts::text::untrusted_block("The check command", &failed.command),
+        crate::prompts::text::untrusted_block(
+            "The task's run (head and tail)",
+            &head_tail(&failed.tail)
+        ),
+        crate::prompts::text::untrusted_block(
             &format!("The base run at {}", short_sha(&task.base_sha)),
             &head_tail(&base.tail)
         ),
@@ -174,7 +205,7 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
             .filter(|a| a.stage == Stage::Implement)
             .nth(1)
             .and_then(|a| a.failure.as_ref())
-            .map(|f| brief::untrusted_block(
+            .map(|f| crate::prompts::text::untrusted_block(
                 "The previous attempt's failure",
                 &tail_chars(&f.detail, RUN_TAIL_CHARS)
             ))
@@ -191,13 +222,13 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
 pub(super) async fn attribute(
     app: &Arc<App>,
     task: &mut Task,
-    failed: &VerifyOutcome,
-    base: &VerifyOutcome,
-    cancel: &CancelToken,
+    comparison: Comparison<'_>,
+    runner: CheckRunner<'_>,
 ) -> Option<Attribution> {
+    let Comparison { failed, base } = comparison;
     let key = (
         task.id.clone(),
-        diff_hash(task),
+        diff_hash(task, runner.cwd),
         task.base_sha.clone(),
         failed.command.clone(),
         run_key(failed),
@@ -206,8 +237,8 @@ pub(super) async fn attribute(
     if let Some(known) = app.attributions.lock().unwrap().get(&key) {
         return known.clone();
     }
-    let verdict = run_turn(app, task, failed, base, cancel).await;
-    if !cancel.is_cancelled() {
+    let verdict = run_turn(app, task, comparison, runner).await;
+    if !runner.cancel.is_cancelled() {
         app.attributions
             .lock()
             .unwrap()
@@ -219,7 +250,7 @@ pub(super) async fn attribute(
 /// Whether the verdict of an attribution turn of this task, on its current
 /// diff, for `command` says the task is meant to make the check pass.
 pub(super) fn attributed_target(app: &App, task: &Task, command: &str) -> bool {
-    let diff = diff_hash(task);
+    let diff = diff_hash(task, Path::new(&task.worktree));
     app.attributions
         .lock()
         .unwrap()
@@ -236,10 +267,10 @@ pub(super) fn attributed_target(app: &App, task: &Task, command: &str) -> bool {
 async fn run_turn(
     app: &Arc<App>,
     task: &mut Task,
-    failed: &VerifyOutcome,
-    base: &VerifyOutcome,
-    cancel: &CancelToken,
+    comparison: Comparison<'_>,
+    runner: CheckRunner<'_>,
 ) -> Option<Attribution> {
+    let Comparison { failed, base } = comparison;
     let settings = app.settings.read().unwrap().clone();
     let attempt = task
         .attempts
@@ -257,7 +288,7 @@ async fn run_turn(
     let route = resolve_judge_route(&settings, None, &implementer, &implementer, task.tier)
         .unwrap_or(&implementer)
         .clone();
-    let worktree = PathBuf::from(&task.worktree);
+    let worktree = runner.cwd;
     let run_dir = app
         .store
         .claim_helper_run_dir(&task.id, "attribution", Some(attempt_n))
@@ -271,41 +302,43 @@ async fn run_turn(
         write_readonly_claude_settings_with_profile(
             &route,
             app,
-            &key_path,
             &settings,
             &deny_read,
             &settings_path,
         );
     }
-    let brief_text = attribution_brief(task, failed, base);
+    let brief_text = attribution_brief(task, failed, base, worktree);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
     let req = harness::RunRequest {
         repo_settings: false,
         resume: None,
-        ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
+        ..review_request(&route, worktree, &mcp_path, &settings_path, &[])
     };
     let limit = app.helper_timeout();
     let result = run_harness(
         app,
-        &task.id,
-        attempt_n,
-        RunTrack::No,
-        &worktree,
-        &req,
-        CostTag::task("attribution", &route.id),
-        &brief_text,
-        &run_dir.join("events.jsonl"),
-        cancel,
+        RunIdentity {
+            id: &task.id,
+            attempt_n,
+            track: RunTrack::No,
+            tag: CostTag::task("attribution", &route.id),
+        },
+        RunInvocation {
+            request: &req,
+            brief: &brief_text,
+            events: &run_dir.join("events.jsonl"),
+            schema: None,
+        },
+        runner.cancel,
         Guard::helper("attribution", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
     let outcome = result.ok()?;
     if outcome.timed_out {
-        task.decisions
-            .push(helper_timeout_message("attribution", limit));
+        task.record_decision(helper_timeout_message("attribution", limit));
     }
-    task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    task.charge(outcome.cost_usd.unwrap_or(0.0));
     if outcome.timed_out || outcome.error.is_some() {
         return None;
     }

@@ -1,0 +1,9 @@
+entry: admit
+transitions:
+  - { from: admit, on: admitted, to: land }
+  - { from: land, on: unlanded, to: commit }
+  - { from: land, on: waiting, to: wait }
+  - { from: land, on: landed, to: landed }
+  - { from: land, on: failed, to: retry }
+  - { from: land, on: rereview, to: review }
+  - { from: land, on: cancelled, to: cancel }

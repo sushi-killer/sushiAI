@@ -3,7 +3,12 @@
 //! `<data>/repo-notes.json`; `repo.notes.add` and `evolution.approve` are the
 //! only writers.
 
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::task::notes::RepoNote;
+use serde::Deserialize;
+use serde_json::json;
+use std::path::PathBuf;
 
 /// Repo notes are the owner's standing guidance: the overseer never writes one.
 fn refuse_overseer(source: Option<&str>) -> Result<(), String> {
@@ -19,7 +24,7 @@ impl App {
     /// The repo root of a path, resolved the way `task.create` does.
     pub(super) async fn resolve_repo(&self, repo: &str) -> Result<String, String> {
         let input = PathBuf::from(repo);
-        let root = tokio::task::spawn_blocking(move || git::repo_toplevel(&input))
+        let root = tokio::task::spawn_blocking(move || crate::git::history::repo_toplevel(&input))
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;

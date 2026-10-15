@@ -45,7 +45,13 @@ fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
                 vec![plan.join("events.jsonl"), retry]
             }
         }
-        Stage::Implement | Stage::Review if attempt.cost_usd.is_none() => {
+        Stage::Implement if attempt.cost_usd.is_none() => {
+            vec![
+                run_dir.join("resume-rejected.events.jsonl"),
+                run_dir.join("events.jsonl"),
+            ]
+        }
+        Stage::Review if attempt.cost_usd.is_none() => {
             vec![run_dir.join("events.jsonl")]
         }
         Stage::Implement | Stage::Review => vec![],
@@ -57,11 +63,11 @@ fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
 /// -- see [`replay_run_cost`] -- to the attempt and the task. That covers
 /// the attempt's review helper runs too, kept in
 /// `review_cost_usd`. Claude only, for the attempt's own runs; the review
-/// may run on either harness.
+/// may run on either harness. Rejected-resume archives retain their own metadata.
 pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store, prices: &Prices) {
     let run_dir = store.run_dir(&task.id, task.attempts[idx].n);
     let attempt = &task.attempts[idx];
-    if attempt.harness == Harness::Claude {
+    if attempt.harness == Harness::Claude || run_dir.join("resume-rejected.events.jsonl").exists() {
         let mut total = None;
         let mut estimated = false;
         let mut usage = Usage {
@@ -70,25 +76,9 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store,
             cached: 0,
         };
         for path in uncounted_event_files(&run_dir, attempt) {
-            let Some(mut outcome) = replay_run_cost(&path, prices) else {
+            let Some(outcome) = replay_attempt_run(task, attempt, &path, store, prices) else {
                 continue;
             };
-            if attempt.stage == Stage::Implement {
-                let argv: Vec<String> = std::fs::read_to_string(run_dir.join("run.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|meta| serde_json::from_value(meta["argv"].clone()).ok())
-                    .unwrap_or_default();
-                if let Some(resume) = argv.windows(2).find(|w| w[0] == "--resume") {
-                    price_claude_resume(
-                        &task.attempts,
-                        attempt.n,
-                        &resume[1],
-                        prices,
-                        &mut outcome,
-                    );
-                }
-            }
             let cost = outcome.cost_usd.unwrap_or(0.0);
             *total.get_or_insert(0.0) += cost;
             estimated |= outcome.cost_estimated;
@@ -101,6 +91,59 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store,
         }
     }
     settle_interrupted_review(task, idx, store, prices);
+}
+
+pub(super) fn rejected_resume_cost(
+    task: &Task,
+    idx: usize,
+    store: &Store,
+    prices: &Prices,
+) -> Option<harness::RunOutcome> {
+    let attempt = &task.attempts[idx];
+    let path = store
+        .run_dir(&task.id, attempt.n)
+        .join("resume-rejected.events.jsonl");
+    replay_attempt_run(task, attempt, &path, store, prices)
+}
+
+fn replay_attempt_run(
+    task: &Task,
+    attempt: &Attempt,
+    path: &Path,
+    store: &Store,
+    prices: &Prices,
+) -> Option<harness::RunOutcome> {
+    let mut outcome = if attempt.harness == Harness::Claude {
+        replay_run_cost(path, prices)?
+    } else {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut outcome = harness::replay_events(attempt.harness, &text);
+        let price = prices.get(&attempt.model)?;
+        outcome.cost_usd = Some(price.codex_cost(
+            outcome.usage_input,
+            outcome.usage_cached,
+            outcome.usage_output,
+        ));
+        outcome
+    };
+    if attempt.stage == Stage::Implement && attempt.harness == Harness::Claude {
+        let metadata = crate::harness::run_files::RunFiles::of(path).meta;
+        let argv: Vec<String> = std::fs::read_to_string(metadata)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|meta| serde_json::from_value(meta["argv"].clone()).ok())
+            .unwrap_or_default();
+        if let Some(resume) = argv.windows(2).find(|w| w[0] == "--resume") {
+            price_claude_resume(
+                &crate::engine::attempts::pricing::session_attempts(task, store, prices),
+                attempt.n,
+                &resume[1],
+                prices,
+                &mut outcome,
+            );
+        }
+    }
+    Some(outcome)
 }
 
 /// A review's cost is saved right after it ends. Replay the attempt's helper

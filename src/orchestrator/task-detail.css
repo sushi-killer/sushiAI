@@ -65,6 +65,11 @@
   gap: 6px;
   min-width: 0;
 }
+@container (max-width: 520px) {
+  .td-title {
+    flex-basis: 100%;
+  }
+}
 .td-title-row {
   display: flex;
   align-items: center;

@@ -50,6 +50,15 @@ pub(super) fn settle(
         }
         Err(RunError::NotFound(message)) => {
             app.mark_harness_missing(executed.run.route.harness);
+            let attempt = &task.attempts[executed.run.idx];
+            if attempt.cost_usd.is_some_and(|cost| cost > 0.0)
+                || attempt
+                    .usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.input > 0 || usage.output > 0 || usage.cached > 0)
+            {
+                return Err(NativeEnd::Failed(failure(FailureKind::Error, message)));
+            }
             attempts::discard(task, executed.run.idx, now_ms());
             task.record_decision(format!("Orchestrator: {message}; no attempt was used"));
             task.touch(now_ms());

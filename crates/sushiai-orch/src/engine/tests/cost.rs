@@ -62,7 +62,7 @@ fn an_interrupted_resumed_attempt_settles_only_its_own_session_spend() {
     let dir = store.run_dir(&task.id, 2);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("run.json"),
+        crate::harness::run_files::RunFiles::of(&dir.join("events.jsonl")).meta,
         r#"{"argv":["-p","--resume","sess-1"]}"#,
     )
     .unwrap();

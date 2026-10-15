@@ -56,6 +56,28 @@ function attempt(overrides = {}) {
   };
 }
 
+test("attempt counts use the task's fixed limit before the current global setting", async () => {
+  const { attemptOf, taskMetaLine } = await library;
+  const fixed = task({
+    variant: { maxAttempts: 2 },
+    attempts: [attempt()],
+  });
+  assert.equal(attemptOf(fixed, 4), "1/2");
+  assert.match(
+    taskMetaLine({ ...fixed, status: "waiting" }, 4),
+    /attempt 1\/2/,
+  );
+  assert.equal(attemptOf(fixed), "1/2");
+  assert.equal(attemptOf(task({ attempts: [attempt()] }), 4), "1/4");
+  assert.equal(
+    attemptOf(
+      { ...fixed, attempts: [attempt(), attempt({ n: 2 }), attempt({ n: 3 })] },
+      4,
+    ),
+    "3",
+  );
+});
+
 test("taskCreateParams adds a trimmed base on the request path, omits the key when blank", async () => {
   const { taskCreateParams } = await library;
   assert.deepEqual(

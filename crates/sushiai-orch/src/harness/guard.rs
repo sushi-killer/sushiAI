@@ -115,6 +115,11 @@ impl Guard {
         self
     }
 
+    pub(crate) fn with_cap(mut self, cap: Option<f64>) -> Self {
+        self.cap = cap;
+        self
+    }
+
     pub(crate) fn armed(&self) -> bool {
         self.stall.is_some() || self.wall.is_some()
     }

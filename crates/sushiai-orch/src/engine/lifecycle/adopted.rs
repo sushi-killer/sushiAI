@@ -66,7 +66,14 @@ pub(in crate::engine) async fn follow(
         &task.variant(),
         registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
     )
-    .with_time_budget(settings.implement_budget_mins, a.started_at);
+    .with_time_budget(settings.implement_budget_mins, a.started_at)
+    .with_cap((task.variant().max_attempt_cost_usd > 0.0).then(|| {
+        let rejected =
+            crate::engine::cost::rejected_resume_cost(task, idx, &app.store, &settings.prices)
+                .and_then(|outcome| outcome.cost_usd)
+                .unwrap_or(0.0);
+        (task.variant().max_attempt_cost_usd - rejected).max(0.0)
+    }));
     let result = follow_run(app, task, &a, cancel, guard).await;
     ExecutedAttempt {
         run: RunReceipt {

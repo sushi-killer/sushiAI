@@ -2,14 +2,12 @@ use super::brief::BriefedAttempt;
 use super::ExecutedAttempt;
 use crate::engine::attempts::best_of::run::{run_best_of, BestOfRun};
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::prepare::{prepare_run, ImplementRun, PreparedRun};
-use crate::engine::attempts::resume::RunBrief;
+use crate::engine::attempts::prepare::{prepare_run, ImplementRun};
 use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
-use crate::harness::RunOutcome;
 use crate::task::state::Task;
 use std::sync::Arc;
 
@@ -79,7 +77,13 @@ pub(super) async fn execute(
     };
     if req.resume.is_some() && rejected && !cancel.is_cancelled() {
         best_of.decisions.push(format!("Orchestrator: attempt {} resume rejected without a session init; falling back to a fresh run in the same attempt", run.attempt_n));
-        result = retry_fresh(app, &implement, &prepared, &brief, cancel).await;
+        result = super::fallback::ResumeFallback {
+            run: implement,
+            prepared: &prepared,
+            brief: &brief,
+        }
+        .run(app, result, cancel)
+        .await;
     }
     ExecutedAttempt {
         run,
@@ -88,52 +92,4 @@ pub(super) async fn execute(
         run_result: result,
         best_of,
     }
-}
-
-async fn retry_fresh(
-    app: &Arc<App>,
-    implement: &ImplementRun<'_>,
-    prepared: &PreparedRun,
-    brief: &RunBrief,
-    cancel: &CancelToken,
-) -> Result<RunOutcome, RunError> {
-    let events = implement.run_dir.join("events.jsonl");
-    let _ = std::fs::rename(
-        &events,
-        implement.run_dir.join("resume-rejected.events.jsonl"),
-    );
-    let _ = std::fs::write(implement.run_dir.join("brief.md"), &brief.full);
-    // Subscription credentials are consumed when the CLI starts.
-    if let Some(account) = implement
-        .route
-        .account_id
-        .as_ref()
-        .and_then(|id| app.secrets.read().unwrap().accounts.get(id).cloned())
-    {
-        if account.kind == "subscription" {
-            let _ = crate::store::files::write_secret_file(
-                &implement.run_dir.join("oauth-token"),
-                &account.value,
-            );
-        }
-    }
-    let request = implement.request(prepared, None);
-    run_harness(
-        app,
-        RunIdentity {
-            id: &implement.task.id,
-            attempt_n: implement.attempt_n,
-            track: RunTrack::Resumable,
-            tag: CostTag::task("implement", &implement.route.id),
-        },
-        RunInvocation {
-            request: &request,
-            brief: &brief.full,
-            events: &events,
-            schema: None,
-        },
-        cancel,
-        implement.guard(prepared),
-    )
-    .await
 }

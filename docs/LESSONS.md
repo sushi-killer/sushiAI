@@ -22,10 +22,10 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
-## 2026-10-15 — acknowledging a RAM-only amendment lost it after restart
+## 2026-10-15 — a rejected continuation lost paid usage during fresh fallback
 
-Root cause: the live control held the pending edit while ordinary task saves knew nothing about it.
-Rule: persist the pending receipt before acknowledgement; preserve it on ordinary writes and consume it with content-checked storage. Test a cold reload and a stale save, including child final-check contributions.
+Root cause: the fresh result replaced the rejected outcome, restoring the attempt allowance and dropping spend from task totals.
+Rule: preserve both invocation receipts, combine usage once and pass only the remaining allowance. Cover cancellation and exhaustion in `resume_fallback`.
 
 ## 2026-10-15 — clearing a live amendment before publishing its plan lost the next edit
 
@@ -39,6 +39,7 @@ Rule: compare owner authority at publication; retain paid observations, then rel
 
 ## Promoted
 
+- 2026-10-15 Acknowledged amendments survive restart: `an_acknowledged_live_wait_edit_survives_the_daemon_and_applies_after_restart`.
 - 2026-10-14 New agent turns require matching fakes: parent landing route-review replay and `tests/common`.
 - 2026-10-06 Build one real caller before generalizing: `AGENTS.md`, Core stays generic.
 - 2026-10-07 Test daemons must isolate inherited homes: `tests/helpers/real-daemon.cjs`; isolation checks in `check-conventions.mjs`.

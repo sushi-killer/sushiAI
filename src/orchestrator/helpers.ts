@@ -650,7 +650,7 @@ export function planDrafts(tasks: Task[]): Task[] {
  * (orchd keeps that raised budget in memory, not on the task). */
 export function attemptOf(task: Task, maxAttempts?: number): string {
   const count = implementAttemptCount(task);
-  const max = maxAttempts ?? count;
+  const max = task.variant?.maxAttempts ?? maxAttempts ?? count;
   return count > max ? `${count}` : `${count}/${max}`;
 }
 

@@ -65,14 +65,28 @@ pub(crate) fn price_resumed_attempt(
         return;
     };
     let task = app.store.load_task(task_id).ok().flatten();
-    price_claude_resume(
-        task.as_ref()
-            .map_or(&[][..], |task| task.attempts.as_slice()),
-        attempt_n,
-        session,
-        &app.settings.read().unwrap().prices,
-        outcome,
-    );
+    let prices = app.settings.read().unwrap().prices.clone();
+    let attempts = task
+        .as_ref()
+        .map_or_else(Vec::new, |task| session_attempts(task, &app.store, &prices));
+    price_claude_resume(&attempts, attempt_n, session, &prices, outcome);
+}
+
+pub(in crate::engine) fn session_attempts(
+    task: &crate::task::Task,
+    store: &crate::store::Store,
+    prices: &std::collections::BTreeMap<String, Price>,
+) -> Vec<Attempt> {
+    let mut attempts = task.attempts.to_vec();
+    for attempt in &mut attempts {
+        let run_dir = store.run_dir(&task.id, attempt.n);
+        if run_dir.join("resume-rejected.events.jsonl").exists() {
+            attempt.cost_usd =
+                crate::engine::cost::replay_run_cost(&run_dir.join("events.jsonl"), prices)
+                    .and_then(|outcome| outcome.cost_usd);
+        }
+    }
+    attempts
 }
 
 pub(crate) fn price_claude_resume(

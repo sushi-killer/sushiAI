@@ -134,7 +134,7 @@ An interrupted check runs once more at once unless cancelled. The same runner re
 
 Review runs alongside the final checks after fast verify, grounded checks, evidence and protected-path approval; a failed final check discards the review, and a failed review cancels the checks.
 
-A retry after a failed check resumes the previous implement session when its route is unchanged, with a short failure brief and new owner answers; route changes, conflict-only or best-of attempts, repeated review findings and loop-stopped runs start fresh, and a rejected resume falls back to a fresh run in the same attempt.
+A retry after a failed check resumes the previous implement session when its route is unchanged, with a short failure brief and new owner answers; route changes, best-of attempts, repeated review findings and loop-stopped runs start fresh, and a rejected resume falls back to a fresh run in the same attempt.
 
 ## Worktree environment
 

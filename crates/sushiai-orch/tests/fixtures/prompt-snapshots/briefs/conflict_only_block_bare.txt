@@ -1,4 +1,0 @@
-## Conflict-only attempt
-
-The work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run only a targeted test for the files you touched (one test file or one test name, not the listed verification commands or a whole-repo suite: the orchestrator runs those after you finish and gives any failure back to you), then finish.
-

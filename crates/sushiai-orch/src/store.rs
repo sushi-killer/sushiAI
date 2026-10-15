@@ -76,7 +76,6 @@ fn migrate_loop_state(task: &mut Task) {
                 .ok()
         })
         .next_back();
-    let stuck_retries = lines("Retry later: ").count() as u32;
     // The count belonged to the landing in progress; a landed task has none.
     let rereviews = if task.landed_at.is_some() {
         0
@@ -145,7 +144,6 @@ fn migrate_loop_state(task: &mut Task) {
     state.agent_restarted = agent_restarted;
     state.dependency_restarted = dependency_restarted;
     state.approach_changed_after = approach_changed_after;
-    state.stuck_retries = stuck_retries;
     state.rereviews = rereviews;
     state.non_owner_continues = non_owner_continues;
     state.unreviewed_parts = unreviewed_parts;
@@ -1070,8 +1068,6 @@ mod tests {
             "Orchestrator: restarted a failed task".into(),
             "Orchestrator: restarted a dependency that failed on the environment".into(),
             "Ladder: changed approach after attempt 1 (the same tier; the planner re-plans the rest)".into(),
-            "Retry later: x; trying again in 30 s (retry 1 of 2)".into(),
-            "Retry later: x; trying again in 30 s (retry 2 of 2)".into(),
             "Land: the carry onto b changed f which the review saw".into(),
             "Orchestrator: Attempts keep failing -> continue (r)".into(),
             "Overseer: answered like owner precedent -- Attempts keep failing -> continue".into(),
@@ -1101,7 +1097,7 @@ mod tests {
         assert_eq!(state.unreviewed_attempt, Some(1));
         assert!(state.agent_restarted && state.dependency_restarted);
         assert_eq!(state.approach_changed_after, Some(1));
-        assert_eq!((state.stuck_retries, state.rereviews), (2, 1));
+        assert_eq!(state.rereviews, 1);
         assert_eq!(state.non_owner_continues, 3);
         assert_eq!(state.unreviewed_parts.len(), 1);
         assert_eq!(state.unreviewed_parts[0].id, "child-1");
@@ -1111,7 +1107,7 @@ mod tests {
         assert_eq!(q.evidence.as_deref(), Some("a. Evidence: b"));
         // Loaded and saved again, the state stays as it is: the lines are not read twice.
         let mut again = store.load_task("legacy").unwrap().unwrap();
-        again.loop_state.stuck_retries = 0;
+        again.loop_state.rereviews = 0;
         store.save_task(&again).unwrap();
         assert_eq!(
             store
@@ -1119,7 +1115,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .loop_state
-                .stuck_retries,
+                .rereviews,
             0
         );
     }

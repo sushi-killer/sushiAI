@@ -29,7 +29,6 @@ fn daemon() -> (Daemon, tempfile::TempDir) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    cheap_route_on_claude(&daemon);
     (daemon, scripts)
 }
 
@@ -551,13 +550,23 @@ fn an_amended_base_that_conflicts_fails_an_attempt_and_lands_after_the_next() {
         "{task}"
     );
     assert_eq!(attempts[0]["failure"]["kind"], "conflict", "{task}");
-    assert_eq!(attempts[1]["routeId"], "claude-cheap", "{task}");
     assert!(
-        attempts[1]["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("conflict only"),
+        attempts[1]["reason"].as_str().unwrap().starts_with("tier "),
         "{task}"
+    );
+    let brief = std::fs::read_to_string(
+        daemon
+            .data_dir()
+            .join("tasks")
+            .join(&id)
+            .join("runs")
+            .join(attempts[1]["n"].as_u64().unwrap().to_string())
+            .join("brief.md"),
+    )
+    .unwrap();
+    assert!(
+        brief.contains("## Base moved") && brief.contains("shared.txt"),
+        "{brief}"
     );
     assert_eq!(
         std::fs::read_to_string(root.join("shared.txt")).unwrap(),

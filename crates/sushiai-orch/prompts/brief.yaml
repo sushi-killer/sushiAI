@@ -162,15 +162,10 @@ conflict: |
 time_budget: |
   The time budget is spent: stop working and reply with the sushi-report only.
 
-conflict_only_files: |
-  ## Conflict-only attempt
+carry_conflict: |
+  ## Base moved
 
-  Carrying this task onto the graph's newest base left conflicts in: {files}. This is the single attempt to resolve these conflicts. Resolve only those files so both changes survive, remove every conflict marker, and run a targeted check. Do not redo or extend the task. The orchestrator did not auto-resolve these conflicts.
-
-conflict_only: |
-  ## Conflict-only attempt
-
-  The work is finished and its checks passed. Landing it carried it onto a base branch that moved on, and the files named under Previous attempts (latest failure) now conflict. Do not redo or extend the work and do not touch other files. Resolve each conflict so both the base's change and this task's change survive, remove every `<<<<<<<`, `=======` and `>>>>>>>` marker, run only a targeted test for the files you touched (one test file or one test name, not the listed verification commands or a whole-repo suite: the orchestrator runs those after you finish and gives any failure back to you), then finish.
+  The base branch moved, and carrying this task onto it conflicts in: {files}. Text files carry `<<<<<<<` / `>>>>>>>` markers; for a binary or deleted file, your version is `git show {wip}:<path>`. Resolve each conflict so both sides' intent survives, remove every conflict marker, regenerate anything generated from the old base, and make the task's checks pass.
 
 parent_failure: |
   ## Finishing this task

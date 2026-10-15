@@ -85,7 +85,6 @@ mod rpc_misc;
 mod rpc_tasks;
 mod secrets;
 mod slots;
-mod stuck;
 mod subtask_checks;
 mod sync;
 mod task_loop;
@@ -131,7 +130,6 @@ use review_findings::*;
 use routing::*;
 use rpc_tasks::*;
 use slots::{take_slot, ResizableSlots, Slot, SlotPermit};
-use stuck::*;
 use task_loop::*;
 #[cfg(test)]
 use test_support::*;

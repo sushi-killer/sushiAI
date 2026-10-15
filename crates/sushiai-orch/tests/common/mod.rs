@@ -749,8 +749,8 @@ pub fn settle(daemon: &Daemon, task_id: &str) -> serde_json::Value {
     })
 }
 
-/// Points the cheap (`mechanical`) tier at a Claude route, so a conflict-only
-/// attempt runs on the fake Claude harness the test set up.
+/// Points the cheap (`mechanical`) tier at a Claude route, so work routed
+/// to it runs on the fake Claude harness the test set up.
 pub fn cheap_route_on_claude(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["routes"]

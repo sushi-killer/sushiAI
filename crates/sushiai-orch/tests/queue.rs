@@ -43,7 +43,7 @@ fn daemon(gates: &Path) -> (Daemon, tempfile::TempDir) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    // A conflict-only attempt runs on the cheap route: keep it on the fake.
+    // A route for the cheap tier that runs on the fake harness.
     cheap_route_on_claude(&daemon);
     (daemon, scripts)
 }

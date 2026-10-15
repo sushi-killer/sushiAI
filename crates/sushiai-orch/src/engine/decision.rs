@@ -236,16 +236,6 @@ pub(super) fn completed_implement_attempts(task: &Task) -> u32 {
         .count() as u32
 }
 
-/// Whether the latest implement attempt failed on a landing conflict: the
-/// next one only resolves it.
-pub(super) fn last_failure_is_conflict(task: &Task) -> bool {
-    task.attempts
-        .iter()
-        .rfind(|a| a.stage == Stage::Implement)
-        .and_then(|a| a.failure.as_ref())
-        .is_some_and(|f| f.kind == FailureKind::Conflict)
-}
-
 /// Implement attempts whose review failed with a repeated finding.
 pub(super) fn repeated_review_count(task: &Task) -> u32 {
     task.attempts
@@ -305,11 +295,6 @@ pub(super) fn advance_after_failure_with(
         .any(|f| f.handled && f.status == FindingStatus::Open && f.attempt == last.n)
     {
         consecutive = consecutive.min(2);
-    }
-    if task.queue.carry_conflict_attempt == Some(last.n) {
-        let reason =
-            "the base carry conflict attempt failed; fix the conflicts, then start it".to_string();
-        return retry_or_fail(task, &reason);
     }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]

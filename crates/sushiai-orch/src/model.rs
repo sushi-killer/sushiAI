@@ -2338,7 +2338,6 @@ impl Default for LoopState {
             unreviewed_attempt: None,
             agent_restarted: false,
             approach_changed_after: None,
-            stuck_retries: 0,
             rereviews: 0,
             non_owner_continues: 0,
             dependency_restarted: false,
@@ -2391,9 +2390,6 @@ pub struct LoopState {
     /// The attempt after which the failure ladder changed the approach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approach_changed_after: Option<u32>,
-    /// Pauses a stuck task has taken since it was last started.
-    #[serde(skip_serializing_if = "is_zero_u32")]
-    pub stuck_retries: u32,
     /// Times the landing in progress sent the work back to verify and the
     /// review; reset when the landing completes.
     #[serde(skip_serializing_if = "is_zero_u32")]
@@ -2487,11 +2483,14 @@ pub struct QueueState {
     pub stopped_explicitly: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub restart_children: bool,
-    /// A base carry needs one conflict-only attempt.
+    /// The files a base carry left conflicted: the next attempt's brief names
+    /// them, and the attempt clears the list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub carry_conflicts: Vec<String>,
+    /// The implement attempt that carries the note; the list is cleared once
+    /// that attempt ends with a recorded outcome, not when it is interrupted.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub carry_conflict_attempt: Option<u32>,
+    pub carry_conflict_step: Option<u32>,
     /// The pull request carry conflicted and the task went back for its one
     /// resolution attempt; a second conflict ends the task `failed`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

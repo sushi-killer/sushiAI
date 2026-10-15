@@ -1,4 +1,0 @@
-## Conflict-only attempt
-
-Carrying this task onto the graph's newest base left conflicts in: src/a.ts, src/b.ts. This is the single attempt to resolve these conflicts. Resolve only those files so both changes survive, remove every conflict marker, and run a targeted check. Do not redo or extend the task. The orchestrator did not auto-resolve these conflicts.
-

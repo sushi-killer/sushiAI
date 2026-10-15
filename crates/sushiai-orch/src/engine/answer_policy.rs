@@ -1,3 +1,13 @@
+pub(in crate::engine) mod authority;
+pub(in crate::engine) mod judge;
+pub(in crate::engine) mod planner;
+pub(in crate::engine) mod publication;
+
+#[cfg(test)]
+use self::authority::is_shared_check;
+use self::authority::removal_refusal;
+#[cfg(test)]
+use self::judge::{impossible_parts, parse_judgement, Judgement};
 #[cfg(test)]
 use crate::engine::decision::impossible_question;
 #[cfg(test)]
@@ -18,21 +28,14 @@ use crate::task::Wait;
 use crate::verify::repository::record_plan_check_sources;
 
 use crate::clock::now_ms;
-use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
-use crate::engine::attempts::tracking::RunTrack;
 use crate::engine::attribution::attributed_target;
-use crate::engine::brief_check::check_route_for;
 use crate::engine::decision::impossible_drop_target;
-use crate::engine::decision_memory::hard_limit;
 use crate::engine::lifecycle::base_wait::waits_for_base_move;
 #[cfg(test)]
 use crate::engine::lifecycle::base_wait::BASE_WAIT_TITLE;
 use crate::engine::lines::policy_answer_line;
 #[cfg(test)]
 use crate::engine::questions::answers::record_answer;
-use crate::engine::review::review_request;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
 #[cfg(test)]
 use crate::engine::test_support::assert_helper_timeout;
@@ -48,19 +51,11 @@ use crate::engine::test_support::planner_made;
 use crate::engine::test_support::slow_helper_task;
 #[cfg(test)]
 use crate::engine::test_support::task_with_status;
-use crate::engine::verification::scoping::scoped_checks_for;
-use crate::harness;
 use crate::harness::cancel::CancelToken;
-use crate::harness::guard::helper_timeout_message;
-use crate::harness::guard::Guard;
-use crate::policy::paths::glob_match;
-use crate::policy::routing::Harness;
+use crate::policy::questions::limits::hard_limit;
+use crate::policy::questions::{cautious_option, owner_only};
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
-use crate::prompts::engine_text;
-use crate::task::amendment::Amendment;
 use crate::task::checks::authority::{criterion_commands, Origin};
-use crate::task::checks::commands::flat_command;
 use crate::task::is_option;
 use crate::task::AnsweredBy;
 use crate::task::AnsweredQuestion;
@@ -72,16 +67,12 @@ use crate::task::Risk;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use crate::task::PRE_EXISTING_RETRY;
-use serde_json::json;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Automatic answers per kind of question and cause on one task; the next
 /// question of that kind and cause goes on to the overseer and the owner.
 pub(super) const MAX_POLICY_ANSWERS: usize = 3;
-
-const MAX_REASON_CHARS: usize = 300;
 
 pub(super) fn policy_on(app: &App) -> bool {
     app.settings.read().unwrap().answer_policy
@@ -169,135 +160,6 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
             })
     });
     (targeted, base_moves)
-}
-
-/// Kinds only the owner may allow: never the policy, the chat agent or an
-/// MCP client (see [`is_refusal`] for what those may still answer).
-pub(crate) fn owner_only(kind: QuestionKind) -> bool {
-    matches!(
-        kind,
-        QuestionKind::Budget
-            | QuestionKind::DailyBudget
-            | QuestionKind::HarnessMissing
-            | QuestionKind::ProtectedPath
-            | QuestionKind::Permission
-    )
-}
-
-/// Whether `answer` only asks the waiting loop to look again at a harness or
-/// a daily budget that may have cleared; it allows nothing, so a non-owner
-/// may give it.
-pub(super) fn is_recheck(question: &Question, answer: &str) -> bool {
-    matches!(
-        question.kind,
-        QuestionKind::HarnessMissing | QuestionKind::DailyBudget
-    ) && answer.trim().eq_ignore_ascii_case("retry")
-}
-
-/// Whether `answer` only denies or stops, so a non-owner may give it.
-pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
-    if answer.trim().eq_ignore_ascii_case("stop") {
-        return true;
-    }
-    match question.kind {
-        QuestionKind::Permission => {
-            matches!(
-                crate::policy::permissions::parse_choice(answer),
-                crate::policy::permissions::Choice::Deny(_)
-            )
-        }
-        QuestionKind::ProtectedPath => is_option(answer, "reject"),
-        _ => false,
-    }
-}
-
-pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
-    check_authority(settings, task).is_shared(task, command)
-}
-
-pub(super) fn check_authority(
-    settings: &Settings,
-    task: &Task,
-) -> crate::task::checks::authority::CheckAuthority {
-    crate::task::checks::authority::CheckAuthority {
-        named: task
-            .planner_check_commands()
-            .into_iter()
-            .map(|(command, _)| command)
-            .chain(
-                task.planner_tests
-                    .sources
-                    .iter()
-                    .map(|source| source.command.clone()),
-            )
-            .filter(|command| {
-                let command = flat_command(command);
-                scoped_checks_for(settings, task).iter().any(|e| {
-                    e.repo
-                        .as_deref()
-                        .is_none_or(|r| crate::git::paths::same_repo_path(r, &task.repo))
-                        && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
-                }) || settings.after_land.iter().any(|a| {
-                    crate::git::paths::same_repo_path(&a.repo, &task.repo)
-                        && flat_command(&a.run) == command
-                })
-            })
-            .collect(),
-    }
-}
-
-pub(super) fn removal_refusal(
-    settings: &Settings,
-    task: &Task,
-    commands: &[String],
-    origin: Origin,
-) -> Option<String> {
-    crate::task::checks::authority::removal_refusal(
-        &check_authority(settings, task),
-        task,
-        commands,
-        origin,
-    )
-}
-
-pub(super) fn criterion_text_refusal(
-    settings: &Settings,
-    task: &Task,
-    i: usize,
-    new_text: &str,
-) -> Option<String> {
-    crate::task::checks::authority::criterion_text_refusal(
-        &check_authority(settings, task),
-        task,
-        i,
-        new_text,
-    )
-}
-
-pub(super) fn remove_check_command(
-    settings: &Settings,
-    task: &mut Task,
-    command: &str,
-    origin: Origin,
-) -> Result<(), String> {
-    crate::task::checks::authority::remove_check_command(
-        &check_authority(settings, task),
-        task,
-        command,
-        origin,
-    )
-}
-
-pub(super) fn shared_check_amend_refusal(
-    settings: &Settings,
-    task: &Task,
-    amendment: &Amendment,
-) -> Option<String> {
-    crate::task::checks::authority::shared_check_amend_refusal(
-        &check_authority(settings, task),
-        task,
-        amendment,
-    )
 }
 
 /// The origin of the answer the wait just recorded in the question history
@@ -428,16 +290,30 @@ fn rule_answer(task: &Task, question: &Question, attempt_n: u32) -> Option<(Stri
     rule_answer_with_context(task, question, attempt_n, &[false], true)
 }
 
+#[derive(Debug)]
+pub(in crate::engine) enum AutomaticAnswer {
+    Policy { text: String, evidence: String },
+    Judge { text: String, evidence: String },
+}
+
+impl AutomaticAnswer {
+    fn parts(&self) -> (&str, &'static str, &str) {
+        match self {
+            Self::Policy { text, evidence } => (text, "policy", evidence),
+            Self::Judge { text, evidence } => (text, "judge", evidence),
+        }
+    }
+}
+
 /// Records an automatic answer as an assumption the owner can overturn, with
-/// a decision line. `by` is `policy` or `judge`.
+/// a decision line identifying the rule or judge.
 pub(super) fn record_policy_answer(
     task: &mut Task,
     question: &Question,
-    answer: &str,
-    by: &str,
-    evidence: &str,
+    answer: &AutomaticAnswer,
     attempt_n: u32,
 ) {
+    let (answer, by, evidence) = answer.parts();
     if question.kind == QuestionKind::AttemptsFailing {
         task.reset_rate_pauses();
     }
@@ -515,180 +391,48 @@ pub(super) async fn try_policy_answer(
     app: &Arc<App>,
     task: &mut Task,
     cancel: &CancelToken,
-) -> Option<String> {
+) -> publication::PolicyResult {
+    use publication::{AnswerRuling, PolicyInput, PolicyResult};
     if cancel.is_cancelled() {
-        return None;
+        return PolicyResult::Stopped;
     }
-    let question = task.question.clone()?;
-    if !policy_open(app, task, &question) {
-        return None;
-    }
-    let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
-    let (answer, by, evidence) = match question.kind {
-        QuestionKind::Impossible => {
-            let (answer, reason) =
-                judge_impossible(app, task, &question, attempt_n, cancel).await?;
-            // Dropping a criterion that carries a shared check is the owner's.
-            let refused =
-                shared_check_drop_refusal(&app.settings.read().unwrap(), task, &question, &answer);
-            if let Some(why) = refused {
-                task.record_decision(format!("Answer judge: {why}"));
-                return None;
-            }
-            (answer, "judge", reason)
-        }
-        _ => {
-            let (targeted, base_moves) = if question.kind == QuestionKind::PreexistingFailure {
-                policy_base_context(app, task, &question)
-            } else {
-                (Vec::new(), false)
-            };
-            let (answer, evidence) =
-                rule_answer_with_context(task, &question, attempt_n, &targeted, base_moves)?;
-            (answer, "policy", evidence)
-        }
+    let Some(question) = task.question.clone() else {
+        return PolicyResult::Open;
     };
-    record_policy_answer(task, &question, &answer, by, &evidence, attempt_n);
-    app.broadcast_log(
-        &task.id,
-        attempt_n,
-        policy_answer_line(&question.text, &answer, by, &evidence),
-    );
-    task.clear_question();
-    task.resume_phase(TaskStatus::Queued, now_ms());
-    task.touch(now_ms());
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    Some(answer)
-}
-
-/// The criterion number and the agent's evidence of an impossible question.
-fn impossible_parts(question: &Question) -> Option<(usize, String)> {
-    Some((question.criterion?, question.evidence.clone()?))
-}
-
-enum Judgement {
-    Verified(String),
-    Refuted(String),
-}
-
-fn parse_judgement(text: &str) -> Option<Judgement> {
-    let (start, end) = (text.find('{')?, text.rfind('}')?);
-    let v: serde_json::Value = serde_json::from_str(text.get(start..=end)?).ok()?;
-    let reason = truncate_chars(
-        &v.get("reason")
-            .and_then(|r| r.as_str())
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-        MAX_REASON_CHARS,
-    );
-    match v.get("verified")?.as_bool()? {
-        true => Some(Judgement::Verified(reason)),
-        false => Some(Judgement::Refuted(reason)),
+    let planner_check = question.kind == QuestionKind::Impossible
+        && question.criterion.is_some_and(|index| {
+            planner::planner_check_criterion(&app.settings.read().unwrap(), task, index)
+        });
+    if !planner_check && !policy_open(app, task, &question) {
+        return PolicyResult::Open;
     }
-}
-
-pub(super) fn impossible_brief(criterion: &str, evidence: &str) -> String {
-    format!(
-        "{}\n\n{}\n",
-        engine_text("answer_policy_judge"),
-        json!({"criterion": criterion, "evidence": evidence})
-    )
-}
-
-/// `drop criterion` only when the judge verified the evidence, else `retry`;
-/// `None` when the judge is off or gave no usable reply (the owner decides).
-async fn judge_impossible(
-    app: &Arc<App>,
-    task: &mut Task,
-    question: &Question,
-    attempt_n: u32,
-    cancel: &CancelToken,
-) -> Option<(String, String)> {
-    let (n, evidence) = impossible_parts(question)?;
-    let criterion = task.criteria.get(n)?.clone();
-    let (_, route, fallback) = check_route_for(app, &task.variant())?;
-    let route = route?;
-    if let Some(note) = fallback {
-        task.record_decision(format!("Answer judge: {note}"));
-    }
-    let settings = app.settings.read().unwrap().clone();
-    let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app
-        .store
-        .claim_helper_run_dir(&task.id, "answer-judge", Some(attempt_n))
-        .ok()?;
-    let mcp_path = run_dir.join("mcp.json");
-    let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
-    let settings_path = run_dir.join("settings.json");
-    let key_path = run_dir.join("key");
-    let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-    if matches!(route.harness, Harness::Claude) {
-        write_readonly_claude_settings_with_profile(
-            &route,
-            app,
-            &key_path,
-            &settings,
-            &deny_read,
-            &settings_path,
-        );
-    }
-    let brief_text = impossible_brief(&criterion, &evidence);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-    let events_path = run_dir.join("events.jsonl");
-    let req = harness::RunRequest {
-        repo_settings: false,
-        resume: None,
-        ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
+    let Some(input) = PolicyInput::capture(app, task) else {
+        return PolicyResult::Stopped;
     };
-    let limit = app.helper_timeout();
-    let result = run_harness(
-        app,
-        &task.id,
-        attempt_n,
-        RunTrack::No,
-        &worktree,
-        &req,
-        CostTag::task("answer_judge", &route.id),
-        &brief_text,
-        &events_path,
-        cancel,
-        Guard::helper("answer judge", limit),
-    )
-    .await;
-    let _ = std::fs::remove_file(&key_path);
-    // A cancelled or failed judge run asks the owner; the wait that follows
-    // sees the cancellation itself.
-    let outcome = result.ok()?;
-    if outcome.timed_out {
-        task.record_decision(helper_timeout_message("answer judge", limit));
-    }
-    task.charge(outcome.cost_usd.unwrap_or(0.0));
-    if outcome.error.is_some() {
-        return None;
-    }
-    match parse_judgement(&outcome.final_text.unwrap_or_default())? {
-        Judgement::Verified(reason) => Some(("drop criterion".to_string(), reason)),
-        Judgement::Refuted(reason) => Some(("retry".to_string(), reason)),
-    }
-}
-
-/// The option of a plan or agent question that is phrased as the cautious or
-/// reversible choice.
-pub(super) fn cautious_option(options: &[String]) -> Option<&String> {
-    options.iter().find(|o| {
-        let o = o.to_ascii_lowercase();
-        let negated = |word: &str| {
-            o.contains(&format!("not {word}"))
-                || o.contains(&format!("non-{word}"))
-                || o.contains(&format!("in{word}"))
-                || o.contains(&format!("ir{word}"))
+    let ruling = if planner_check {
+        planner::settle_planner_check(app, task, &question, input.attempt, cancel).await
+    } else if question.kind == QuestionKind::Impossible {
+        judge::judge_impossible(app, task, &question, input.attempt, cancel).await
+    } else {
+        let (targeted, base_moves) = if question.kind == QuestionKind::PreexistingFailure {
+            policy_base_context(app, task, &question)
+        } else {
+            (Vec::new(), false)
         };
-        (o.contains("cautious") && !negated("cautious"))
-            || (o.contains("reversible") && !negated("reversible"))
-    })
+        let Some((text, evidence)) =
+            rule_answer_with_context(task, &question, input.attempt, &targeted, base_moves)
+        else {
+            return PolicyResult::Open;
+        };
+        AnswerRuling::rule(AutomaticAnswer::Policy { text, evidence })
+    };
+    match publication::publish(app, task, input, ruling, cancel) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("orch: automatic answer was not published: {error}");
+            PolicyResult::Stopped
+        }
+    }
 }
 
 /// The option taken for a waiting question nobody answers in time: the
@@ -719,622 +463,18 @@ pub(super) fn default_choice(app: &App, task: &Task, question: &Question) -> Opt
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn opts(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn the_wait_default_never_takes_an_option_under_a_hard_limit() {
-        let (app, _dir) = crate::engine::test_support::test_app();
-        app.settings.write().unwrap().answer_policy = true;
-        let task = task_with_status(TaskStatus::Waiting);
-        let mut question = Question::new(
-            "Which layout?",
-            opts(&["wide", "narrow"]),
-            QuestionKind::AgentQuestion,
-            AskedBy::Implement,
-            crate::clock::now_ms(),
-        );
-        question.default_option = Some(1);
-        assert_eq!(
-            default_choice(&app, &task, &question).as_deref(),
-            Some("narrow")
-        );
-        question.text = "Clean up the old data?".into();
-        question.options = opts(&["delete the old data", "keep the old data"]);
-        assert_eq!(default_choice(&app, &task, &question), None);
-        question.default_option = Some(0);
-        assert_eq!(default_choice(&app, &task, &question), None);
-        // The agent's own tag limits an option the words do not.
-        question.options = opts(&["go ahead", "wait"]);
-        question.text = "How should it go?".into();
-        question.risk = vec![Risk::Destructive];
-        assert_eq!(default_choice(&app, &task, &question), None);
-    }
-
-    #[test]
-    fn a_check_is_the_owners_unless_the_planner_wrote_it_for_a_file_of_its_own() {
-        let settings = Settings::default();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        planner_made(&mut task, "pytest tests/test_new.py", "tests/test_new.py");
-        planner_made(
-            &mut task,
-            "node --test tests/a.test.cjs README.md",
-            "tests/a.test.cjs",
-        );
-        for command in [
-            "go test ./...",
-            "pytest",
-            "cargo nextest run",
-            "just ci",
-            "./gradlew test",
-            "npx vitest run",
-            "npm run test:daemon",
-            "pytest tests/test_other.py",
-            "",
-        ] {
-            assert_eq!(
-                is_shared_check(&settings, &task, command),
-                !command.is_empty(),
-                "{command}"
-            );
-        }
-        assert!(!is_shared_check(
-            &settings,
-            &task,
-            "pytest   tests/test_new.py"
-        ));
-    }
-
-    #[test]
-    fn a_planner_command_that_the_owner_or_the_settings_name_stays_the_owners() {
-        let mut settings = Settings::default();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        planner_made(&mut task, "pytest tests/test_new.py", "tests/test_new.py");
-        assert!(!is_shared_check(
-            &settings,
-            &task,
-            "pytest tests/test_new.py"
-        ));
-        task.fixture_data().planner_tests.sources[0].source = CheckSource::Owner;
-        assert!(is_shared_check(
-            &settings,
-            &task,
-            "pytest tests/test_new.py"
-        ));
-        task.fixture_data().planner_tests.sources[0].source = CheckSource::Planner;
-        settings.after_land.push(AfterLand {
-            repo: task.repo.clone(),
-            run: "pytest tests/test_new.py".into(),
-        });
-        assert!(is_shared_check(
-            &settings,
-            &task,
-            "pytest tests/test_new.py"
-        ));
-    }
-
-    fn sourced(task: &mut Task, command: &str, source: CheckSource) {
-        task.fixture_data()
-            .planner_tests
-            .sources
-            .push(SourcedCheck {
-                command: command.into(),
-                source,
-            });
-    }
-
-    #[test]
-    fn a_whole_suite_in_verify_is_the_repos_and_a_planner_file_check_is_not() {
-        let repo = tempfile::tempdir().unwrap();
-        init_git_repo(repo.path());
-        let mut task = task_with_status(TaskStatus::Waiting);
-        task.fixture_data().repo = repo.path().to_string_lossy().into_owned();
-        task.fixture_data().base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
-        let suites = [
-            "go test ./...",
-            "pytest",
-            "just ci",
-            "./gradlew test",
-            "tox",
-            "make check",
-            "cargo nextest run",
-            "cargo test --workspace",
-            "pytest tests tests/new_test.py",
-        ];
-        task.fixture_data().verify = suites.iter().map(|c| c.to_string()).collect();
-        task.fixture_data().verify.push("test -f new/a.txt".into());
-        task.fixture_data().criteria = vec!["x -- check: go test ./...".into()];
-        record_plan_check_sources(&mut task, repo.path());
-        let settings = Settings::default();
-        for command in suites {
-            assert!(is_shared_check(&settings, &task, command), "{command}");
-        }
-        assert!(!is_shared_check(&settings, &task, "test -f new/a.txt"));
-    }
-
-    #[test]
-    fn a_planner_check_that_cannot_pass_on_a_moved_base_is_droppable() {
-        let settings = Settings::default();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        task.fixture_data().criteria = vec![
-            "The version is 9 -- check: grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet".into(),
-        ];
-        let command = "grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet";
-        sourced(&mut task, command, CheckSource::Planner);
-        assert!(!is_shared_check(&settings, &task, command));
-        assert_eq!(
-            removal_refusal(&settings, &task, &[command.into()], Origin::Other),
-            None
-        );
-    }
-
-    #[test]
-    fn a_repo_or_owner_check_stays_shared_for_a_non_owner() {
-        let mut settings = Settings::default();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        sourced(&mut task, "npm test", CheckSource::Repo);
-        sourced(&mut task, "cargo test --workspace", CheckSource::Repo);
-        sourced(&mut task, "grep -q x a.txt", CheckSource::Owner);
-        for command in [
-            "npm test",
-            "cargo test --workspace",
-            "grep -q x a.txt",
-            "make unknown",
-        ] {
-            assert!(is_shared_check(&settings, &task, command), "{command}");
-            assert!(
-                removal_refusal(&settings, &task, &[command.into()], Origin::Other).is_some(),
-                "{command}"
-            );
-            assert_eq!(
-                removal_refusal(&settings, &task, &[command.into()], Origin::Owner),
-                None
-            );
-        }
-        // A setting that names a planner-recorded command keeps it shared.
-        sourced(&mut task, "pytest tests/x.py", CheckSource::Planner);
-        assert!(!is_shared_check(&settings, &task, "pytest tests/x.py"));
-        settings.after_land.push(AfterLand {
-            repo: task.repo.clone(),
-            run: "pytest tests/x.py".into(),
-        });
-        assert!(is_shared_check(&settings, &task, "pytest tests/x.py"));
-    }
-
-    #[test]
-    fn a_cautious_or_reversible_option_is_found() {
-        let o = opts(&["rewrite it", "keep the old API (cautious)"]);
-        assert_eq!(
-            cautious_option(&o).map(String::as_str),
-            Some("keep the old API (cautious)")
-        );
-        let o = opts(&["a reversible migration", "drop the table"]);
-        assert_eq!(
-            cautious_option(&o).map(String::as_str),
-            Some("a reversible migration")
-        );
-    }
-
-    #[test]
-    fn a_negated_option_is_not_cautious() {
-        assert!(cautious_option(&opts(&["an irreversible migration", "not cautious"])).is_none());
-        assert!(cautious_option(&opts(&["yes", "no"])).is_none());
-    }
-
-    #[test]
-    fn the_impossible_question_yields_its_criterion_and_evidence() {
-        let mut task = task_with_status(TaskStatus::Running);
-        task.fixture_data().criteria = vec!["zero".into(), "one. Evidence: nope".into()];
-        // The criterion and the evidence hold the old separator: nothing is parsed back.
-        let evidence = "see a. Evidence: b";
-        let claim = crate::engine::attempts::report::Impossible {
-            criterion: 1,
-            evidence: evidence.into(),
-        };
-        let q = impossible_question(&task, &claim);
-        assert_eq!(impossible_parts(&q), Some((1, evidence.to_string())));
-    }
-
-    #[test]
-    fn a_judgement_reads_its_flag() {
-        assert!(matches!(
-            parse_judgement("```json\n{\"verified\": true, \"reason\": \"seen\"}\n```"),
-            Some(Judgement::Verified(r)) if r == "seen"
-        ));
-        assert!(matches!(
-            parse_judgement("{\"verified\": false}"),
-            Some(Judgement::Refuted(_))
-        ));
-        assert!(parse_judgement("no idea").is_none());
-    }
-
-    #[test]
-    fn attempts_keep_failing_has_no_blind_continue_rule() {
-        let mut task = task_with_status(TaskStatus::Waiting);
-        task.fixture_data().attempts = vec![attempt_with_failure(1, "review:x")];
-        let q = Question::new(
-            "Attempts keep failing",
-            opts(&["continue", "stop"]),
-            QuestionKind::AttemptsFailing,
-            AskedBy::Implement,
-            crate::clock::now_ms(),
-        );
-        // The failure ladder owns this kind: a changed approach, never a
-        // plain continue.
-        assert!(rule_answer(&task, &q, 1).is_none());
-    }
-
-    fn base_check_question(commands: &[&str], options: &[&str]) -> Question {
-        let failed: Vec<VerifyOutcome> = commands
-            .iter()
-            .map(|c| VerifyOutcome {
-                command: c.to_string(),
-                code: Some(1),
-                tail: "boom".to_string(),
-                ms: 1,
-                ..Default::default()
-            })
-            .collect();
-        let mut q = crate::engine::verification::base::questions::pre_existing_question(
-            &failed,
-            "0123456789",
-        );
-        q.options = opts(options);
-        q
-    }
-
-    #[test]
-    fn drop_all_with_a_shared_check_is_refused_for_a_non_owner() {
-        let settings = Settings::default();
-        let task = task_with_status(TaskStatus::Waiting);
-        let q = base_check_question(
-            &["node --test tests/x.test.cjs", "npm run ci"],
-            &["retry after the base is fixed", "drop all", "stop"],
-        );
-        let mut task = task;
-        planner_made(
-            &mut task,
-            "node --test tests/x.test.cjs",
-            "tests/x.test.cjs",
-        );
-        let why = shared_check_drop_refusal(&settings, &task, &q, "drop all").unwrap();
-        assert!(
-            why.contains("`npm run ci`") && why.contains("only the owner"),
-            "{why}"
-        );
-        // Retry and stop are not removals.
-        assert!(shared_check_drop_refusal(&settings, &task, &q, "stop").is_none());
-        // Only task-specific checks: droppable by anyone.
-        let q = base_check_question(&["node --test tests/x.test.cjs"], &["drop all"]);
-        assert!(shared_check_drop_refusal(&settings, &task, &q, "drop all").is_none());
-        // Nothing is removed on a refusal: the owner's route is the only one.
-        task.fixture_data().verify =
-            vec!["npm run ci".into(), "node --test tests/x.test.cjs".into()];
-        let q = base_check_question(
-            &["npm run ci", "node --test tests/x.test.cjs"],
-            &["drop all"],
-        );
-        assert!(removal_refusal(&settings, &task, &q.commands, Origin::Other).is_some());
-        assert_eq!(task.verify.len(), 2);
-    }
-
-    #[test]
-    fn a_base_check_rule_fires_once_per_command() {
-        let mut task = task_with_status(TaskStatus::Waiting);
-        let keep = crate::engine::verification::base::answers::KEEP_ALL;
-        let first = base_check_question(&["a.sh", "b.sh"], &[keep, "drop all", "stop"]);
-        let (answer, _) = rule_answer_with_context(&task, &first, 1, &[true, true], false).unwrap();
-        assert_eq!(answer, keep);
-        record_policy_answer(&mut task, &first, &answer, "policy", "e", 1);
-        // The same commands again: covered.
-        assert!(rule_answer_with_context(&task, &first, 1, &[true, true], false).is_none());
-        // A new command in the list: the rule fires again.
-        let second = base_check_question(&["b.sh", "c.sh"], &[keep, "drop all", "stop"]);
-        assert!(rule_answer_with_context(&task, &second, 1, &[true, true], false).is_some());
-        record_policy_answer(&mut task, &second, keep, "policy", "e", 1);
-        assert!(rule_answer_with_context(&task, &second, 1, &[true, true], false).is_none());
-
-        // The retry rule of a single task is per command too.
-        let retry = PRE_EXISTING_RETRY;
-        let mut task = task_with_status(TaskStatus::Waiting);
-        let one = base_check_question(&["a.sh"], &[retry, "drop all", "stop"]);
-        let (answer, _) = rule_answer_with_context(&task, &one, 1, &[false], true).unwrap();
-        assert_eq!(answer, retry);
-        record_policy_answer(&mut task, &one, &answer, "policy", "e", 1);
-        assert!(rule_answer_with_context(&task, &one, 1, &[false], true).is_none());
-        let other = base_check_question(&["a.sh", "d.sh"], &[retry, "drop all", "stop"]);
-        assert!(rule_answer_with_context(&task, &other, 1, &[false, false], true).is_some());
-    }
-
-    #[test]
-    fn preexisting_policy_keeps_targets_retries_only_moving_bases_and_otherwise_defers() {
-        let mut task = task_with_status(TaskStatus::Waiting);
-        let command = "node --test tests/focus.test.cjs";
-        task.fixture_data().request = Some(format!("Make {command} pass"));
-        let question = crate::engine::verification::base::questions::pre_existing_question(
-            &[VerifyOutcome {
-                command: command.into(),
-                code: Some(1),
-                tail: "test a_base_retry_carries_the_planner_test_commit ... FAILED".into(),
-                ..Default::default()
-            }],
-            &task.base_sha,
-        );
-        let targeted =
-            crate::engine::verification::base::answers::is_task_target(&task, command, &[]);
-        let (answer, evidence) =
-            rule_answer_with_context(&task, &question, 1, &[targeted], false).unwrap();
-        assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
-        assert!(evidence.contains("task is meant to make the check pass"));
-
-        task.fixture_data().request = None;
-        let path_command = "node --test crates/sushiai-orch/tests/base_retry.rs";
-        let path_output = "error in crates/sushiai-orch/tests/base_retry.rs:17:2";
-        let path_target = crate::engine::verification::base::answers::is_task_target(
-            &task,
-            path_command,
-            &["crates/sushiai-orch/tests/base_retry.rs".into()],
-        );
-        assert!(path_target);
-        let path_question = crate::engine::verification::base::questions::pre_existing_question(
-            &[VerifyOutcome {
-                command: path_command.into(),
-                code: Some(1),
-                tail: path_output.into(),
-                ..Default::default()
-            }],
-            &task.base_sha,
-        );
-        let (answer, _) =
-            rule_answer_with_context(&task, &path_question, 1, &[path_target], false).unwrap();
-        assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
-
-        let control =
-            base_check_question(&["make verify"], &[PRE_EXISTING_RETRY, "drop all", "stop"]);
-        assert!(rule_answer_with_context(&task, &control, 1, &[false], false).is_none());
-        let (answer, _) = rule_answer_with_context(&task, &control, 1, &[false], true).unwrap();
-        assert_eq!(answer, PRE_EXISTING_RETRY);
-
-        let parent_options = base_check_question(
-            &["make verify"],
-            &[
-                crate::engine::verification::base::answers::KEEP_ALL,
-                "drop all",
-                "stop",
-            ],
-        );
-        for base_moves in [false, true] {
-            let (answer, evidence) =
-                rule_answer_with_context(&task, &parent_options, 1, &[false], base_moves).unwrap();
-            assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
-            assert!(evidence.contains("subtasks are meant to make the check pass"));
-        }
-
-        let mixed = base_check_question(
-            &[
-                "cargo test -p sushiai-orch --test base_retry",
-                "make verify",
-            ],
-            &[PRE_EXISTING_RETRY, "drop all", "stop"],
-        );
-        let (answer, _) = rule_answer_with_context(&task, &mixed, 1, &[true, false], true).unwrap();
-        assert_eq!(answer, PRE_EXISTING_RETRY);
-        assert!(rule_answer_with_context(&task, &mixed, 1, &[true, false], false).is_none());
-    }
-}
+#[path = "answer_policy/tests/callers.rs"]
+mod answer_caller_tests;
+#[cfg(test)]
+#[path = "answer_policy/tests/base_moves.rs"]
+mod base_moves_tests;
+#[cfg(test)]
+#[path = "answer_policy/tests/rules.rs"]
+mod tests;
+#[cfg(test)]
+#[path = "answer_policy/tests/timeout.rs"]
+mod timeout_tests;
 
 #[cfg(test)]
-mod answer_caller_tests {
-    use super::*;
-
-    #[test]
-    fn a_command_retried_by_a_lead_overseer_or_chat_is_not_retried_by_rule() {
-        for caller in [
-            AnsweredBy::Lead,
-            AnsweredBy::Overseer,
-            AnsweredBy::Orchestrator,
-            AnsweredBy::Owner,
-        ] {
-            let mut task = task_with_status(TaskStatus::Waiting);
-            let first = crate::engine::verification::base::questions::pre_existing_question(
-                &[VerifyOutcome {
-                    command: "a.sh".into(),
-                    code: Some(1),
-                    ..Default::default()
-                }],
-                &task.base_sha,
-            );
-            assert!(rule_answer(&task, &first, 1).is_some());
-            record_answer(&mut task, Some(&first), PRE_EXISTING_RETRY, caller);
-            let sha = task.base_sha.clone();
-            record_owner_base_check(&mut task, &first.commands, &sha, PRE_EXISTING_RETRY, false);
-            assert_eq!(
-                rule_answer(&task, &first, 1).is_none(),
-                caller != AnsweredBy::Owner
-            );
-            let mut new_command = first.clone();
-            new_command.commands.push("b.sh".into());
-            assert!(rule_answer(&task, &new_command, 1).is_some());
-            task.fixture_data().base_sha = "1234567890".into();
-            assert_eq!(
-                rule_answer(&task, &first, 1).is_none(),
-                caller != AnsweredBy::Owner
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod timeout_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn answer_judge_timed_out_leaves_the_decision_to_the_owner() {
-        let (app, _dir, mut task, _) = slow_helper_task();
-        let criteria = task.criteria.clone();
-        let claim = crate::engine::attempts::report::Impossible {
-            criterion: 0,
-            evidence: "the file is gone".into(),
-        };
-        let question = impossible_question(&task, &claim);
-        assert!(
-            judge_impossible(&app, &mut task, &question, 1, &CancelToken::new())
-                .await
-                .is_none()
-        );
-        assert_eq!(task.criteria, criteria);
-        assert!(task.assumptions.is_empty());
-        assert_helper_timeout(&task, "answer judge");
-    }
-}
-
-#[cfg(test)]
-mod base_moves_tests {
-    use super::*;
-    use crate::engine::test_support::{git_in, init_git_repo, task_with_status, test_app};
-
-    #[test]
-    fn a_default_branch_landing_may_not_move_is_never_waited_for() {
-        let (app, dir) = test_app();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        init_git_repo(&repo);
-        git_in(&repo, &["branch", "-M", "main"]);
-        let on_main = |status| {
-            let mut task = task_with_status(status);
-            task.fixture_data().repo = repo.display().to_string();
-            task.fixture_data().worktree = task.repo.clone();
-            task.fixture_data().base_ref = Some("main".into());
-            task.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
-            task
-        };
-        let task = on_main(TaskStatus::Waiting);
-        let mut other = on_main(TaskStatus::Running);
-        other.fixture_data().id = "other".into();
-        app.store.save_task(&task).unwrap();
-        app.store.save_task(&other).unwrap();
-        let question = Question::new(
-            "make verify already fails on base",
-            vec![PRE_EXISTING_RETRY.into(), "stop".into()],
-            QuestionKind::PreexistingFailure,
-            AskedBy::Verify,
-            crate::clock::now_ms(),
-        );
-
-        let (_, base_moves) = policy_base_context(&app, &task, &question);
-        assert!(!base_moves, "nothing may land on main, so it never moves");
-
-        app.settings
-            .write()
-            .unwrap()
-            .land_on_default_repos
-            .insert(task.repo.clone(), true);
-        let (_, base_moves) = policy_base_context(&app, &task, &question);
-        assert!(base_moves, "another live task may land on main");
-    }
-
-    #[test]
-    fn only_a_task_that_can_land_counts_as_moving_the_base() {
-        let (app, dir) = test_app();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        init_git_repo(&repo);
-        git_in(&repo, &["branch", "-M", "main"]);
-        app.settings
-            .write()
-            .unwrap()
-            .land_on_default_repos
-            .insert(repo.display().to_string(), true);
-        let on_main = |id: &str, status| {
-            let mut task = task_with_status(status);
-            task.fixture_data().id = id.into();
-            task.fixture_data().repo = repo.display().to_string();
-            task.fixture_data().worktree = task.repo.clone();
-            task.fixture_data().base_ref = Some("main".into());
-            task.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
-            task
-        };
-        let red = on_main("red", TaskStatus::Waiting);
-        app.store.save_task(&red).unwrap();
-        let question = Question::new(
-            "make verify already fails on base",
-            vec![PRE_EXISTING_RETRY.into(), "stop".into()],
-            QuestionKind::PreexistingFailure,
-            AskedBy::Verify,
-            crate::clock::now_ms(),
-        );
-        let moves = |app: &App| policy_base_context(app, &red, &question).1;
-
-        // Another red task, waiting for an answer, queued, or in the bounded
-        // wait for this very move, can land nothing.
-        let mut asking = on_main("asking", TaskStatus::Waiting);
-        let queued = on_main("queued", TaskStatus::Queued);
-        let mut in_wait = on_main("in_wait", TaskStatus::Running);
-        in_wait.fixture_data().queue.wait = Some(Wait::Dependency {
-            titles: vec![format!("{} main (retrying)", BASE_WAIT_TITLE)],
-        });
-        asking.fixture_data().question = Some(question.clone());
-        for other in [&asking, &queued, &in_wait] {
-            app.store.save_task(other).unwrap();
-        }
-        assert!(!moves(&app), "two red tasks must not wait on each other");
-
-        let running = on_main("running", TaskStatus::Running);
-        app.store.save_task(&running).unwrap();
-        assert!(moves(&app), "a running task can land");
-        let mut landing = running.clone();
-        landing.fixture_data().status = TaskStatus::Landing;
-        app.store.save_task(&landing).unwrap();
-        assert!(moves(&app), "a landing task moves the base");
-    }
-
-    #[test]
-    fn the_policy_budget_is_per_kind_and_cause_not_per_task() {
-        let (app, _dir) = crate::engine::test_support::test_app();
-        let mut task = task_with_status(TaskStatus::Waiting);
-        let spent = Question::new(
-            "make verify already fails on base",
-            vec![],
-            QuestionKind::PreexistingFailure,
-            AskedBy::Verify,
-            crate::clock::now_ms(),
-        );
-        for _ in 0..MAX_POLICY_ANSWERS {
-            record_policy_answer(&mut task, &spent, "keep all", "policy", "e", 1);
-        }
-        assert!(!policy_open(&app, &task, &spent), "that kind is spent");
-
-        // Other kinds still have their own budget, the judge's included.
-        let impossible = |n: usize| {
-            let mut q = Question::new(
-                format!("Criterion {n} cannot be met as written: x. Evidence: y"),
-                vec!["retry".into(), "drop criterion".into()],
-                QuestionKind::Impossible,
-                AskedBy::Implement,
-                crate::clock::now_ms(),
-            );
-            q.criterion = Some(n);
-            q
-        };
-        assert!(policy_open(&app, &task, &impossible(0)));
-        let attempts = Question::new(
-            "Attempts keep failing",
-            vec![],
-            QuestionKind::AttemptsFailing,
-            AskedBy::Implement,
-            crate::clock::now_ms(),
-        );
-        assert!(policy_open(&app, &task, &attempts));
-
-        // One criterion that the judge refuted three times is spent; another is not.
-        for _ in 0..MAX_POLICY_ANSWERS {
-            record_policy_answer(&mut task, &impossible(0), "retry", "judge", "e", 1);
-        }
-        assert!(!policy_open(&app, &task, &impossible(0)));
-        assert!(policy_open(&app, &task, &impossible(1)));
-    }
-}
+#[path = "answer_policy/tests/planner.rs"]
+mod planner_check_tests;

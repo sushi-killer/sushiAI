@@ -1,7 +1,7 @@
 use super::{compare, Compared};
 use crate::task::attempt::VerifyOutcome;
 fn run(code: i32, output: &str) -> VerifyOutcome {
-    let report = crate::test_failures::parse(output, "");
+    let report = crate::policy::test_output::parse(output, "");
     VerifyOutcome {
         command: "check".into(),
         code: Some(code),
@@ -67,7 +67,7 @@ fn the_stored_outcome_has_counts_and_a_key_and_the_lists_come_back_from_the_side
     let output = format!("{passing}not ok 600 - bad\n");
     let mut base = run(1, &output);
     base.tail.clear();
-    crate::test_failures::stash_lists(dir.path(), &mut base);
+    crate::verify::test_lists::stash_lists(dir.path(), &mut base);
     assert_eq!((base.failing_count, base.passing_count), (1, 600));
     assert_eq!(base.tests_key.len(), 16);
     let stored = serde_json::to_string(&base).unwrap();
@@ -76,7 +76,7 @@ fn the_stored_outcome_has_counts_and_a_key_and_the_lists_come_back_from_the_side
     let mut loaded: VerifyOutcome = serde_json::from_str(&stored).unwrap();
     let task = run(1, &output);
     assert_eq!(compare(&task, &loaded), Compared::Unparsed);
-    crate::test_failures::hydrate_lists(dir.path(), &mut loaded);
+    crate::verify::test_lists::hydrate_lists(dir.path(), &mut loaded);
     assert_eq!(
         compare(&task, &loaded),
         Compared::Covered(vec!["bad".into()])

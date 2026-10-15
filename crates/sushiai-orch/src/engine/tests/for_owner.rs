@@ -80,9 +80,20 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
     let handle = tokio::spawn({
-        let (app, pending, cancel, _id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
+        let (app, pending, cancel, _id) =
+            (app.clone(), pending.clone(), cancel.clone(), id.clone());
         async move {
-            park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await;
         }
     });
     // The park-time wake runs right after the one-shot is installed and
@@ -99,7 +110,7 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
                 .flatten()
                 .and_then(|t| t.question.clone());
             let deferred = || {
-                crate::overseer::read(&app.data_dir, Some(&repo), None)
+                crate::store::overseer::read(&app.data_dir, Some(&repo), None)
                     .iter()
                     .any(|e| e.text == owner_notice::DEFERRED)
             };
@@ -155,7 +166,10 @@ async fn for_owner_is_set_at_once_for_an_owner_only_kind() {
     let q = fo_question(&app, &id);
     assert!(q.for_owner && !q.held_for_overseer);
     crate::engine::chat::test_support::wait_idle(&app, &repo).await;
-    assert_eq!(crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)), 0);
+    assert_eq!(
+        crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+        0
+    );
     parked.end().await;
 }
 
@@ -166,7 +180,10 @@ async fn for_owner_is_set_when_auto_answer_is_off() {
     let id = task.id.clone();
     let parked = fo_park(&app, task).await;
     assert!(fo_for_owner(&app, &id));
-    assert_eq!(crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)), 0);
+    assert_eq!(
+        crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+        0
+    );
     parked.end().await;
 }
 
@@ -224,7 +241,10 @@ async fn for_owner_is_set_when_the_overseer_turn_ends_with_the_question_open() {
         let id = task.id.clone();
         let parked = fo_park(&app, task).await;
         crate::engine::chat::test_support::wait_idle(&app, &repo).await;
-        assert_eq!(crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)), 1);
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            1
+        );
         let q = fo_question(&app, &id);
         assert!(q.for_owner && !q.held_for_overseer, "slow: {slow}");
         parked.end().await;
@@ -279,8 +299,21 @@ async fn for_owner_is_never_set_at_the_attempts_failing_cap() {
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
     let mut events = app.subscribe();
-    let answered = wait_for_exhausted_answer(&app, &mut task, &pending, &cancel, &mut None).await;
-    assert_eq!(answered.map(|a| a.text).as_deref(), Some("change approach"));
+    let answered = wait_for_exhausted_answer(
+        &app,
+        &mut task,
+        &mut QuestionSlot::new(
+            &crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+            &mut None,
+        ),
+    )
+    .await;
+    assert_eq!(answered.map(|a| a.text).as_deref(), Ok("change approach"));
     assert!(task.question.is_none() && task.status == TaskStatus::Queued);
     while let Ok(event) = events.try_recv() {
         if let Event::Task { task } = event {
@@ -321,7 +354,7 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
     let handle = tokio::spawn({
         let (app, pending, cancel, id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
         async move {
-            ask_plan_question(&app, &id, crate::task::Question { risk: vec![], default_option: None, ..crate::task::Question::new("The planner has 2 blocking question(s); answer them all in one reply:\n\n1. A?\n2. B?", vec![], crate::task::QuestionKind::PlanQuestion, crate::task::AskedBy::Plan, crate::clock::now_ms()) }, &crate::engine::run_control::TaskSignals { cancel: cancel.clone(), pending_answer: pending.clone(), pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)) }, &mut None)
+            ask_plan_question(&app, &id, crate::task::Question { risk: vec![], default_option: None, ..crate::task::Question::new("The planner has 2 blocking question(s); answer them all in one reply:\n\n1. A?\n2. B?", vec![], crate::task::QuestionKind::PlanQuestion, crate::task::AskedBy::Plan, crate::clock::now_ms()) }, &crate::engine::run_control::TaskSignals { resume: Default::default(),  cancel: cancel.clone(), pending_answer: pending.clone(), pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)) }, &mut None)
             .await;
         }
     });
@@ -364,6 +397,7 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
                     )
                 },
                 &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: cancel.clone(),
                     pending_answer: pending.clone(),
                     pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -392,7 +426,7 @@ async fn for_owner_is_set_for_a_deferred_notice_when_quiet_hours_end() {
         let id = task.id.clone();
         let parked = fo_park(&app, task).await;
         crate::engine::chat::test_support::wait_idle(&app, &repo).await;
-        let log = crate::overseer::read(&app.data_dir, Some(&repo), None);
+        let log = crate::store::overseer::read(&app.data_dir, Some(&repo), None);
         assert!(
             log.iter().any(|e| e.text == owner_notice::DEFERRED),
             "{log:?}"
@@ -446,7 +480,7 @@ async fn for_owner_is_never_set_while_the_overseer_holds_the_question() {
 }
 
 #[tokio::test]
-async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
+async fn for_owner_is_never_set_when_the_policy_answers() {
     // The answer policy answers before the task parks.
     let (app, _dir, repo) = fo_app(true);
     let mut task = fo_waiting(
@@ -458,14 +492,29 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
     let mut events = app.subscribe();
     let _id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
-    let answer = wait_for_answer(&app, &mut task, &pending, &CancelToken::new(), &mut None).await;
-    assert_eq!(answer.as_deref(), Some("retry the dependency"));
+    let answer = QuestionSlot::new(
+        &crate::engine::run_control::TaskSignals {
+            resume: Default::default(),
+            cancel: CancelToken::new(),
+            pending_answer: pending.clone(),
+            pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        },
+        &mut None,
+    )
+    .answer(&app, &mut task)
+    .await;
+    assert_eq!(answer.as_deref(), Ok("retry the dependency"));
     while let Ok(event) = events.try_recv() {
         if let Event::Task { task } = event {
             assert!(task.question.clone().is_none_or(|q| !q.for_owner));
         }
     }
 
+    app.shutdown();
+}
+
+#[tokio::test]
+async fn for_owner_is_never_set_when_a_precedent_answers() {
     // An owner precedent answers it as the overseer, with no turn.
     let (app, dir, _) = fo_app(true);
     let root = dir.path().join("git");
@@ -510,6 +559,7 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -519,8 +569,21 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
     );
     let mut events = app.subscribe();
     let parked = tokio::spawn({
-        let (app, pending, cancel, _id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
-        async move { park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await }
+        let (app, pending, cancel, _id) =
+            (app.clone(), pending.clone(), cancel.clone(), id.clone());
+        async move {
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await
+        }
     });
     let answer = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
@@ -571,6 +634,7 @@ async fn for_owner_is_never_on_the_waiting_broadcast_before_the_hold() {
                     )
                 },
                 &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: cancel.clone(),
                     pending_answer: pending.clone(),
                     pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),

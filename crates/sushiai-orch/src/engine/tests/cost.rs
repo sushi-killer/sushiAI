@@ -18,8 +18,11 @@ fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
         &app,
         &task.id,
         4,
-        Harness::Claude,
-        Some("resumed"),
+        crate::engine::attempts::pricing::ProviderRun {
+            harness: Harness::Claude,
+            model: None,
+            resume: Some("resumed"),
+        },
         &mut outcome,
     );
     assert!((outcome.cost_usd.unwrap() - 0.4).abs() < 1e-9);
@@ -40,8 +43,11 @@ fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
         &app,
         &task.id,
         4,
-        Harness::Claude,
-        Some("resumed"),
+        crate::engine::attempts::pricing::ProviderRun {
+            harness: Harness::Claude,
+            model: None,
+            resume: Some("resumed"),
+        },
         &mut streamed,
     );
     assert_eq!(streamed.cost_usd, Some(expected));

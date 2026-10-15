@@ -8,7 +8,7 @@ use crate::engine::test_support::task_with_status;
 #[cfg(test)]
 use crate::engine::test_support::test_app;
 use crate::engine::verification::context::CheckContext;
-use crate::engine::verification::runner::run_verify_commands;
+use crate::engine::verification::runner::{run_verify_commands, CheckRunner};
 use crate::engine::verification::scoping::deferred_line;
 use crate::engine::verification::scoping::scope_task_checks;
 use crate::engine::verification::scoping::split_deferred;
@@ -16,7 +16,6 @@ use crate::harness::cancel::CancelToken;
 #[cfg(test)]
 use crate::policy::settings::SandboxMode;
 use crate::policy::settings::Settings;
-use crate::sandbox::TaskSandbox;
 use crate::task::Task;
 #[cfg(test)]
 use crate::task::TaskStatus;
@@ -41,32 +40,31 @@ impl BackgroundFinal {
     pub(in crate::engine) fn start(
         app: &Arc<App>,
         task: &Task,
-        worktree: &Path,
         run_dir: &Path,
         settings: &Settings,
         parent: &CancelToken,
     ) -> Self {
+        let worktree = std::path::PathBuf::from(&task.worktree);
         let cancel = parent.child();
         let review_cancel = parent.child();
         let (commands, deferred) = split_deferred(app, settings, task);
-        let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
+        let sandbox = app.task_sandbox(&task.repo, &worktree, run_dir);
         let app = app.clone();
         let task = task.clone();
         let base = task.base_sha.clone();
-        let worktree = worktree.to_path_buf();
-        let run_dir = run_dir.to_path_buf();
         let final_cancel = cancel.clone();
         let failed = review_cancel.clone();
         let handle = tokio::spawn(async move {
             let mut finished = run_final_checks(
-                &app,
+                CheckRunner::from_context(
+                    CheckContext::new(&app, Some(&task.id)).with_gate("final checks"),
+                    &worktree,
+                    sandbox.as_ref(),
+                    &base,
+                    &final_cancel,
+                ),
                 &task,
-                &worktree,
-                &run_dir,
-                &base,
                 &commands,
-                sandbox.as_ref(),
-                &final_cancel,
                 Some(&failed),
             )
             .await;
@@ -93,35 +91,20 @@ impl Drop for BackgroundFinal {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::engine) async fn run_final_checks(
-    app: &Arc<App>,
+    runner: CheckRunner<'_>,
     task: &Task,
-    worktree: &Path,
-    _run_dir: &Path,
-    base: &str,
     commands: &[String],
-    sandbox: Option<&TaskSandbox>,
-    cancel: &CancelToken,
     cancel_review: Option<&CancelToken>,
 ) -> FinalChecks {
-    let (commands, skipped) = scope_task_checks(app, task, worktree, base, commands).await;
+    let (commands, skipped) =
+        scope_task_checks(runner.ctx.app, task, runner.cwd, runner.base, commands).await;
     let mut results = Vec::new();
     for command in &commands {
-        if cancel.is_cancelled() {
+        if runner.cancel.is_cancelled() {
             break;
         }
-        let checked = run_verify_commands(
-            crate::engine::verification::runner::CheckRunner::from_context(
-                CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
-                worktree,
-                sandbox,
-                base,
-                cancel,
-            ),
-            std::slice::from_ref(command),
-        )
-        .await;
+        let checked = run_verify_commands(runner, std::slice::from_ref(command)).await;
         if checked.iter().any(|r| r.code.is_some_and(|code| code != 0)) {
             if let Some(review) = cancel_review {
                 review.cancel();
@@ -162,8 +145,7 @@ mod final_check_tests {
     async fn background_final_failure_cancels_review_without_stopping_the_task() {
         let (app, _home, repo, task, settings) = fixture(vec!["echo failed; exit 7".into()]);
         let parent = CancelToken::new();
-        let finals =
-            BackgroundFinal::start(&app, &task, repo.path(), repo.path(), &settings, &parent);
+        let finals = BackgroundFinal::start(&app, &task, repo.path(), &settings, &parent);
         tokio::time::timeout(Duration::from_secs(5), finals.review_cancel.cancelled())
             .await
             .unwrap();
@@ -180,8 +162,7 @@ mod final_check_tests {
         let (app, _home, repo, task, settings) =
             fixture(vec!["touch STARTED; sleep 30; touch DONE".into()]);
         let parent = CancelToken::new();
-        let finals =
-            BackgroundFinal::start(&app, &task, repo.path(), repo.path(), &settings, &parent);
+        let finals = BackgroundFinal::start(&app, &task, repo.path(), &settings, &parent);
         tokio::time::timeout(Duration::from_secs(5), async {
             while !repo.path().join("STARTED").exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;

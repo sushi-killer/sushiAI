@@ -5,7 +5,10 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
 
 /// Logs each call as `<kind> <argv>` to `$CALLS_LOG`. The check judge says
 /// conflict on its first call and clear on the next. The first fresh

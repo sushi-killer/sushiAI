@@ -3,6 +3,8 @@ use crate::engine::delivery_gate::{begin_delivery, DeliveryGate};
 use crate::engine::graph::base::parent_finals_on_base;
 use crate::engine::graph::base::ParentGate;
 use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
+use crate::engine::persistence::contract::{ContractInput, Publication};
+use crate::engine::questions::parking::WaitEnd;
 use crate::engine::state::App;
 use crate::engine::verification::base::amendments::apply_pending_amendment;
 use crate::engine::verification::baseline::gated_checks;
@@ -15,7 +17,7 @@ use crate::engine::verification::runner::run_verify_commands;
 use crate::engine::verification::scoping::scope_task_checks;
 use crate::harness::cancel::CancelToken;
 use crate::prompts::text::tail_chars;
-use crate::task::checks::snapshot::CheckSnapshot;
+use crate::task::checks::admission::CheckAdmission;
 use crate::task::graph::parent_cost;
 use crate::task::Task;
 use std::path::Path;
@@ -32,15 +34,18 @@ pub(in crate::engine::graph) async fn ordinary_checks(
     let task_id = task.id.clone();
     let task_id = task_id.as_str();
     let cancel = &signals.cancel;
-    let pending_answer = &signals.pending_answer;
     let pending_amend = &signals.pending_amend;
     loop {
         // An amendment made at any point (also while this loop waited for a
         // slot or an answer) reaches this check.
-        apply_pending_amendment(app, task, pending_amend, cancel).await;
+        if let Err(error) = apply_pending_amendment(app, task, pending_amend, cancel).await {
+            eprintln!("orch: applying amendment to {} failed: {error}", task.id);
+            return Err(ParentEnd::Finished);
+        }
         let Ok(Some(mut task)) = app.store.load_task(task_id) else {
             return Err(ParentEnd::Finished);
         };
+        let input = ContractInput::capture(&task);
         let checks: Vec<String> = task
             .verify
             .iter()
@@ -71,19 +76,43 @@ pub(in crate::engine::graph) async fn ordinary_checks(
             &checks,
         )
         .await;
-        record_check_outcomes(app, &mut task, &results);
+        record_parent_outcomes(app, &mut task, &results)?;
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(app, task_id).await;
             return Err(ParentEnd::Finished);
         }
-        match parent_finals_on_base(app, &mut task, results, pending_answer, cancel).await {
-            ParentGate::Go(results) => return Ok((task, results, skipped)),
+        let observed = results.clone();
+        match parent_finals_on_base(app, &mut task, results, signals).await {
+            ParentGate::Go(mut results) => {
+                let waived: Vec<_> = observed
+                    .iter()
+                    .filter(|run| {
+                        run.code != Some(0)
+                            && !results.iter().any(|kept| kept.command == run.command)
+                    })
+                    .map(|run| run.command.clone())
+                    .collect();
+                match publish_waivers(app, &task, &input, &waived, cancel)? {
+                    Publication::Applied(revoked) => {
+                        let rejected: Vec<_> = observed
+                            .into_iter()
+                            .filter(|run| {
+                                revoked.contains(&run.command)
+                                    && !results.iter().any(|kept| kept.command == run.command)
+                            })
+                            .collect();
+                        results.extend(rejected);
+                        return Ok((task, results, skipped));
+                    }
+                    Publication::Deferred(WaitEnd::Changed) => continue,
+                    Publication::Deferred(WaitEnd::Stopped) => return Err(ParentEnd::Finished),
+                }
+            }
             ParentGate::Again => continue,
             ParentGate::Conflict(failure) => {
                 return Err(ParentEnd::Attempt {
                     failure,
                     budget: Some(1),
-                    conflict_only: true,
                 });
             }
             ParentGate::End => {
@@ -99,7 +128,7 @@ pub(in crate::engine::graph) async fn grounded_checks(
     task: &mut Task,
     results: &[VerifyOutcome],
     cancel: &CancelToken,
-) -> Option<String> {
+) -> Result<Option<String>, ParentEnd> {
     let task_id = task.id.clone();
     let task_id = task_id.as_str();
     let sandbox = app.task_sandbox(
@@ -128,7 +157,7 @@ pub(in crate::engine::graph) async fn grounded_checks(
             &commands,
         )
         .await;
-        record_check_outcomes(app, task, &gated_results);
+        record_parent_outcomes(app, task, &gated_results)?;
         if let Some((check, failed)) = gated
             .iter()
             .zip(&gated_results)
@@ -158,7 +187,7 @@ pub(in crate::engine::graph) async fn grounded_checks(
                 &held,
             )
             .await;
-            record_check_outcomes(app, task, std::slice::from_ref(&result));
+            record_parent_outcomes(app, task, std::slice::from_ref(&result))?;
             if detail.is_some() {
                 grounded_failure = Some(format!(
                     "Orchestrator: every subtask landed, but the held-out check for criterion {} failed (heldout) on {}: {}",
@@ -169,7 +198,7 @@ pub(in crate::engine::graph) async fn grounded_checks(
             }
         }
     }
-    grounded_failure
+    Ok(grounded_failure)
 }
 
 pub(in crate::engine::graph) fn finish_checks(
@@ -225,7 +254,6 @@ pub(in crate::engine::graph) fn finish_checks(
         return Err(ParentEnd::Attempt {
             failure,
             budget: Some(1),
-            conflict_only: false,
         });
     }
     Ok(task)
@@ -244,13 +272,18 @@ pub(in crate::engine::graph) async fn checked_for_delivery(
             Ok(checked) => checked,
             Err(end) => return Err(end),
         };
-        let expected = CheckSnapshot::capture(&checked);
-        let grounded_failure = grounded_checks(app, &mut checked, &results, cancel).await;
+        let expected = CheckAdmission::capture(&checked);
+        let grounded_failure = grounded_checks(app, &mut checked, &results, cancel).await?;
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(app, task_id).await;
             return Err(ParentEnd::Finished);
         }
-        apply_pending_amendment(app, &mut checked, &signals.pending_amend, cancel).await;
+        if let Err(error) =
+            apply_pending_amendment(app, &mut checked, &signals.pending_amend, cancel).await
+        {
+            eprintln!("orch: applying amendment to {} failed: {error}", checked.id);
+            return Err(ParentEnd::Finished);
+        }
         if !expected.matches(&checked) {
             *task = checked;
             continue;
@@ -267,7 +300,12 @@ pub(in crate::engine::graph) async fn checked_for_delivery(
                     return Err(ParentEnd::Finished);
                 };
                 *task = fresh;
-                apply_pending_amendment(app, task, &signals.pending_amend, cancel).await;
+                if let Err(error) =
+                    apply_pending_amendment(app, task, &signals.pending_amend, cancel).await
+                {
+                    eprintln!("orch: applying amendment to {} failed: {error}", task.id);
+                    return Err(ParentEnd::Finished);
+                }
             }
             Err(error) => {
                 eprintln!("orch: admitting delivery for parent {task_id} failed: {error}");
@@ -276,3 +314,78 @@ pub(in crate::engine::graph) async fn checked_for_delivery(
         }
     }
 }
+
+/// Validates every waiver used by this check round against fresh Owner state.
+fn publish_waivers(
+    app: &App,
+    checked: &Task,
+    input: &ContractInput,
+    used: &[String],
+    cancel: &CancelToken,
+) -> Result<Publication<Vec<String>>, ParentEnd> {
+    if used.is_empty() {
+        return Ok(Publication::Applied(Vec::new()));
+    }
+    let waivers: Vec<_> = checked
+        .assumptions
+        .iter()
+        .filter(|a| {
+            a.by == crate::task::questions::WAIVER_BY
+                && a.answer == crate::task::questions::WAIVED
+                && !a.overturned
+                && a.owner_answer.is_none()
+                && a.commands.iter().any(|command| used.contains(command))
+        })
+        .cloned()
+        .collect();
+    input
+        .publish(app, checked, cancel, |fresh| {
+            let mut rejected = Vec::new();
+            for command in used {
+                let waiver = waivers.iter().rev().find(|a| a.commands.contains(command));
+                let revoked = fresh.assumptions.iter().any(|a| {
+                    a.commands.contains(command) && (a.overturned || a.owner_answer.is_some())
+                });
+                match waiver.filter(|_| !revoked) {
+                    Some(waiver) if !fresh.assumptions.contains(waiver) => {
+                        fresh.record_assumption(waiver.clone());
+                    }
+                    Some(_) => {}
+                    None => rejected.push(command.clone()),
+                }
+            }
+            Ok(rejected)
+        })
+        .map_err(|error| {
+            eprintln!(
+                "orch: publishing parent check judgments for {} failed: {error}",
+                checked.id
+            );
+            ParentEnd::Finished
+        })
+}
+
+/// Retains completed measurements even if a later judgment changes the gate or the owner stops.
+fn record_parent_outcomes(
+    app: &App,
+    task: &mut Task,
+    results: &[VerifyOutcome],
+) -> Result<(), ParentEnd> {
+    record_check_outcomes(app, task, results);
+    task.record_delivery_checks(results.to_vec());
+    app.update_task(&task.id, |fresh| {
+        fresh.record_delivery_checks(results.to_vec())
+    })
+    .map(|_| ())
+    .map_err(|error| {
+        eprintln!(
+            "orch: recording parent checks for {} failed: {error}",
+            task.id
+        );
+        ParentEnd::Finished
+    })
+}
+
+#[cfg(test)]
+#[path = "parent_checks/tests.rs"]
+mod tests;

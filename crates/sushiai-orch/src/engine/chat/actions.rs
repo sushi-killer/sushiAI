@@ -188,7 +188,7 @@ pub(in crate::engine) async fn handle_action_send(
     tokio::spawn(async move {
         let settings = app.settings.read().unwrap().clone();
         let outcome = match settings.chat_tools.iter().find(|c| c.id == action.server) {
-            Some(cfg) => chat_tools::execute(&app, cfg, &action.tool, &action.args).await,
+            Some(cfg) => chat_tools::approved::execute(&app, cfg, &action.tool, &action.args).await,
             None => Err("the connected tool was removed from Settings".to_string()),
         };
         let slot = session

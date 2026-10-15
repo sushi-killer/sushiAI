@@ -3,7 +3,13 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::polling::{poll_until, remove_dir_retrying, settle, wait_until};
+use common::process::Daemon;
+use common::protocol::stop_daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -145,7 +151,7 @@ emit "$REPORT""#,
                 // Creates a file and edits a tracked one, then fails on base.
                 {"criterion": 0, "run": "echo junk > side.txt; echo more >> READ*.md; grep -q ok impl.txt"},
                 {"criterion": 1, "run": "true"},
-                {"criterion": 2, "run": "no-such-tool-anywhere --version"},
+                {"criterion": 2, "run": "./no-such-tool-anywhere --version"},
                 {"criterion": 9, "run": "dropped: out of range"},
                 {"criterion": 0, "run": "   "},
             ],
@@ -173,7 +179,7 @@ emit "$REPORT""#,
         &"Orchestrator: check for criterion 1 already passes on base, not grounded: true"
     ));
     assert!(decisions.contains(
-        &"Orchestrator: check for criterion 2 could not run on base (exit 127), left out: no-such-tool-anywhere --version"
+        &"Orchestrator: check for criterion 2 could not run on base (exit 127), left out: ./no-such-tool-anywhere --version"
     ));
 
     // The gate: attempt 1 fails with kind verify until the check passes.
@@ -215,6 +221,47 @@ emit "$REPORT""#,
     );
     assert!(retry.contains("grep -q ok impl.txt exited 2."), "{retry}");
     cleanup(s, &[&done]);
+}
+
+fn assert_held_out_private(daemon: &Daemon, id: &str, done: &Value, held: &str) {
+    let attempts = implement_attempts(done);
+    // Nothing the implementer or reviewer could read holds the command.
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "plan") {
+                    continue;
+                }
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &daemon.data_dir().join("tasks").join(id).join("runs"),
+        &mut files,
+    );
+    assert!(files.iter().any(|f| f.ends_with("runs/2/brief.md")));
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            !text.contains(held),
+            "{} leaks the held-out command",
+            f.display()
+        );
+    }
+    let decisions = done["decisions"].to_string();
+    assert!(!decisions.contains(held), "{decisions}");
+    assert!(!attempts
+        .iter()
+        .any(|a| a["failure"].to_string().contains(held)));
+    assert!(!attempts
+        .iter()
+        .any(|a| a["verify"].to_string().contains(held)));
 }
 
 #[test]
@@ -280,43 +327,7 @@ emit "$REPORT""#,
         s.daemon.child.try_wait().unwrap()
     });
 
-    // Nothing the implementer or reviewer could read holds the command.
-    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "plan") {
-                    continue;
-                }
-                walk(&path, out);
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(
-        &s.daemon.data_dir().join("tasks").join(&id).join("runs"),
-        &mut files,
-    );
-    assert!(files.iter().any(|f| f.ends_with("runs/2/brief.md")));
-    for f in &files {
-        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        assert!(
-            !text.contains(held),
-            "{} leaks the held-out command",
-            f.display()
-        );
-    }
-    let decisions = done["decisions"].to_string();
-    assert!(!decisions.contains(held), "{decisions}");
-    assert!(!attempts
-        .iter()
-        .any(|a| a["failure"].to_string().contains(held)));
-    assert!(!attempts
-        .iter()
-        .any(|a| a["verify"].to_string().contains(held)));
+    assert_held_out_private(&s.daemon, &id, &done, held);
 
     // The review names the result by criterion only, and the check that
     // passed on the base as not grounded.
@@ -670,7 +681,7 @@ fn task_create_validates_checks_and_refuses_the_retired_flag() {
 
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/api/mcp/schema.rs"
+        "/src/api/mcp/schema/tasks.rs"
     ))
     .unwrap();
     assert_eq!(

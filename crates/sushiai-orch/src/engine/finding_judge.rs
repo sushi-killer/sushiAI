@@ -1,5 +1,5 @@
-use crate::engine::review::cheapest_route_at;
-use crate::engine::review::review_floor;
+use crate::engine::review::routing::cheapest_route_at;
+use crate::engine::review::routing::review_floor;
 #[cfg(test)]
 use crate::policy::presets::PresetValues;
 #[cfg(test)]
@@ -25,8 +25,8 @@ pub(super) fn resolve_judge_route<'a>(
     if judge_id != "auto" {
         let named = settings.routes.iter().find(|r| r.id == judge_id);
         if let Some(route) = named.filter(|route| {
-            !super::review::is_excluded(route, &[reviewer])
-                && !super::review::is_excluded(route, &[implementer])
+            !crate::engine::review::routing::is_excluded(route, &[reviewer])
+                && !crate::engine::review::routing::is_excluded(route, &[implementer])
         }) {
             return Some(route);
         }

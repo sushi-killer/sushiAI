@@ -6,6 +6,7 @@ use crate::policy::delivery::BaseFrom;
 use crate::prompts::clip::truncate_chars;
 use crate::task::creation::NewTask;
 use crate::task::{valid_check, valid_checks, Check, ChecklistItem, Task};
+use crate::verify::command_gate::{gate_checks, gate_held_out};
 use crate::verify::options::split_verify_commands;
 use std::{
     collections::HashMap,
@@ -14,6 +15,7 @@ use std::{
 /// What a standalone part brings to its child: its own draft.
 #[derive(Default)]
 struct Draft<'a> {
+    refused: Vec<String>,
     goal: String,
     criteria: Vec<String>,
     verify: Vec<String>,
@@ -149,6 +151,7 @@ impl<'a> SplitGraph<'a> {
             repo_root: PathBuf::from(&parent.repo.clone()),
             project_id: parent.project_id.clone(),
             title: title.clone(),
+            decisions: drafted.refused,
             goal: drafted.goal,
             criteria: drafted.criteria,
             verify: drafted.verify,
@@ -212,7 +215,11 @@ fn unit_draft<'a>(
                 }
             }
         }
-        (text, plan_gate::checklist_of(parts, &unit.members), paths)
+        (
+            text,
+            plan_gate::grouping::checklist_of(parts, &unit.members),
+            paths,
+        )
     } else {
         let part = &parts[unit.members[0]];
         let mut drafted_verify = non_empty(&part.verify);
@@ -233,8 +240,16 @@ fn unit_draft<'a>(
         let mut criteria = non_empty(&part.criteria);
         // Indices count the part's own criteria, before the review entries.
         let own_criteria = criteria.len();
-        drafted.checks = valid_checks(part.checks.clone(), own_criteria);
-        drafted.held_out = valid_check(part.held_out.clone(), own_criteria);
+        drafted.checks = gate_checks(
+            parent_worktree,
+            valid_checks(part.checks.clone(), own_criteria),
+            &mut drafted.refused,
+        );
+        drafted.held_out = gate_held_out(
+            parent_worktree,
+            valid_check(part.held_out.clone(), own_criteria),
+            &mut drafted.refused,
+        );
         criteria.extend(
             judged
                 .into_iter()

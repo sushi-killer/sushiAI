@@ -2,8 +2,8 @@ use crate::clock::now_ms;
 use crate::engine::cost::settle_unfinished_cost;
 use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
 use crate::engine::planning::run::PlanOutcome;
-use crate::engine::protected::keep_planned_tests;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::protected::paths::keep_planned_tests;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
 use crate::policy::routing::Harness;
 use crate::policy::routing::Route;
@@ -11,9 +11,7 @@ use crate::policy::settings::Settings;
 use crate::task::AttemptStatus;
 use crate::task::Stage;
 use crate::task::Task;
-use crate::verify::options::split_verify_commands;
 use crate::verify::repository::record_plan_check_sources;
-use crate::verify::repository::whole_repo_suite;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -93,7 +91,6 @@ pub(in crate::engine) fn write_planner_run_files(
         write_readonly_claude_settings_with_profile(
             route,
             app,
-            &key_path,
             settings,
             &deny_read,
             &settings_path,
@@ -127,53 +124,7 @@ pub(in crate::engine) fn store_draft(
             .map(|command| command.trim().to_string())
             .filter(|command| !command.is_empty()),
     });
-    // A whole-repo suite is no per-attempt check: it runs once, as a
-    // finalVerify, on the final tree. Before the split, so it also applies
-    // when review is off.
-    let (suites, kept): (Vec<String>, Vec<String>) = draft
-        .verify
-        .iter()
-        .cloned()
-        .partition(|c| whole_repo_suite(&worktree, c));
-    // With review off nobody would check a moved entry: keep it as is.
-    let (verify, judged) = if task.variant().review_route_id(settings).is_empty() {
-        (kept, Vec::new())
-    } else {
-        split_verify_commands(&worktree, &kept)
-    };
-    // What the planner says the task edits: a hint that orders sibling
-    // subtasks. It never holds a lease; only files really changed do.
-    let mut criteria = draft.criteria.clone();
-    criteria.extend(
-        judged
-            .into_iter()
-            .map(|command| format!("Checked by review (not a shell command): {command}")),
-    );
-    let mut finals: Vec<_> = draft
-        .final_verify
-        .iter()
-        .filter(|command| !command.trim().is_empty())
-        .cloned()
-        .collect();
-    for suite in suites {
-        if !finals.contains(&suite) {
-            finals.push(suite.clone());
-        }
-        task.record_decision(format!(
-            "Orchestrator: verify entry {suite} is a whole-repo suite; moved to finalVerify"
-        ));
-    }
-    crate::task::checks::plan::install(
-        task,
-        crate::task::checks::plan::CheckPlan {
-            criteria,
-            visual_criteria: draft.visual_criteria.clone(),
-            verify,
-            final_verify: finals,
-            checks: draft.checks.clone(),
-            held_out: draft.held_out.clone(),
-        },
-    );
+    super::check_plan::PlannedChecks::prepare(task, draft, settings).install(task);
     let (tests, dropped) = keep_planned_tests(&draft.tests);
     crate::task::checks::edits::replace_planner_files(task, tests);
     for line in dropped {
@@ -198,3 +149,6 @@ pub(in crate::engine) fn store_draft(
     task.record_planned_summary(idx, &draft.title);
     task.touch(now_ms());
 }
+
+#[cfg(test)]
+mod tests;

@@ -40,6 +40,8 @@ pub(crate) fn sample_task() -> Task {
         status: TaskStatus::Running,
         tier: Tier::Standard,
         question: None,
+        pending_amendment: None,
+        delivery_checks: vec![],
         decisions: vec!["Owner: use the primary button style".into()],
         attempts: vec![],
         cost_usd: 0.0,

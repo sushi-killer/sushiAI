@@ -5,7 +5,7 @@ use crate::task::state::Task;
 
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct CheckContext<'a> {
-    pub(super) app: &'a App,
+    pub(in crate::engine) app: &'a App,
     task_id: Option<&'a str>,
     pub(super) label: Option<&'a str>,
     pub(super) gate: &'a str,

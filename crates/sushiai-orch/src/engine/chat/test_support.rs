@@ -201,6 +201,8 @@ pub(super) fn stored_task(id: &str, title: &str) -> Task {
         status: TaskStatus::Running,
         tier: Tier::Standard,
         question: None,
+        pending_amendment: None,
+        delivery_checks: vec![],
         decisions: vec![],
         attempts: vec![],
         cost_usd: 0.0,

@@ -1,13 +1,9 @@
-use crate::engine::state::App;
 use crate::engine::verification::runner::CheckRunner;
-use crate::harness::cancel::CancelToken;
 use crate::harness::compiler_cache::CacheRun;
 use crate::task::attempt::VerifyOutcome;
 use crate::task::checks::snapshot::CheckSnapshot;
 use crate::verify::diff::diff_hash;
 use crate::verify::passes::is_interrupted;
-use std::path::Path;
-use std::sync::Arc;
 
 pub(in crate::engine) struct CachedVerification {
     pub(in crate::engine) plan: CheckSnapshot,
@@ -18,17 +14,19 @@ pub(in crate::engine) struct CachedVerification {
 /// Cached by a hash of `git diff <base>` + the untracked-file list: if
 /// nothing has changed since the last run, reuse completed failures. Passes
 /// come from the bounded tree cache; interrupted result sets are not stored.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::engine) async fn run_verify_cached(
-    app: &Arc<App>,
+    runner: CheckRunner<'_>,
     task_id: &str,
-    repo: &str,
-    worktree: &Path,
-    run_dir: &Path,
-    base: &str,
     commands: &[String],
-    cancel: &CancelToken,
 ) -> (Vec<VerifyOutcome>, Vec<String>) {
+    let CheckRunner {
+        ctx,
+        cwd: worktree,
+        base,
+        cancel,
+        ..
+    } = runner;
+    let app = ctx.app;
     let snapshot = app
         .store
         .load_task(task_id)
@@ -51,9 +49,8 @@ pub(in crate::engine) async fn run_verify_cached(
                 && entry.results.iter().map(|r| &r.command).eq(commands.iter())
         })
         .map(|entry| entry.results.clone());
-    let sandbox = app.task_sandbox(repo, worktree, run_dir);
     let cache_run = CacheRun::for_commands(worktree, commands).await;
-    let runner = CheckRunner::new(app, worktree, sandbox.as_ref(), base, cancel).for_task(task_id);
+    let runner = runner.for_task(task_id);
     let mut results = Vec::new();
     let mut lines = Vec::new();
     for (i, command) in commands.iter().enumerate() {

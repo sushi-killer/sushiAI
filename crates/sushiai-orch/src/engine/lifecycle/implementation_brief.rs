@@ -1,12 +1,10 @@
 use crate::engine::decision::completed_implement_attempts;
 use crate::engine::messages;
 use crate::engine::state::App;
-use crate::task::Stage;
-use crate::task::Task;
+use crate::task::attempt::Stage;
+use crate::task::state::Task;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use crate::engine::lifecycle::selection::Selection;
 
 pub(in crate::engine) struct FullBrief {
     pub(in crate::engine) text: String,
@@ -17,24 +15,13 @@ pub(in crate::engine) struct FullBrief {
 pub(in crate::engine) fn build(
     app: &Arc<App>,
     task: &Task,
-    selection: &Selection,
     parent_failure: Option<&str>,
     display: (&str, &str),
 ) -> FullBrief {
     let (status_short, diff_stat) = display;
     let task_id = &task.id;
     let worktree = PathBuf::from(&task.worktree);
-    let conflict_only = selection.conflict_only;
-    let carry_conflicts = &selection.carry_conflicts;
     let brief_text = crate::engine::attempts::brief::build_brief(task, status_short, diff_stat);
-    let brief_text = if conflict_only {
-        crate::engine::attempts::context::with_block_before_report(
-            &brief_text,
-            &crate::engine::attempts::context::conflict_only_block(carry_conflicts),
-        )
-    } else {
-        brief_text
-    };
     let brief_text = match &task.brief_check.conflict {
         Some(conflict) if completed_implement_attempts(task) == 0 => {
             crate::engine::attempts::context::with_block_before_report(
@@ -44,17 +31,10 @@ pub(in crate::engine) fn build(
         }
         _ => brief_text,
     };
-    // The full brief carries the block unless the attempt is
-    // conflict-only (it touches only the conflicted files); a resumed
-    // retry sends a shorter resume brief instead of this one.
-    let brief_text = if conflict_only {
-        brief_text
-    } else {
-        crate::engine::attempts::context::with_block_before_report(
-            &brief_text,
-            &crate::engine::attempts::context::where_to_look_block(&worktree, &task.paths),
-        )
-    };
+    let brief_text = crate::engine::attempts::context::with_block_before_report(
+        &brief_text,
+        &crate::engine::attempts::context::where_to_look_block(&worktree, &task.paths),
+    );
     let brief_text = crate::engine::attempts::context::with_block_before_report(
         &brief_text,
         &crate::engine::attempts::dependencies::landed_dependencies_block(
@@ -73,7 +53,9 @@ pub(in crate::engine) fn build(
     };
     // A parent's first attempt gets what failed when it tried to finish.
     let brief_text = match &parent_failure {
-        Some(failure) if completed_implement_attempts(task) == 0 => {
+        Some(failure)
+            if completed_implement_attempts(task) == 0 && task.queue.carry_conflicts.is_empty() =>
+        {
             crate::engine::attempts::context::with_block_before_report(
                 &brief_text,
                 &crate::engine::attempts::context::parent_failure_block(failure),
@@ -106,3 +88,7 @@ pub(in crate::engine) fn build(
         advice,
     }
 }
+
+#[cfg(test)]
+#[path = "implementation_brief/tests.rs"]
+mod tests;

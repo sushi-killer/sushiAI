@@ -8,7 +8,9 @@ use crate::clock::now_ms;
 use crate::engine::decision::completed_implement_attempts;
 #[cfg(test)]
 use crate::engine::decision::implement_attempt_count;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::QuestionSlot;
+#[cfg(test)]
+use crate::engine::run_control::TaskSignals;
 use crate::engine::state::App;
 #[cfg(test)]
 use crate::engine::test_support::attempt_with_failure;
@@ -17,6 +19,7 @@ use crate::engine::test_support::task_with_status;
 #[cfg(test)]
 use crate::engine::test_support::test_app;
 use crate::harness;
+#[cfg(test)]
 use crate::harness::cancel::CancelToken;
 use crate::prompts::clip::truncate_chars;
 use crate::task::Task;
@@ -61,17 +64,14 @@ pub(super) fn counted_attempts(task: &Task) -> u32 {
 /// Pauses a task whose attempt hit a usage or rate limit: the attempt is
 /// interrupted (not a failure), the task shows when it resumes and holds no
 /// slot meanwhile. `false` when the task was stopped during the pause.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn pause_for_rate_limit(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
-    idx: usize,
     error: &str,
     wait_secs: u64,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> bool {
+    let idx = task.attempts.len() - 1;
     let attempt_n = task.attempts[idx].n;
     let now = now_ms();
     crate::task::transitions::pause_for_limit(task, idx, now + wait_secs as i64 * 1000, now);
@@ -80,16 +80,12 @@ pub(super) async fn pause_for_rate_limit(
         truncate_chars(error.trim(), 120),
         wait_secs.div_ceil(60)
     );
-    app.broadcast_log(task_id, attempt_n, line.clone());
+    app.broadcast_log(&task.id, attempt_n, line.clone());
     task.record_decision(line);
     task.resume_phase(TaskStatus::Queued, now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
-    permit.take();
-    let resumed = tokio::select! {
-        _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => true,
-    };
+    let resumed = slot.pause(Duration::from_secs(wait_secs)).await;
     let outcome = if resumed {
         crate::task::transitions::PauseEnd::Elapsed
     } else {
@@ -162,7 +158,6 @@ mod tests {
         task.fixture_data().attempts[0].status = AttemptStatus::Running;
         task.fixture_data().attempts[0].failure = None;
         app.store.save_task(&task).unwrap();
-        let id = task.id.clone();
         let cancel = CancelToken::new();
         let mut permit = Some(app.slots.clone().acquire_owned().await.unwrap());
         let before = app.slots.available_permits();
@@ -171,13 +166,16 @@ mod tests {
             tokio::spawn(async move {
                 let ok = pause_for_rate_limit(
                     &app,
-                    &id,
                     &mut task,
-                    0,
                     "rate limit hit",
                     1,
-                    &cancel,
-                    &mut permit,
+                    &mut QuestionSlot::new(
+                        &TaskSignals {
+                            cancel: cancel.clone(),
+                            ..TaskSignals::new()
+                        },
+                        &mut permit,
+                    ),
                 )
                 .await;
                 (ok, task)
@@ -208,20 +206,22 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Running);
         task.fixture_data().attempts = vec![attempt_with_failure(1, "x")];
         app.store.save_task(&task).unwrap();
-        let id = task.id.clone();
         let cancel = CancelToken::new();
         let waiter = {
             let (app, cancel) = (app.clone(), cancel.clone());
             tokio::spawn(async move {
                 let ok = pause_for_rate_limit(
                     &app,
-                    &id,
                     &mut task,
-                    0,
                     "rate limit",
                     600,
-                    &cancel,
-                    &mut None,
+                    &mut QuestionSlot::new(
+                        &TaskSignals {
+                            cancel: cancel.clone(),
+                            ..TaskSignals::new()
+                        },
+                        &mut None,
+                    ),
                 )
                 .await;
                 (ok, task)

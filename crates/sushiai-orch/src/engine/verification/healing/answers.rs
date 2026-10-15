@@ -1,5 +1,4 @@
-use crate::engine::brief_check::run_judge;
-use crate::engine::brief_check::JudgeRun;
+use crate::engine::brief_check::judge::JudgeRun;
 use crate::engine::state::App;
 use crate::engine::verification::healing::contract::amend_criterion;
 use crate::engine::verification::healing::contract::judge_route;
@@ -16,7 +15,7 @@ use std::sync::Arc;
 
 use crate::clock::now_ms;
 use crate::policy::settings::Settings;
-use crate::task::checks::snapshot::CheckSnapshot;
+use crate::task::checks::admission::CheckAdmission;
 use crate::task::state::TaskStatus;
 
 pub(in crate::engine) enum AnswerHealing {
@@ -26,7 +25,7 @@ pub(in crate::engine) enum AnswerHealing {
 }
 
 struct AnswerInput {
-    contract: CheckSnapshot,
+    contract: CheckAdmission,
     phase: TaskStatus,
     answers: Vec<String>,
     seen: usize,
@@ -47,7 +46,7 @@ pub(in crate::engine) async fn heal_answers(
     cancel: &CancelToken,
 ) -> Result<AnswerHealing, RunError> {
     let input = AnswerInput {
-        contract: CheckSnapshot::capture(task),
+        contract: CheckAdmission::capture(task),
         phase: task.status,
         answers: new_answers(task),
         seen: task.brief_check.answers_seen,
@@ -69,16 +68,11 @@ pub(in crate::engine) async fn heal_answers(
             return Ok(AnswerHealing::Ready);
         };
         let prompt = answer_prompt(task, &input.answers);
-        let judged = run_judge(
-            app,
-            task,
+        let judged = crate::engine::brief_check::judge::Judge::new(
             &route,
-            Some(attempt_n),
-            "brief_check",
-            "answer-check",
-            &prompt,
-            cancel,
+            crate::engine::brief_check::judge::JudgePurpose::AnswerCheck(attempt_n),
         )
+        .run(app, task, &prompt, cancel)
         .await;
         let JudgeRun {
             reply,
@@ -128,11 +122,16 @@ fn publish(
     let stopped = cancel.is_cancelled()
         || fresh.archived
         || fresh.queue.park.is_some()
-        || !matches!(fresh.status, TaskStatus::Queued | TaskStatus::Running)
+        || matches!(
+            fresh.status,
+            TaskStatus::Stopped | TaskStatus::Done | TaskStatus::Failed | TaskStatus::Landing
+        );
+    let stale = !matches!(fresh.status, TaskStatus::Queued | TaskStatus::Running)
         || fresh.status != input.phase
         || !input.contract.matches(&fresh)
-        || fresh.brief_check.answers_seen != input.seen;
-    let stale = new_answers(&fresh) != input.answers
+        || fresh.brief_check.answers_seen != input.seen
+        || fresh.pending_amendment.is_some()
+        || new_answers(&fresh) != input.answers
         || pending.as_deref().is_some_and(|edit| edit.is_some());
     let settings = app.settings.read().unwrap().clone();
     let outcome = if stopped {

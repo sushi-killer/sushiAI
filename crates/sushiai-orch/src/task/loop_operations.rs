@@ -24,14 +24,8 @@ impl Task {
         self.data.tier_fallback = fallback;
     }
 
-    pub(crate) fn recount_native_run(&mut self, index: usize) {
-        if let Some(counted) = self.data.attempts[index].cost_usd.take() {
-            self.data.cost_usd -= counted;
-        }
-    }
-
-    pub(crate) fn record_conflict_attempt(&mut self, attempt: u32) {
-        self.data.queue.carry_conflict_attempt = Some(attempt);
+    pub(crate) fn record_carry_conflict_step(&mut self, attempt: u32) {
+        self.data.queue.carry_conflict_step = Some(attempt);
     }
 
     pub(crate) fn record_discarded_tests(&mut self, files: Vec<String>) {
@@ -44,6 +38,24 @@ impl Task {
 
     pub(crate) fn record_carry_conflicts(&mut self, files: Vec<String>) {
         self.data.queue.carry_conflicts = files;
+        self.data.queue.carry_conflict_step = None;
+    }
+
+    pub(crate) fn settle_carry_conflicts(&mut self) {
+        let Some(number) = self.queue.carry_conflict_step else {
+            return;
+        };
+        let ended = self.attempts.iter().any(|attempt| {
+            attempt.n == number
+                && !matches!(
+                    attempt.status,
+                    AttemptStatus::Running | AttemptStatus::Interrupted
+                )
+        });
+        if ended {
+            self.data.queue.carry_conflicts.clear();
+            self.data.queue.carry_conflict_step = None;
+        }
     }
 
     pub(crate) fn record_unreviewed(&mut self, unreviewed: bool) {

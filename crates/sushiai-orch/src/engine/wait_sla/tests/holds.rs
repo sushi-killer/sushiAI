@@ -135,7 +135,7 @@ async fn a_hung_overseer_turn_is_cancelled_logged_as_timed_out_and_releases_its_
     crate::engine::chat::test_support::wait_idle(&app, &repo_str).await;
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(!held(&app, &task.id), "released when the turn timed out");
-    let log = crate::overseer::read(&app.data_dir, Some(&repo_str), None);
+    let log = crate::store::overseer::read(&app.data_dir, Some(&repo_str), None);
     assert!(
         log.iter()
             .any(|e| e.kind == "failed" && e.text.contains("timed out")),

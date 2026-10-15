@@ -35,24 +35,13 @@ impl App {
         let parent = self.graph_parent(repo, parent)?;
         let new_id = "(new task)".to_string();
         let mut all = self.repo_tasks(repo);
-        {
-            let controls = self.controls.lock().unwrap();
-            for task in &mut all {
-                if let Some(ctrl) = controls
-                    .get(&task.id)
-                    .filter(|c| !c.signals.cancel.is_cancelled())
-                {
-                    if let Some(deps) = ctrl
-                        .signals
-                        .pending_amend
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .and_then(|a| a.depends_on.as_ref())
-                    {
-                        task.record_dependencies(deps.clone());
-                    }
-                }
+        for task in &mut all {
+            if let Some(dependencies) = task
+                .pending_amendment
+                .as_ref()
+                .and_then(|pending| pending.depends_on.clone())
+            {
+                task.record_dependencies(dependencies);
             }
         }
         let mut edges = wait_edges(&all);

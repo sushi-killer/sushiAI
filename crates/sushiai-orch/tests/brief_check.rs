@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
 
 /// Answers by what it is asked: the check prompt gets `$CHECK_RESULT`, a
 /// planner brief a draft, anything else an implementation. Every kind of

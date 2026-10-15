@@ -21,3 +21,12 @@ pub(crate) mod prepare;
 pub(crate) mod record;
 pub(crate) mod remote;
 pub(crate) mod retry;
+
+mod validation;
+
+mod observations;
+pub(in crate::engine) mod repair;
+
+pub(in crate::engine) mod admission;
+
+mod resolution;

@@ -1,115 +1,106 @@
-use crate::clock::now_ms;
-use crate::engine::attempts::best_of::outcome::BestOfExtra;
+use crate::engine::attempts::best_of::candidate::{CandidateRun, CompletedCandidates};
+use crate::engine::attempts::best_of::run::BestOfRun;
 use crate::engine::attempts::best_of::sibling::Sibling;
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::prepare::prepare_run;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::prepare::{prepare_run, ImplementRun};
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::cost::replay_run_cost;
 use crate::engine::state::App;
-use crate::harness;
 use crate::harness::cancel::CancelToken;
-use crate::harness::guard::Guard;
 use crate::harness::native::error::RunError;
-use crate::policy::routing::Route;
-use crate::policy::settings::Settings;
-use crate::task::Task;
+use crate::harness::RunOutcome;
+use std::path::Path;
 use std::sync::Arc;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_candidates<F>(
     app: &Arc<App>,
-    task: &Task,
-    task_id: &str,
-    attempt_n: u32,
+    run: &BestOfRun<'_>,
     a_run: F,
-    b_route: &Route,
-    settings: &Settings,
     sibling: &Sibling,
-    brief_text: &str,
     cancel: &CancelToken,
-    extra: &mut BestOfExtra,
-) -> (
-    Result<harness::RunOutcome, RunError>,
-    Result<harness::RunOutcome, RunError>,
-)
+) -> (CompletedCandidates, Vec<String>)
 where
-    F: std::future::Future<Output = Result<harness::RunOutcome, RunError>>,
+    F: std::future::Future<Output = Result<RunOutcome, RunError>>,
 {
-    let _ = std::fs::create_dir_all(&sibling.run_dir);
-    let tools_b =
-        crate::engine::permissions::tools::task_tools(app, settings, task, &sibling.worktree);
-    for line in &tools_b.notes {
-        if !task.decisions.contains(line) && !extra.decisions.contains(line) {
-            extra.decisions.push(line.clone());
+    let primary = &run.primary;
+    let secondary = ImplementRun {
+        route: run.secondary,
+        worktree: &sibling.worktree,
+        run_dir: &sibling.run_dir,
+        ..*primary
+    };
+    let _ = std::fs::create_dir_all(secondary.run_dir);
+    let tools = crate::engine::permissions::tools::task_tools(
+        app,
+        secondary.settings,
+        secondary.task,
+        secondary.worktree,
+    );
+    let mut notes = Vec::new();
+    for line in &tools.notes {
+        if !secondary.task.decisions.contains(line) && !notes.contains(line) {
+            notes.push(line.clone());
         }
     }
-    let prep = prepare_run(
-        app,
-        task,
-        task_id,
-        b_route,
-        settings,
-        &sibling.worktree,
-        attempt_n,
-        &sibling.run_dir,
-        &tools_b,
-    );
-    let _ = std::fs::write(sibling.run_dir.join("brief.md"), brief_text);
-    let events_b = sibling.run_dir.join("events.jsonl");
-    let variant = task.variant();
-    let started_at = task
-        .attempts
-        .iter()
-        .rev()
-        .find(|a| a.n == attempt_n)
-        .map_or_else(now_ms, |a| a.started_at);
-    let codex_mcp_b =
-        tools_b.codex_servers((prep.sandbox.is_none()).then_some(&prep.messages_server));
-    let req_b = harness::RunRequest {
-        harness: b_route.harness,
-        worktree: &sibling.worktree,
-        model: b_route.model.as_deref(),
-        effort: b_route.effort.as_deref(),
-        max_budget_usd: (variant.max_attempt_cost_usd > 0.0)
-            .then_some(variant.max_attempt_cost_usd),
-        review: false,
-        task_run: true,
-        task_sandbox: prep.sandbox.as_ref(),
-        mcp_config: Some(&prep.mcp_path),
-        settings_path: Some(&prep.settings_path),
-        network_allowed: settings.codex_network,
-        codex_mcp: &codex_mcp_b,
-        images: &[],
-        repo_settings: true,
-        resume: None,
-    };
+    let prepared = prepare_run(app, &secondary, &tools);
+    let _ = std::fs::write(secondary.run_dir.join("brief.md"), run.brief);
+    let events_b = secondary.run_dir.join("events.jsonl");
+    let request = secondary.request(&prepared, None);
     let b_run = run_harness(
         app,
-        task_id,
-        attempt_n,
-        RunTrack::No,
-        &sibling.worktree,
-        &req_b,
-        CostTag::task("implement", &b_route.id),
-        brief_text,
-        &events_b,
+        RunIdentity {
+            id: secondary.task.id.as_str(),
+            attempt_n: secondary.attempt_n,
+            track: RunTrack::No,
+            tag: CostTag::task("implement", &secondary.route.id),
+        },
+        RunInvocation {
+            request: &request,
+            brief: run.brief,
+            events: &events_b,
+            schema: None,
+        },
         cancel,
-        Guard::for_variant(
-            &variant,
-            prep.registered
-                .as_ref()
-                .map(|(_, ctx)| ctx.hook_running.clone()),
-        )
-        .with_time_budget(settings.implement_budget_mins, started_at),
+        secondary.guard(&prepared),
     );
-    let results = tokio::join!(a_run, b_run);
-    if let Some((token, ctx)) = &prep.registered {
-        app.forget_hook(token, &sibling.run_dir);
+    let (a_res, b_res) = tokio::join!(a_run, b_run);
+    if let Some((token, ctx)) = &prepared.registered {
+        app.forget_hook(token, secondary.run_dir);
         ctx.cancel.cancel();
         crate::engine::permissions::staging::finish_staging(ctx);
     }
-    let _ = std::fs::remove_file(&prep.key_path);
-    let _ = std::fs::remove_file(&prep.mcp_path);
+    let _ = std::fs::remove_file(&prepared.key_path);
+    let _ = std::fs::remove_file(&prepared.mcp_path);
+    let cost_a = run_cost(app, &a_res, &primary.run_dir.join("events.jsonl"));
+    let cost_b = run_cost(app, &b_res, &events_b);
+    (
+        CompletedCandidates {
+            a: CandidateRun {
+                route: primary.route.clone(),
+                worktree: primary.worktree.to_path_buf(),
+                run_dir: primary.run_dir.to_path_buf(),
+                outcome: a_res,
+                cost: cost_a,
+            },
+            b: CandidateRun {
+                route: secondary.route.clone(),
+                worktree: secondary.worktree.to_path_buf(),
+                run_dir: secondary.run_dir.to_path_buf(),
+                outcome: b_res,
+                cost: cost_b,
+            },
+        },
+        notes,
+    )
+}
 
-    results
+fn run_cost(app: &App, result: &Result<RunOutcome, RunError>, events: &Path) -> f64 {
+    match result {
+        Ok(outcome) => outcome.cost_usd.unwrap_or(0.0),
+        Err(RunError::Cancelled) => replay_run_cost(events, &app.settings.read().unwrap().prices)
+            .and_then(|outcome| outcome.cost_usd)
+            .unwrap_or(0.0),
+        Err(RunError::Io(_) | RunError::NotFound(_)) => 0.0,
+    }
 }

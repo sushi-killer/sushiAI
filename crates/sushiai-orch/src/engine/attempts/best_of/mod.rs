@@ -1,3 +1,4 @@
+mod candidate;
 mod candidates;
 mod evaluate;
 mod evidence;
@@ -9,3 +10,6 @@ mod sibling;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod recovery_tests;

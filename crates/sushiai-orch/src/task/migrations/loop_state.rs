@@ -30,7 +30,6 @@ pub(super) fn migrate_loop_state(task: &mut TaskData) {
                 .ok()
         })
         .next_back();
-    let stuck_retries = lines("Retry later: ").count() as u32;
     // The count belonged to the landing in progress; a landed task has none.
     let rereviews = if task.landed_at.is_some() {
         0
@@ -81,7 +80,6 @@ pub(super) fn migrate_loop_state(task: &mut TaskData) {
     state.agent_restarted = agent_restarted;
     state.dependency_restarted = dependency_restarted;
     state.approach_changed_after = approach_changed_after;
-    state.stuck_retries = stuck_retries;
     state.rereviews = rereviews;
     state.non_owner_continues = non_owner_continues;
     state.unreviewed_parts = unreviewed_parts;

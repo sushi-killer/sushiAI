@@ -1,5 +1,3 @@
-use crate::engine::answer_policy;
-
 use crate::harness::cancel::CancelToken;
 
 use crate::engine::decision;
@@ -110,7 +108,8 @@ fn every_check_is_the_owners_except_one_the_planner_wrote_for_its_own_file() {
         "node --test tests/one.test.cjs",
         "tests/one.test.cjs",
     );
-    let shared = |c: &str| answer_policy::is_shared_check(&settings, &task, c);
+    let shared =
+        |c: &str| crate::engine::answer_policy::authority::is_shared_check(&settings, &task, c);
     for command in [
         "npm run ci --silent",
         "cd web && cargo test",
@@ -206,15 +205,23 @@ fn the_removal_choke_point_refuses_a_non_owner_for_every_kind_of_removal() {
     assert!(decision::drop_criterion(&settings, &mut task, 0, Other).is_err());
     assert_eq!(task.criteria.len(), 1, "still there");
     assert!(
-        answer_policy::remove_check_command(&settings, &mut task, "npm run ci", Other).is_err()
+        crate::engine::answer_policy::authority::remove_check_command(
+            &settings,
+            &mut task,
+            "npm run ci",
+            Other
+        )
+        .is_err()
     );
-    assert!(answer_policy::remove_check_command(
-        &settings,
-        &mut task,
-        "node --test tests/mine.test.cjs",
-        Other
-    )
-    .is_ok());
+    assert!(
+        crate::engine::answer_policy::authority::remove_check_command(
+            &settings,
+            &mut task,
+            "node --test tests/mine.test.cjs",
+            Other
+        )
+        .is_ok()
+    );
     assert_eq!(task.verify, vec!["npm run ci".to_string()]);
     let ruled = crate::engine::verification::healing::contract::apply_feasibility(
         &settings,
@@ -263,6 +270,7 @@ async fn an_amendment_cannot_drop_a_shared_held_out_or_criterion_check_or_overwr
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: CancelToken::new(),
                 pending_answer: Arc::new(StdMutex::new(None)),
                 pending_amend: pending_slot.clone(),
@@ -347,13 +355,13 @@ async fn an_after_land_command_is_a_shared_check_only_for_its_repo() {
         "node --test tests/rb.test.cjs",
         "tests/rb.test.cjs",
     );
-    assert!(answer_policy::is_shared_check(
+    assert!(crate::engine::answer_policy::authority::is_shared_check(
         &settings,
         &task,
         "node --test tests/rb.test.cjs"
     ));
     task.fixture_data().repo = "/repo/b".to_string();
-    assert!(!answer_policy::is_shared_check(
+    assert!(!crate::engine::answer_policy::authority::is_shared_check(
         &settings,
         &task,
         "node --test tests/rb.test.cjs"

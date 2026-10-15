@@ -1,18 +1,18 @@
-use crate::engine::answer_policy::is_recheck;
-use crate::engine::answer_policy::is_refusal;
-use crate::engine::answer_policy::owner_only;
 use crate::engine::answer_policy::record_answered_question;
-use crate::engine::answer_policy::record_policy_answer;
 use crate::engine::answer_policy::shared_check_drop_refusal;
+use crate::engine::answer_policy::{record_policy_answer, AutomaticAnswer};
 use crate::engine::decision::EXHAUSTED_QUESTION;
-use crate::engine::decision_memory::hard_limit;
-use crate::engine::decision_memory::HardLimit;
 use crate::engine::lines::orchestrator_answer_line;
 use crate::engine::lines::overseer_like_line;
 use crate::engine::lines::policy_answer_line;
 use crate::engine::questions::reply::Reply;
 use crate::engine::state::App;
 use crate::engine::verification::base::answers::non_owner_base_retry;
+use crate::policy::questions::is_recheck;
+use crate::policy::questions::is_refusal;
+use crate::policy::questions::limits::hard_limit;
+use crate::policy::questions::limits::HardLimit;
+use crate::policy::questions::owner_only;
 use crate::policy::settings::Settings;
 use crate::task::is_option;
 use crate::task::AnsweredBy;
@@ -159,7 +159,15 @@ pub(in crate::engine) fn record_answer_for(
     match (question, reply.default_evidence.as_deref()) {
         (Some(q), Some(evidence)) => {
             let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
-            record_policy_answer(task, q, &reply.text, "policy", evidence, attempt_n);
+            record_policy_answer(
+                task,
+                q,
+                &AutomaticAnswer::Policy {
+                    text: reply.text.to_string(),
+                    evidence: evidence.to_string(),
+                },
+                attempt_n,
+            );
         }
         _ => record_answer_like(task, question, &reply.text, caller, reply.like.as_deref()),
     }

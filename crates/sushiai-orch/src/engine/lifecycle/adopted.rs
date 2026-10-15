@@ -27,7 +27,11 @@ pub(in crate::engine) async fn follow(
     let route = settings
         .routes
         .iter()
-        .find(|r| r.id == a.route_id)
+        .find(|r| {
+            r.id == a.route_id
+                && r.harness == a.harness
+                && r.model.as_deref().unwrap_or_default() == a.model
+        })
         .cloned()
         .unwrap_or_else(|| Route {
             id: a.route_id.clone(),
@@ -40,9 +44,6 @@ pub(in crate::engine) async fn follow(
             strength: None,
         });
     let run_dir = app.store.run_dir(&task_id, a.n);
-    // The earlier daemon may have counted this run's spend before it
-    // died (during review); the outcome below counts it again.
-    task.recount_native_run(idx);
     // A review it died under is paid for too; the review runs again.
     settle_interrupted_review(task, idx, &app.store, &settings.prices);
     task.resume_phase(TaskStatus::Running, task.updated_at);
@@ -66,7 +67,7 @@ pub(in crate::engine) async fn follow(
         registered.as_ref().map(|(_, ctx)| ctx.hook_running.clone()),
     )
     .with_time_budget(settings.implement_budget_mins, a.started_at);
-    let result = follow_run(app, task, idx, cancel, guard).await;
+    let result = follow_run(app, task, &a, cancel, guard).await;
     ExecutedAttempt {
         run: RunReceipt {
             settings,
@@ -80,6 +81,10 @@ pub(in crate::engine) async fn follow(
         key_path: run_dir.join("key"),
         registered,
         run_result: result,
-        best_of: BestOfExtra::default(),
+        best_of: BestOfExtra {
+            candidates: a.candidates.clone(),
+            discarded: task.planner_tests.discarded.clone(),
+            ..Default::default()
+        },
     }
 }

@@ -1,102 +1,94 @@
+use crate::engine::attempts::active::ActiveRun;
 use crate::engine::attempts::ledger::record_run;
-use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::pricing::finalize_cost;
-use crate::engine::attempts::pricing::price_resumed_attempt;
+use crate::engine::attempts::pricing::{finalize_cost, price_resumed_attempt, ProviderRun};
+use crate::engine::attempts::run::{RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::persistence::persist_attempt_observation;
 use crate::engine::state::App;
-use crate::harness;
 use crate::harness::native::error::RunError;
-use crate::harness::native::io::NativeRun;
-use std::path::Path;
+use crate::harness::{RunOutcome, RunRequest};
+use crate::task::attempt::Fingerprint;
 use std::sync::Arc;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn complete_run(
-    app: &App,
-    task_id: &str,
-    attempt_n: u32,
-    track: RunTrack,
-    req: &harness::RunRequest<'_>,
-    tag: &CostTag,
-    process: &NativeRun,
-    mut outcome: harness::RunOutcome,
-    started_at: i64,
-) -> harness::RunOutcome {
-    finalize_cost(app, req.harness, req.model, &mut outcome);
-    if track != RunTrack::No {
-        price_resumed_attempt(
-            app,
-            task_id,
-            attempt_n,
-            req.harness,
-            req.resume,
-            &mut outcome,
-        );
+impl ActiveRun {
+    pub(super) fn complete(
+        mut self,
+        app: &App,
+        identity: &RunIdentity<'_>,
+        req: &RunRequest<'_>,
+    ) -> RunOutcome {
+        self.settle(app, identity, req);
+        self.stream.outcome
     }
-    outcome.fingerprint = Some(process.fingerprint(&outcome, req));
-    record_run(
-        app,
-        task_id,
-        attempt_n,
-        tag,
-        (req.harness, req.model, req.resume.is_some()),
-        &outcome,
-        started_at,
-    );
-    outcome
-}
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn cancel_run(
-    app: &Arc<App>,
-    task_id: &str,
-    attempt_n: u32,
-    track: RunTrack,
-    req: &harness::RunRequest<'_>,
-    tag: &CostTag,
-    events_path: &Path,
-    process: &mut NativeRun,
-    outcome: &harness::RunOutcome,
-    started_at: i64,
-) -> RunError {
-    if track == RunTrack::Resumable && app.runs_survive_shutdown() {
-        return RunError::Cancelled;
-    }
-    process.stop().await;
-    let fp = process.fingerprint(outcome, req);
-    let mut partial = outcome.clone();
-    finalize_cost(app, req.harness, req.model, &mut partial);
-    if track != RunTrack::No {
-        price_resumed_attempt(
+    fn settle(
+        &mut self,
+        app: &App,
+        identity: &RunIdentity<'_>,
+        req: &RunRequest<'_>,
+    ) -> Fingerprint {
+        let outcome = &mut self.stream.outcome;
+        finalize_cost(app, req.harness, req.model, outcome);
+        if identity.track != RunTrack::No {
+            price_resumed_attempt(
+                app,
+                identity.id,
+                identity.attempt_n,
+                ProviderRun::from(req),
+                outcome,
+            );
+        }
+        let fingerprint = self.process.fingerprint(outcome, req);
+        outcome.fingerprint = Some(fingerprint.clone());
+        record_run(
             app,
-            task_id,
-            attempt_n,
-            req.harness,
-            req.resume,
-            &mut partial,
+            identity,
+            ProviderRun::from(req),
+            outcome,
+            self.started_at,
         );
+        fingerprint
     }
-    partial.fingerprint = Some(fp.clone());
-    record_run(
-        app,
-        task_id,
-        attempt_n,
-        tag,
-        (req.harness, req.model, req.resume.is_some()),
-        &partial,
-        started_at,
-    );
-    if track != RunTrack::No {
-        persist_attempt_observation(
-            app,
-            task_id,
-            attempt_n,
-            crate::task::attempts::RunObservation::Fingerprint(fp),
-        )
-        .await;
-    } else {
-        crate::harness::run_files::write_cancelled_fingerprint(events_path, &fp);
+
+    pub(super) async fn cancel(
+        &mut self,
+        app: &Arc<App>,
+        identity: &RunIdentity<'_>,
+        invocation: &RunInvocation<'_>,
+    ) -> RunError {
+        if identity.track == RunTrack::Resumable && app.runs_survive_shutdown() {
+            return RunError::Cancelled;
+        }
+        self.process.stop().await;
+        let fingerprint = self.settle(app, identity, invocation.request);
+        if identity.track != RunTrack::No {
+            let prices = app.settings.read().unwrap().prices.clone();
+            if let Err(error) = app.update_task(identity.id, |task| {
+                if identity.track == RunTrack::Resumable {
+                    if let Some(index) = task
+                        .attempts
+                        .iter()
+                        .position(|attempt| attempt.n == identity.attempt_n)
+                    {
+                        crate::engine::cost::settle_unfinished_cost(
+                            task, index, &app.store, &prices,
+                        );
+                    }
+                }
+                crate::task::attempts::observe_run(
+                    task,
+                    identity.attempt_n,
+                    crate::task::attempts::RunObservation::Fingerprint(fingerprint),
+                    crate::clock::now_ms(),
+                );
+            }) {
+                eprintln!(
+                    "orch: saving cancelled run for {} failed: {error}",
+                    identity.id
+                );
+            }
+        } else {
+            crate::harness::run_files::write_cancelled_fingerprint(invocation.events, &fingerprint);
+        }
+        RunError::Cancelled
     }
-    RunError::Cancelled
 }

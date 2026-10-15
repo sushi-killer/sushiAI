@@ -16,14 +16,13 @@ use tokio::sync::oneshot;
 #[derive(Clone)]
 pub(super) struct TaskSignals {
     pub(super) cancel: CancelToken,
+    pub(super) resume: Arc<tokio::sync::Notify>,
     /// One-shot per question: created fresh by `wait_for_answer` each time
     /// the loop actually waits, taken (and consumed) by `task.answer`. No
     /// long-lived queue -- an answer that arrives when nobody is waiting is
     /// simply not delivered (`task.answer` rejects it before it gets here).
     pub(super) pending_answer: Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    /// An owner's `task.amend` for a task whose loop holds its own copy of
-    /// the task: the loop applies it at its next attempt boundary, so no
-    /// save of the loop's copy can overwrite it.
+    /// Mirror of the task's durable pending amendment, consumed at a safe boundary.
     pub(super) pending_amend: Arc<StdMutex<Option<PendingAmendment>>>,
 }
 
@@ -31,6 +30,7 @@ impl TaskSignals {
     pub(super) fn new() -> Self {
         Self {
             cancel: CancelToken::new(),
+            resume: Arc::new(tokio::sync::Notify::new()),
             pending_answer: Arc::new(StdMutex::new(None)),
             pending_amend: Arc::new(StdMutex::new(None)),
         }

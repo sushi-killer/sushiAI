@@ -47,7 +47,7 @@ pub(in crate::engine::planning) fn planner_brief(
     let brief_text = if task.plan_gate.replanned {
         crate::engine::attempts::context::with_block_before_report(
             &brief_text,
-            &plan_gate::findings_block(&task.plan_gate.findings),
+            &plan_gate::prompt::findings_block(&task.plan_gate.findings),
         )
     } else {
         brief_text

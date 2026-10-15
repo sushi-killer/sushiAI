@@ -1,3 +1,5 @@
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
+use crate::policy::keys::normalize_signature_line;
 #[cfg(test)]
 use crate::task::checks::results::criteria_results;
 #[cfg(test)]
@@ -12,19 +14,15 @@ use crate::task::ReviewResult;
 use crate::task::Verdict;
 
 use crate::clock::now_ms;
-use crate::engine::answer_policy::check_authority;
+use crate::engine::answer_policy::authority::check_authority;
 use crate::engine::questions::exhausted::settle_exhausted_answer;
 use crate::engine::questions::exhausted::wait_for_exhausted_answer;
-use crate::engine::questions::reply::Reply;
 use crate::engine::rate_limit::counted_attempts;
-use crate::engine::slots::SlotPermit;
 use crate::engine::state::App;
-use crate::engine::stuck::retry_or_fail;
 #[cfg(test)]
 use crate::engine::test_support::attempt_with_failure;
 #[cfg(test)]
 use crate::engine::test_support::task_with_status;
-use crate::harness::cancel::CancelToken;
 use crate::policy::routing::Tier;
 use crate::policy::settings::Settings;
 use crate::prompts::clip::truncate_chars;
@@ -43,8 +41,6 @@ use crate::task::Stage;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
 const ERROR_KEYWORDS: &[&str] = &["error", "fail", "assert", "panic", "exception"];
 
@@ -110,35 +106,6 @@ fn find_error_line(text: &str) -> Option<&str> {
                 ERROR_KEYWORDS.iter().any(|k| lower.contains(k))
             })
         })
-}
-
-/// Strips digits, ids and hashes (long tokens with a digit, hex) and
-/// absolute-path-looking tokens (so `/tmp/xyz123/a.ts:42`
-/// across two runs still normalizes to the same signature) and collapses
-/// whitespace.
-pub(crate) fn normalize_signature_line(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    for word in line.split_whitespace() {
-        // A path is cut at its first slash.
-        let word = word.split('/').next().unwrap_or("");
-        if word.is_empty() {
-            continue;
-        }
-        let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        let ident = core.len() >= 8
-            && core
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        let hex = core.len() >= 7 && core.chars().all(|c| c.is_ascii_hexdigit());
-        // A request id, hash or token differs on every run of one failure.
-        if hex || (ident && core.chars().any(|c| c.is_ascii_digit())) {
-            out.push_str(" ID ");
-            continue;
-        }
-        out.extend(word.chars().filter(|c| !c.is_ascii_digit()));
-        out.push(' ');
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// spec step 8 (as sharpened by review): "kind + normalized first
@@ -252,16 +219,19 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
     FailureDecision::NextAttempt { tier }
 }
 
+pub(super) fn failure(kind: FailureKind, detail: String) -> Failure {
+    Failure {
+        signature: failure_signature(kind, &detail),
+        kind,
+        detail,
+    }
+}
+
 pub(super) fn record_failure(task: &mut Task, idx: usize, kind: FailureKind, detail: String) {
-    let signature = failure_signature(kind, &detail);
     crate::task::attempts::end(
         task,
         idx,
-        crate::task::attempts::AttemptEnd::Failed(Failure {
-            kind,
-            detail,
-            signature,
-        }),
+        crate::task::attempts::AttemptEnd::Failed(failure(kind, detail)),
         now_ms(),
     );
 }
@@ -276,16 +246,6 @@ pub(super) fn implement_attempt_count(task: &Task) -> u32 {
 /// limit pause) is no attempt for "has this task started implementing".
 pub(super) fn completed_implement_attempts(task: &Task) -> u32 {
     crate::task::attempts::completed_implement_count(task)
-}
-
-/// Whether the latest implement attempt failed on a landing conflict: the
-/// next one only resolves it.
-pub(super) fn last_failure_is_conflict(task: &Task) -> bool {
-    task.attempts
-        .iter()
-        .rfind(|a| a.stage == Stage::Implement)
-        .and_then(|a| a.failure.as_ref())
-        .is_some_and(|f| f.kind == FailureKind::Conflict)
 }
 
 /// Implement attempts whose review failed with a repeated finding.
@@ -348,11 +308,6 @@ pub(super) fn advance_after_failure_with(
     {
         consecutive = consecutive.min(2);
     }
-    if task.queue.carry_conflict_attempt == Some(last.n) {
-        let reason =
-            "the base carry conflict attempt failed; fix the conflicts, then start it".to_string();
-        return retry_or_fail(task, &reason);
-    }
     let previous_signature = if task.attempts.len() >= 2 {
         task.attempts[task.attempts.len() - 2]
             .failure
@@ -411,6 +366,7 @@ pub(super) fn advance_after_failure_with(
 
 pub(super) enum LoopSignal {
     Continue,
+    Changed,
     Stop,
 }
 
@@ -419,20 +375,20 @@ pub(super) enum LoopSignal {
 /// answer, one changed approach, then `failed`. The owner is never asked by
 /// the ladder itself.
 /// A continue extends the attempt budget by 2.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn fail_and_continue(
     app: &Arc<App>,
-    _task_id: &str,
     task: &mut Task,
-    idx: usize,
-    kind: FailureKind,
-    detail: String,
+    failure: Failure,
     attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> LoopSignal {
-    record_failure(task, idx, kind, detail);
+    let idx = task.attempts.len() - 1;
+    crate::task::attempts::end(
+        task,
+        idx,
+        crate::task::attempts::AttemptEnd::Failed(failure),
+        now_ms(),
+    );
     let base = super::ladder::base_tails(app, &task.base_sha);
     let should_continue = advance_after_failure_with(task, *attempt_budget, &base);
     if should_continue {
@@ -442,9 +398,10 @@ pub(super) async fn fail_and_continue(
     }
     // Not persisted here: the wait does it itself, after the one-shot is
     // installed (see `wait_for_answer`).
-    let Some(answered) = wait_for_exhausted_answer(app, task, pending_answer, cancel, permit).await
-    else {
-        return LoopSignal::Stop;
+    let answered = match wait_for_exhausted_answer(app, task, slot).await {
+        Ok(answered) => answered,
+        Err(WaitEnd::Changed) => return LoopSignal::Changed,
+        Err(WaitEnd::Stopped) => return LoopSignal::Stop,
     };
     settle_exhausted_answer(app, task, idx, &answered.text);
     *attempt_budget += 2;

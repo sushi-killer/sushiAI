@@ -5,15 +5,15 @@
 //! caution holds only when the test names it gives appear in the base output.
 
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::review;
-use crate::engine::review::review_request;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::baseline::Comparison;
+use crate::engine::review::native::review_request;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
+use crate::engine::verification::runner::CheckRunner;
 use crate::git::paths::short_sha;
 use crate::harness;
-use crate::harness::cancel::CancelToken;
 use crate::harness::guard::helper_timeout_message;
 use crate::harness::guard::Guard;
 use crate::policy::routing::Harness;
@@ -24,7 +24,6 @@ use crate::task::Task;
 use crate::task::VerifyOutcome;
 use serde::Deserialize;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::engine::finding_judge::resolve_judge_route;
@@ -57,8 +56,7 @@ pub(super) type AttributionKey = (String, String, String, String, String, String
 
 /// A hash of the task's changes against its base, so a verdict is not reused
 /// for another task or another diff.
-fn diff_hash(task: &Task) -> String {
-    let worktree = Path::new(&task.worktree);
+fn diff_hash(task: &Task, worktree: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     crate::git::changes::diff_full(worktree, &task.base_sha, usize::MAX)
         .unwrap_or_default()
@@ -157,13 +155,17 @@ fn head_tail(text: &str) -> String {
     }
     format!(
         "{}\n[...]\n{}",
-        review::head_chars(text, RUN_HEAD_CHARS),
+        crate::engine::review::native::head_chars(text, RUN_HEAD_CHARS),
         tail_chars(text, RUN_TAIL_CHARS)
     )
 }
 
-fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) -> String {
-    let worktree = Path::new(&task.worktree);
+fn attribution_brief(
+    task: &Task,
+    failed: &VerifyOutcome,
+    base: &VerifyOutcome,
+    worktree: &Path,
+) -> String {
     let changed = crate::git::changes::changed_files(worktree, &task.base_sha)
         .unwrap_or_default()
         .join("\n");
@@ -220,13 +222,13 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
 pub(super) async fn attribute(
     app: &Arc<App>,
     task: &mut Task,
-    failed: &VerifyOutcome,
-    base: &VerifyOutcome,
-    cancel: &CancelToken,
+    comparison: Comparison<'_>,
+    runner: CheckRunner<'_>,
 ) -> Option<Attribution> {
+    let Comparison { failed, base } = comparison;
     let key = (
         task.id.clone(),
-        diff_hash(task),
+        diff_hash(task, runner.cwd),
         task.base_sha.clone(),
         failed.command.clone(),
         run_key(failed),
@@ -235,8 +237,8 @@ pub(super) async fn attribute(
     if let Some(known) = app.attributions.lock().unwrap().get(&key) {
         return known.clone();
     }
-    let verdict = run_turn(app, task, failed, base, cancel).await;
-    if !cancel.is_cancelled() {
+    let verdict = run_turn(app, task, comparison, runner).await;
+    if !runner.cancel.is_cancelled() {
         app.attributions
             .lock()
             .unwrap()
@@ -248,7 +250,7 @@ pub(super) async fn attribute(
 /// Whether the verdict of an attribution turn of this task, on its current
 /// diff, for `command` says the task is meant to make the check pass.
 pub(super) fn attributed_target(app: &App, task: &Task, command: &str) -> bool {
-    let diff = diff_hash(task);
+    let diff = diff_hash(task, Path::new(&task.worktree));
     app.attributions
         .lock()
         .unwrap()
@@ -265,10 +267,10 @@ pub(super) fn attributed_target(app: &App, task: &Task, command: &str) -> bool {
 async fn run_turn(
     app: &Arc<App>,
     task: &mut Task,
-    failed: &VerifyOutcome,
-    base: &VerifyOutcome,
-    cancel: &CancelToken,
+    comparison: Comparison<'_>,
+    runner: CheckRunner<'_>,
 ) -> Option<Attribution> {
+    let Comparison { failed, base } = comparison;
     let settings = app.settings.read().unwrap().clone();
     let attempt = task
         .attempts
@@ -286,7 +288,7 @@ async fn run_turn(
     let route = resolve_judge_route(&settings, None, &implementer, &implementer, task.tier)
         .unwrap_or(&implementer)
         .clone();
-    let worktree = PathBuf::from(&task.worktree);
+    let worktree = runner.cwd;
     let run_dir = app
         .store
         .claim_helper_run_dir(&task.id, "attribution", Some(attempt_n))
@@ -300,31 +302,34 @@ async fn run_turn(
         write_readonly_claude_settings_with_profile(
             &route,
             app,
-            &key_path,
             &settings,
             &deny_read,
             &settings_path,
         );
     }
-    let brief_text = attribution_brief(task, failed, base);
+    let brief_text = attribution_brief(task, failed, base, worktree);
     let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
     let req = harness::RunRequest {
         repo_settings: false,
         resume: None,
-        ..review_request(&route, &worktree, &mcp_path, &settings_path, &[])
+        ..review_request(&route, worktree, &mcp_path, &settings_path, &[])
     };
     let limit = app.helper_timeout();
     let result = run_harness(
         app,
-        &task.id,
-        attempt_n,
-        RunTrack::No,
-        &worktree,
-        &req,
-        CostTag::task("attribution", &route.id),
-        &brief_text,
-        &run_dir.join("events.jsonl"),
-        cancel,
+        RunIdentity {
+            id: &task.id,
+            attempt_n,
+            track: RunTrack::No,
+            tag: CostTag::task("attribution", &route.id),
+        },
+        RunInvocation {
+            request: &req,
+            brief: &brief_text,
+            events: &run_dir.join("events.jsonl"),
+            schema: None,
+        },
+        runner.cancel,
         Guard::helper("attribution", limit),
     )
     .await;

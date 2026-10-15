@@ -2,7 +2,12 @@
 //! alone and keeps a small state file for the repo.
 
 mod common;
-use common::*;
+
+use common::harness::fake_harness_script;
+use common::polling::settle;
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};

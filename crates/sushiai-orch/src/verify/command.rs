@@ -1,5 +1,6 @@
 use crate::harness::compiler_cache::CompilerCache;
 use crate::harness::environment::augmented_path;
+#[cfg(target_os = "macos")]
 use crate::sandbox::to_sbpl;
 use crate::sandbox::TaskSandbox;
 use crate::task::attempt::VerifyOutcome;
@@ -231,7 +232,7 @@ pub async fn run_verify_command(
     let report = if full.is_empty() {
         Default::default()
     } else {
-        crate::test_failures::parse(&full, &cwd.to_string_lossy())
+        crate::policy::test_output::parse(&full, &cwd.to_string_lossy())
     };
     VerifyOutcome {
         command: cmd.to_string(),

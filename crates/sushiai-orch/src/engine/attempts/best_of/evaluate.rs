@@ -1,20 +1,18 @@
+use crate::engine::attempts::best_of::candidate::CandidateRun;
 use crate::engine::state::App;
 use crate::engine::verification::baseline::gated_checks;
 use crate::engine::verification::baseline::gated_held_out;
 use crate::engine::verification::context::CheckContext;
 use crate::engine::verification::held_out::run_held_out;
 use crate::engine::verification::runner::run_verify_commands;
-use crate::git::own_diff::OwnDiff;
 use crate::harness;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
 use crate::policy::settings::ScopedCheck;
-use crate::sandbox::TaskSandbox;
-use crate::task::CheckTally;
-use crate::task::Task;
-use crate::task::VerifyOutcome;
+use crate::task::attempt::CheckTally;
+use crate::task::attempt::VerifyOutcome;
+use crate::task::state::Task;
 use crate::verify::scoping::filter_scoped;
-use std::path::Path;
 
 pub(super) struct Eval {
     /// It finished, changed files and every check exited 0.
@@ -34,20 +32,19 @@ pub(super) fn run_finished(res: &Result<harness::RunOutcome, RunError>) -> bool 
 /// A candidate's verify commands, then (with `groundedChecks`) the gated
 /// checks and the held-out one; all of them run so the candidates can be
 /// compared by how many fail.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn evaluate(
     app: &App,
     task: &Task,
-    worktree: &Path,
-    base_sha: &str,
-    own: &OwnDiff,
-    _dir: &Path,
-    finished: bool,
-    sandbox: Option<&TaskSandbox>,
+    run: &CandidateRun,
     scoped_checks: &[ScopedCheck],
     cancel: &CancelToken,
 ) -> Eval {
-    let (wt, own) = (worktree.to_path_buf(), own.clone());
+    let worktree = run.worktree.as_path();
+    let base_sha = task.base_sha.as_str();
+    let sandbox = app.task_sandbox(&task.repo, worktree, &run.run_dir);
+    let sandbox = sandbox.as_ref();
+    let finished = run_finished(&run.outcome);
+    let (wt, own) = (worktree.to_path_buf(), task.own_diff());
     let changed = tokio::task::spawn_blocking(move || {
         let _ = crate::git::changes::stage_all(&wt);
         own.changed_files(&wt).unwrap_or_default()

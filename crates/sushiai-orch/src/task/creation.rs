@@ -13,6 +13,7 @@ pub(crate) struct NewTask {
     pub(crate) repo_root: PathBuf,
     pub(crate) project_id: Option<String>,
     pub(crate) title: String,
+    pub(crate) decisions: Vec<String>,
     pub(crate) goal: String,
     pub(crate) criteria: Vec<String>,
     pub(crate) verify: Vec<String>,
@@ -93,7 +94,13 @@ pub(crate) fn create(new: NewTask, workspace: Workspace) -> Task {
             parent: new.parent,
             tier: Tier::Standard,
             question: None,
-            decisions: workspace.warnings,
+            pending_amendment: None,
+            delivery_checks: vec![],
+            decisions: workspace
+                .warnings
+                .into_iter()
+                .chain(new.decisions)
+                .collect(),
             attempts: vec![],
             cost_usd: 0.0,
             budget_raises: 0,

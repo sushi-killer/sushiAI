@@ -2,7 +2,13 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::poll_task_status;
+use common::repository::{git_out, init_git_repo};
+use common::sandbox::{native_sandbox_unavailable, sandbox_toolchain_homes};
+
 use serde_json::json;
 use std::fs;
 use std::os::unix::net::UnixListener;
@@ -340,16 +346,8 @@ echo changed > CHANGED_MARKER.txt
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"}}'
 "#;
 
-fn daemon_task(native: bool) {
-    if !available() {
-        return;
-    }
-    let fixtures = tempfile::tempdir().unwrap();
-    let harness = fake_harness_script(fixtures.path(), "codex.sh", CODEX);
-    let user = fixtures.path().join("user");
-    let (cargo, rustup) = sandbox_toolchain_homes(&user);
-    let repo = init_git_repo();
-    let sibling = fixtures.path().join("sibling");
+fn create_sibling(fixtures: &Path) -> PathBuf {
+    let sibling = fixtures.join("sibling");
     fs::create_dir(&sibling).unwrap();
     fs::write(sibling.join(".env"), "synthetic secret").unwrap();
     fs::write(sibling.join(".gitignore"), ".env\n").unwrap();
@@ -368,22 +366,23 @@ fn daemon_task(native: bool) {
             "base",
         ],
     );
-    let sibling_secret = sibling.join(".env");
-    let electron = checkout().join("node_modules/electron");
-    let npm_cache = user.join(".npm");
+    sibling
+}
+
+fn write_check_project(repo: &Path) {
     fs::write(
-        repo.path().join("package.json"),
+        repo.join("package.json"),
         json!({"scripts": {
             "ci": "cargo build && node --test policy.test.cjs", "test:desktop": "node desktop.cjs"
         }})
         .to_string(),
     )
     .unwrap();
-    fs::write(repo.path().join("Cargo.toml"), "[package]\nname = \"sandbox-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
-    fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
-    fs::create_dir(repo.path().join("src")).unwrap();
-    fs::write(repo.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-    fs::write(repo.path().join("policy.test.cjs"), r#"const fs = require('node:fs');
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"sandbox-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
+    fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(repo.join("policy.test.cjs"), r#"const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
 test('task policy and check environment', () => {
@@ -396,14 +395,14 @@ test('task policy and check environment', () => {
   fs.writeFileSync('ci-passed', 'yes');
 });
 "#).unwrap();
-    fs::write(repo.path().join("desktop.cjs"), r#"const {spawnSync} = require('node:child_process');
+    fs::write(repo.join("desktop.cjs"), r#"const {spawnSync} = require('node:child_process');
 const fs = require('node:fs');
 const electron = require(process.env.TEST_ELECTRON);
 const out = spawnSync(electron, ['hidden-electron.cjs'], {env: {...process.env, SUSHIAI_TEST_WINDOW: 'hidden'}, encoding: 'utf8'});
 if (out.status !== 0) { console.error(out.stdout, out.stderr); process.exit(1); }
 fs.writeFileSync('desktop-passed', 'yes');
 "#).unwrap();
-    fs::write(repo.path().join("hidden-electron.cjs"), r#"const {app, BrowserWindow} = require('electron');
+    fs::write(repo.join("hidden-electron.cjs"), r#"const {app, BrowserWindow} = require('electron');
 const fs = require('node:fs');
 if (process.env.SUSHIAI_TEST_WINDOW !== 'hidden') process.exit(2);
 const userData = process.env.HOME + '/.cache/sandbox-electron';
@@ -420,8 +419,50 @@ app.whenReady().then(async () => {
   app.exit(text === 'Sandbox smoke' ? 0 : 5);
 }).catch(error => { console.error(error); app.exit(6); });
 "#).unwrap();
-    git_out(repo.path(), &["add", "."]);
-    git_out(repo.path(), &["commit", "-qm", "checks"]);
+    git_out(repo, &["add", "."]);
+    git_out(repo, &["commit", "-qm", "checks"]);
+}
+
+fn assert_sandbox_task(daemon: &Daemon, repo: &Path, done: &serde_json::Value, native: bool) {
+    assert_eq!(done["status"], "done", "{done}");
+    // Done tasks release their checkout; inspect the committed result.
+    let branch = done["branch"].as_str().unwrap();
+    let argv = git_out(repo, &["show", &format!("{branch}:implement.argv")]);
+    assert_eq!(argv.contains("danger-full-access"), native, "{argv}");
+    assert_eq!(argv.contains("workspace-write"), !native, "{argv}");
+    assert_eq!(
+        argv.contains("mcp_servers.sushiai-messages."),
+        !native,
+        "{argv}"
+    );
+    assert_eq!(
+        git_out(repo, &["show", &format!("{branch}:ci-passed")]),
+        "yes"
+    );
+    assert_eq!(
+        git_out(repo, &["show", &format!("{branch}:desktop-passed")]),
+        "yes"
+    );
+    assert_eq!(
+        daemon.request("settings.get", json!({}))["sandbox"],
+        "native"
+    );
+}
+
+fn daemon_task(native: bool) {
+    if !available() {
+        return;
+    }
+    let fixtures = tempfile::tempdir().unwrap();
+    let harness = fake_harness_script(fixtures.path(), "codex.sh", CODEX);
+    let user = fixtures.path().join("user");
+    let (cargo, rustup) = sandbox_toolchain_homes(&user);
+    let repo = init_git_repo();
+    let sibling = create_sibling(fixtures.path());
+    let sibling_secret = sibling.join(".env");
+    let electron = checkout().join("node_modules/electron");
+    let npm_cache = user.join(".npm");
+    write_check_project(repo.path());
     let daemon = Daemon::spawn(&[
         ("ORCHD_CODEX_BIN", harness.to_str().unwrap()),
         ("CARGO_HOME", cargo.to_str().unwrap()),
@@ -482,29 +523,7 @@ app.whenReady().then(async () => {
         "verify": ["npm run ci"], "finalVerify": ["npm run test:desktop"], "start": true,
     }));
     let done = poll_task_status(&daemon, task["id"].as_str().unwrap());
-    assert_eq!(done["status"], "done", "{done}");
-    // Done tasks release their checkout; inspect the committed result.
-    let branch = done["branch"].as_str().unwrap();
-    let argv = git_out(repo.path(), &["show", &format!("{branch}:implement.argv")]);
-    assert_eq!(argv.contains("danger-full-access"), native, "{argv}");
-    assert_eq!(argv.contains("workspace-write"), !native, "{argv}");
-    assert_eq!(
-        argv.contains("mcp_servers.sushiai-messages."),
-        !native,
-        "{argv}"
-    );
-    assert_eq!(
-        git_out(repo.path(), &["show", &format!("{branch}:ci-passed")]),
-        "yes"
-    );
-    assert_eq!(
-        git_out(repo.path(), &["show", &format!("{branch}:desktop-passed")]),
-        "yes"
-    );
-    assert_eq!(
-        daemon.request("settings.get", json!({}))["sandbox"],
-        "native"
-    );
+    assert_sandbox_task(&daemon, repo.path(), &done, native);
 }
 
 #[test]

@@ -1,8 +1,8 @@
 use crate::engine::answer_policy::default_choice;
-use crate::engine::answer_policy::owner_only;
 use crate::engine::owner_notice;
 use crate::engine::questions::wake::waiting_prompt;
 use crate::engine::state::App;
+use crate::policy::questions::owner_only;
 use crate::policy::waits::default_due;
 use crate::policy::waits::reminder_due;
 use crate::task::TaskStatus;
@@ -38,7 +38,7 @@ impl App {
             self.hand_over_deferred(now);
         }
         self.resume_cleared_waits(now).await;
-        let mut log: Option<Vec<crate::overseer::Entry>> = None;
+        let mut log: Option<Vec<crate::task::notes::overseer::Entry>> = None;
         if remind == 0 && default == 0 {
             return;
         }

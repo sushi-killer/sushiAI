@@ -21,7 +21,7 @@ async fn a_daily_budget_wait_resumes_once_todays_spend_is_under_the_budget() {
     let waiter = park_live(&app, task).await;
     app.wait_sla_tick(T0).await;
     let (answer, task) = waiter.await.unwrap();
-    assert_eq!(answer.as_deref(), Some("retry"));
+    assert_eq!(answer.as_deref(), Ok("retry"));
     assert!(task.decisions.iter().any(|d| d.starts_with("Policy:")));
     assert!(task.daily_budget_ok_day.is_none());
 }
@@ -93,7 +93,7 @@ async fn a_harness_wait_resumes_once_a_cli_can_be_started_and_only_once() {
     let waiter = park_live(&app, task.clone()).await;
     app.wait_sla_tick(T0).await;
     let (answer, _) = waiter.await.unwrap();
-    assert_eq!(answer.as_deref(), Some("retry"));
+    assert_eq!(answer.as_deref(), Ok("retry"));
     // The spawn fails again and the owner is asked again: no new resume.
     let mut again = task;
     again.fixture_data().status = TaskStatus::Waiting;

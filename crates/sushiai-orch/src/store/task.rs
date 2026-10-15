@@ -90,11 +90,33 @@ impl Store {
     }
 
     pub fn save_task(&self, task: &Task) -> io::Result<()> {
+        let _guard = self.task_writes.lock().unwrap();
+        let stored = self.load_task(&task.id)?;
+        let kept = task.retaining_pending_amendment(stored.as_deref());
+        self.write_task(&kept)
+    }
+
+    pub(crate) fn save_task_with_pending(
+        &self,
+        task: &Task,
+        expected: Option<&crate::task::amendment::PendingAmendment>,
+    ) -> io::Result<()> {
+        let _guard = self.task_writes.lock().unwrap();
+        let stored = self
+            .load_task(&task.id)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "task not found"))?;
+        if !stored.matches_pending_amendment(expected) {
+            return Err(io::Error::other("the pending amendment changed"));
+        }
+        self.write_task(task)
+    }
+
+    fn write_task(&self, task: &Task) -> io::Result<()> {
         let dir = self.task_dir(&task.id);
         fs::create_dir_all(&dir)?;
         write_json_atomic(&self.task_path(&task.id), task)?;
         // Every answered question lands in the decision memory (`precedents.rs`).
-        crate::precedents::sync(&self.data_dir, task);
+        crate::store::precedents::sync(&self.data_dir, task);
         Ok(())
     }
 
@@ -141,3 +163,6 @@ impl Store {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod amendments;

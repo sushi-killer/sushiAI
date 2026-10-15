@@ -75,11 +75,13 @@ impl Task {
         self.data.pr_pending = pending;
     }
     pub(crate) fn finish_pr(&mut self) {
+        self.clear_pr_check_repair();
         self.data.pr_pending = false;
         self.data.pr_plan = None;
         self.data.queue.pr_conflict_tried = false;
     }
     pub(crate) fn record_pr_opened(&mut self, url: String, branch: String) {
+        self.clear_pr_check_repair();
         self.data.pr_url = Some(url);
         self.data.pr_branch = Some(branch);
         self.data.queue.pr_conflict_tried = false;

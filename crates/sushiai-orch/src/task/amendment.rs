@@ -1,7 +1,7 @@
 use crate::task::{check_part_command, valid_check, valid_checks, Check, Task, TaskData};
 
 /// What `task.amend` changes; a `None` field is left as it is.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Amendment {
     pub criteria: Option<Vec<String>>,
     /// The `criteria` texts flagged visual; only meaningful when `criteria` is set.
@@ -11,6 +11,7 @@ pub(crate) struct Amendment {
     /// The screenshot command; an empty string removes it.
     pub screenshot: Option<String>,
     pub checks: Option<Vec<Check>>,
+    #[serde(with = "held_out_edit")]
     pub held_out: Option<Option<Check>>,
     pub depends_on: Option<Vec<String>>,
     pub dependency_titles: Vec<String>,
@@ -201,7 +202,7 @@ impl Amendment {
 
 /// Live-loop handoff preserves each caller's authority and the original
 /// content identity while retaining the existing field-wise merge behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingAmendment {
     snapshot: crate::task::checks::snapshot::CheckSnapshot,
     edits: Vec<(Amendment, crate::task::checks::authority::Origin)>,
@@ -246,30 +247,6 @@ impl PendingAmendment {
     ) {
         self.merged.merge(later.clone());
         self.edits.push((later, origin));
-    }
-
-    pub(crate) fn extend_final(
-        &mut self,
-        task: &Task,
-        authority: &crate::task::checks::authority::CheckAuthority,
-        commands: &[String],
-        child: &str,
-        now: i64,
-    ) -> Result<(), String> {
-        let mut effective = self.preview(task, authority, now)?;
-        let before = effective.decisions.len();
-        if crate::task::checks::edits::append_final(&mut effective, commands, child, now) {
-            self.notes
-                .extend(effective.decisions[before..].iter().cloned());
-            self.merge(
-                Amendment {
-                    final_verify: Some(effective.final_verify.clone()),
-                    ..Default::default()
-                },
-                crate::task::checks::authority::Origin::Other,
-            );
-        }
-        Ok(())
     }
 
     pub(crate) fn preview(
@@ -318,3 +295,24 @@ pub(crate) fn ensure_amendable(task: &crate::task::TaskData) -> Result<(), Strin
     }
     Ok(())
 }
+
+mod held_out_edit {
+    use crate::task::Check;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Option<Check>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_ref().map(|check| (check,)).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<Check>>, D::Error> {
+        Option::<(Option<Check>,)>::deserialize(deserializer)
+            .map(|value| value.map(|(check,)| check))
+    }
+}
+
+pub(crate) mod storage;

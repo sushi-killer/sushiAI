@@ -28,7 +28,13 @@ fn matches_any_protected_checks_every_glob() {
     assert!(!matches_any_protected("src/extensions/registry.ts", &globs));
 }
 
-fn with_route(settings: &mut Settings, id: &str, harness: Harness, model: &str, strength: Option<u32>) {
+fn with_route(
+    settings: &mut Settings,
+    id: &str,
+    harness: Harness,
+    model: &str,
+    strength: Option<u32>,
+) {
     settings.routes.push(Route {
         id: id.into(),
         label: id.into(),
@@ -48,7 +54,13 @@ fn find<'a>(settings: &'a Settings, id: &str) -> &'a Route {
 #[test]
 fn review_auto_mechanical_luna_is_reviewed_by_sonnet() {
     let mut settings = Settings::default();
-    with_route(&mut settings, "codex-luna", Harness::Codex, "gpt-5.6-luna", None);
+    with_route(
+        &mut settings,
+        "codex-luna",
+        Harness::Codex,
+        "gpt-5.6-luna",
+        None,
+    );
     let luna = find(&settings, "codex-luna");
     let (route, reason) = select_review_route(&settings, luna, Tier::Mechanical).unwrap();
     assert_eq!(route.id, "claude-sonnet");
@@ -60,12 +72,26 @@ fn review_auto_standard_sonnet_is_reviewed_by_another_harness() {
     let mut settings = Settings::default();
     settings.prices.insert(
         "gpt-pricey".into(),
-        Price { input: 10.0, cached_input: 1.0, output: 50.0, cache_write: None },
+        Price {
+            input: 10.0,
+            cached_input: 1.0,
+            output: 50.0,
+            cache_write: None,
+        },
     );
-    with_route(&mut settings, "codex-pricey", Harness::Codex, "gpt-pricey", Some(2));
+    with_route(
+        &mut settings,
+        "codex-pricey",
+        Harness::Codex,
+        "gpt-pricey",
+        Some(2),
+    );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
-    assert_eq!(route.id, "codex-pricey", "another harness beats cheaper opus");
+    assert_eq!(
+        route.id, "codex-pricey",
+        "another harness beats cheaper opus"
+    );
     assert_eq!(reason, "standard tier, strength 2");
 }
 
@@ -95,12 +121,20 @@ fn review_auto_with_only_the_implementers_route_is_a_logged_self_review() {
 #[test]
 fn review_auto_skips_a_route_with_the_implementers_model() {
     let mut settings = Settings::default();
-    with_route(&mut settings, "claude-sonnet-b", Harness::Claude, "sonnet", None);
+    with_route(
+        &mut settings,
+        "claude-sonnet-b",
+        Harness::Claude,
+        "sonnet",
+        None,
+    );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
     assert_ne!(route.id, "claude-sonnet-b");
     assert_ne!(route.id, "claude-sonnet");
-    settings.routes.retain(|r| r.id != "claude-opus" && r.id != "codex");
+    settings
+        .routes
+        .retain(|r| r.id != "claude-opus" && r.id != "codex");
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
     assert_eq!(route.id, "claude-sonnet", "only same-model routes remain");
@@ -110,12 +144,22 @@ fn review_auto_skips_a_route_with_the_implementers_model() {
 #[test]
 fn a_route_with_no_model_and_no_strength_never_meets_the_floor() {
     let mut settings = Settings::default();
-    settings.routes.retain(|r| r.id == "claude-sonnet" || r.id == "codex");
+    settings
+        .routes
+        .retain(|r| r.id == "claude-sonnet" || r.id == "codex");
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Mechanical).unwrap();
     assert_eq!(route.id, "codex");
-    assert!(reason.contains("codex") && reason.contains("set strength"), "{reason}");
-    settings.routes.iter_mut().find(|r| r.id == "codex").unwrap().strength = Some(2);
+    assert!(
+        reason.contains("codex") && reason.contains("set strength"),
+        "{reason}"
+    );
+    settings
+        .routes
+        .iter_mut()
+        .find(|r| r.id == "codex")
+        .unwrap()
+        .strength = Some(2);
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Mechanical).unwrap();
     assert_eq!(route.id, "codex");
@@ -127,9 +171,20 @@ fn review_auto_prefers_a_cheaper_route_and_the_other_harness_on_a_tie() {
     let mut settings = Settings::default();
     settings.prices.insert(
         "gpt-mid".into(),
-        Price { input: 1.0, cached_input: 0.1, output: 5.0, cache_write: None },
+        Price {
+            input: 1.0,
+            cached_input: 0.1,
+            output: 5.0,
+            cache_write: None,
+        },
     );
-    with_route(&mut settings, "codex-mid", Harness::Codex, "gpt-mid", Some(2));
+    with_route(
+        &mut settings,
+        "codex-mid",
+        Harness::Codex,
+        "gpt-mid",
+        Some(2),
+    );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
     assert_eq!(route.id, "codex-mid", "other harness at strength 2");
@@ -137,7 +192,12 @@ fn review_auto_prefers_a_cheaper_route_and_the_other_harness_on_a_tie() {
     // Priced higher, it still wins: another harness sorts before price.
     settings.prices.insert(
         "gpt-mid".into(),
-        Price { input: 2.0, cached_input: 0.1, output: 10.0, cache_write: None },
+        Price {
+            input: 2.0,
+            cached_input: 0.1,
+            output: 10.0,
+            cache_write: None,
+        },
     );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
@@ -146,9 +206,20 @@ fn review_auto_prefers_a_cheaper_route_and_the_other_harness_on_a_tie() {
     // Two priced routes on the other harness: the cheaper one wins.
     settings.prices.insert(
         "gpt-cheap".into(),
-        Price { input: 0.5, cached_input: 0.1, output: 2.0, cache_write: None },
+        Price {
+            input: 0.5,
+            cached_input: 0.1,
+            output: 2.0,
+            cache_write: None,
+        },
     );
-    with_route(&mut settings, "codex-cheap", Harness::Codex, "gpt-cheap", Some(2));
+    with_route(
+        &mut settings,
+        "codex-cheap",
+        Harness::Codex,
+        "gpt-cheap",
+        Some(2),
+    );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, _) = select_review_route(&settings, sonnet, Tier::Standard).unwrap();
     assert_eq!(route.id, "codex-cheap");
@@ -179,11 +250,22 @@ fn review_auto_without_a_strong_route_uses_the_strongest() {
 #[test]
 fn review_auto_fallback_ranks_a_known_weaker_route_above_an_unknown_one() {
     let mut settings = Settings::default();
-    settings.routes.retain(|r| r.id == "claude-sonnet" || r.id == "codex");
-    with_route(&mut settings, "codex-mid", Harness::Codex, "gpt-mid", Some(2));
+    settings
+        .routes
+        .retain(|r| r.id == "claude-sonnet" || r.id == "codex");
+    with_route(
+        &mut settings,
+        "codex-mid",
+        Harness::Codex,
+        "gpt-mid",
+        Some(2),
+    );
     let sonnet = find(&settings, "claude-sonnet");
     let (route, reason) = select_review_route(&settings, sonnet, Tier::Hard).unwrap();
-    assert_eq!(route.id, "codex-mid", "known strength 2 beats a route with no model");
+    assert_eq!(
+        route.id, "codex-mid",
+        "known strength 2 beats a route with no model"
+    );
     assert_eq!(reason, "no route at strength 3; strongest available");
 }
 
@@ -225,7 +307,10 @@ fn select_review_route_explicit_id() {
     };
     let implementer = find(&settings, "claude-opus");
     let (route, reason) = select_review_route(&settings, implementer, Tier::Hard).unwrap();
-    assert_eq!(route.id, "claude-sonnet", "even weaker than the implementer");
+    assert_eq!(
+        route.id, "claude-sonnet",
+        "even weaker than the implementer"
+    );
     assert_eq!(reason, "explicit setting");
 }
 
@@ -277,12 +362,26 @@ fn evidence_copies_only_the_named_images() {
     let tmp = tempfile::tempdir().unwrap();
     write_images(
         tmp.path(),
-        &["panel.png", "workspace.png", "smoke-hidden-window.png", "list/a.png"],
+        &[
+            "panel.png",
+            "workspace.png",
+            "smoke-hidden-window.png",
+            "list/a.png",
+        ],
     );
     let task = visual_task(&["panel -- check: screenshot artifacts/panel.png"]);
     let scope = evidence_scope(&task);
     let saved = save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &scope);
-    let names: Vec<_> = saved.iter().map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned()).collect();
+    let names: Vec<_> = saved
+        .iter()
+        .map(|p| {
+            Path::new(p)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
     assert_eq!(names, vec!["panel.png"]);
     let shown = attempt_screenshots(tmp.path(), 0, &scope);
     assert_eq!(shown, vec![tmp.path().join("artifacts/panel.png")]);
@@ -305,7 +404,10 @@ fn a_named_image_the_attempt_did_not_write_is_missing_from_the_gate() {
 #[test]
 fn a_directory_a_check_names_is_evidence_for_every_image_under_it() {
     let tmp = tempfile::tempdir().unwrap();
-    write_images(tmp.path(), &["list/a.png", "list/deep/b.png", "workspace.png"]);
+    write_images(
+        tmp.path(),
+        &["list/a.png", "list/deep/b.png", "workspace.png"],
+    );
     let task = visual_task(&["sorted -- check: screenshots under artifacts/list/"]);
     let scope = evidence_scope(&task);
     let saved = save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &scope);
@@ -319,7 +421,10 @@ fn an_unscoped_visual_criterion_and_a_task_without_one_behave_as_named() {
     let tmp = tempfile::tempdir().unwrap();
     write_images(tmp.path(), &["a.png", "b.png"]);
     let all = evidence_scope(&visual_task(&["looks right -- check: screenshot"]));
-    assert_eq!(save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &all).len(), 2);
+    assert_eq!(
+        save_evidence(tmp.path(), 0, &tmp.path().join("ev"), &all).len(),
+        2
+    );
     let none = evidence_scope(&visual_task(&["x -- check: cargo test"]));
     assert!(save_evidence(tmp.path(), 0, &tmp.path().join("ev2"), &none).is_empty());
     assert!(attempt_screenshots(tmp.path(), 0, &none).is_empty());

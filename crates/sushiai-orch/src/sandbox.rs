@@ -76,6 +76,52 @@ fn deny_except(root: &Path, keep: &[&Path], denied: &mut Vec<PathBuf>) {
     }
 }
 
+fn denied_roots(
+    inputs: &Inputs<'_>,
+    repo: &Path,
+    worktree: &Path,
+    data_dir: &Path,
+    home: &Path,
+) -> Vec<PathBuf> {
+    let mut denied_read_roots = vec![
+        data_dir.to_path_buf(),
+        resolved(inputs.sushiai_home).join("worktrees.noindex"),
+        home.join(".claude/projects"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
+    ];
+    for project in std::iter::once(inputs.repo_root)
+        .chain(inputs.known_project_folders.iter().map(PathBuf::as_path))
+    {
+        denied_read_roots.push(crate::git::worktree::worktree_path(
+            project,
+            inputs.sushiai_home,
+            inputs.worktree_root,
+            "",
+        ));
+    }
+    // Existing tasks retain their paths when worktreeRoot changes.
+    denied_read_roots.extend(
+        inputs
+            .known_task_worktrees
+            .iter()
+            .map(|path| resolved(path))
+            .filter(|path| *path != worktree),
+    );
+    for project in inputs.known_project_folders {
+        let project = resolved(project);
+        if project == repo || project == worktree {
+            continue;
+        }
+        if repo.starts_with(&project) {
+            deny_except(&project, &[repo, worktree], &mut denied_read_roots);
+        } else {
+            denied_read_roots.push(project);
+        }
+    }
+    denied_read_roots
+}
+
 impl TaskSandbox {
     /// Builds from explicit inputs and a read-only snapshot of their paths;
     /// no app state, process environment or files are changed.
@@ -122,42 +168,7 @@ impl TaskSandbox {
             write_roots.push(resolved(&modules));
         }
 
-        let mut denied_read_roots = vec![
-            data_dir.clone(),
-            resolved(inputs.sushiai_home).join("worktrees.noindex"),
-            home.join(".claude/projects"),
-            home.join(".codex/sessions"),
-            home.join(".codex/archived_sessions"),
-        ];
-        for project in std::iter::once(inputs.repo_root)
-            .chain(inputs.known_project_folders.iter().map(PathBuf::as_path))
-        {
-            denied_read_roots.push(crate::git::worktree::worktree_path(
-                project,
-                inputs.sushiai_home,
-                inputs.worktree_root,
-                "",
-            ));
-        }
-        // Existing tasks retain their paths when worktreeRoot changes.
-        denied_read_roots.extend(
-            inputs
-                .known_task_worktrees
-                .iter()
-                .map(|path| resolved(path))
-                .filter(|path| *path != worktree),
-        );
-        for project in inputs.known_project_folders {
-            let project = resolved(project);
-            if project == repo || project == worktree {
-                continue;
-            }
-            if repo.starts_with(&project) {
-                deny_except(&project, &[&repo, &worktree], &mut denied_read_roots);
-            } else {
-                denied_read_roots.push(project);
-            }
-        }
+        let mut denied_read_roots = denied_roots(&inputs, &repo, &worktree, &data_dir, &home);
         write_roots = write_roots.iter().map(|path| resolved(path)).collect();
         denied_read_roots = denied_read_roots
             .iter()

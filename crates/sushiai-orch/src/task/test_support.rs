@@ -43,6 +43,8 @@ pub(crate) fn sample_task(id: &str, status: TaskStatus, attempt_status: AttemptS
             status,
             tier: Tier::Standard,
             question: None,
+            pending_amendment: None,
+            delivery_checks: vec![],
             decisions: vec![],
             attempts: vec![sample_attempt(attempt_status)],
             cost_usd: 0.0,

@@ -1,12 +1,8 @@
 use crate::clock::now_ms;
 use crate::engine::attempts::pricing::price_claude_resume;
-use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::questions::reply::Reply;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
 use crate::harness;
-use crate::harness::cancel::CancelToken;
 use crate::policy::routing::Harness;
 use crate::store::Store;
 use crate::task::AskedBy;
@@ -16,13 +12,10 @@ use crate::task::Question;
 use crate::task::QuestionKind;
 use crate::task::Stage;
 use crate::task::Task;
-use crate::task::TaskStatus;
 use crate::task::Usage;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
 type Prices = std::collections::BTreeMap<String, crate::policy::pricing::Price>;
 
@@ -229,19 +222,15 @@ fn asked_by_run(run: &str) -> AskedBy {
 /// review): while the task's spend meets its `variant.max_cost_usd` budget,
 /// it waits for the owner -- "raise" adds the budget once more, "stop"
 /// stops it -- instead of running. Never interrupts a run already going.
-/// On `true` the task is back in `resume_status` holding a slot; on `false`
-/// it is stopped (the wait already persisted that).
-#[allow(clippy::too_many_arguments)]
+/// Restores the entering phase and slot after an answer; changes return to
+/// lifecycle admission and cancellation remains a separate outcome.
 pub(super) async fn wait_while_over_budget(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
     run: &str,
-    resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> bool {
+    slot: &mut QuestionSlot<'_>,
+) -> Result<(), WaitEnd> {
+    let resume_status = task.status;
     let mut waited = false;
     loop {
         let question = if let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
@@ -265,36 +254,20 @@ pub(super) async fn wait_while_over_budget(
         };
         task.ask(question.clone(), now_ms());
         waited = true;
-        match wait_for_answer(app, task, pending_answer, cancel, permit).await {
-            None => return false,
-            Some(answer) => {
-                if is_budget_raise(&question, &answer) {
-                    task.raise_budget();
-                }
-                if is_daily_budget_run_anyway(&question, &answer) {
-                    task.allow_daily_budget(crate::costs::today(now_ms()));
-                }
-            }
+        let answer = slot.answer(app, task).await?;
+        if is_budget_raise(&question, &answer) {
+            task.raise_budget();
+        }
+        if is_daily_budget_run_anyway(&question, &answer) {
+            task.allow_daily_budget(crate::policy::calendar::day(now_ms()));
         }
     }
     if !waited {
-        return true;
+        return Ok(());
     }
-    task.resume_phase(resume_status, now_ms());
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    if permit.is_none() {
-        let acquired = tokio::select! {
-            _ = cancel.cancelled() => None,
-            p = app.slots.clone().acquire_owned() => p.ok(),
-        };
-        match acquired {
-            Some(p) => *permit = Some(p),
-            None => {
-                mark_stopped_if_not_already(app, task_id).await;
-                return false;
-            }
-        }
+    if slot.resume(app, task, resume_status).await {
+        Ok(())
+    } else {
+        Err(WaitEnd::Stopped)
     }
-    true
 }

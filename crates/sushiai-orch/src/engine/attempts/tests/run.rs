@@ -1,7 +1,8 @@
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::review::review_request;
+use crate::engine::review::native::review_request;
 use crate::engine::test_support::slow_helper_task;
 use crate::harness::cancel::CancelToken;
 use crate::harness::guard::Guard;
@@ -25,14 +26,18 @@ async fn helper_timed_out_while_stdin_is_full() {
         Duration::from_secs(1),
         run_harness(
             &app,
-            &task.id,
-            0,
-            RunTrack::No,
-            &worktree,
-            &req,
-            CostTag::task_without_attempt("brief_check", &route.id),
-            &prompt,
-            &run_dir.join("events.jsonl"),
+            RunIdentity {
+                id: &task.id,
+                attempt_n: 0,
+                track: RunTrack::No,
+                tag: CostTag::task_without_attempt("brief_check", &route.id),
+            },
+            RunInvocation {
+                request: &req,
+                brief: &prompt,
+                events: &run_dir.join("events.jsonl"),
+                schema: None,
+            },
             &CancelToken::new(),
             Guard::helper("test-helper", app.helper_timeout()),
         ),

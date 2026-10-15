@@ -2,7 +2,7 @@ use crate::task::{Check, PlannedTest, SourcedCheck, TaskData};
 
 /// Content identity for asynchronous check work. Baselines are observations,
 /// so completing another baseline does not itself invalidate this identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckSnapshot {
     task_id: String,
     repo: String,

@@ -2,7 +2,7 @@ use super::store::turn_dir;
 use super::turn::{ScheduledTurn, Turn};
 use super::types::ChatMode;
 use crate::engine::chat_tools;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
 use crate::harness;
 use crate::policy::routing::Harness;
@@ -57,7 +57,7 @@ pub(super) fn claude_argv(
     invocation: &ChatInvocation<'_>,
     mcp_config: &Path,
     settings_path: &Path,
-    connected: &chat_tools::TurnTools,
+    connected: &chat_tools::turn::TurnTools,
 ) -> Vec<String> {
     let ChatInvocation {
         route,
@@ -121,7 +121,7 @@ pub(super) fn codex_argv(
     invocation: &ChatInvocation<'_>,
     repo: &str,
     server: &serde_json::Value,
-    connected: &chat_tools::TurnTools,
+    connected: &chat_tools::turn::TurnTools,
 ) -> Vec<String> {
     let ChatInvocation {
         route,
@@ -158,7 +158,7 @@ pub(super) fn codex_argv(
         toml(&json!(format!("{}{}", mode.prompt(), connected.prompt)))
     ));
     argv.extend(harness::codex_mcp_flags(SERVER, server));
-    argv.extend(chat_tools::codex_flags(connected));
+    argv.extend(chat_tools::turn::codex_flags(connected));
     if let Some(model) = &route.model {
         argv.push("-m".into());
         argv.push(model.clone());
@@ -222,8 +222,8 @@ pub(super) async fn prepare(app: &App, scheduled: &ScheduledTurn) -> PreparedLau
     let settings = app.settings.read().unwrap().clone();
     // A question turn answers a task, not the owner: it gets no connected tools.
     let connected = match turn {
-        Turn::Owner(_) => chat_tools::for_turn(app, &settings).await,
-        Turn::Questions(_) | Turn::Overseer { .. } => chat_tools::TurnTools::default(),
+        Turn::Owner(_) => chat_tools::turn::for_turn(app, &settings).await,
+        Turn::Questions(_) | Turn::Overseer { .. } => chat_tools::turn::TurnTools::default(),
     };
     // Only the owner's turns resume the harness session; a wake starts fresh.
     let owner = matches!(turn, Turn::Owner(_));
@@ -242,7 +242,6 @@ pub(super) async fn prepare(app: &App, scheduled: &ScheduledTurn) -> PreparedLau
             write_readonly_claude_settings_with_profile(
                 route,
                 app,
-                &key_path,
                 &settings,
                 &[app.data_dir.to_string_lossy().to_string()],
                 &settings_path,

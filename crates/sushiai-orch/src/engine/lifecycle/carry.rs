@@ -1,11 +1,18 @@
-use crate::engine::fresh_base;
+use crate::delivery::git::carry::Rebase;
 use crate::engine::graph::relay::conflict_detail;
-use crate::engine::protected::adopt_carried_tests;
+use crate::engine::protected::carry::adopt_carried_tests;
 use crate::engine::state::App;
 use crate::git::paths::short_sha;
+use crate::git::GitError;
 use crate::harness::cancel::CancelToken;
 use crate::task::Task;
 use std::path::Path;
+
+pub(in crate::engine) mod attempt;
+mod checkout;
+mod contained;
+
+use checkout::CarriedWork;
 
 /// Decision line for a carry that stopped on conflicts.
 pub(in crate::engine) fn rebase_conflict_note(
@@ -55,52 +62,85 @@ pub(in crate::engine) async fn carry_onto_newest_base(
     };
     let before = task.clone();
     let (wt, mut snapshot, r) = (worktree.to_path_buf(), task.clone(), base_ref.clone());
+    let carried = tokio::task::spawn_blocking(move || checkout::carry(&mut snapshot, &wt, &r))
+        .await
+        .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())));
+    let result = record_outcome(task, &base_ref, carried);
+    if crate::task::checks::snapshot::CheckSnapshot::capture(&before).matches(task) {
+        return result;
+    }
+    publish_result(app, task, &before, cancel, result)
+}
+
+pub(in crate::engine) async fn carry_relay_onto_parent(
+    app: &App,
+    task: &mut Task,
+    parent: &Task,
+    chain_base: &str,
+    cancel: &CancelToken,
+) -> BaseCarry {
+    let before = task.clone();
+    let (mut snapshot, wt, from, branch) = (
+        task.clone(),
+        Path::new(&task.worktree).to_path_buf(),
+        chain_base.to_string(),
+        parent.branch.clone(),
+    );
     let carried = tokio::task::spawn_blocking(move || {
-        let from = snapshot.base_sha.clone();
-        let tip = snapshot.fresh_base.as_ref().and_then(|f| f.tip.clone());
-        let new_sha = crate::git::history::resolve_commit(
-            &wt,
-            &fresh_base::carry_rev(&wt, &r, tip.as_deref()),
-        )?;
-        if new_sha == from {
-            return Ok((
-                crate::delivery::git::carry::Rebase::Unchanged,
-                false,
-                snapshot.planner_tests.clone(),
-            ));
-        }
-        // Preserve a merge the task already made; resetting it would carry
-        // the base's changes a second time along with the task's own work.
-        if crate::git::history::is_ancestor(&wt, &new_sha, "HEAD") == Some(true) {
-            return Ok((
-                crate::delivery::git::carry::Rebase::Moved {
-                    new_sha,
-                    rewritten: false,
-                },
-                true,
-                snapshot.planner_tests.clone(),
-            ));
-        }
-        // Work committed by an attempt goes back to uncommitted.
-        if crate::git::history::head_sha(&wt)? != from {
-            crate::delivery::git::carry::uncommit_to(&wt, &from)?;
-        }
-        let carried = fresh_base::carry_work(&mut snapshot, &wt, &r)?;
-        Ok((carried, false, snapshot.planner_tests.clone()))
+        let carried = checkout::carry_relay(&mut snapshot, &wt, &from, &branch);
+        (snapshot, carried)
     })
-    .await
-    .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())));
-    let result = match carried {
-        Ok((crate::delivery::git::carry::Rebase::Unchanged, _, _)) => BaseCarry::Ready,
-        Ok((
-            crate::delivery::git::carry::Rebase::Moved { new_sha, rewritten },
+    .await;
+    let (mut next, carried) = carried
+        .unwrap_or_else(|error| (before.clone(), Err(crate::git::GitError(error.to_string()))));
+    let result = record_outcome(&mut next, &parent.branch, carried);
+    if matches!(&result, BaseCarry::Ready | BaseCarry::Conflict(_)) {
+        next.record_relay_base(Some(next.base_sha.clone()));
+    }
+    *task = next;
+    publish_result(app, task, &before, cancel, result)
+}
+
+fn publish_result(
+    app: &App,
+    task: &mut Task,
+    before: &Task,
+    cancel: &CancelToken,
+    result: BaseCarry,
+) -> BaseCarry {
+    use crate::engine::delivery_gate::{publish_carry, DeliveryGate};
+    match publish_carry(app, task, before, cancel) {
+        Ok(DeliveryGate::Ready) => result,
+        Ok(DeliveryGate::Recheck) => {
+            if let Ok(Some(fresh)) = app.store.load_task(&task.id) {
+                *task = fresh;
+            }
+            BaseCarry::Stale
+        }
+        Ok(DeliveryGate::Stopped) => BaseCarry::Stopped,
+        Err(error) => BaseCarry::Failed(error),
+    }
+}
+
+fn record_outcome(
+    task: &mut Task,
+    base_ref: &str,
+    carried: Result<CarriedWork, GitError>,
+) -> BaseCarry {
+    match carried {
+        Ok(CarriedWork {
+            rebase: Rebase::Unchanged,
+            ..
+        }) => BaseCarry::Ready,
+        Ok(CarriedWork {
+            rebase: Rebase::Moved { new_sha, rewritten },
             already_contained,
             tests,
-        )) => {
+        }) => {
             adopt_carried_tests(
                 task,
                 tests,
-                &crate::delivery::git::carry::Rebase::Moved {
+                &Rebase::Moved {
                     new_sha: new_sha.clone(),
                     rewritten,
                 },
@@ -124,23 +164,27 @@ pub(in crate::engine) async fn carry_onto_newest_base(
             crate::task::transitions::move_base(task, new_sha);
             BaseCarry::Ready
         }
-        Ok((
-            crate::delivery::git::carry::Rebase::Conflicts {
-                new_sha,
-                files,
-                rewritten,
-            },
-            _,
+        Ok(CarriedWork {
+            rebase:
+                Rebase::Conflicts {
+                    new_sha,
+                    files,
+                    rewritten,
+                },
             tests,
-        )) => {
+            ..
+        }) => {
             crate::task::checks::edits::adopt_planner_tests(task, tests);
-            task.record_decision(rebase_conflict_note(&base_ref, &new_sha, &files, rewritten));
-            let detail = conflict_detail(&base_ref, &new_sha, &files, &task.id);
+            task.record_decision(rebase_conflict_note(base_ref, &new_sha, &files, rewritten));
+            let detail = conflict_detail(base_ref, &new_sha, &files);
             task.record_carry_conflicts(files);
             crate::task::transitions::move_base(task, new_sha);
             BaseCarry::Conflict(detail)
         }
-        Ok((crate::delivery::git::carry::Rebase::Skipped { reason }, _, _)) => {
+        Ok(CarriedWork {
+            rebase: Rebase::Skipped { reason },
+            ..
+        }) => {
             let detail = format!("Rebase: not carried onto {base_ref}: {reason}");
             task.record_decision(detail.clone());
             BaseCarry::Skipped(detail)
@@ -150,20 +194,5 @@ pub(in crate::engine) async fn carry_onto_newest_base(
             task.record_decision(detail.clone());
             BaseCarry::Failed(detail)
         }
-    };
-    if crate::task::checks::snapshot::CheckSnapshot::capture(&before).matches(task) {
-        return result;
-    }
-    use crate::engine::delivery_gate::{publish_carry, DeliveryGate};
-    match publish_carry(app, task, &before, cancel) {
-        Ok(DeliveryGate::Ready) => result,
-        Ok(DeliveryGate::Recheck) => {
-            if let Ok(Some(fresh)) = app.store.load_task(&task.id) {
-                *task = fresh;
-            }
-            BaseCarry::Stale
-        }
-        Ok(DeliveryGate::Stopped) => BaseCarry::Stopped,
-        Err(error) => BaseCarry::Failed(error),
     }
 }

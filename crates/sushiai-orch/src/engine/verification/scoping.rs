@@ -1,18 +1,15 @@
 use crate::clock::now_ms;
-use crate::engine::answer_policy::check_authority;
+use crate::engine::answer_policy::authority::check_authority;
 use crate::engine::state::App;
 use crate::engine::subtask_checks;
 use crate::git::paths::short_sha;
 use crate::policy::paths::glob_match;
 use crate::policy::settings::ScopedCheck;
 use crate::policy::settings::Settings;
-use crate::task::amendment::Amendment;
-use crate::task::amendment::PendingAmendment;
-use crate::task::checks::authority::Origin;
+use crate::task::checks::contribution::ChildChecks;
 use crate::task::state::Task;
 use crate::verify::scoping::filter_scoped;
 use std::path::Path;
-use std::sync::Arc;
 
 /// One merged policy for diff checks, base checks, briefs and shared checks.
 pub(in crate::engine) fn scoped_checks_for(settings: &Settings, task: &Task) -> Vec<ScopedCheck> {
@@ -28,7 +25,7 @@ pub(in crate::engine) fn scoped_checks_for(settings: &Settings, task: &Task) -> 
 /// Like [`filter_scoped`] for the task's own diff against `base`. When the
 /// diff cannot be read every command runs.
 pub(in crate::engine) async fn scope_to_diff(
-    app: &Arc<App>,
+    app: &App,
     task: &Task,
     worktree: &Path,
     base: &str,
@@ -54,7 +51,7 @@ pub(in crate::engine) async fn scope_to_diff(
 
 /// Path policy first, then the planner's check for subtasks gated at their parent.
 pub(in crate::engine) async fn scope_task_checks(
-    app: &Arc<App>,
+    app: &App,
     task: &Task,
     worktree: &Path,
     base: &str,
@@ -90,27 +87,33 @@ fn add_parent_checks(app: &App, task: &Task, commands: &[String]) -> bool {
     let Ok(Some(mut parent)) = app.store.load_task(parent_id) else {
         return false;
     };
-    let controls = app.controls.lock().unwrap();
-    if let Some(control) = controls
+    let signals = app
+        .controls
+        .lock()
+        .unwrap()
         .get(parent_id)
         .filter(|control| !control.signals.cancel.is_cancelled())
-    {
-        let mut slot = control.signals.pending_amend.lock().unwrap();
+        .map(|control| control.signals.clone());
+    let contribution = ChildChecks::new(short_sha(&task.id), commands);
+    if signals.is_some() || parent.pending_amendment.is_some() {
+        let expected = parent.pending_amendment.clone();
         let authority = check_authority(&app.settings.read().unwrap(), &parent);
-        let pending = slot.get_or_insert_with(|| {
-            PendingAmendment::capture(&parent, Amendment::default(), Origin::Other)
-        });
-        return pending
-            .extend_final(&parent, &authority, commands, short_sha(&task.id), now_ms())
-            .is_ok();
+        if parent
+            .queue_final_checks(&authority, contribution, now_ms())
+            .is_err()
+            || app
+                .store
+                .save_task_with_pending(&parent, expected.as_ref())
+                .is_err()
+        {
+            return false;
+        }
+        if let Some(signals) = signals {
+            *signals.pending_amend.lock().unwrap() = parent.pending_amendment.clone();
+        }
+        return true;
     }
-    drop(controls);
-    if crate::task::checks::edits::append_final(
-        &mut parent,
-        commands,
-        short_sha(&task.id),
-        now_ms(),
-    ) {
+    if contribution.append_to(&mut parent, now_ms()) {
         if app.store.save_task(&parent).is_err() {
             return false;
         }

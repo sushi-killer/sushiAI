@@ -3,7 +3,15 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+use common::repository::git_out;
+
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{poll_task_status, remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit, DaemonChild};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::init_git_repo;
 
 const PASS_SCRIPT: &str = "#!/bin/sh\ninput=\"$(cat)\"\ncase \"$input\" in *SLOW*) sleep 30 ;; esac\necho changed > CHANGED_MARKER.txt\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-fake\"}'\necho '{\"type\":\"result\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"result\":\"```sushi-report\\n{\\\"outcome\\\":\\\"complete\\\",\\\"summary\\\":\\\"done\\\",\\\"decisions\\\":[],\\\"question\\\":\\\"\\\"}\\n```\"}'\n";
 

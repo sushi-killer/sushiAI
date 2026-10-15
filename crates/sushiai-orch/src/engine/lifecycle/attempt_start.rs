@@ -1,15 +1,15 @@
 use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::policy::routing::Route;
-use crate::task::checks::snapshot::CheckSnapshot;
-use crate::task::{Stage, Task, TaskStatus};
+use crate::task::attempt::Stage;
+use crate::task::checks::admission::CheckAdmission;
+use crate::task::state::{Task, TaskStatus};
 
 pub(in crate::engine) fn start(
     app: &App,
     task: &mut Task,
     route: &Route,
     reason: &str,
-    conflicts: &[String],
 ) -> Result<Option<usize>, String> {
     let lock = app.task_lock(&task.id);
     let _guard = lock.lock().unwrap();
@@ -25,9 +25,10 @@ pub(in crate::engine) fn start(
     if control.signals.cancel.is_cancelled()
         || fresh.archived
         || fresh.queue.park.is_some()
+        || fresh.pending_amendment.is_some()
         || !matches!(fresh.status, TaskStatus::Queued | TaskStatus::Running)
         || fresh.status != task.status
-        || !CheckSnapshot::capture(task).matches(&fresh)
+        || !CheckAdmission::capture(task).matches(&fresh)
         || control
             .signals
             .pending_amend
@@ -41,10 +42,7 @@ pub(in crate::engine) fn start(
     let now = now_ms();
     let attempt_n = crate::task::attempts::next_number(task);
     let index = crate::task::attempts::start(task, Stage::Implement, route, reason, now);
-    if !conflicts.is_empty() {
-        task.record_conflict_attempt(attempt_n);
-        task.record_carry_conflicts(Vec::new());
-    }
+    task.record_carry_conflict_step(attempt_n);
     crate::task::checks::results::refresh_criteria_results(task, index);
     task.resume_phase(TaskStatus::Running, now);
     task.touch(now);

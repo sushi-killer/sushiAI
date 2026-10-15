@@ -3,14 +3,13 @@ use crate::engine::graph::landing::Landing;
 use crate::engine::graph::parent_checks::checked_for_delivery;
 use crate::engine::graph::relay::remove_chain_branches;
 use crate::engine::ladder;
-use crate::engine::land::land_on_base;
+use crate::engine::land::run::land_on_base;
 use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
 use crate::engine::questions::wake::wake_orchestrator_for_done;
 use crate::engine::state::App;
 use crate::engine::verification::base::amendments::apply_pending_amendment;
 use crate::harness::cancel::CancelToken;
 use crate::task::checks::edits::heal_grep_dashes;
-use crate::task::FailureKind;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use std::path::PathBuf;
@@ -28,7 +27,6 @@ pub(in crate::engine) enum ParentEnd {
     Attempt {
         failure: String,
         budget: Option<u32>,
-        conflict_only: bool,
     },
 }
 
@@ -50,7 +48,13 @@ pub(in crate::engine) async fn land_parent(
     if !task.unreviewed && task.variant().land && task.parent.is_none() {
         let run_dir = app.store.task_dir(&task_id).join("runs").join("parent");
         let _ = std::fs::create_dir_all(&run_dir);
-        match land_on_base(app, task, None, 0, &worktree, &run_dir, cancel).await {
+        match land_on_base(
+            app,
+            task,
+            &crate::engine::graph::carry::CarryTree::new(&worktree, &run_dir, None, cancel),
+        )
+        .await
+        {
             Landing::Landed => {
                 crate::delivery::git::carry::delete_wip_ref(&worktree, &task_id);
                 landed = true;
@@ -62,7 +66,7 @@ pub(in crate::engine) async fn land_parent(
                 app.broadcast_task(task);
                 return ParentEnd::Finished;
             }
-            Landing::Failed { kind, detail } => {
+            Landing::Failed { detail, .. } => {
                 task.resume_phase(TaskStatus::Running, crate::clock::now_ms());
                 task.touch(now_ms());
                 app.save_task_logged(task);
@@ -70,7 +74,6 @@ pub(in crate::engine) async fn land_parent(
                 return ParentEnd::Attempt {
                     failure: detail,
                     budget: None,
-                    conflict_only: kind == FailureKind::Conflict,
                 };
             }
             Landing::Cancelled => {
@@ -97,7 +100,6 @@ pub(in crate::engine) async fn land_parent(
             return ParentEnd::Attempt {
                 failure,
                 budget: Some(1),
-                conflict_only: false,
             };
         }
         crate::delivery::git::carry::delete_wip_ref(&worktree, &task_id);
@@ -142,7 +144,12 @@ pub(in crate::engine) async fn run_parent(
         return ParentEnd::Finished;
     };
     let cancel = &signals.cancel;
-    apply_pending_amendment(app, &mut task, &signals.pending_amend, cancel).await;
+    if let Err(error) =
+        apply_pending_amendment(app, &mut task, &signals.pending_amend, cancel).await
+    {
+        eprintln!("orch: applying amendment to {} failed: {error}", task.id);
+        return ParentEnd::Finished;
+    }
     if heal_grep_dashes(&mut task) {
         app.verify_cache.lock().unwrap().remove(task_id);
         task.touch(now_ms());

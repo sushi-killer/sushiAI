@@ -32,3 +32,11 @@ mod graph_params;
 mod workspace;
 
 mod amend_request;
+
+#[cfg(test)]
+#[path = "tests/command_gate.rs"]
+mod command_gate_tests;
+
+#[cfg(test)]
+#[path = "tests/pr_check.rs"]
+mod pr_check_tests;

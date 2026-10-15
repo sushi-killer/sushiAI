@@ -10,8 +10,10 @@ mod task;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct Store {
     data_dir: PathBuf,
+    task_writes: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl Store {
@@ -19,7 +21,10 @@ impl Store {
         let data_dir = data_dir.into();
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(data_dir.join("tasks"))?;
-        Ok(Store { data_dir })
+        Ok(Store {
+            data_dir,
+            task_writes: Default::default(),
+        })
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -33,3 +38,9 @@ mod tests;
 pub(crate) mod log;
 
 pub(crate) mod permissions;
+
+pub mod overseer;
+
+pub(crate) mod overseer_state;
+
+pub(crate) mod precedents;

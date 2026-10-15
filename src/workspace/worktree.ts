@@ -1,5 +1,25 @@
 import type { Panel } from "../types";
 
+type WorktreeHostCheck =
+  { checkout: { ok: boolean } } | "checking" | "unreachable" | undefined;
+
+/** A local launch can always create a worktree; an SSH launch needs a checkout. */
+export function canLaunchWorktree({
+  setup,
+  ssh,
+  check,
+}: {
+  setup: boolean;
+  ssh: boolean;
+  check: WorktreeHostCheck;
+}): boolean {
+  if (setup) return false;
+  if (!ssh) return true;
+  return (
+    typeof check === "object" && check !== null && check.checkout?.ok === true
+  );
+}
+
 /** A local-time, minute-precision suggestion for the branch field, prefilled
  * when the "New worktree" launch choice opens. */
 export function suggestWorktreeBranch(now: Date): string {

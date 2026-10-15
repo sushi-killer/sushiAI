@@ -59,8 +59,8 @@ impl App {
             "chat.createProposal" => {
                 crate::engine::chat::proposals::handle_create_proposal(self, params).await
             }
-            "chat.tools" => chat_tools::handle_tools(self, params).await,
-            "chat.toolServers" => chat_tools::handle_tool_servers(self, params).await,
+            "chat.tools" => chat_tools::status::handle_tools(self, params).await,
+            "chat.toolServers" => chat_tools::status::handle_tool_servers(self, params).await,
             "chat.actionSend" => {
                 crate::engine::chat::actions::handle_action_send(self, params).await
             }

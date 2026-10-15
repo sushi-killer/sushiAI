@@ -129,7 +129,7 @@ fn apply_result(
                 (Some(reply), _, Turn::Owner(_) | Turn::Overseer { .. }) => {
                     let reply = notice.unwrap_or(reply);
                     apply_reply(thread, &reply, tools, mode, &|server, tool| {
-                        chat_tools::proposable(app, settings, server, tool)
+                        chat_tools::approved::proposable(app, settings, server, tool)
                     });
                 }
                 (Some(reply), _, Turn::Questions(ids)) => {

@@ -2,6 +2,7 @@ pub mod draft;
 pub mod prompt;
 pub(crate) mod serde;
 
+pub(in crate::engine::planning) mod check_plan;
 pub(in crate::engine) mod correction;
 pub(in crate::engine) mod graph;
 pub(in crate::engine) mod questions;
@@ -24,3 +25,7 @@ pub(in crate::engine) mod validation;
 pub(in crate::engine) mod split_graph;
 
 pub(in crate::engine::planning) mod publication;
+
+#[cfg(test)]
+#[path = "tests/command_gate.rs"]
+mod command_gate_tests;

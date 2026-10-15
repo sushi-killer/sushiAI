@@ -1,8 +1,8 @@
-use crate::engine::answer_policy::check_authority;
-use crate::engine::answer_policy::criterion_text_refusal;
-use crate::engine::answer_policy::removal_refusal;
-use crate::engine::answer_policy::remove_check_command;
-use crate::engine::brief_check::check_route_for;
+use crate::engine::answer_policy::authority::check_authority;
+use crate::engine::answer_policy::authority::criterion_text_refusal;
+use crate::engine::answer_policy::authority::removal_refusal;
+use crate::engine::answer_policy::authority::remove_check_command;
+use crate::engine::brief_check::routing::check_route_for;
 use crate::engine::state::App;
 use crate::policy::routing::Route;
 use crate::policy::settings::Settings;

@@ -1,6 +1,8 @@
+pub(crate) mod admission;
 pub(crate) mod authority;
 pub(crate) mod baseline;
 pub mod commands;
+pub(crate) mod contribution;
 pub(crate) mod criteria;
 pub(crate) mod edits;
 pub(crate) mod plan;
@@ -18,3 +20,5 @@ pub use types::{
 
 pub(crate) mod base;
 pub(crate) mod results;
+
+pub(crate) mod rewrite;

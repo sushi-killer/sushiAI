@@ -138,11 +138,22 @@ pub fn carry_onto_moved_base(
     )?;
     let wip = run(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
     run(worktree, &["update-ref", &wip_ref(task_id), &wip])?;
+    apply_saved_work(worktree, base_sha, &new_sha, &wip, rewritten)
+}
+
+fn apply_saved_work(
+    worktree: &Path,
+    base_sha: &str,
+    new_sha: &str,
+    wip: &str,
+    rewritten: bool,
+) -> Result<Rebase, GitError> {
+    let quiet = quiet_git();
     let apply = || -> Result<Rebase, GitError> {
-        run(worktree, &["reset", "-q", "--hard", &new_sha])?;
+        run(worktree, &["reset", "-q", "--hard", new_sha])?;
         let picked = run(
             worktree,
-            &[&quiet[..], &["cherry-pick", "--no-commit", &wip]].concat(),
+            &[&quiet[..], &["cherry-pick", "--no-commit", wip]].concat(),
         );
         let files: Vec<String> = run(worktree, &["diff", "--name-only", "--diff-filter=U"])?
             .lines()
@@ -155,12 +166,12 @@ pub fn carry_onto_moved_base(
         run(worktree, &["reset", "-q"])?;
         Ok(if files.is_empty() {
             Rebase::Moved {
-                new_sha: new_sha.clone(),
+                new_sha: new_sha.to_string(),
                 rewritten,
             }
         } else {
             Rebase::Conflicts {
-                new_sha: new_sha.clone(),
+                new_sha: new_sha.to_string(),
                 files,
                 rewritten,
             }
@@ -169,7 +180,7 @@ pub fn carry_onto_moved_base(
     apply().inspect_err(|_| {
         // Back to the agent's uncommitted work on the old base.
         let _ = run(worktree, &["cherry-pick", "--quit"]);
-        let _ = run(worktree, &["reset", "-q", "--hard", &wip]);
+        let _ = run(worktree, &["reset", "-q", "--hard", wip]);
         let _ = run(worktree, &["reset", "-q", "--soft", base_sha]);
         let _ = run(worktree, &["reset", "-q"]);
     })
@@ -255,24 +266,6 @@ pub fn merge_base(worktree: &Path, base_ref: &str) -> Result<BaseMerge, GitError
 /// as they are.
 pub fn uncommit_to(worktree: &Path, base_sha: &str) -> Result<(), GitError> {
     run(worktree, &["reset", "-q", base_sha]).map(|_| ())
-}
-
-/// `git merge --ff-only <sha>` in `worktree`: moves its checked-out branch
-/// (and its files) to `sha`, or fails without touching anything when that
-/// is not a fast-forward.
-pub fn fast_forward(worktree: &Path, sha: &str) -> Result<(), GitError> {
-    run(
-        worktree,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "merge",
-            "-q",
-            "--ff-only",
-            sha,
-        ],
-    )
-    .map(|_| ())
 }
 
 /// Drops the saved work of a task that no longer needs it.

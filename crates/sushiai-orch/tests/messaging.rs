@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::{poll_task_status, remove_dir_retrying, wait_until};
+use common::repository::init_git_repo;
 
 /// Records each attempt's brief under `$MSG_DIR` and holds the first attempt
 /// open until the test creates `$MSG_DIR/release`; only the second attempt

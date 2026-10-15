@@ -11,6 +11,9 @@ pub(crate) fn next_number(task: &crate::task::TaskData) -> u32 {
 }
 
 pub(crate) fn start(task: &mut Task, stage: Stage, route: &Route, reason: &str, now: i64) -> usize {
+    if stage == Stage::Implement {
+        task.record_pr_check_repair_step(next_number(&task.data));
+    }
     let task = &mut task.data;
     let attempt = Attempt {
         n: next_number(task),

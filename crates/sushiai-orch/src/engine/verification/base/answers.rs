@@ -30,7 +30,12 @@ pub(in crate::engine) const KEPT_BY_PLAN: &str = "targets absent on base; the pl
 /// Keeps a check although it fails on the base, once: the typed state is what
 /// stops a relaunch from asking again, the decision line is the owner's log.
 pub(in crate::engine) fn keep_check(task: &mut Task, command: &str, reason: &str) {
-    if is_kept(task, command) {
+    if task
+        .loop_state
+        .kept_checks
+        .iter()
+        .any(|kept| kept == command)
+    {
         return;
     }
     task.record_kept_check(command.to_string());
@@ -39,7 +44,18 @@ pub(in crate::engine) fn keep_check(task: &mut Task, command: &str, reason: &str
 
 /// Whether `task` already keeps `command` although it fails on the base.
 pub(in crate::engine) fn is_kept(task: &Task, command: &str) -> bool {
-    task.loop_state.kept_checks.iter().any(|c| c == command)
+    task.loop_state.kept_checks.iter().any(|c| c == command) || owner_revoked_waiver(task, command)
+}
+
+/// An Owner rejection of a typed waiver keeps that exact command behind its gate.
+pub(in crate::engine) fn owner_revoked_waiver(task: &Task, command: &str) -> bool {
+    task.assumptions.iter().any(|assumption| {
+        assumption.overturned
+            && assumption.kind == Some(crate::task::QuestionKind::PreexistingFailure)
+            && assumption.by == crate::task::questions::WAIVER_BY
+            && assumption.answer == crate::task::questions::WAIVED
+            && assumption.commands.iter().any(|named| named == command)
+    })
 }
 
 /// Whether the request, goal or criteria name `command` itself: the explicit

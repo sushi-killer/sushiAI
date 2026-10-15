@@ -38,6 +38,7 @@ pub(in crate::engine) async fn graph(
         });
     let failure = parent_failure.or(carry_conflict.as_deref());
     if parent
+        && !task.pr_check_repair_due()
         && failure.is_none()
         && (completed_implement_count(task) == 0
             || !matches!(waits_state(task, &all), Waits::Ready | Waits::Nothing))

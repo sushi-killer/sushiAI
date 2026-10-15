@@ -254,11 +254,22 @@ fn add_follow_ups_data(task: &mut TaskData, findings: Vec<String>) {
 }
 
 impl Task {
+    pub(crate) fn record_handled_finding(&mut self, observed: &FindingRecord) {
+        let mut finding = observed.clone();
+        finding.handled = true;
+        match self
+            .data
+            .findings
+            .iter_mut()
+            .find(|record| record.id == finding.id)
+        {
+            Some(record) => *record = finding,
+            None => self.data.findings.push(finding),
+        }
+    }
+
     pub(crate) fn add_review_follow_ups(&mut self, findings: Vec<String>) {
         add_follow_ups_data(&mut self.data, findings);
-    }
-    pub(crate) fn mark_finding_handled(&mut self, index: usize) {
-        self.data.findings[index].handled = true;
     }
 }
 

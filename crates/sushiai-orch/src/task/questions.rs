@@ -182,6 +182,8 @@ pub enum QuestionKind {
     DailyBudget,
     /// No agent CLI (claude or codex) is installed; never answered by policy.
     HarnessMissing,
+    /// A post-carry PR check still fails after its own repair step.
+    PrCheck,
     #[default]
     AgentQuestion,
 }

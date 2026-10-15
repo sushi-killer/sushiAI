@@ -27,14 +27,16 @@ pub(super) async fn carry_before_draft(app: &Arc<App>, task: &Task) -> bool {
     let carried = carry_for_pr(app, task, None).await;
     drop(guard);
     match carried {
-        Ok(PrCarry::Ready) => {}
+        Ok(PrCarry::Ready(_)) => {}
         // One decision line was saved; there is no pull request to open.
         Ok(PrCarry::Contained) => {
             record(app, id, Vec::new(), 0.0, true);
             return false;
         }
         // The task is back in its loop and opens the pull request when done.
-        Ok(PrCarry::Resolving(_) | PrCarry::Failed(_) | PrCarry::Deferred) => return false,
+        Ok(
+            PrCarry::Resolving(_) | PrCarry::ChecksPending | PrCarry::Failed(_) | PrCarry::Deferred,
+        ) => return false,
         // setup_failed: the environment, not the work. The branch is
         // untouched; the owner hears once and opens it with task_pr.
         Ok(PrCarry::Environment(e)) => {

@@ -1,3 +1,4 @@
+pub mod evolution;
 mod loader;
 pub(crate) mod reply;
 pub(crate) mod text;
@@ -11,4 +12,4 @@ pub(crate) mod clip;
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 15;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 17;

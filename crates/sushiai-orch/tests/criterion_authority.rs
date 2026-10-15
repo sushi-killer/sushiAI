@@ -1,7 +1,10 @@
 //! Criterion-only checks retain their authority through the public amendment RPC.
 mod common;
 
-use common::{init_git_repo, remove_dir_retrying, Daemon};
+use common::polling::remove_dir_retrying;
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::{json, Value};
 
 fn criterion_task(daemon: &Daemon, repo: &std::path::Path, source: Option<&str>) -> Value {

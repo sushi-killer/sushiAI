@@ -31,7 +31,7 @@ const BRIEF_SOURCES = [
   "verify/evidence.rs",
   "delivery/brief.rs",
   "engine/audit/brief.rs",
-  "evolution/proposal.rs",
+  "prompts/evolution/proposal.rs",
   "prompts/reply.rs",
   "prompts/text.rs",
 ];

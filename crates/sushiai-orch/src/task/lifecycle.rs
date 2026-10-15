@@ -28,7 +28,6 @@ impl Default for LoopState {
             unreviewed_attempt: None,
             agent_restarted: false,
             approach_changed_after: None,
-            stuck_retries: 0,
             rereviews: 0,
             non_owner_continues: 0,
             dependency_restarted: false,
@@ -81,9 +80,6 @@ pub struct LoopState {
     /// The attempt after which the failure ladder changed the approach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approach_changed_after: Option<u32>,
-    /// Pauses a stuck task has taken since it was last started.
-    #[serde(skip_serializing_if = "is_zero_u32")]
-    pub stuck_retries: u32,
     /// Times the landing in progress sent the work back to verify and the
     /// review; reset when the landing completes.
     #[serde(skip_serializing_if = "is_zero_u32")]

@@ -1,3 +1,4 @@
+use super::{WAIVED, WAIVER_BY};
 use crate::task::{AnsweredQuestion, Assumption, Question, QuestionKind, Task, TaskStatus};
 
 impl Task {
@@ -67,6 +68,26 @@ impl Task {
     pub(crate) fn mark_overseer_woken(&mut self) {
         self.data.overseer_woken = true;
     }
+    pub(crate) fn adopt_answer_receipt(&mut self, saved: &crate::task::TaskData) {
+        self.data
+            .question_history
+            .clone_from(&saved.question_history);
+        self.data.assumptions.clone_from(&saved.assumptions);
+        self.data.question.clone_from(&saved.question);
+        self.data.status = saved.status;
+        self.data.updated_at = saved.updated_at;
+        match saved.question_history.last().map(|answer| answer.kind) {
+            Some(QuestionKind::Impossible) => self
+                .data
+                .loop_state
+                .impossible_answers
+                .clone_from(&saved.loop_state.impossible_answers),
+            Some(QuestionKind::AttemptsFailing) => {
+                self.data.queue.rate_pauses = saved.queue.rate_pauses
+            }
+            _ => {}
+        }
+    }
     pub(crate) fn record_answer_history(&mut self, answer: AnsweredQuestion) {
         self.data.question_history.push(answer);
     }
@@ -74,9 +95,19 @@ impl Task {
         self.data.assumptions.push(assumption);
     }
     pub(crate) fn overturn_assumption(&mut self, index: usize, answer: String) {
-        if let Some(assumption) = self.data.assumptions.get_mut(index) {
-            assumption.overturned = true;
-            assumption.owner_answer = Some(answer);
+        let Some(assumption) = self.data.assumptions.get_mut(index) else {
+            return;
+        };
+        assumption.overturned = true;
+        assumption.owner_answer = Some(answer);
+        if assumption.kind == Some(QuestionKind::PreexistingFailure)
+            && assumption.by == WAIVER_BY
+            && assumption.answer == WAIVED
+        {
+            let commands = assumption.commands.clone();
+            for command in commands {
+                self.record_kept_check(command);
+            }
         }
     }
     pub(crate) fn replace_last_decision(&mut self, line: String) {
@@ -145,3 +176,6 @@ mod tests {
         assert!(!task.question.as_ref().unwrap().for_owner);
     }
 }
+
+#[cfg(test)]
+mod overturn;

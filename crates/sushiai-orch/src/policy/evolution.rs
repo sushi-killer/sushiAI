@@ -38,3 +38,5 @@ impl Default for EvolutionSettings {
         }
     }
 }
+
+pub mod proposal;

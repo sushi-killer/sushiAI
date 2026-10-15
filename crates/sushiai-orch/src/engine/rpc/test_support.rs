@@ -1,4 +1,4 @@
-use crate::engine::answer_policy::record_policy_answer;
+use crate::engine::answer_policy::{record_policy_answer, AutomaticAnswer};
 
 use crate::engine::verification::base::questions::pre_existing_question;
 
@@ -170,12 +170,18 @@ pub(in crate::engine::rpc) fn record_base_retry(
     let mut question = task.question.clone().unwrap();
     question.commands = commands.iter().map(|c| (*c).to_string()).collect();
     if matches!(caller, AnsweredBy::Policy | AnsweredBy::Judge) {
-        let by = if caller == AnsweredBy::Policy {
-            "policy"
+        let answer = if caller == AnsweredBy::Policy {
+            AutomaticAnswer::Policy {
+                text: PRE_EXISTING_RETRY.into(),
+                evidence: "fails on base".into(),
+            }
         } else {
-            "judge"
+            AutomaticAnswer::Judge {
+                text: PRE_EXISTING_RETRY.into(),
+                evidence: "fails on base".into(),
+            }
         };
-        record_policy_answer(task, &question, PRE_EXISTING_RETRY, by, "fails on base", 1);
+        record_policy_answer(task, &question, &answer, 1);
     } else {
         record_answer(task, Some(&question), PRE_EXISTING_RETRY, caller);
         let sha = task.base_sha.clone();

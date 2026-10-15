@@ -26,7 +26,7 @@ impl App {
             limit: Option<usize>,
         }
         let p: P = serde_json::from_value(params).map_err(|e| e.to_string())?;
-        let entries = crate::overseer::read(&self.data_dir, p.repo.as_deref(), p.limit);
+        let entries = crate::store::overseer::read(&self.data_dir, p.repo.as_deref(), p.limit);
         serde_json::to_value(entries).map_err(|e| e.to_string())
     }
 

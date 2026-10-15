@@ -99,20 +99,20 @@ flowchart TB
 
   subgraph orch["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
     direction LR
-    proto["protocol.rs<br/>orch.* request and result types"]
-    engine["engine/<br/>task loop, gates, routing"]
-    chat["chat.rs<br/>orchestrator chat"]
-    audit["audit.rs<br/>repo.audit, read-only"]
+    proto["api/<br/>orch.* validation, events and scoped MCP"]
+    engine["engine/lifecycle/<br/>admission, execution, inspection,<br/>verification, review and completion"]
+    chat["engine/chat/<br/>orchestrator chat"]
+    audit["engine/audit/<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     pipeline["engine/pipeline.rs<br/>pipeline.describe, task.preset"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
     evolveCli["sushiai orch evolve<br/>evolution.run / evolution.adopt"]
     costs["costs.rs<br/>costs.summary, sushiai orch costs"]
-    harness["harness.rs<br/>claude -p / codex exec"]
-    side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
+    harness["harness/<br/>claude -p / codex exec,<br/>native session and process receipts"]
+    side["git/ shared IO + delivery/git/<br/>commit, carry and recovery;<br/>messages.rs (engine owner) for merging"]
     store[("data dir<br/>tasks/, runs/, settings.json<br/>(presets, repoPresets),<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["sushiai mcp<br/>task_* tools, stdio;<br/>host / hosts_list go as orch.relay.call"]
-    chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
+    chatTools["engine/chat_tools/<br/>discovery, read grants and approved writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
     skill[("~/.claude, ~/.codex, ~/.agents skills<br/>sushiai-orchestrator (serve --install-skill)")]
@@ -185,13 +185,16 @@ flowchart LR
   Engine --> Store[store: persisted JSON and atomic files]
   Task --> Policy[policy: pure routing and permission rules]
   Engine --> Policy
+  Engine --> Flows[policy/pipelines: typed flow definitions]
+  Flows --> YAML[(pipelines/*.yaml: compiled operations and outcomes)]
   Verify --> Git[git: shared repository IO]
   Delivery --> Git
 ```
 
 `Task` exposes read access through an opaque state wrapper; production writes
-use typed operations in `task/`. Deserialization retains the existing JSON
-shape. Engine adapters classify repository evidence before calling pure
+use typed operations in `task/`. Existing JSON names and defaults are retained;
+optional amendment, delivery-check and repair receipts record the new owner-control
+and PR-repair behavior. Engine adapters classify repository evidence before calling pure
 check authority, amendment, criterion removal and baseline operations. Unknown
 provenance is protected from non-owner removal. Captured positional edits use
 full content identity; a new positional RPC captures the current criterion.
@@ -203,9 +206,34 @@ parsing, early session identity, process cancellation and guarding live in
 `verify/` owns their execution, scoping, cache facts and classification.
 `git/` is shared IO; delivery transactions live in `delivery/git/`.
 
+Compiled task, planning and delivery graphs in `pipelines/` drive their existing
+coordinators through typed operation/outcome transitions. `policy/pipelines/`
+validates each graph and its receipt capabilities; existing operations retain
+permission, snapshot, budget, cancellation and publication gates. The pipeline UI
+catalog is compiled YAML too, with the existing RPC grouping and IDs. There is no
+runtime override or persisted stage cursor. See [pipeline definitions](orchd-pipelines.md).
+
+`engine/lifecycle/run.rs` owns iteration and failure-budget handling. The
+native receipt retains its starting base even after the work moves; verification
+and review use the current carried base. Native settlement publishes the selected
+A/B result, provider fingerprint, usage and cost once, without reconstructing a
+settled result from current route or price settings. A saved sibling selection
+must read that sibling's retained artifacts rather than the primary run's files.
+
+A pending amendment is saved in the task before its acknowledgement. Store writes
+preserve the current receipt; only a content-checked operation may replace or
+consume it. The loop publishes the accepted contract before asynchronous baseline
+work, and startup consumes saved amendments before resuming work. Waiting tasks
+return an applied/pending response without waiting for an answer or baseline IO.
+Owner start clears `pausedUntil` and wakes a live pause.
+
 Admission and mutation share the existing per-task lock. No synchronous mutex
 is held over an await. Asynchronous plan/check results carry a full content
-snapshot, including the base and planner file contents. A queued amendment's
+snapshot, including the base and planner file contents. The shared check-contract
+publication boundary in `engine/persistence/contract.rs` admits dependency refresh,
+feasibility and repeated-criterion healing, protected-test rewrites, review-generated
+checks and parent waivers under the task lock. A pending owner edit defers that
+mutation; completed helper spend and observations remain recorded. A queued amendment's
 admitted plan is persisted before its baseline starts, so another live RPC sees
 the current contract. Async baseline observations are published only while
 that identity and the running phase remain current. A carry may retarget a
@@ -214,6 +242,14 @@ unchanged. Delivery admission persists `landing` under the same lock, and a
 pending edit causes another check round. Recovery recognizes only a clean HEAD
 with the exact existing `Task-Id` and `Attempt` trailers as an already completed
 branch commit.
+
+An ephemeral `task/checks/CheckAdmission` pairs the existing content snapshot
+with explicit owner answers and overturned assumptions. It admits helper,
+native-settlement, parent-check and delivery results against the current owner
+decision under the task lock. Automatic observations do not invalidate their own
+publication. A rejected result retains its measured output, usage and cost;
+the coordinator reloads current state before deciding what runs next. The
+serialized check snapshot and cache identity remain unchanged.
 
 The generic workspace test in `crates/sushiai/tests/rust_standards.rs` loads
 crate-local `rust-standards.json` profiles. It measures rustfmt output with
@@ -426,9 +462,9 @@ the parent's new head at its next attempt boundary (`Rebase:`). Automatic
 sync runs at these boundaries only when incoming base commits touch no path
 the graph holds: the parent's and parts' declared paths plus their lease
 files. Explicit `task.sync` merges regardless of overlap. A part carry that
-conflicts gets one attempt on the conflict-only route, with the conflicting
-files in its brief; orchd never auto-resolves them. A failed conflict attempt
-parks for a fix and an explicit start.
+conflicts is one ordinary attempt on the task's own route, with the conflicting
+files in its brief; orchd never auto-resolves them. A failed attempt goes to
+the usual failure ladder.
 
 Answer history keeps `answeredBy` and an optional `failureSignature`. An
 omitted RPC source means the owner in the UI (`Owner: <answer>` and
@@ -464,6 +500,45 @@ before the next attempt and review. A brief-check contradiction in a planner
 draft resumes the planner's own session once with the conflict (a short
 correction turn); without a session, or when the resumed run fails or does not
 parse, it falls back to a fresh draft.
+
+### Pull request checks and repair
+
+`engine/graph/carry/` runs final commands in the checkout that will be published.
+Post-carry failures use the same rerun and base-fingerprint judgement as ordinary
+verification. A waiver records the command, named tests and evidence; it does not
+rewrite a measured nonzero exit as a pass.
+
+A persistent new failure queues one designated step for the task's own
+implementer on that carried tree, including the measured failure in both resumed
+and fresh briefs. It retains the task's tier, uses one candidate, and does not
+raise the general attempt budget. Passing gates resume PR publication. The same
+cause after that step leaves the task Waiting on one owner-only `pr_check`
+question; explicit owner retry authorizes one further step. Stop keeps the work
+unpublished. Parent carry conflicts use the normal Base moved step with the
+conflicting files.
+
+PR readiness retains the authority accepted by the carry through Git and GitHub
+preparation. Delivery prepares typed writes after its prerequisite reads; the
+engine checks current owner authority and dispatches each command under the task
+lock, then awaits completion and readback outside that lock. Push pins the
+prepared commit and remote lease. The factual PR receipt is saved under the
+same task lock, preserving an intervening stop or owner answer.
+
+Conflict and check repair share one resolution handoff. It compares their
+persisted intent with the current task, respects suspension and cancellation,
+and retains or starts the existing task control under the task lock. This
+prevents rejected asynchronous preparation from leaving queued work without
+a loop. It adds no actor or persisted stage.
+
+Parents retain their actual ordinary, final, grounded and scrubbed held-out
+check receipts even when they need no implementation attempt. Raw failed exits
+remain failed in Validation; any accepted waiver is shown separately.
+
+PR drafting describes what changed and why. Code rebuilds Validation at publication
+from recorded command outcomes, checkout commits, checked trees and waivers.
+Reused passes retain their original checkout provenance and add no execution time.
+Older receipts without a checkout commit say so; matching their tree to a commit
+is labelled as a tree match rather than an invented execution commit.
 
 ## 2b. Evolution flow
 
@@ -526,7 +601,8 @@ flowchart TD
   heldout -->|fails, kind heldout| fail
   evidence -->|no image, kind evidence| fail
   impl -.- impossible
-  impossible -->|"drop criterion / retry / stop"| ownerQ
+  impossible -->|"a repo or owner check: drop criterion / retry / stop"| ownerQ
+  impossible -->|"only planner checks: the answer judge drops, rewrites or retries,<br/>else orchd drops it as an assumption"| impl
   ownerQ -->|drop criterion or retry| impl
   ownerQ -->|"drop all"| commit
   basecheck -.->|"result is cached for the lookup after the final checks"| baserun
@@ -568,7 +644,7 @@ The base preflight is a background job per task: attempt 1 starts at once and
 the job holds no slot. Its result lives in memory; only the loop applies it to
 its own task. After a daemon restart the gate starts the job again.
 
-The parent preflight (`graph.rs` `parent_base_preflight`) still blocks: it holds
+The parent preflight (`engine/graph/base.rs` `parent_base_preflight`) still blocks: it holds
 no slot either, and its answer decides what the subtasks must make pass before
 any of them starts, so moving it to the background would let a subtask run
 against a check the owner may drop.
@@ -592,7 +668,7 @@ flowchart LR
   orch -->|task_create / task_answer via MCP| planner
 ```
 
-Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/model.rs`): the
+Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/policy/settings.rs`): the
 sandbox keeps writes inside the task's worktree and the network is open
 (`allowedDomains: ["*"]`). `sandbox: host` turns it off.
 

@@ -49,7 +49,8 @@ async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_che
     std::fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     let mut parent = graph_task("p", TaskStatus::Running, &[], None);
-    let created = crate::git::worktree::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
+    let created =
+        crate::git::worktree::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
     parent.fixture_data().repo = repo.to_string_lossy().into();
     parent.fixture_data().worktree = worktree.to_string_lossy().into();
     parent.fixture_data().base_sha = created.base_sha;
@@ -60,12 +61,24 @@ async fn an_amendment_made_while_a_parent_loop_is_live_is_applied_before_its_che
     app.store.save_task(&parent).unwrap();
     app.store.save_task(&child).unwrap();
 
-    let pending = Arc::new(StdMutex::new(Some(PendingAmendment::capture(&parent, Amendment {
-        verify: Some(vec!["touch amended-ran".into()]),
-        ..Default::default()
-    }, Origin::Owner))));
+    let pending = Arc::new(StdMutex::new(Some(PendingAmendment::capture(
+        &parent,
+        Amendment {
+            verify: Some(vec!["touch amended-ran".into()]),
+            ..Default::default()
+        },
+        Origin::Owner,
+    ))));
+    let mut queued = app.store.load_task(&parent.id).unwrap().unwrap();
+    queued.fixture_data().pending_amendment = pending.lock().unwrap().clone();
+    app.store.save_task_with_pending(&queued, None).unwrap();
     let answers = Arc::new(StdMutex::new(None));
-    let signals = crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: answers, pending_amend: pending.clone() };
+    let signals = crate::engine::run_control::TaskSignals {
+        resume: Default::default(),
+        cancel: CancelToken::new(),
+        pending_answer: answers,
+        pending_amend: pending.clone(),
+    };
     let end = run_parent(&app, "p", &signals).await;
 
     // The old command would have failed the parent into an agent attempt.
@@ -95,7 +108,8 @@ async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_com
     std::fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     let mut parent = graph_task("p", TaskStatus::Running, &[], None);
-    let created = crate::git::worktree::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
+    let created =
+        crate::git::worktree::create_worktree(&repo, &parent.branch, &worktree, "HEAD").unwrap();
     parent.fixture_data().repo = repo.to_string_lossy().into();
     parent.fixture_data().worktree = worktree.to_string_lossy().into();
     parent.fixture_data().base_sha = created.base_sha;
@@ -103,12 +117,24 @@ async fn an_amendment_pending_before_the_base_preflight_replaces_the_checked_com
     parent.fixture_data().verify = vec!["exit 1".into()];
     app.store.save_task(&parent).unwrap();
 
-    let pending = Arc::new(StdMutex::new(Some(PendingAmendment::capture(&parent, Amendment {
-        verify: Some(vec!["touch amended-ran".into()]),
-        ..Default::default()
-    }, Origin::Owner))));
+    let pending = Arc::new(StdMutex::new(Some(PendingAmendment::capture(
+        &parent,
+        Amendment {
+            verify: Some(vec!["touch amended-ran".into()]),
+            ..Default::default()
+        },
+        Origin::Owner,
+    ))));
+    let mut queued = app.store.load_task(&parent.id).unwrap().unwrap();
+    queued.fixture_data().pending_amendment = pending.lock().unwrap().clone();
+    app.store.save_task_with_pending(&queued, None).unwrap();
     let answers = Arc::new(StdMutex::new(None));
-    let signals = crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: answers, pending_amend: pending.clone() };
+    let signals = crate::engine::run_control::TaskSignals {
+        resume: Default::default(),
+        cancel: CancelToken::new(),
+        pending_answer: answers,
+        pending_amend: pending.clone(),
+    };
     let end = run_parent(&app, "p", &signals).await;
 
     // The old command would have parked the parent on a base-check question.

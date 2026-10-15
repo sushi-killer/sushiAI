@@ -1,4 +1,3 @@
-use crate::delivery::git::carry::fast_forward;
 use crate::git::command::run;
 use crate::git::GitError;
 use std::path::Path;
@@ -135,6 +134,24 @@ pub fn update_branch(repo: &Path, branch: &str, sha: &str, expected: &str) -> Re
     run(
         repo,
         &["update-ref", &format!("refs/heads/{branch}"), sha, expected],
+    )
+    .map(|_| ())
+}
+
+/// `git merge --ff-only <sha>` in `worktree`: moves its checked-out branch
+/// (and its files) to `sha`, or fails without touching anything when that
+/// is not a fast-forward.
+pub fn fast_forward(worktree: &Path, sha: &str) -> Result<(), GitError> {
+    run(
+        worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "merge",
+            "-q",
+            "--ff-only",
+            sha,
+        ],
     )
     .map(|_| ())
 }

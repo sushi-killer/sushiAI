@@ -18,7 +18,7 @@ pub(super) fn create_sibling(
     crate::git::worktree::create_worktree(repo, branch, path, base_sha)?;
     if let Err(e) = crate::git::bootstrap::bootstrap_worktree(repo, path)
         .map_err(|e| e.to_string())
-        .and_then(|()| crate::engine::protected::write_files(path, files).map(|_| ()))
+        .and_then(|()| crate::engine::protected::prepare::write_files(path, files).map(|_| ()))
     {
         crate::delivery::git::recovery::discard_worktree(repo, path, branch);
         return Err(crate::git::GitError(e));

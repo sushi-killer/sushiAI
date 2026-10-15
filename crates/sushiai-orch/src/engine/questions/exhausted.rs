@@ -1,20 +1,15 @@
 use crate::clock::now_ms;
+use crate::engine::answer_policy::publication::PolicyResult;
 use crate::engine::answer_policy::try_policy_answer;
 use crate::engine::ladder;
-use crate::engine::questions::parking::park;
-use crate::engine::questions::parking::prepare_park;
-use crate::engine::questions::parking::Parked;
+use crate::engine::questions::parking::{Parked, QuestionSlot, WaitEnd};
 use crate::engine::questions::reply::Reply;
-use crate::engine::slots::SlotPermit;
 use crate::engine::state::App;
-use crate::harness::cancel::CancelToken;
 use crate::task::is_option;
 use crate::task::Stage;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
 /// How many times non-owner sessions may extend a task's budget on their own
 /// before "attempts keep failing" goes to the owner: enough to push past a
@@ -31,10 +26,8 @@ pub(in crate::engine) const MAX_ORCHESTRATOR_CONTINUES: usize = 2;
 pub(in crate::engine) async fn wait_for_exhausted_answer(
     app: &Arc<App>,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> Option<Answered> {
+    slot: &mut QuestionSlot<'_>,
+) -> Result<Answered, WaitEnd> {
     let id = task.id.clone();
     let task_id = id.as_str();
     if task.queue.park.is_some() || task.status == TaskStatus::Failed {
@@ -42,21 +35,24 @@ pub(in crate::engine) async fn wait_for_exhausted_answer(
         let _ = app.store.save_task(task);
         app.broadcast_task(task);
         app.advance_queue(&task.repo);
-        return None;
+        return Err(WaitEnd::Stopped);
     }
-    if let Some(text) = try_policy_answer(app, task, cancel).await {
-        return Some(Answered { text });
+    match try_policy_answer(app, task, slot.cancel()).await {
+        PolicyResult::Answered(text) => return Ok(Answered { text }),
+        PolicyResult::Stale => return Err(WaitEnd::Changed),
+        PolicyResult::Stopped => return Err(WaitEnd::Stopped),
+        PolicyResult::Open => {}
     }
     let auto_answer = app.settings.read().unwrap().auto_answer;
     if (task.loop_state.non_owner_continues as usize) < MAX_ORCHESTRATOR_CONTINUES && auto_answer {
-        if !prepare_park(app, task, cancel, permit) {
-            return None;
+        if !slot.prepare(app, task) {
+            return Err(WaitEnd::Stopped);
         }
-        match park(app, task, pending_answer, cancel, true).await {
+        match slot.park_with(app, task, true).await {
             Parked::Answer(text) => {
-                let text = text?;
+                let text = text.ok_or(WaitEnd::Stopped)?;
                 app.take_agent_answer(task_id);
-                return Some(Answered { text });
+                return Ok(Answered { text });
             }
             // No overseer turn started: the ladder decides, not a wait with
             // nobody to answer.
@@ -68,10 +64,10 @@ pub(in crate::engine) async fn wait_for_exhausted_answer(
     task.clear_question();
     if ladder::approach_changed(task) {
         ladder::end_ladder(app, task);
-        return None;
+        return Err(WaitEnd::Stopped);
     }
     task.resume_phase(TaskStatus::Queued, task.updated_at);
-    Some(Answered {
+    Ok(Answered {
         text: "change approach".to_string(),
     })
 }

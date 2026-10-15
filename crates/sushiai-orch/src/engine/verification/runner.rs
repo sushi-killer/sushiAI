@@ -16,12 +16,12 @@ use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct CheckRunner<'a> {
-    pub(super) ctx: CheckContext<'a>,
-    pub(super) cwd: &'a Path,
+    pub(in crate::engine) ctx: CheckContext<'a>,
+    pub(in crate::engine) cwd: &'a Path,
     pub(super) sandbox: Option<&'a TaskSandbox>,
     pub(super) timeout: Duration,
-    pub(super) base: &'a str,
-    pub(super) cancel: &'a CancelToken,
+    pub(in crate::engine) base: &'a str,
+    pub(in crate::engine) cancel: &'a CancelToken,
 }
 
 impl<'a> CheckRunner<'a> {
@@ -110,8 +110,6 @@ pub(in crate::engine) async fn run_verify_commands(
 ) -> Vec<VerifyOutcome> {
     let CheckRunner { ctx, cwd, .. } = runner;
     let cache_run = CacheRun::for_commands(cwd, commands).await;
-    // Taken before the commands run: the code they check, not what they wrote.
-    let tree = check_tree(cwd).await;
     let mut results = Vec::new();
     for cmd in commands {
         let timeout = Duration::from_secs(ctx.app.settings.read().unwrap().verify_timeout_secs);
@@ -121,9 +119,6 @@ pub(in crate::engine) async fn run_verify_commands(
         if let Some(result) = results.last_mut() {
             ctx.decision(line, &mut result.decisions);
         }
-    }
-    for result in &mut results {
-        result.tree.clone_from(&tree);
     }
     results
 }
@@ -211,6 +206,7 @@ async fn run_attempts(runner: &CheckRunner<'_>, cmd: &str) -> VerifyOutcome {
         };
         let tree = check_tree(cwd).await;
         let mut result = execute_verify_command(runner, cmd).await;
+        result.tree.clone_from(&tree);
         drop(permit);
         if attempt == 0 && is_interrupted(&result) && !cancel.is_cancelled() {
             if timed_out_under_load(&result) {
@@ -291,11 +287,18 @@ async fn execute_verify_command(runner: &CheckRunner<'_>, cmd: &str) -> VerifyOu
         cancel,
     } = *runner;
     let (load, cores) = (ctx.app.check_load.read().unwrap())();
+    let directory = cwd.to_path_buf();
+    let commit =
+        tokio::task::spawn_blocking(move || crate::git::history::head_sha(&directory).ok())
+            .await
+            .ok()
+            .flatten();
     let command = build_verify_command(cwd, cmd, sandbox, base_sha);
     let mut result = run_verify_command(cwd, cmd, command, timeout, cancel.cancelled()).await;
+    result.commit = commit;
     result.load = load;
     result.cores = cores;
-    crate::test_failures::stash_lists(&ctx.app.data_dir, &mut result);
+    crate::verify::test_lists::stash_lists(&ctx.app.data_dir, &mut result);
     result
 }
 
@@ -353,15 +356,13 @@ pub(in crate::engine) async fn passed_on_tree(
     base: &str,
 ) -> Option<VerifyOutcome> {
     let tree = check_tree(cwd).await?;
-    if !ctx
+    let mut passed = ctx
         .app
         .gate_passes
         .lock()
         .unwrap()
-        .contains(&tree, command, base)
-    {
-        return None;
-    }
+        .get(&tree, command, base)
+        .cloned()?;
     let mut decisions = Vec::new();
     ctx.decision(
         format!(
@@ -371,10 +372,11 @@ pub(in crate::engine) async fn passed_on_tree(
         ),
         &mut decisions,
     );
-    Some(VerifyOutcome {
-        command: command.into(),
-        code: Some(0),
-        decisions,
-        ..Default::default()
-    })
+    passed.decisions = decisions;
+    passed.ms = 0;
+    Some(passed)
 }
+
+#[cfg(test)]
+#[path = "runner/provenance_tests.rs"]
+mod provenance_tests;

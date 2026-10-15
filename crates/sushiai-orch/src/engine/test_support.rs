@@ -115,6 +115,8 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         status,
         tier: Tier::Standard,
         question: None,
+        pending_amendment: None,
+        delivery_checks: vec![],
         decisions: vec![],
         attempts: vec![],
         cost_usd: 0.0,

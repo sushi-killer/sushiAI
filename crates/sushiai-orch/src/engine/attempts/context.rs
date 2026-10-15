@@ -42,17 +42,31 @@ pub fn conflict_block(conflict: &str) -> String {
     out
 }
 
-/// Tells the implementer that the work was finished and checked, and only a
-/// landing conflict is left: resolve the markers, nothing else.
-pub fn conflict_only_block(files: &[String]) -> String {
-    let mut out = if files.is_empty() {
-        brief_text("conflict_only").to_string()
-    } else {
-        fill(
-            brief_text("conflict_only_files"),
-            &[("files", &files.join(", "))],
-        )
-    };
+/// Names the work a carry left conflicted for the task's ordinary attempt.
+pub fn carry_conflict_block(files: &[String], task_id: &str) -> String {
+    let mut out = fill(
+        brief_text("carry_conflict"),
+        &[
+            ("files", &files.join(", ")),
+            ("wip", &crate::delivery::git::carry::wip_ref(task_id)),
+        ],
+    );
+    out.push_str("\n\n");
+    out
+}
+
+/// The measured failure behind the PR's designated ordinary repair step.
+pub fn pr_check_repair_block(repair: &crate::task::delivery::PrCheckRepair) -> String {
+    let mut out = fill(
+        brief_text("pr_check_repair"),
+        &[(
+            "failure",
+            &untrusted_block(
+                "The failed check, named tests and output",
+                &repair.failure.detail,
+            ),
+        )],
+    );
     out.push_str("\n\n");
     out
 }

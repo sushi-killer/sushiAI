@@ -43,16 +43,17 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `crates/sushiai-orch` is the orchestrator. `crates/sushiai-orch/src/lib.rs` exposes the host facade; `crates/sushiai-orch/src/engine/runtime.rs` owns `Orch::call` and runtime startup/shutdown.
 - `crates/sushiai-orch/src/engine` is the task engine. Start at `crates/sushiai-orch/src/engine/mod.rs`.
 - `crates/sushiai-orch/src/engine/lifecycle/run.rs` runs a task through lifecycle operations. `crates/sushiai-orch/src/engine/planning` plans.
-- `crates/sushiai-orch/src/engine/verification` coordinates checks; `crates/sushiai-orch/src/verify` executes and classifies repository evidence. `crates/sushiai-orch/src/engine/review.rs` reviews.
+- `crates/sushiai-orch/src/engine/verification` coordinates checks; `crates/sushiai-orch/src/verify` executes and classifies repository evidence. `crates/sushiai-orch/src/engine/review/native.rs` reviews.
 - `crates/sushiai-orch/src/engine/land.rs` lands. `crates/sushiai-orch/src/engine/rpc` validates and dispatches task RPC.
 - `crates/sushiai-orch/src/engine/attempts/brief.rs` builds the executor brief; `crates/sushiai-orch/src/engine/planning/prompt.rs` builds planning prompts. `crates/sushiai-orch/src/policy/settings.rs` has `Settings`.
 - `crates/sushiai-orch/src/prompts/loader.rs` loads `crates/sushiai-orch/prompts/orchestrator.yaml`.
+- `crates/sushiai-orch/pipelines` holds compiled executable graphs and the stage catalog. `crates/sushiai-orch/src/policy/pipelines` validates them; `docs/orchd-pipelines.md` maps their coordinators.
 - `crates/sushiai-orch/src/task` owns pure task state and transitions; `crates/sushiai-orch/src/task/checks` owns criteria, commands, provenance, captured edits and baseline snapshots.
 - `crates/sushiai-orch/src/harness` owns native provider argv and stream/session parsing; `crates/sushiai-orch/src/api` owns scoped MCP and event wire shapes.
 - `crates/sushiai-orch/src/git` provides shared repository IO; `crates/sushiai-orch/src/delivery/git` owns commit, carry and saved-work recovery transactions.
 - `crates/sushiai-orch/rust-standards.json` sets this crate's limits and dependency boundaries; the generic workspace check is `crates/sushiai/tests/rust_standards.rs`.
 - Orchestrator settings are documented in `docs/orchestrator-settings.md`.
-- The incomplete architecture checkpoint and all twelve follow-ups are in `docs/orchd-simplify-status.md`; measured ownership and remaining limits are in `docs/orchd-simplify-inventory.md`.
+- The goal status and all twelve follow-ups are in `docs/orchd-simplify-status.md`; measured ownership and remaining limits are in `docs/orchd-simplify-inventory.md`.
 
 ## Tests
 

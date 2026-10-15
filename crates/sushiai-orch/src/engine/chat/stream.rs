@@ -5,6 +5,7 @@ use crate::clock::now_ms;
 use crate::engine::attempts::ledger::record_run;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::pricing::finalize_cost;
+use crate::engine::attempts::run::RunIdentity;
 use crate::engine::chat_tools;
 use crate::engine::state::App;
 use crate::harness;
@@ -48,7 +49,7 @@ pub(super) async fn run(
             line = out.next_line(), if !out_done => match line {
                 Ok(Some(l)) => {
                     append_line(&events, &l);
-                    chat_tools::note_init(app, &l);
+                    chat_tools::discovery::note_init(app, &l);
                     keep_tools(
                         &mut tools,
                         tools_in_line(app, repo, harness_kind, &l, &mut seen_items),
@@ -128,10 +129,21 @@ fn record_cost(
     outcome.fingerprint = Some(outcome.build_fingerprint(harness_kind, None, String::new()));
     record_run(
         app,
-        "",
-        0,
-        &CostTag::repo("chat", &route.id, repo),
-        (harness_kind, route.model.as_deref(), launch.resumed),
+        &RunIdentity {
+            id: "",
+            attempt_n: 0,
+            track: crate::engine::attempts::tracking::RunTrack::No,
+            tag: CostTag::repo("chat", &route.id, repo),
+        },
+        crate::engine::attempts::pricing::ProviderRun {
+            harness: harness_kind,
+            model: route.model.as_deref(),
+            resume: scheduled
+                .thread
+                .session_id
+                .as_deref()
+                .filter(|_| launch.resumed),
+        },
         outcome,
         started_at,
     );

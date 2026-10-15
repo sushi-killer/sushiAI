@@ -26,6 +26,11 @@ impl PassedChecks {
         )
     }
 
+    pub(crate) fn get(&self, tree: &str, command: &str, base: &str) -> Option<&VerifyOutcome> {
+        self.entries.get(&Self::key(tree, command, base))
+    }
+
+    #[cfg(test)]
     pub(crate) fn contains(&self, tree: &str, command: &str, base: &str) -> bool {
         self.entries.contains_key(&Self::key(tree, command, base))
     }

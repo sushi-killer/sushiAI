@@ -1,6 +1,6 @@
 use crate::clock::now_ms;
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
 use crate::engine::decision::record_failure;
 use crate::engine::planning::draft::parse_plan;
@@ -8,7 +8,7 @@ use crate::engine::planning::publication::PlanProposal;
 use crate::engine::planning::retry::Retry;
 use crate::engine::planning::round::PlannerRound;
 use crate::engine::planning::run_brief::planner_brief;
-use crate::engine::review::review_request;
+use crate::engine::review::native::review_request;
 use crate::engine::run_control::TaskSignals;
 use crate::harness::guard::helper_timeout_message;
 use crate::harness::guard::Guard;
@@ -142,14 +142,18 @@ impl PlannerRound {
         };
         let result = run_harness(
             &self.app,
-            &self.task.id,
-            self.task.attempts[self.index].n,
-            RunTrack::Attempt,
-            &worktree,
-            &request,
-            CostTag::task("plan", &self.route.id),
-            &brief,
-            &events,
+            RunIdentity {
+                id: &self.task.id,
+                attempt_n: self.task.attempts[self.index].n,
+                track: RunTrack::Attempt,
+                tag: CostTag::task("plan", &self.route.id),
+            },
+            RunInvocation {
+                request: &request,
+                brief: &brief,
+                events: &events,
+                schema: None,
+            },
             &signals.cancel,
             Guard::helper("planner", limit),
         )

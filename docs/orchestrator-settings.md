@@ -6,7 +6,7 @@ Orchestration**, Host scope edits that object directly; a key with no control
 there is edited under **Advanced — all settings as JSON**. Project scope layers
 project defaults and host overrides over those daemon settings; see below. The
 source of truth for the settings object is the `Settings` struct in
-`crates/sushiai-orch/src/model.rs`; the defaults below are the ones a fresh
+`crates/sushiai-orch/src/policy/settings.rs`; the defaults below are the ones a fresh
 install gets.
 
 Settings hold no secrets. Model-provider keys stay in **Settings → Models**.
@@ -134,7 +134,7 @@ An interrupted check runs once more at once unless cancelled. The same runner re
 
 Review runs alongside the final checks after fast verify, grounded checks, evidence and protected-path approval; a failed final check discards the review, and a failed review cancels the checks.
 
-A retry after a failed check or an implement time budget resumes the previous implement session when its route, harness and model are unchanged. The brief gives the current criteria, checks and verification commands, with previous failure output kept as history and new owner answers. A time-budget retry asks to continue the work; it does not claim a check failed. Route changes, conflict-only or best-of attempts, repeated review findings and loop-stopped runs start fresh, and a rejected resume falls back to a fresh run in the same attempt. No separate report turn runs after a timeout. Tool failures are for the harness to diagnose; exact repeated calls and edits, the stall watchdog, budgets, cancellation and attempt limits remain enforced.
+A retry after a failed check or an implement time budget resumes the previous implement session when its route, harness and model are unchanged. The brief gives the current criteria, checks and verification commands, with previous failure output kept as history and new owner answers. A time-budget retry asks to continue the work; it does not claim a check failed. Route changes or best-of attempts, repeated review findings and loop-stopped runs start fresh, and a rejected resume falls back to a fresh run in the same attempt. No separate report turn runs after a timeout. Tool failures are for the harness to diagnose; exact repeated calls and edits, the stall watchdog, budgets, cancellation and attempt limits remain enforced.
 
 ## Worktree environment
 
@@ -223,7 +223,7 @@ Pipeline view in the Orchestrator rail draws the pipeline and holds the preset
 picker; a task's detail shows the same diagram for that task.
 
 Three built-in presets are defined in code (`Preset::builtins` in
-`crates/sushiai-orch/src/model.rs`). They are read-only and are always listed
+`crates/sushiai-orch/src/policy/presets.rs`). They are read-only and are always listed
 before the custom ones.
 
 | Preset              | Brief check | Advisor | Held-out check | `maxAttempts` |
@@ -337,9 +337,9 @@ configured, a duplicate or built-in id, `maxAttempts` of 0, and a
 | `land`                                                | `true`  | A passed task lands on its base branch by itself (never on the default branch unless allowed above). |
 | `maxCostUsd`, `maxAttemptCostUsd`                     | `0`     | Dollar caps per task and per attempt; 0 is none.                                                     |
 | `batchQuestions`                                      | `true`  | A planner question that is not blocking and has a recommendation becomes an assumption.              |
-| `plannerRoute`, `tierRoutes`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/model.rs` for each.                       |
+| `plannerRoute`, `tierRoutes`, `bestOf`, `bestOfRoute` | off     | Experiment arms; see `Variant` in `crates/sushiai-orch/src/policy/variant.rs` for each.              |
 
 Only settings reachable through the app are listed with a control. A key
-missing from the list above but present in `crates/sushiai-orch/src/model.rs` is still
+missing from the list above but present in `crates/sushiai-orch/src/policy/settings.rs` is still
 editable in the Advanced JSON, which shows the whole object as the daemon
 returned it.

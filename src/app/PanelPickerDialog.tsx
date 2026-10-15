@@ -26,6 +26,7 @@ import {
 } from "../extensions/ExtensionSlots.tsx";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import {
+  canLaunchWorktree,
   launchesInWorktree,
   suggestWorktreeBranch,
   worktreeBranchError,
@@ -276,8 +277,12 @@ export function PanelPickerDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.id, hostsKey, projectId]);
   const targetIsSsh = Boolean(targetWorkspace.connection?.startsWith("ssh:"));
-  // Slice 1 launches on this Mac only, so a worktree needs a local checkout.
-  const canWorktree = !setupPick && !targetIsSsh;
+  const targetCheck = hostChecks[targetWorkspace.id];
+  const canWorktree = canLaunchWorktree({
+    setup: Boolean(setupPick),
+    ssh: targetIsSsh,
+    check: targetCheck,
+  });
   const [checkout, setCheckout] = useState<"current" | "worktree">("current");
   const [branch, setBranch] = useState(() => suggestWorktreeBranch(new Date()));
   const [base, setBase] = useState("main");
@@ -481,7 +486,6 @@ export function PanelPickerDialog({
     starting,
   ]);
 
-  const targetCheck = hostChecks[targetWorkspace.id];
   const matrix =
     targetCheck && targetCheck !== "checking" && targetCheck !== "unreachable"
       ? targetCheck

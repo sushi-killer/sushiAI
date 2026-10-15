@@ -27,3 +27,11 @@ pub(crate) mod waits;
 pub(crate) mod compiler_cache;
 
 pub(crate) mod best_of;
+
+pub mod test_output;
+
+pub(crate) mod calendar;
+
+pub(crate) mod questions;
+
+pub(crate) mod pipelines;

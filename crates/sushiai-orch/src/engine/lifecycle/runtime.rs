@@ -24,14 +24,8 @@ impl App {
         if controls.contains_key(&task_id) {
             return;
         }
-        let signals = TaskSignals::new();
-        let app = self.arc();
-        let for_loop = signals.clone();
-        let tid = task_id.clone();
-        let handle = tokio::spawn(async move {
-            run_task_loop(app, tid, for_loop, auto_start_after_plan).await;
-        });
-        controls.insert(task_id, TaskControl { signals, handle });
+        let control = TaskControl::spawn(self.arc(), task_id.clone(), auto_start_after_plan);
+        controls.insert(task_id, control);
     }
 
     pub(in crate::engine) fn finish_task_loop(&self, task_id: &str) {
@@ -68,5 +62,23 @@ impl App {
             self.advance_graph(&task.repo);
         }
         self.record_evolution_signals(task_id);
+    }
+}
+
+impl TaskControl {
+    pub(in crate::engine) fn spawn(
+        app: std::sync::Arc<App>,
+        task_id: String,
+        auto_start_after_plan: bool,
+    ) -> Self {
+        let signals = TaskSignals::new();
+        if let Ok(Some(task)) = app.store.load_task(&task_id) {
+            *signals.pending_amend.lock().unwrap() = task.pending_amendment.clone();
+        }
+        let for_loop = signals.clone();
+        let handle = tokio::spawn(async move {
+            run_task_loop(app, task_id, for_loop, auto_start_after_plan).await;
+        });
+        Self { signals, handle }
     }
 }

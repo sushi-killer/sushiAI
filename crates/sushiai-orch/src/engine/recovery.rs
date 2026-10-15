@@ -1,9 +1,5 @@
 use crate::clock::now_ms;
-use crate::engine::attempts::ledger::record_run;
-use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::observations::note_first_edit;
-use crate::engine::attempts::pricing::finalize_cost;
-use crate::engine::attempts::pricing::price_resumed_attempt;
 use crate::engine::attempts::secrets::run_secrets;
 use crate::engine::cost::settle_interrupted_advisor;
 use crate::engine::cost::settle_unfinished_cost;
@@ -18,8 +14,8 @@ use crate::harness::process::run_group_alive;
 use crate::harness::run_files::remove_raw_output;
 use crate::harness::run_files::RunFiles;
 use crate::harness::run_files::{fate_of_run, RunFate};
-use crate::policy::routing::Harness;
 use crate::store::log::append_line;
+use crate::task::attempt::Attempt;
 use crate::task::AttemptStatus;
 use crate::task::Stage;
 use crate::task::Task;
@@ -31,9 +27,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(super) mod amendments;
 pub(super) mod interrupted;
 #[cfg(test)]
 mod interrupted_tests;
+mod outcome;
+mod selected;
 
 impl App {
     /// Restores loops for in-flight work: interrupted attempts are marked
@@ -41,6 +40,9 @@ impl App {
     /// Stopped tasks stay stopped. A `waiting` task needs no loop until
     /// its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
+        if let Err(error) = self.recover_pending_amendments() {
+            eprintln!("orch: recovering pending amendments failed: {error}");
+        }
         // No overseer turn survives a restart: nothing is held any more.
         // First, so a resumed loop never parks beside a stale hold.
         self.release_stale_holds();
@@ -75,6 +77,38 @@ impl App {
         }
         // A run that is still going holds its concurrency slot already: its
         // loop starts before the queued ones compete for the rest.
+        self.restart_task_loops(&prices);
+        self.spawn_landing_retries();
+        self.spawn_digest_timer();
+        self.spawn_wait_sla_timer();
+        self.wake_overseer_for_waiting_after_restart();
+        self.spawn_lead_touch_check();
+        self.recovery_timers_started.store(true, Ordering::SeqCst);
+        // A dependency question can have become moot while the daemon was
+        // down; the graph clears it now, not at the next graph event.
+        let mut repos: Vec<String> = self
+            .store
+            .list_tasks()
+            .unwrap_or_else(|e| {
+                eprintln!("orch: listing tasks for graph recovery failed: {e}");
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|t| !t.archived)
+            .map(|t| t.repo.clone())
+            .collect();
+        repos.sort();
+        repos.dedup();
+        for repo in repos {
+            self.advance_graph(&repo);
+        }
+        Ok(())
+    }
+
+    fn restart_task_loops(
+        &self,
+        prices: &std::collections::BTreeMap<String, crate::policy::pricing::Price>,
+    ) {
         let mut tasks = self.store.list_tasks().unwrap_or_else(|e| {
             eprintln!("orch: listing tasks for recovery failed: {e}");
             Vec::new()
@@ -107,7 +141,7 @@ impl App {
             ) {
                 // A restart starts the dirty-checkout hour over.
                 let was_dirty = t.take_dirty_wait().is_some();
-                if settle_interrupted_advisor(&mut t, &self.store, &prices) || was_dirty {
+                if settle_interrupted_advisor(&mut t, &self.store, prices) || was_dirty {
                     t.touch(now_ms());
                     self.save_task_logged(&t);
                     self.broadcast_task(&t);
@@ -120,31 +154,6 @@ impl App {
                 }
             }
         }
-        self.spawn_landing_retries();
-        self.spawn_digest_timer();
-        self.spawn_wait_sla_timer();
-        self.wake_overseer_for_waiting_after_restart();
-        self.spawn_lead_touch_check();
-        self.recovery_timers_started.store(true, Ordering::SeqCst);
-        // A dependency question can have become moot while the daemon was
-        // down; the graph clears it now, not at the next graph event.
-        let mut repos: Vec<String> = self
-            .store
-            .list_tasks()
-            .unwrap_or_else(|e| {
-                eprintln!("orch: listing tasks for graph recovery failed: {e}");
-                Vec::new()
-            })
-            .into_iter()
-            .filter(|t| !t.archived)
-            .map(|t| t.repo.clone())
-            .collect();
-        repos.sort();
-        repos.dedup();
-        for repo in repos {
-            self.advance_graph(&repo);
-        }
-        Ok(())
     }
 }
 
@@ -240,9 +249,20 @@ impl App {
             return RunFate::Interrupted;
         }
         let attempt = &task.attempts[idx];
-        let events = self.store.run_dir(&task.id, attempt.n).join("events.jsonl");
+        if attempt.stage != Stage::Implement {
+            return RunFate::Interrupted;
+        }
+        let run_dir = self.store.run_dir(&task.id, attempt.n);
+        if let Some(events) = selected::events(&run_dir, attempt) {
+            return if events.is_file() {
+                RunFate::Resume
+            } else {
+                RunFate::Interrupted
+            };
+        }
+        let events = run_dir.join("events.jsonl");
         let files = RunFiles::of(&events);
-        if attempt.stage != Stage::Implement || !files.raw.exists() {
+        if !files.raw.exists() {
             return RunFate::Interrupted;
         }
         let secrets = run_secrets(self, &task.id).unwrap_or_default().redaction;
@@ -260,27 +280,34 @@ impl App {
 pub(super) fn resumable_attempt(app: &App, task: &Task) -> Option<usize> {
     let idx = task.attempts.len().checked_sub(1)?;
     let attempt = &task.attempts[idx];
-    let events = app.store.run_dir(&task.id, attempt.n).join("events.jsonl");
-    (attempt.stage == Stage::Implement
-        && attempt.status == AttemptStatus::Running
-        && RunFiles::of(&events).raw.exists())
-    .then_some(idx)
+    if attempt.stage != Stage::Implement || attempt.status != AttemptStatus::Running {
+        return None;
+    }
+    let run_dir = app.store.run_dir(&task.id, attempt.n);
+    let available = match selected::events(&run_dir, attempt) {
+        Some(events) => events.is_file(),
+        None => RunFiles::of(&run_dir.join("events.jsonl")).raw.is_file(),
+    };
+    available.then_some(idx)
 }
 
-/// Follows the run of attempt `idx`, which started under an earlier daemon:
+/// Follows the saved native attempt, which started under an earlier daemon:
 /// its output goes into `events.jsonl` and the log until it ends, then its
 /// outcome is read from what it left, as `run_harness` would have returned it.
 /// A daemon shutdown leaves the run going; `task.stop` ends it.
 pub(super) async fn follow_run(
     app: &Arc<App>,
     task: &Task,
-    idx: usize,
+    attempt: &Attempt,
     cancel: &CancelToken,
     mut guard: Guard,
 ) -> Result<harness::RunOutcome, RunError> {
-    let attempt = &task.attempts[idx];
     let n = attempt.n;
-    let events = app.store.run_dir(&task.id, n).join("events.jsonl");
+    let run_dir = app.store.run_dir(&task.id, n);
+    if let Some(events) = selected::events(&run_dir, attempt) {
+        return selected::replay(&events, attempt);
+    }
+    let events = run_dir.join("events.jsonl");
     let files = RunFiles::of(&events);
     // A pgid that is not this run's wrapper is treated as dead.
     let pgid = attempt
@@ -342,77 +369,7 @@ pub(super) async fn follow_run(
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
     }
-    let code = std::fs::read_to_string(&files.exit)
-        .ok()
-        .and_then(|t| t.trim().parse::<i32>().ok())
-        // A group killed hard before its wrapper wrote the code.
-        .or(trip.as_ref().map(|_| 137));
-    if code.is_none() {
-        return Err(RunError::Io(
-            "The run ended without leaving an exit code.".into(),
-        ));
-    }
-    let raw = std::fs::read_to_string(&files.raw).unwrap_or_default();
-    let mut outcome = harness::replay_events(attempt.harness, &raw);
-    if let Some(trip) = trip {
-        trip.apply(&mut outcome);
-    }
-    if code != Some(0) && outcome.error.is_none() && outcome.looped.is_none() {
-        let stderr = std::fs::read_to_string(&files.stderr).unwrap_or_default();
-        let tail: String = stderr.trim().chars().rev().take(4000).collect();
-        let tail: String = tail.chars().rev().collect();
-        outcome.error = Some(if !tail.is_empty() {
-            tail
-        } else {
-            use std::os::unix::process::ExitStatusExt;
-            harness::exit_error(
-                attempt.harness,
-                std::process::ExitStatus::from_raw(code.unwrap_or(1) << 8),
-            )
-        });
-    }
-    finalize_cost(app, attempt.harness, model.as_deref(), &mut outcome);
-    let meta: serde_json::Value = std::fs::read_to_string(&files.meta)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    let argv: Vec<String> = meta
-        .get("argv")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let resume = match attempt.harness {
-        Harness::Claude => argv
-            .windows(2)
-            .find(|w| w[0] == "--resume")
-            .map(|w| w[1].as_str()),
-        Harness::Codex => argv
-            .get(2)
-            .filter(|_| argv.get(1).is_some_and(|a| a == "resume"))
-            .map(String::as_str),
-    };
-    price_resumed_attempt(app, &task.id, n, attempt.harness, resume, &mut outcome);
-    let codex_version = meta
-        .get("codexVersion")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    outcome.fingerprint = Some(outcome.build_fingerprint(
-        attempt.harness,
-        codex_version,
-        harness::prompt_hash(&argv, None),
-    ));
-    // A run the earlier daemon already settled (it died during review) has its record.
-    if attempt.fingerprint.is_none() {
-        record_run(
-            app,
-            &task.id,
-            n,
-            &CostTag::task("implement", &attempt.route_id),
-            (attempt.harness, model.as_deref(), resume.is_some()),
-            &outcome,
-            attempt.started_at,
-        );
-    }
-    Ok(outcome)
+    outcome::settle(app, task, attempt, &files, trip)
 }
 
 impl App {

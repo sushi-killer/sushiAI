@@ -91,3 +91,5 @@ pub struct Proposal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+
+pub mod signals;

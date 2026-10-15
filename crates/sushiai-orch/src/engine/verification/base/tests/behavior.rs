@@ -1,6 +1,8 @@
 use crate::clock::now_ms;
 use crate::engine::answer_policy::record_answered_question;
+use crate::engine::questions::parking::QuestionSlot;
 use crate::engine::questions::reply::Reply;
+use crate::engine::run_control::TaskSignals;
 use crate::engine::test_support::git_in;
 use crate::engine::test_support::init_git_repo;
 use crate::engine::test_support::task_with_status;
@@ -21,8 +23,8 @@ use crate::engine::verification::base::checks::base_result;
 use crate::engine::verification::base::checks::failing_twice_on_base;
 use crate::engine::verification::base::questions::pre_existing_question;
 use crate::engine::verification::base::run::run_on_base;
-use crate::engine::verification::base::wait::wait_on_broken_base;
 use crate::engine::verification::base::wait::BaseBreak;
+use crate::engine::verification::base::wait::BaseFailure;
 use crate::harness::cancel::CancelToken;
 use crate::policy::settings::SandboxMode;
 use crate::task::amendment::Amendment;
@@ -38,10 +40,7 @@ use crate::task::questions::AnsweredBy;
 use crate::task::state::TaskStatus;
 use crate::verify::base_cache::is_environment_result;
 use crate::verify::base_cache::load_base_runs;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 #[cfg(test)]
@@ -270,9 +269,8 @@ mod cases {
             ms: 1,
             ..Default::default()
         };
-        let pending: Arc<StdMutex<Option<oneshot::Sender<Reply>>>> = Arc::new(StdMutex::new(None));
-        let cancel = CancelToken::new();
-        let mut budget = 3u32;
+        let signals = TaskSignals::new();
+        let pending = signals.pending_answer.clone();
         let mut permit = None;
         // An agent's "drop all" that got past the RPC gate (the
         // setting changed in between, say) is still refused by the loop.
@@ -296,21 +294,9 @@ mod cases {
             }
         };
         let (end, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-            tokio::join!(
-                wait_on_broken_base(
-                    &app,
-                    &id,
-                    &mut task,
-                    0,
-                    &failed,
-                    &failed,
-                    &mut budget,
-                    &pending,
-                    &cancel,
-                    &mut permit,
-                ),
-                deliver
-            )
+            let mut slot = QuestionSlot::new(&signals, &mut permit);
+            let failure = BaseFailure::new(0, &failed, &failed);
+            tokio::join!(failure.wait(&app, &mut task, &mut slot), deliver)
         })
         .await
         .expect("a refused drop must retry on the moved base without another owner answer");

@@ -4,7 +4,7 @@ use crate::engine::plan_gate;
 use crate::engine::planning::graph::relay_links;
 use crate::engine::planning::graph::serialise_overlapping;
 use crate::engine::planning::split_graph::{PreparedChild, SplitGraph};
-use crate::engine::protected::keep_planned_tests;
+use crate::engine::protected::paths::keep_planned_tests;
 use crate::engine::state::App;
 use crate::task::Task;
 use crate::task::TaskStatus;
@@ -16,7 +16,7 @@ pub(in crate::engine) struct SubtaskPlan {
     pub(in crate::engine) parts: Vec<crate::engine::planning::draft::PlanSubtask>,
     pub(in crate::engine) links: Vec<Option<usize>>,
     decisions: Vec<String>,
-    pub(in crate::engine) merge: plan_gate::MergePlan,
+    pub(in crate::engine) merge: plan_gate::grouping::MergePlan,
 }
 
 /// All dependency edges are present before grouping can contract the graph.
@@ -26,7 +26,7 @@ pub(in crate::engine) fn prepare_subtasks(
     let (mut parts, mut decisions) = serialise_overlapping(parts);
     let (links, relayed) = relay_links(&mut parts);
     decisions.extend(relayed);
-    let merge = plan_gate::merge_parts(&parts);
+    let merge = plan_gate::grouping::merge_parts(&parts);
     SubtaskPlan {
         parts,
         links,
@@ -47,7 +47,10 @@ pub(in crate::engine) fn merge_into_checklist(
         .load_task(task_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "task not found".to_string())?;
-    task.record_checklist(plan_gate::checklist_of(&plan.parts, &plan.merge.merged));
+    task.record_checklist(plan_gate::grouping::checklist_of(
+        &plan.parts,
+        &plan.merge.merged,
+    ));
     task.record_decisions(plan.decisions.iter().cloned());
     task.record_decision(format!(
         "Plan gate: merged {} subtasks into one task with a checklist",

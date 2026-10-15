@@ -18,6 +18,7 @@ uuid.workspace = true
 libc.workspace = true
 sha2 = "0.10"
 url = "2"
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -480,6 +480,7 @@ mod tests {
         app.store.save_task(&holder).unwrap();
         let control = TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: CancelToken::new(),
                 pending_answer: Arc::new(StdMutex::new(None)),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -530,6 +531,7 @@ mod tests {
             holder.id.clone(),
             TaskControl {
                 signals: crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: CancelToken::new(),
                     pending_answer: Arc::new(StdMutex::new(None)),
                     pending_amend: Arc::new(StdMutex::new(None)),
@@ -560,6 +562,7 @@ mod tests {
             holder.id.clone(),
             TaskControl {
                 signals: crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: CancelToken::new(),
                     pending_answer: Arc::new(StdMutex::new(None)),
                     pending_amend: Arc::new(StdMutex::new(None)),
@@ -606,6 +609,7 @@ mod tests {
             holder.id.clone(),
             TaskControl {
                 signals: crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: CancelToken::new(),
                     pending_answer: Arc::new(StdMutex::new(None)),
                     pending_amend: Arc::new(StdMutex::new(None)),

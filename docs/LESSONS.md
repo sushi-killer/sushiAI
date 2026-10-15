@@ -22,28 +22,26 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
+## 2026-10-15 — acknowledging a RAM-only amendment lost it after restart
+
+Root cause: the live control held the pending edit while ordinary task saves knew nothing about it.
+Rule: persist the pending receipt before acknowledgement; preserve it on ordinary writes and consume it with content-checked storage. Test a cold reload and a stale save, including child final-check contributions.
+
 ## 2026-10-15 — clearing a live amendment before publishing its plan lost the next edit
 
 Root cause: baseline IO cleared the queue before publishing its admitted contract; the next accepted RPC captured stale content.
 Rule: publish the plan and clear the queue under one lock before IO; guard results by full content identity. Persist relay carries before attempt admission; never call locking save helpers under that same lock.
 
-## 2026-10-06 — a platform API grew before one real caller
+## 2026-10-15 — a late save restored an owner-revoked waiver
 
-Root cause: schema and fairness harness built before any real plugin used them.
-Rule: land one working end-to-end path first, then generalize.
-
-## 2026-10-07 — lanes from an old base rewrote the owner's `~/.sushiai` link
-
-Root cause: JS tests on a base without the step 5 isolation changed the real home.
-Rule: merge the isolation fix into every lane base before JS tests run.
-Update 2026-10-07: inherited `SUSHIAI_HOME` relinked it again; spawned binaries set or remove it.
-
-## 2026-10-14 — lanes green alone, 49 integration tests red together
-
-Root cause: lanes added agent turns the shared fakes in `tests/common` did not answer.
-Rule: run the full suite on the integration tip after each merge; a new turn ships with its fake.
+Root cause: snapshots omitted owner answers and admitted stale decisions.
+Rule: compare owner authority at publication; retain paid observations, then reload before choosing the next action. Test the real caller after rejection.
 
 ## Promoted
+
+- 2026-10-14 New agent turns require matching fakes: parent landing route-review replay and `tests/common`.
+- 2026-10-06 Build one real caller before generalizing: `AGENTS.md`, Core stays generic.
+- 2026-10-07 Test daemons must isolate inherited homes: `tests/helpers/real-daemon.cjs`; isolation checks in `check-conventions.mjs`.
 
 - 2026-10-14 PR delivery must carry onto the newest base and recheck before push: `a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push`.
 - 2026-10-14 Fail-fast hid later baseline regressions → use `--no-fail-fast`. `tests/baseline_cargo.rs`.

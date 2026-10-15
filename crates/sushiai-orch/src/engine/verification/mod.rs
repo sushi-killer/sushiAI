@@ -7,3 +7,7 @@ pub(crate) mod scoping;
 
 pub(crate) mod base;
 pub(crate) mod healing;
+
+#[cfg(test)]
+#[path = "tests/command_gate.rs"]
+mod command_gate_tests;

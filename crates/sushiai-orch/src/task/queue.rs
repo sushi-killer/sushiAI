@@ -16,15 +16,17 @@ pub struct QueueState {
     pub stopped_explicitly: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub restart_children: bool,
-    /// A base carry needs one conflict-only attempt.
+    /// Files left conflicted by a base carry; the next ordinary attempt resolves them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub carry_conflicts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub carry_conflict_attempt: Option<u32>,
+    pub carry_conflict_step: Option<u32>,
     /// The pull request carry conflicted and the task went back for its one
     /// resolution attempt; a second conflict ends the task `failed`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pr_conflict_tried: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_check_repair: Option<crate::task::delivery::PrCheckRepair>,
     /// What the task waits for right now, if anything: a global slot, a
     /// subtask slot, dependencies, or a file another task has changed.
     #[serde(skip_serializing_if = "Option::is_none")]

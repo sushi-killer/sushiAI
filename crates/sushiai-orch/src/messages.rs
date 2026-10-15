@@ -381,6 +381,8 @@ mod tests {
             status: TaskStatus::Running,
             tier: Tier::Standard,
             question: None,
+            pending_amendment: None,
+            delivery_checks: vec![],
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,
@@ -473,6 +475,7 @@ mod tests {
         let cancel = CancelToken::new();
         let ctl = TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: Arc::new(StdMutex::new(None)),
                 pending_amend: Arc::new(StdMutex::new(None)),

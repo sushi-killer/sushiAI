@@ -5,12 +5,8 @@
 //! available one, and with no harness at all a task waits for the owner.
 
 use crate::clock::now_ms;
-use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::questions::reply::Reply;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
-use crate::harness::cancel::CancelToken;
 use crate::harness::environment::augmented_path;
 use crate::harness::environment::resolve_binary;
 use crate::policy::pricing::route_cost;
@@ -22,11 +18,8 @@ use crate::task::AskedBy;
 use crate::task::Question;
 use crate::task::QuestionKind;
 use crate::task::Task;
-use crate::task::TaskStatus;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
 const HARNESSES: [Harness; 2] = [Harness::Claude, Harness::Codex];
 
@@ -185,48 +178,28 @@ impl App {
 }
 
 /// Parks the task with an install question while no harness is available.
-/// `true` when one is (the task is back in `resume_status` holding a slot);
-/// `false` when the task was stopped meanwhile.
+/// Reacquires a slot when a harness becomes available; a changed contract
+/// returns to lifecycle admission and a stopped task remains stopped.
 pub(super) async fn wait_for_harness(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
-    resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> bool {
+    slot: &mut QuestionSlot<'_>,
+) -> Result<(), WaitEnd> {
+    let resume_status = task.status;
     if app.any_harness_available() {
-        return true;
+        return Ok(());
     }
     while !app.any_harness_available() {
         task.record_decision(
             "Orchestrator: no agent CLI found; waiting for one to be installed".to_string(),
         );
         task.ask(install_question(), now_ms());
-        if wait_for_answer(app, task, pending_answer, cancel, permit)
-            .await
-            .is_none()
-        {
-            return false;
-        }
+        slot.answer(app, task).await?;
         app.refresh_availability();
     }
-    task.resume_phase(resume_status, now_ms());
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    if permit.is_none() {
-        let acquired = tokio::select! {
-            _ = cancel.cancelled() => None,
-            p = app.slots.clone().acquire_owned() => p.ok(),
-        };
-        match acquired {
-            Some(p) => *permit = Some(p),
-            None => {
-                mark_stopped_if_not_already(app, task_id).await;
-                return false;
-            }
-        }
+    if slot.resume(app, task, resume_status).await {
+        Ok(())
+    } else {
+        Err(WaitEnd::Stopped)
     }
-    true
 }

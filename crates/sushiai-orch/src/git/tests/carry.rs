@@ -5,25 +5,32 @@ use crate::git::worktree::{create_worktree, worktree_path};
 use std::path::Path;
 use std::process::Command as StdCommand;
 
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = StdCommand::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn git_as_test_user(dir: &Path, args: &[&str]) -> String {
+    let mut configured = vec!["-c", "user.email=t@example.com", "-c", "user.name=t"];
+    configured.extend_from_slice(args);
+    git(dir, &configured)
+}
+
 #[test]
 fn carry_onto_moved_base_moves_clean_work_and_marks_conflicts() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     std::fs::create_dir_all(&repo_root).unwrap();
     init_repo(&repo_root);
-    let git = |dir: &Path, args: &[&str]| {
-        let out = StdCommand::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
     let base = branch_of(&repo_root, "HEAD").unwrap();
     let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/carry");
     let created = create_worktree(&repo_root, "task/carry", &wt, "HEAD").unwrap();
@@ -78,19 +85,6 @@ fn carry_onto_moved_base_skips_what_would_lose_work() {
     let repo_root = tmp.path().join("repo");
     std::fs::create_dir_all(&repo_root).unwrap();
     init_repo(&repo_root);
-    let git = |dir: &Path, args: &[&str]| {
-        let out = StdCommand::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
     let base = branch_of(&repo_root, "HEAD").unwrap();
     let first = git(&repo_root, &["rev-parse", "HEAD"]);
     let wt = worktree_path(&repo_root, &tmp.path().join("home"), "", "task/skip");
@@ -120,19 +114,7 @@ fn carry_onto_moved_base_skips_what_would_lose_work() {
     // Commits of the agent's own on the task branch.
     std::fs::write(wt.join("a.txt"), "a\n").unwrap();
     git(&wt, &["add", "."]);
-    git(
-        &wt,
-        &[
-            "-c",
-            "user.email=t@example.com",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "agent",
-        ],
-    );
+    git_as_test_user(&wt, &["commit", "-q", "-m", "agent"]);
     let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
     assert!(matches!(r, Rebase::Skipped { .. }), "{r:?}");
     assert!(wt.join("a.txt").exists());
@@ -140,19 +122,7 @@ fn carry_onto_moved_base_skips_what_would_lose_work() {
     // The same branch after the new base was merged into it: the base
     // moves to that head and the branch is left as it is.
     let base_head = git(&repo_root, &["rev-parse", "HEAD"]);
-    git(
-        &wt,
-        &[
-            "-c",
-            "user.email=t@example.com",
-            "-c",
-            "user.name=t",
-            "merge",
-            "-q",
-            "--no-edit",
-            &base_head,
-        ],
-    );
+    git_as_test_user(&wt, &["merge", "-q", "--no-edit", &base_head]);
     let merged = git(&wt, &["rev-parse", "HEAD"]);
     let r = carry_onto_moved_base(&wt, &base, &created.base_sha, "t2").unwrap();
     assert!(

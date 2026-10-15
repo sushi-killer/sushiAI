@@ -3,7 +3,10 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
 
 /// Answers by what it is asked. A planner brief that carries the gate's
 /// findings gets `$SECOND_DRAFT`, any other `$FIRST_DRAFT`; the review prompt

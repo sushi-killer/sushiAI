@@ -1,6 +1,6 @@
 use super::checks::baseline_on_base;
 use crate::clock::now_ms;
-use crate::engine::answer_policy::check_authority;
+use crate::engine::answer_policy::authority::check_authority;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::task::amendment::PendingAmendment;
@@ -21,22 +21,17 @@ pub(in crate::engine) async fn apply_pending_amendment(
     task: &mut Task,
     pending: &Arc<Mutex<Option<PendingAmendment>>>,
     cancel: &CancelToken,
-) {
-    let admitted = match admit(app, task, pending, cancel) {
-        Ok(admitted) => admitted,
-        Err(error) => {
-            eprintln!("orch: applying amendment to {} failed: {error}", task.id);
-            return;
-        }
-    };
+) -> Result<(), String> {
+    let admitted = admit(app, task, pending, cancel)?;
     if matches!(admitted, Admission::Empty) {
-        return;
+        return Ok(());
     }
     app.broadcast_task(task);
     if matches!(admitted, Admission::Rejected) {
-        return;
+        return Ok(());
     }
     baseline_current_plan(app, task, cancel).await;
+    Ok(())
 }
 
 pub(in crate::engine) async fn baseline_current_plan(
@@ -63,14 +58,16 @@ fn admit(
     let lock = app.task_lock(&task.id);
     let _guard = lock.lock().unwrap();
     let mut slot = pending.lock().unwrap();
-    let Some(edit) = slot.as_ref() else {
-        return Ok(Admission::Empty);
-    };
     let fresh = app
         .store
         .load_task(&task.id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "task not found".to_string())?;
+    *slot = fresh.pending_amendment.clone();
+    let Some(edit) = fresh.pending_amendment.clone() else {
+        task.adopt_pending_amendment(&fresh);
+        return Ok(Admission::Empty);
+    };
     if cancel.is_cancelled()
         || fresh.archived
         || fresh.queue.park.is_some()
@@ -87,18 +84,21 @@ fn admit(
     }
     if !CheckSnapshot::capture(task).matches(&fresh) {
         *task = fresh;
+    } else {
+        task.adopt_pending_amendment(&fresh);
     }
     let settings = app.settings.read().unwrap().clone();
     let invalidate = edit.verify.is_some();
-    let (next, admitted) = match edit.preview(task, &check_authority(&settings, task), now_ms()) {
-        Ok(next) => (next, Admission::Applied),
-        Err(why) => {
-            let mut next = task.clone();
-            next.record_decision(format!("Amendment not applied: {why}"));
-            (next, Admission::Rejected)
-        }
+    let mut next = task.clone();
+    let admitted = match next.settle_pending_amendment(&check_authority(&settings, task), now_ms())
+    {
+        crate::task::amendment::storage::Settlement::Applied => Admission::Applied,
+        crate::task::amendment::storage::Settlement::Rejected => Admission::Rejected,
+        crate::task::amendment::storage::Settlement::Empty => Admission::Empty,
     };
-    app.store.save_task(&next).map_err(|e| e.to_string())?;
+    app.store
+        .save_task_with_pending(&next, Some(&edit))
+        .map_err(|e| e.to_string())?;
     *task = next;
     slot.take();
     if invalidate && matches!(admitted, Admission::Applied) {
@@ -115,7 +115,7 @@ fn publish_baselines(
 ) -> Result<(), String> {
     let lock = app.task_lock(&task.id);
     let _guard = lock.lock().unwrap();
-    let fresh = app
+    let mut fresh = app
         .store
         .load_task(&task.id)
         .map_err(|e| e.to_string())?
@@ -129,8 +129,15 @@ fn publish_baselines(
         *task = fresh;
         return Ok(());
     }
-    app.store.save_task(task).map_err(|e| e.to_string())?;
-    app.broadcast_task(task);
+    crate::task::checks::baseline::adopt(&mut fresh, task);
+    for decision in &task.decisions {
+        if !fresh.decisions.contains(decision) {
+            fresh.record_decision(decision.clone());
+        }
+    }
+    app.store.save_task(&fresh).map_err(|e| e.to_string())?;
+    task.adopt_pending_amendment(&fresh);
+    app.broadcast_task(&fresh);
     Ok(())
 }
 

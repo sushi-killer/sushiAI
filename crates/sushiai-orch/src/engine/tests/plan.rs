@@ -10,21 +10,15 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
     };
     assert!(check_subtasks(&[part("a", &[]), part("b", &["a"])]).is_ok());
     assert!(check_subtasks(&[part("a", &[])]).is_err());
-    assert!(
-        check_subtasks(&[part("a", &["b"]), part("b", &["a"])])
-            .unwrap_err()
-            .contains("cycle")
-    );
-    assert!(
-        check_subtasks(&[part("a", &[]), part("b", &["z"])])
-            .unwrap_err()
-            .contains("unknown key")
-    );
-    assert!(
-        check_subtasks(&[part("a", &[]), part("a", &[])])
-            .unwrap_err()
-            .contains("duplicate")
-    );
+    assert!(check_subtasks(&[part("a", &["b"]), part("b", &["a"])])
+        .unwrap_err()
+        .contains("cycle"));
+    assert!(check_subtasks(&[part("a", &[]), part("b", &["z"])])
+        .unwrap_err()
+        .contains("unknown key"));
+    assert!(check_subtasks(&[part("a", &[]), part("a", &[])])
+        .unwrap_err()
+        .contains("duplicate"));
     let many: Vec<_> = (0..=MAX_SUBTASKS)
         .map(|i| part(&i.to_string(), &[]))
         .collect();
@@ -34,11 +28,10 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
 #[test]
 fn a_subtask_request_carries_the_whole_and_what_was_decided() {
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.fixture_data().decisions = vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
+    parent.fixture_data().decisions =
+        vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
     let text = subtask_request(&parent, "  write the toggle ");
-    assert!(
-        text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\"")
-    );
+    assert!(text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\""));
     assert!(text.contains("- Owner: Which default? -> dark"));
     assert!(!text.contains("Planner: x"));
 }
@@ -146,8 +139,8 @@ fn normalized_dependencies_are_checked_before_contracting_the_merged_group() {
     let c = pathed("c", &[], &[]);
     let parts = vec![a, b, c];
     assert_eq!(
-        plan_gate::merge_parts(&parts),
-        plan_gate::MergePlan {
+        plan_gate::grouping::merge_parts(&parts),
+        plan_gate::grouping::MergePlan {
             separate: vec![1],
             merged: vec![0, 2],
         }
@@ -164,7 +157,7 @@ fn normalized_dependencies_are_checked_before_contracting_the_merged_group() {
     // The policy instead keeps their acyclic order in one checklist.
     assert_eq!(
         plan.merge,
-        plan_gate::MergePlan {
+        plan_gate::grouping::MergePlan {
             separate: vec![],
             merged: vec![0, 1, 2],
         }

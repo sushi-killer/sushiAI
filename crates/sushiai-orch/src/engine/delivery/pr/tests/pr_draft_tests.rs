@@ -40,13 +40,13 @@ mod tests {
             "Why this change\n",
             "Why\n\n## Waived base failures\n\n- invented\n",
         ] {
-            let body = final_body(&task, drafted.to_string(), &none, None);
+            let body = final_body(&task, drafted.to_string(), &none, None, &Default::default());
             assert_eq!(body.matches("## Waived base failures").count(), 1, "{body}");
             assert!(body.contains("- check: alpha fails on the base"), "{body}");
             assert!(!body.contains("invented"), "{body}");
         }
         task.fixture_data().unreviewed = true;
-        let body = final_body(&task, "Why\n".into(), &none, None);
+        let body = final_body(&task, "Why\n".into(), &none, None, &Default::default());
         assert!(
             body.starts_with(crate::delivery::pr::body::UNREVIEWED_LINE)
                 && body.contains("alpha fails")

@@ -12,6 +12,7 @@ use crate::task::valid_checks;
 use crate::task::Check;
 use crate::task::Task;
 use crate::task::TASK_SOURCES;
+use crate::verify::command_gate::{gate_checks, gate_held_out};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -141,15 +142,27 @@ impl CreateRequest {
             Some(b) => Some(app.backlog_slot(&repo, None, b.bucket, b.order)?),
             None => None,
         };
+        let mut refused = Vec::new();
+        let checks = gate_checks(
+            &repo_root,
+            valid_checks(self.checks.clone(), self.criteria.len()),
+            &mut refused,
+        );
+        let held_out = gate_held_out(
+            &repo_root,
+            valid_check(self.held_out.clone(), self.criteria.len()),
+            &mut refused,
+        );
         Ok(NewTask {
             id: uuid::Uuid::new_v4().to_string(),
             backlog,
             repo_root,
             project_id,
             title,
+            decisions: refused,
             goal,
-            checks: valid_checks(self.checks.clone(), self.criteria.len()),
-            held_out: valid_check(self.held_out.clone(), self.criteria.len()),
+            checks,
+            held_out,
             criteria: self.criteria.clone(),
             verify: self.verify.clone(),
             final_verify: self.final_verify.clone(),

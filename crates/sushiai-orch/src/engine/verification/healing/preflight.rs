@@ -1,6 +1,7 @@
 use crate::clock::now_ms;
-use crate::engine::brief_check::run_judge;
-use crate::engine::brief_check::JudgeRun;
+use crate::engine::brief_check::judge::JudgeRun;
+use crate::engine::persistence::contract::ContractInput;
+use crate::engine::questions::parking::WaitEnd;
 use crate::engine::state::App;
 use crate::engine::verification::base::answers::keep_planned_checks;
 use crate::engine::verification::base::checks::start_final_base_jobs;
@@ -10,6 +11,7 @@ use crate::engine::verification::healing::contract::apply_feasibility;
 use crate::engine::verification::healing::contract::judge_route;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
+use crate::policy::settings::Settings;
 use crate::task::attempt::VerifyOutcome;
 use crate::task::checks::edits::heal_grep_dashes;
 use crate::task::state::Task;
@@ -200,16 +202,11 @@ async fn run_base_preflight(
         .filter(|r| r.code != Some(0) && !timed_out_under_load(r) && !kept.contains(&r.command))
     {
         let prompt = feasibility_prompt(task, failed);
-        let reply = run_judge(
-            app,
-            task,
+        let reply = crate::engine::brief_check::judge::Judge::new(
             &route,
-            None,
-            "brief_check",
-            "feasibility",
-            &prompt,
-            cancel,
+            crate::engine::brief_check::judge::JudgePurpose::Feasibility,
         )
+        .run(app, task, &prompt, cancel)
         .await;
         match reply {
             Err(RunError::Cancelled) => return None,
@@ -234,67 +231,102 @@ async fn run_base_preflight(
     Some(out)
 }
 
-/// Waits for the task's base preflight (a running one is awaited and the wait
-/// is a decision line) and applies it to the loop's own `task`: the judge's
-/// cost, the rulings (`apply_feasibility`'s exceptions hold: exit 127 keeps
-/// gating, a shared check is never switched off) and, when the judge settled,
-/// `feasibility_done`. Saves and broadcasts. A no-op without a job or after
-/// it was applied. `false`: cancelled while waiting.
+/// Publishes completed preflight observations independently from its guarded rulings.
 pub(in crate::engine) async fn settle_base_preflight(
     app: &Arc<App>,
     task: &mut Task,
     cancel: &CancelToken,
-) -> bool {
+) -> Result<(), WaitEnd> {
     let Some(job) = app.base_preflights.lock().unwrap().get(&task.id).cloned() else {
-        return true;
+        return Ok(());
     };
     if job.applied.load(std::sync::atomic::Ordering::SeqCst) {
-        return true;
+        return Ok(());
     }
+    let input = ContractInput::capture(task);
     let waited = job.running();
     let result = tokio::select! {
+        biased;
         r = job.wait() => r,
-        _ = cancel.cancelled() => return false,
+        _ = cancel.cancelled() => return Err(WaitEnd::Stopped),
     };
     if job.applied.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return true;
+        return Ok(());
     }
     let Some(result) = result else {
-        // A cancelled job: forget it, a later start may spawn a new one.
-        app.base_preflights.lock().unwrap().remove(&task.id);
-        return true;
+        forget_job(app, &task.id, &job);
+        return Ok(());
     };
-    if !job.snapshot.matches(task) {
-        task.charge(result.cost);
-        task.record_decision("Orchestrator: discarded a stale base preflight".to_string());
-        app.base_preflights.lock().unwrap().remove(&task.id);
-        app.save_task_logged(task);
-        app.broadcast_task(task);
-        return true;
-    }
+    let mut notes = result.decisions.clone();
     if waited {
-        task.record_decision(
-            "Orchestrator: waited for the base preflight before the final checks".to_string(),
-        );
+        notes.push("Orchestrator: waited for the base preflight before the final checks".into());
     }
-    apply_base_preflight(app, task, &result);
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    true
+    if let Err(error) = app.update_task(&task.id, |fresh| {
+        fresh.charge(result.cost);
+        record_notes(fresh, &notes);
+    }) {
+        eprintln!("orch: base preflight observations {}: {error}", task.id);
+        return Err(WaitEnd::Stopped);
+    }
+    task.charge(result.cost);
+    record_notes(task, &notes);
+    if !job.snapshot.matches(task) {
+        forget_job(app, &task.id, &job);
+        return input
+            .publish(app, task, cancel, |_| Ok(()))
+            .map_err(|error| {
+                eprintln!("orch: discarding obsolete preflight {}: {error}", task.id);
+                WaitEnd::Stopped
+            })?
+            .into_result();
+    }
+    let settings = app.settings.read().unwrap().clone();
+    let publication = input
+        .publish(app, task, cancel, |fresh| {
+            Ok(apply_base_preflight(&settings, fresh, &result))
+        })
+        .map_err(|error| {
+            eprintln!("orch: base preflight publication {}: {error}", task.id);
+            WaitEnd::Stopped
+        })?;
+    let changed = match publication.into_result() {
+        Ok(changed) => changed,
+        Err(end) => {
+            forget_job(app, &task.id, &job);
+            let line = "Orchestrator: deferred a base preflight after the task changed".to_string();
+            app.append_decision(&task.id, line.clone());
+            task.record_decision(line);
+            return Err(end);
+        }
+    };
+    apply_base_preflight(&settings, task, &result);
+    if changed {
+        app.verify_cache.lock().unwrap().remove(&task.id);
+    }
+    Ok(())
 }
 
-fn apply_base_preflight(app: &Arc<App>, task: &mut Task, result: &BasePreflight) {
-    task.charge(result.cost);
-    for line in &result.decisions {
+fn forget_job(app: &App, task_id: &str, job: &Arc<PreflightJob>) {
+    let mut jobs = app.base_preflights.lock().unwrap();
+    if jobs
+        .get(task_id)
+        .is_some_and(|current| Arc::ptr_eq(current, job))
+    {
+        jobs.remove(task_id);
+    }
+}
+
+fn record_notes(task: &mut Task, notes: &[String]) {
+    for line in notes {
         if !task.decisions.contains(line) {
             task.record_decision(line.clone());
         }
     }
+}
+
+fn apply_base_preflight(settings: &Settings, task: &mut Task, result: &BasePreflight) -> bool {
     let mut changed = false;
     for (failed, ruling) in &result.rulings {
-        // 127: the shell could not find a program. A rewrite to a check the
-        // repo can run is fine, but "unrelated" would be this host's PATH or
-        // toolchain quietly switching the check off: it keeps gating.
         if failed.code == Some(127) && matches!(ruling, Feasibility::Unrelated { .. }) {
             task.record_decision(format!(
                 "Orchestrator: check {} cannot find a program on this host (exit 127); it keeps gating - fix the host's PATH or toolchain",
@@ -303,17 +335,16 @@ fn apply_base_preflight(app: &Arc<App>, task: &mut Task, result: &BasePreflight)
             changed = true;
             continue;
         }
-        let settings = app.settings.read().unwrap().clone();
-        changed |= apply_feasibility(&settings, task, &failed.command, ruling.clone());
-    }
-    if changed {
-        app.verify_cache.lock().unwrap().remove(&task.id);
+        changed |= apply_feasibility(settings, task, &failed.command, ruling.clone());
     }
     if result.settled {
         task.mark_feasibility_done();
     }
-    task.touch(now_ms());
+    changed
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cancellation_tests;

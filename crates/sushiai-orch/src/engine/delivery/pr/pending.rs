@@ -28,6 +28,7 @@ pub(in crate::engine) fn mark_pr_pending(app: &App, task: &mut Task) {
         && task.landed_sha.is_none()
         && !task.archived
         && (task.queue.pr_conflict_tried
+            || task.queue.pr_check_repair.is_some()
             || app.settings.read().unwrap().may_open_pr_on_done(&task.repo));
     task.record_pr_pending(pending);
 }
@@ -43,6 +44,7 @@ pub(in crate::engine) fn spawn_pr_on_done(app: &App, task: &Task) {
     if task.pr_url.is_some()
         || task.archived
         || !(task.queue.pr_conflict_tried
+            || task.queue.pr_check_repair.is_some()
             || app.settings.read().unwrap().may_open_pr_on_done(&task.repo))
     {
         let _ = app.update_task(&id, |t| t.finish_pr());

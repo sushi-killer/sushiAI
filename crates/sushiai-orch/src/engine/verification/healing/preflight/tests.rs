@@ -1,5 +1,9 @@
 use super::run_base_preflight;
 use super::spawn_base_preflight;
+use super::{settle_base_preflight, BasePreflight, PreflightJob};
+use crate::engine::persistence::contract::tests::pending_once;
+use crate::engine::questions::parking::WaitEnd;
+use crate::engine::run_control::{TaskControl, TaskSignals};
 use crate::engine::state::App;
 use crate::engine::test_support::assert_helper_timeout;
 use crate::engine::test_support::attempt_with_failure;
@@ -71,7 +75,9 @@ mod timeout_tests {
         let criteria = task.criteria.clone();
         assert!(matches!(
             heal_repeated_unmet(&app, &mut task, 1, &review, &CancelToken::new()).await,
-            Ok(false)
+            Ok(crate::engine::persistence::contract::Publication::Applied(
+                false
+            ))
         ));
         assert_eq!(task.criteria, criteria);
         assert!(task.assumptions.is_empty());
@@ -91,5 +97,173 @@ mod timeout_tests {
         assert_eq!(task.criteria, criteria);
         assert!(task.assumptions.is_empty());
         assert_helper_timeout(&task, "answer-check");
+    }
+}
+
+#[tokio::test]
+async fn pending_owner_edit_defers_a_completed_preflight_without_charging_twice() {
+    use super::{settle_base_preflight, BasePreflight, PreflightJob};
+    use crate::engine::persistence::contract::tests::{
+        assert_owner_applies, pending_once, queue_owner,
+    };
+    use crate::engine::questions::parking::WaitEnd;
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Running);
+    task.fixture_data().verify = vec!["false".into()];
+    app.store.save_task(&task).unwrap();
+    let cancel = CancelToken::new();
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    app.base_preflights.lock().unwrap().insert(
+        task.id.clone(),
+        Arc::new(PreflightJob {
+            result: rx,
+            applied: std::sync::atomic::AtomicBool::new(false),
+            snapshot: crate::task::checks::snapshot::CheckSnapshot::capture(&task),
+            cancel: cancel.clone(),
+        }),
+    );
+    let observed = task.clone();
+    {
+        let future = settle_base_preflight(&app, &mut task, &cancel);
+        tokio::pin!(future);
+        pending_once(future.as_mut()).await;
+        queue_owner(&app, &observed);
+        tx.send(Some(Arc::new(BasePreflight {
+            settled: true,
+            cost: 0.4,
+            decisions: vec!["feasibility helper completed".into()],
+            rulings: vec![(
+                crate::task::VerifyOutcome {
+                    command: "false".into(),
+                    code: Some(1),
+                    tail: String::new(),
+                    ..Default::default()
+                },
+                crate::verify::healing::reply::Feasibility::Rewrite {
+                    command: "true".into(),
+                    criterion: None,
+                    reason: "unavailable".into(),
+                },
+            )],
+        })))
+        .unwrap();
+        assert_eq!(future.await, Err(WaitEnd::Changed));
+    }
+    assert_eq!(
+        settle_base_preflight(&app, &mut task, &cancel).await,
+        Ok(())
+    );
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.verify, ["false"]);
+    assert!(!saved.brief_check.feasibility_done);
+    assert_eq!(saved.cost_usd, 0.4);
+    assert_eq!(task.cost_usd, 0.4);
+    assert_eq!(
+        saved
+            .decisions
+            .iter()
+            .filter(|line| line.as_str() == "feasibility helper completed")
+            .count(),
+        1
+    );
+    assert_owner_applies(&app, &task);
+}
+
+#[tokio::test]
+async fn an_obsolete_preflight_is_discarded_without_replaying_the_carried_native_run() {
+    for owner_edit in [false, true] {
+        let (app, _dir) = test_app();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.fixture_data().criteria = vec!["Keep the requested behavior".into()];
+        task.fixture_data().verify = vec!["false".into()];
+        app.store.save_task(&task).unwrap();
+        let old = task.clone();
+        let snapshot = crate::task::checks::snapshot::CheckSnapshot::capture(&task);
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let signals = TaskSignals::new();
+        let cancel = signals.cancel.clone();
+        app.controls.lock().unwrap().insert(
+            task.id.clone(),
+            TaskControl {
+                signals,
+                handle: tokio::spawn(std::future::pending()),
+            },
+        );
+        app.base_preflights.lock().unwrap().insert(
+            task.id.clone(),
+            Arc::new(PreflightJob {
+                result: rx,
+                applied: std::sync::atomic::AtomicBool::new(false),
+                snapshot,
+                cancel: cancel.clone(),
+            }),
+        );
+        crate::task::transitions::move_base(&mut task, "new-base".into());
+        assert!(matches!(
+            crate::engine::delivery_gate::publish_carry(&app, &task, &old, &cancel).unwrap(),
+            crate::engine::delivery_gate::DeliveryGate::Ready
+        ));
+        let id = task.id.clone();
+        {
+            let future = settle_base_preflight(&app, &mut task, &cancel);
+            tokio::pin!(future);
+            pending_once(future.as_mut()).await;
+            if owner_edit {
+                let reply = app
+                    .dispatch(
+                        "task.amend",
+                        json!({"id":id,
+                    "criteria":["Owner's accepted replacement"]}),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(reply["pending"], true);
+            }
+            tx.send(Some(Arc::new(BasePreflight {
+                settled: true,
+                cost: 0.4,
+                decisions: vec!["old-base helper completed".into()],
+                rulings: vec![(
+                    crate::task::VerifyOutcome {
+                        command: "false".into(),
+                        code: Some(1),
+                        ..Default::default()
+                    },
+                    crate::verify::healing::reply::Feasibility::Rewrite {
+                        command: "true".into(),
+                        criterion: None,
+                        reason: "old base".into(),
+                    },
+                )],
+            })))
+            .unwrap();
+            assert_eq!(
+                future.await,
+                if owner_edit {
+                    Err(WaitEnd::Changed)
+                } else {
+                    Ok(())
+                }
+            );
+        }
+        assert_eq!(
+            settle_base_preflight(&app, &mut task, &cancel).await,
+            Ok(())
+        );
+        let saved = app.store.load_task(&id).unwrap().unwrap();
+        assert_eq!(saved.verify, ["false"]);
+        assert_eq!(saved.base_sha, "new-base");
+        assert!(!saved.brief_check.feasibility_done);
+        assert_eq!(saved.cost_usd, 0.4);
+        assert_eq!(task.cost_usd, 0.4);
+        assert_eq!(saved.pending_amendment.is_some(), owner_edit);
+        assert!(!app.base_preflights.lock().unwrap().contains_key(&id));
+        app.controls
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .unwrap()
+            .handle
+            .abort();
     }
 }

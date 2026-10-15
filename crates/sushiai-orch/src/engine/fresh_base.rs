@@ -19,7 +19,7 @@ use crate::harness::cancel::CancelToken;
 use crate::task::TaskStatus;
 
 use crate::clock::now_ms;
-use crate::engine::protected::carry_with_planner_tests;
+use crate::engine::protected::carry::carry_with_planner_tests;
 use crate::engine::secrets;
 use crate::engine::state::App;
 #[cfg(test)]

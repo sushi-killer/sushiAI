@@ -39,7 +39,9 @@ pub enum Event {
     Proposal { proposal: Box<serde_json::Value> },
     /// One new `overseer.log` entry, when the overseer acts.
     #[serde(rename = "overseer")]
-    Overseer { entry: Box<crate::overseer::Entry> },
+    Overseer {
+        entry: Box<crate::task::notes::overseer::Entry>,
+    },
 }
 
 #[cfg(test)]
@@ -84,6 +86,8 @@ mod tests {
             status: crate::task::TaskStatus::Running,
             tier: crate::policy::routing::Tier::Standard,
             question: None,
+            pending_amendment: None,
+            delivery_checks: vec![],
             decisions: vec![],
             attempts: vec![],
             cost_usd: 0.0,

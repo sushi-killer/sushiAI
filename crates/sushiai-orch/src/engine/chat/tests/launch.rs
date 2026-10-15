@@ -21,7 +21,7 @@ fn claude_chat_reads_only_and_reaches_orchd_through_one_allowed_tools_value() {
         },
         Path::new("/d/mcp.json"),
         Path::new("/d/settings.json"),
-        &chat_tools::TurnTools::default(),
+        &chat_tools::turn::TurnTools::default(),
     );
     let at = |flag: &str| argv[argv.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(at("--tools"), "Read,Grep,Glob");
@@ -52,7 +52,7 @@ fn codex_chat_is_read_only_fresh_or_resumed() {
         },
         "/repo",
         &server,
-        &chat_tools::TurnTools::default(),
+        &chat_tools::turn::TurnTools::default(),
     );
     assert_eq!(&fresh[..2], &["exec".to_string(), "--json".to_string()]);
     assert!(fresh
@@ -70,7 +70,7 @@ fn codex_chat_is_read_only_fresh_or_resumed() {
         },
         "/repo",
         &server,
-        &chat_tools::TurnTools::default(),
+        &chat_tools::turn::TurnTools::default(),
     );
     assert_eq!(
         &resumed[..3],
@@ -125,7 +125,7 @@ fn brainstorm_and_plan_turns_carry_their_prompt_and_only_read_only_tools() {
                 },
                 Path::new("/d/mcp.json"),
                 Path::new("/d/settings.json"),
-                &chat_tools::TurnTools::default(),
+                &chat_tools::turn::TurnTools::default(),
             );
             let at =
                 |flag: &str| claude[claude.iter().position(|a| a == flag).unwrap() + 1].clone();
@@ -150,7 +150,7 @@ fn brainstorm_and_plan_turns_carry_their_prompt_and_only_read_only_tools() {
                 },
                 "/repo",
                 &server,
-                &chat_tools::TurnTools::default(),
+                &chat_tools::turn::TurnTools::default(),
             );
             assert!(codex.contains(&format!("developer_instructions={}", json!(prompt))));
             assert!(!codex.contains(&format!(

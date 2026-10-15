@@ -33,8 +33,14 @@ async fn a_digest_restarts_the_reminder_window_and_the_reminder_comes_once_after
     app.store.save_task(&task).unwrap();
     // The owner heard the question 30 minutes after it was asked.
     let key = owner_notice::decision_key(&task.id, task.question.as_ref().unwrap());
-    let mut digest =
-        crate::overseer::Entry::new("digest", &repo_str, None, "Digest").with_decision(&[key]);
+    let mut digest = crate::task::notes::overseer::Entry::new(
+        "digest",
+        &repo_str,
+        None,
+        "Digest",
+        crate::clock::now_ms(),
+    )
+    .with_decision(&[key]);
     digest.ts = T0 + HALF_HOUR;
     app.record_overseer(digest);
     // One interval after the question, the notice is only 30 minutes old: no wake.
@@ -86,10 +92,15 @@ async fn quiet_hours_start_no_reminder_and_the_held_notice_is_posted_once_after_
         "no reminder wake in quiet hours"
     );
     // A notice held overnight, with the digest off, goes out once the window ends.
-    let mut held =
-        crate::overseer::Entry::new("skipped", &repo_str, Some(&task.id), owner_notice::DEFERRED)
-            .with_detail("Which way?\nA or B\nI suggest A.")
-            .with_decision(&[key]);
+    let mut held = crate::task::notes::overseer::Entry::new(
+        "skipped",
+        &repo_str,
+        Some(&task.id),
+        owner_notice::DEFERRED,
+        crate::clock::now_ms(),
+    )
+    .with_detail("Which way?\nA or B\nI suggest A.")
+    .with_decision(&[key]);
     held.ts = T0;
     app.record_overseer(held);
     app.wait_sla_tick(T0 + 2 * HOUR_MS).await;
@@ -186,8 +197,14 @@ async fn the_boundary_notice_survives_a_restart_and_a_full_overseer_log() {
     let flood = |app: &App| {
         use std::io::Write;
         let mut lines = String::new();
-        for i in 0..crate::overseer::MAX_LINES + 10 {
-            let entry = crate::overseer::Entry::new("skipped", "/other", None, &format!("n{i}"));
+        for i in 0..crate::store::overseer::MAX_LINES + 10 {
+            let entry = crate::task::notes::overseer::Entry::new(
+                "skipped",
+                "/other",
+                None,
+                &format!("n{i}"),
+                crate::clock::now_ms(),
+            );
             lines.push_str(&serde_json::to_string(&entry).unwrap());
             lines.push('\n');
         }

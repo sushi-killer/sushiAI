@@ -1,7 +1,7 @@
 use crate::api::validation::validate_task_id;
 use crate::clock::now_ms;
-use crate::engine::review::attempt_screenshots;
-use crate::engine::review::evidence_scope;
+use crate::engine::review::evidence::attempt_screenshots;
+use crate::engine::review::evidence::evidence_scope;
 use crate::engine::state::App;
 use crate::git::paths::short_sha;
 use crate::policy::delivery::BaseFrom;
@@ -454,6 +454,7 @@ impl App {
             repo_root: PathBuf::from(&task.repo),
             project_id: task.project_id.clone(),
             title: follow_up_title(task),
+            decisions: vec![],
             goal: String::new(),
             criteria: vec![],
             verify: vec![],

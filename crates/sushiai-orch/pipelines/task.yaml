@@ -1,0 +1,26 @@
+entry: execute
+transitions:
+  - { from: execute, on: ready, to: settle }
+  - { from: execute, on: retry, to: retry }
+  - { from: execute, on: finished, to: finish }
+  - { from: settle, on: ready, to: inspect }
+  - { from: settle, on: changed, to: retry }
+  - { from: settle, on: retry, to: retry }
+  - { from: settle, on: stopped, to: stop }
+  - { from: settle, on: failed, to: fail }
+  - { from: inspect, on: ready, to: qualify }
+  - { from: inspect, on: retry, to: retry }
+  - { from: inspect, on: stopped, to: stop }
+  - { from: inspect, on: failed, to: fail }
+  - { from: qualify, on: ready, to: review }
+  - { from: qualify, on: retry, to: retry }
+  - { from: qualify, on: changed, to: retry }
+  - { from: qualify, on: stopped, to: stop }
+  - { from: qualify, on: finished, to: finish }
+  - { from: qualify, on: failed, to: fail }
+  - { from: review, on: ready, to: complete }
+  - { from: review, on: changed, to: retry }
+  - { from: review, on: stopped, to: stop }
+  - { from: review, on: failed, to: fail }
+  - { from: complete, on: continue, to: retry }
+  - { from: complete, on: finished, to: finish }

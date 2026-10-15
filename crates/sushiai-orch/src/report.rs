@@ -255,6 +255,19 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         out.push_str(&format!("{}\n\n", top.goal.trim()));
     }
 
+    let wall = push_outcome(&mut out, top);
+    push_work(&mut out, top, graph, facts);
+    push_assumptions(&mut out, graph);
+    push_cost(&mut out, graph, records, &wall);
+    out.push_str("\n## Attempts\n\n");
+    for task in graph {
+        out.push_str(&attempts_line(task, graph.len() > 1, facts));
+    }
+    push_follow_ups(&mut out, graph);
+    out
+}
+
+fn push_outcome(out: &mut String, top: &Task) -> String {
     out.push_str("## Outcome\n\n");
     let status = match top.status {
         TaskStatus::Done => "done",
@@ -291,6 +304,10 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         None => out.push_str("- Lead touch: unknown\n"),
     }
 
+    wall
+}
+
+fn push_work(out: &mut String, top: &Task, graph: &[&Task], facts: &Facts) {
     out.push_str("\n## What changed\n\n");
     if facts.commits.is_empty() && facts.files.is_empty() {
         out.push_str("- Nothing recorded.\n");
@@ -319,7 +336,7 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         if graph.len() > 1 {
             out.push_str(&format!("**{}**\n\n", task.title));
         }
-        push_criteria(&mut out, task, facts, &mut used);
+        push_criteria(out, task, facts, &mut used);
         out.push('\n');
     }
     let loose: Vec<&String> = facts.images.iter().filter(|i| !used.contains(*i)).collect();
@@ -342,7 +359,9 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
         }
         out.push('\n');
     }
+}
 
+fn push_assumptions(out: &mut String, graph: &[&Task]) {
     let many = graph.len() > 1;
     out.push_str("## Assumptions and automatic answers\n\n");
     let mut any = false;
@@ -374,7 +393,9 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if !any {
         out.push_str("- None.\n");
     }
+}
 
+fn push_cost(out: &mut String, graph: &[&Task], records: &[CostRecord], wall: &str) {
     out.push_str("\n## Cost\n\n");
     let ids: HashSet<&str> = graph.iter().map(|t| t.id.as_str()).collect();
     let mine: Vec<&CostRecord> = records
@@ -389,14 +410,12 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if mine.is_empty() {
         out.push_str("No cost records.\n");
     } else {
-        cost_tables(&mut out, &mine);
+        cost_tables(out, &mine);
     }
+}
 
-    out.push_str("\n## Attempts\n\n");
-    for task in graph {
-        out.push_str(&attempts_line(task, many, facts));
-    }
-
+fn push_follow_ups(out: &mut String, graph: &[&Task]) {
+    let many = graph.len() > 1;
     out.push_str("\n## Follow-ups\n\n");
     let mut any = false;
     for task in graph {
@@ -420,7 +439,6 @@ pub fn build(top: &Task, graph: &[&Task], records: &[CostRecord], facts: &Facts)
     if !any {
         out.push_str("- None.\n");
     }
-    out
 }
 
 #[cfg(test)]

@@ -1,17 +1,14 @@
 use crate::engine::decision::completed_implement_attempts;
-use crate::engine::decision::last_failure_is_conflict;
 use crate::engine::lines::no_planner_tier_line;
 use crate::engine::lines::variant_route_line;
 use crate::engine::state::App;
 use crate::policy::routing::Harness;
 use crate::policy::routing::Route;
-use crate::policy::routing::Tier;
 use crate::policy::settings::Settings;
-use crate::task::Task;
+use crate::task::state::Task;
 
 pub(in crate::engine) struct Selection {
     pub(in crate::engine) route: Route,
-    pub(in crate::engine) conflict_only: bool,
     pub(in crate::engine) carry_conflicts: Vec<String>,
 }
 
@@ -19,27 +16,10 @@ pub(in crate::engine) fn route(
     app: &App,
     task: &mut Task,
     settings: &Settings,
-    parent_conflict_only: bool,
 ) -> Option<Selection> {
-    // A landing that conflicted only needs its markers resolved: that
-    // runs on the cheap route, not as a full re-implementation.
     let carry_conflicts = task.queue.carry_conflicts.clone();
-    let conflict_only = !carry_conflicts.is_empty()
-        || last_failure_is_conflict(task)
-        || (parent_conflict_only && completed_implement_attempts(task) == 0);
-    let (route_id, overridden) = task.variant().implement_route_id(
-        settings,
-        if conflict_only {
-            Tier::Mechanical
-        } else {
-            task.tier
-        },
-    );
-    if conflict_only {
-        task.record_decision(format!(
-                "Orchestrator: the carry conflicted -> conflict-only attempt on the cheap route {route_id}"
-            ));
-    } else if overridden {
+    let (route_id, overridden) = task.variant().implement_route_id(settings, task.tier);
+    if overridden {
         let line = variant_route_line(&format!("tier {}", task.tier.as_str()), &route_id);
         if !task.decisions.contains(&line) {
             task.record_decision(line);
@@ -81,7 +61,43 @@ pub(in crate::engine) fn route(
 
     Some(Selection {
         route,
-        conflict_only,
         carry_conflicts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route;
+    use crate::engine::test_support::{task_with_status, test_app};
+    use crate::policy::routing::Tier;
+    use crate::task::state::TaskStatus;
+
+    #[test]
+    fn a_carry_conflict_keeps_the_tasks_own_tier_route() {
+        let (app, _dir) = test_app();
+        let settings = app.settings.read().unwrap().clone();
+        let mut task = task_with_status(TaskStatus::Running);
+        task.fixture_data().tier = Tier::Hard;
+        task.record_carry_conflicts(vec!["src/file.rs".into()]);
+        let selected = route(&app, &mut task, &settings).expect("configured tier route");
+        assert_eq!(&selected.route.id, settings.tiers.get(&Tier::Hard).unwrap());
+        assert_eq!(selected.carry_conflicts, ["src/file.rs"]);
+    }
+    #[test]
+    fn a_check_repair_keeps_the_tasks_own_tier_route() {
+        let (app, _dir) = test_app();
+        let settings = app.settings.read().unwrap().clone();
+        let mut task = task_with_status(TaskStatus::Queued);
+        task.fixture_data().tier = Tier::Hard;
+        task.schedule_pr_check_repair(
+            "cause".into(),
+            crate::engine::decision::failure(
+                crate::task::FailureKind::Verify,
+                "named output".into(),
+            ),
+        );
+        let selected = route(&app, &mut task, &settings).unwrap();
+        assert_eq!(&selected.route.id, settings.tiers.get(&Tier::Hard).unwrap());
+        assert!(selected.carry_conflicts.is_empty());
+    }
 }

@@ -11,3 +11,7 @@ pub struct RepoNote {
     pub source: String,
     pub created_at: i64,
 }
+
+pub mod overseer;
+
+pub(crate) mod wake;

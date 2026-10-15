@@ -75,6 +75,9 @@ pub struct VerifyOutcome {
     /// never read from the command's output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_failed: bool,
+    /// Checkout HEAD when this command actually ran; the checked tree may include uncommitted work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// Git tree id of the worktree the command ran in. Two failing runs of one
     /// command compare as flaky only when their trees are equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]

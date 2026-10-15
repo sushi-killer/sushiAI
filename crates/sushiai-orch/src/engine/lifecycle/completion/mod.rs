@@ -1,6 +1,10 @@
 pub(in crate::engine) mod admission;
-pub(in crate::engine) mod delivery;
+mod base_question;
+mod commit;
+mod delivery;
+mod final_results;
 pub(in crate::engine) mod finish;
+mod retry;
 
 pub(in crate::engine) enum Tail {
     Continue,

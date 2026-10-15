@@ -3,7 +3,12 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::polling::{remove_dir_retrying, settle, wait_until};
+use common::process::Daemon;
+use common::repository::init_git_repo;
+
 use serde_json::{json, Value};
 
 const FAKE_SLOW: &str = r###"#!/bin/sh

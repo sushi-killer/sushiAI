@@ -138,23 +138,7 @@ fn attempt_segments(store: &Store, task: &Task, a: &Attempt, rules: &WorkBuckets
             implement.failure_kind = failed;
         }
         if a.stage == Stage::Implement {
-            let changed_verify: Vec<String> = task
-                .verify
-                .iter()
-                .chain(&task.final_verify)
-                .cloned()
-                .collect();
-            let events = read_events(&run_dir.join("events.jsonl"));
-            let b = work_breakdown(&events, &a.changed_files, &changed_verify, rules);
-            if b.total() > 0 {
-                implement.buckets = Some(Buckets {
-                    process: b.process,
-                    evidence: b.evidence,
-                    verify: b.verify,
-                    task: b.task,
-                    explore: b.explore,
-                });
-            }
+            implement.buckets = work_buckets(&run_dir, task, a, rules);
         }
         out.push(implement);
 
@@ -198,6 +182,37 @@ fn attempt_segments(store: &Store, task: &Task, a: &Attempt, rules: &WorkBuckets
         }
     }
 
+    if let Some(advisor) = advisor_segment(store, task, a) {
+        out.push(advisor);
+    }
+    out
+}
+
+fn work_buckets(
+    run_dir: &Path,
+    task: &Task,
+    attempt: &Attempt,
+    rules: &WorkBuckets,
+) -> Option<Buckets> {
+    let checks: Vec<String> = task
+        .verify
+        .iter()
+        .chain(&task.final_verify)
+        .cloned()
+        .collect();
+    let events = read_events(&run_dir.join("events.jsonl"));
+    let breakdown = work_breakdown(&events, &attempt.changed_files, &checks, rules);
+    (breakdown.total() > 0).then_some(Buckets {
+        process: breakdown.process,
+        evidence: breakdown.evidence,
+        verify: breakdown.verify,
+        task: breakdown.task,
+        explore: breakdown.explore,
+    })
+}
+
+fn advisor_segment(store: &Store, task: &Task, a: &Attempt) -> Option<Segment> {
+    let end = a.ended_at.unwrap_or(a.started_at);
     let advisor_dirs = store.helper_run_dirs(&task.id, "advisor", Some(a.n));
     if a.advisor_cost_usd.is_some() {
         let start = advisor_dirs
@@ -214,9 +229,9 @@ fn attempt_segments(store: &Store, task: &Task, a: &Attempt, rules: &WorkBuckets
             "none"
         }
         .into();
-        out.push(s);
+        return Some(s);
     }
-    out
+    None
 }
 
 /// A task's timeline: its attempts' segments in time order, with a `wait`

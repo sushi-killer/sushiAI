@@ -1,4 +1,3 @@
-
 fn task_with_evidence(app: &App, archived: bool, age_days: i64) -> (Task, PathBuf) {
     let mut task = task_with_status(TaskStatus::Done);
     task.fixture_data().archived = archived;
@@ -122,7 +121,12 @@ fn a_landed_deliverable_is_placed_in_the_main_copy_without_overwriting() {
         "report"
     );
     // notes.md is not gitignored in the main copy: not placed.
-    assert!(list.iter().find(|d| d.path == "notes.md").unwrap().placed.is_none());
+    assert!(list
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .placed
+        .is_none());
     assert!(!repo.join("notes.md").exists());
 
     // An existing file is never overwritten.
@@ -166,5 +170,8 @@ fn the_report_lists_deliverables() {
     }];
     let text = crate::report::build(&task, &[&task], &[], &Default::default());
     assert!(text.contains("## Deliverables"), "{text}");
-    assert!(text.contains("placed at `/repo/artifacts/inventory.md`"), "{text}");
+    assert!(
+        text.contains("placed at `/repo/artifacts/inventory.md`"),
+        "{text}"
+    );
 }

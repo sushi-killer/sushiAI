@@ -78,7 +78,7 @@ async fn a_restart_tells_the_owner_once_and_a_second_restart_says_nothing() {
     assert_eq!(notes, 1, "no second message");
     assert_eq!(kinds(&again, &repo_str, "asked_owner"), 1);
     assert_eq!(kinds(&again, &repo_str, "skipped"), 1);
-    let skipped = crate::overseer::read(&again.data_dir, Some(&repo_str), Some(1));
+    let skipped = crate::store::overseer::read(&again.data_dir, Some(&repo_str), Some(1));
     assert_eq!(skipped[0].text, owner_notice::DUPLICATE);
 }
 

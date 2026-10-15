@@ -43,6 +43,9 @@ async fn an_accepted_dependency_edit_lands_before_the_old_planner_contract_is_di
         Origin::Owner,
     ));
     app.store.save_task(&task).unwrap();
+    let mut queued = app.store.load_task(&task.id).unwrap().unwrap();
+    queued.fixture_data().pending_amendment = signals.pending_amend.lock().unwrap().clone();
+    app.store.save_task_with_pending(&queued, None).unwrap();
     let settings = app.settings.read().unwrap().clone();
     assert!(matches!(
         publish(&app, &mut task, proposal, &settings, &signals)

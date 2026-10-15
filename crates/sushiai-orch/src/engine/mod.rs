@@ -49,7 +49,6 @@ mod rpc;
 mod rpc_misc;
 mod secrets;
 mod slots;
-mod stuck;
 mod subtask_checks;
 mod sync;
 mod test_claim;

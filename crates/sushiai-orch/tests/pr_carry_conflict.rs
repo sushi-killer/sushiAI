@@ -5,7 +5,11 @@
 
 mod common;
 
-use common::*;
+use common::harness::{cheap_route_on_claude, fake_harness_script};
+use common::polling::{poll_until, wait_until};
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -30,7 +34,7 @@ case "$1 $2" in
 esac
 "#;
 
-/// One fake claude for every role. A conflict-only attempt writes
+/// One fake claude for every role. An implement run whose brief says the base moved writes
 /// `$dir/resolution` into `pr.txt` and keeps its brief; any other
 /// implement run writes `pr.txt`; the planner answers with `plan.json`.
 const FAKE_CLAUDE: &str = r###"#!/bin/sh
@@ -53,7 +57,7 @@ printf '%s\n' '{"type":"result","result":"{\"ok\":true,\"corrections\":[]}"}'
 *sushi-plan*)
 cat "$dir/plan.json"
 ;;
-*"## Conflict-only attempt"*)
+*"## Base moved"*)
 printf '%s' "$brief" > "$dir/resolve-brief.md"
 if [ -f "$dir/remote" ] && [ ! -f "$dir/pushed" ]; then
 touch "$dir/pushed"
@@ -208,7 +212,7 @@ fn blob(repo: &Path, rev: &str, path: &str) -> String {
 }
 
 #[test]
-fn a_conflicting_carry_gets_one_resolution_attempt_and_then_the_pull_request() {
+fn a_conflicting_carry_is_one_ordinary_step_and_then_the_pull_request() {
     let s = setup(true, &[]);
     let newer = s.advance_origin(&[("pr.txt", "theirs\n")]);
     let id = s.create("test -f pr.txt");
@@ -245,7 +249,7 @@ fn a_conflicting_carry_gets_one_resolution_attempt_and_then_the_pull_request() {
 
 #[test]
 fn a_resolution_that_fails_ends_the_task_failed_with_one_notice_and_no_pull_request() {
-    let s = setup(true, &[("ORCHD_STUCK_PAUSE_SECS", "0")]);
+    let s = setup(true, &[]);
     std::fs::write(s.tools.path().join("resolution"), "<<<<<<< left in\n").unwrap();
     s.advance_origin(&[("pr.txt", "theirs\n")]);
     let id = s.create("test -f pr.txt && ! grep -q '<<<<<<<' pr.txt");
@@ -347,7 +351,7 @@ fn a_conflict_in_a_parent_task_is_resolved_before_its_checks_and_the_pull_reques
     assert_eq!(text, "resolved", "markers or old content pushed: {text}");
     assert!(
         std::fs::read_to_string(s.tools.path().join("resolve-brief.md")).is_ok(),
-        "no conflict-only attempt ran"
+        "no conflict step ran"
     );
     s.daemon.shutdown_and_wait();
 }
@@ -497,3 +501,6 @@ fn an_owner_stop_during_conflict_setup_keeps_the_entire_saved_task_unchanged() {
     assert!(!s.gh_log().contains("pr create"));
     s.daemon.shutdown_and_wait();
 }
+
+#[path = "pr_carry_conflict/checks.rs"]
+mod check_repair_tests;

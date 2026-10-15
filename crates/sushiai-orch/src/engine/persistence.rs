@@ -1,3 +1,5 @@
+pub(super) mod contract;
+
 use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::engine::verification::context::record_check_decisions;

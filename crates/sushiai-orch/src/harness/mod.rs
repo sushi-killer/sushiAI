@@ -15,6 +15,7 @@ pub use claude::{
     build_claude_settings, build_claude_task_settings, claude_argv, shell_quote, StopHook,
     DELEGATION_TOOLS, DENIED_BASH_COMMANDS, HOOKED_TOOLS, HOOK_HOLD_SECS,
 };
+#[cfg(target_os = "macos")]
 pub(crate) use codex::task_run_uses_outer_sandbox;
 pub use codex::{codex_argv, codex_mcp_flags};
 pub use failure::ProviderFailure;

@@ -1,7 +1,7 @@
 use crate::clock::now_ms;
 use crate::engine::planning::questions::ask_plan_question;
 use crate::engine::questions::answers::record_answer_for;
-use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::parking::QuestionSlot;
 use crate::engine::run_control::TaskControl;
 use crate::engine::test_support::task_with_status;
 use crate::engine::test_support::test_app;
@@ -36,7 +36,17 @@ async fn the_default_answers_a_waiting_question_with_its_cautious_option_as_an_a
         let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
             let _id = task.id.clone();
-            let answer = wait_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            let answer = QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .answer(&app, &mut task)
+            .await;
             (answer, task)
         })
     };
@@ -51,6 +61,7 @@ async fn the_default_answers_a_waiting_question_with_its_cautious_option_as_an_a
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -62,7 +73,7 @@ async fn the_default_answers_a_waiting_question_with_its_cautious_option_as_an_a
     assert!(pending.lock().unwrap().is_some(), "not yet due");
     app.wait_sla_tick(T0 + 2 * HOUR_MS).await;
     let (answer, task) = waiter.await.unwrap();
-    assert_eq!(answer.as_deref(), Some("keep the old API (cautious)"));
+    assert_eq!(answer.as_deref(), Ok("keep the old API (cautious)"));
     assert_eq!(task.assumptions.len(), 1);
     let a = &task.assumptions[0];
     assert_eq!(
@@ -98,7 +109,17 @@ async fn the_default_option_the_agent_named_is_taken_without_a_cautious_word() {
         let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
             let _id = task.id.clone();
-            let answer = wait_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            let answer = QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .answer(&app, &mut task)
+            .await;
             (answer, task)
         })
     };
@@ -112,6 +133,7 @@ async fn the_default_option_the_agent_named_is_taken_without_a_cautious_word() {
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -124,7 +146,7 @@ async fn the_default_option_the_agent_named_is_taken_without_a_cautious_word() {
         .await
         .expect("the default option never answered the question")
         .unwrap();
-    assert_eq!(answer.as_deref(), Some("keep the old API"));
+    assert_eq!(answer.as_deref(), Ok("keep the old API"));
     assert_eq!(task.assumptions.len(), 1);
     assert_eq!(task.assumptions[0].by, "policy");
 }
@@ -177,6 +199,7 @@ async fn a_default_answer_to_a_planner_question_is_a_policy_assumption_and_leave
                     )
                 },
                 &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: cancel.clone(),
                     pending_answer: pending.clone(),
                     pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -201,6 +224,7 @@ async fn a_default_answer_to_a_planner_question_is_a_policy_assumption_and_leave
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -248,6 +272,7 @@ async fn a_default_is_refused_when_the_loop_is_not_parked_any_more() {
         task.id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: CancelToken::new(),
                 pending_answer: Arc::new(StdMutex::new(None)),
                 pending_amend: Arc::new(StdMutex::new(None)),

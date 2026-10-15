@@ -57,14 +57,18 @@ impl App {
             match tokio::time::timeout(
                 Duration::from_secs(budget),
                 run_verify_cached(
-                    &app,
+                    crate::engine::verification::runner::CheckRunner::from_context(
+                        crate::engine::verification::context::CheckContext::new(
+                            &app,
+                            Some(&ctx.task_id),
+                        ),
+                        &worktree,
+                        app.task_sandbox(&ctx.repo, &worktree, &run_dir).as_ref(),
+                        &base_sha,
+                        &ctx.cancel,
+                    ),
                     &ctx.task_id,
-                    &ctx.repo,
-                    &worktree,
-                    &run_dir,
-                    &base_sha,
                     &hook_verify,
-                    &ctx.cancel,
                 ),
             )
             .await

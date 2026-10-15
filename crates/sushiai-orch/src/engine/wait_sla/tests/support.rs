@@ -1,7 +1,7 @@
 use crate::api::events::Event;
 use crate::clock::now_ms;
 use crate::engine::owner_notice;
-use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::questions::wake::wake_orchestrator_for_waiting;
 use crate::engine::run_control::TaskControl;
 use crate::engine::state::App;
@@ -51,7 +51,7 @@ pub(super) async fn calls_reach(repo: &Path, n: usize) {
 pub(super) async fn park_live(
     app: &Arc<App>,
     mut task: Task,
-) -> tokio::task::JoinHandle<(Option<String>, Task)> {
+) -> tokio::task::JoinHandle<(Result<String, WaitEnd>, Task)> {
     let id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
@@ -59,7 +59,17 @@ pub(super) async fn park_live(
         let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
             let _id = task.id.clone();
-            let answer = wait_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            let answer = QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .answer(&app, &mut task)
+            .await;
             (answer, task)
         })
     };
@@ -73,6 +83,7 @@ pub(super) async fn park_live(
         id,
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel,
                 pending_answer: pending,
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -84,7 +95,7 @@ pub(super) async fn park_live(
 }
 
 pub(super) fn kinds(app: &App, repo: &str, kind: &str) -> usize {
-    crate::overseer::read(&app.data_dir, Some(repo), None)
+    crate::store::overseer::read(&app.data_dir, Some(repo), None)
         .iter()
         .filter(|e| e.kind == kind)
         .count()
@@ -92,8 +103,14 @@ pub(super) fn kinds(app: &App, repo: &str, kind: &str) -> usize {
 
 pub(super) fn told(app: &App, task: &Task, ts: i64) {
     let key = owner_notice::decision_key(&task.id, task.question.as_ref().unwrap());
-    let mut entry = crate::overseer::Entry::new("asked_owner", &task.repo, Some(&task.id), "Q")
-        .with_decision(&[key]);
+    let mut entry = crate::task::notes::overseer::Entry::new(
+        "asked_owner",
+        &task.repo,
+        Some(&task.id),
+        "Q",
+        crate::clock::now_ms(),
+    )
+    .with_decision(&[key]);
     entry.ts = ts;
     app.record_overseer(entry);
 }

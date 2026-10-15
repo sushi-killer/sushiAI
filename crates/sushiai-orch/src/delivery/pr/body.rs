@@ -108,7 +108,9 @@ pub(crate) fn final_body(
     checked: String,
     secrets: &std::collections::HashMap<String, String>,
     home: Option<&str>,
+    commits: &std::collections::BTreeMap<String, String>,
 ) -> String {
+    let checked = super::validation::without_section(&checked);
     let source =
         if task.unreviewed && !checked.starts_with(crate::delivery::pr::body::UNREVIEWED_LINE) {
             format!(
@@ -118,11 +120,8 @@ pub(crate) fn final_body(
         } else {
             checked
         };
-    let waived = redact_pr_text(
-        &crate::delivery::pr::body::waived_section(task),
-        secrets,
-        home,
-    );
+    let recorded = super::validation::section(task, commits) + &waived_section(task);
+    let waived = redact_pr_text(&recorded, secrets, home);
     let source = crate::delivery::pr::body::without_waived_section(&source);
     truncate_chars(
         &redact_pr_text(&source, secrets, home),

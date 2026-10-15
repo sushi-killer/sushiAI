@@ -1,5 +1,5 @@
 use crate::engine::chat_tools;
-use crate::engine::chat_tools::TurnTools;
+use crate::engine::chat_tools::turn::TurnTools;
 use crate::engine::messages;
 use crate::engine::secrets;
 use crate::engine::state::App;
@@ -113,7 +113,7 @@ pub(in crate::engine) fn task_tools(
         let mut known = project.contains_key(name) || task_servers.contains_key(name);
         disabled.insert(name.clone());
         for cfg in &settings.chat_tools {
-            let key = chat_tools::server_key(cfg);
+            let key = chat_tools::server::server_key(cfg);
             if cfg.id == *name || key == *name {
                 known = true;
                 disabled.insert(cfg.id.clone());
@@ -135,19 +135,19 @@ pub(in crate::engine) fn task_tools(
     for cfg in &mut on.chat_tools {
         cfg.enabled = (enable.contains(&cfg.id) || enabled_here.contains(&cfg.id.as_str()))
             && !disabled.contains(&cfg.id)
-            && !disabled.contains(&chat_tools::server_key(cfg));
+            && !disabled.contains(&chat_tools::server::server_key(cfg));
         if !cfg.enabled {
             off.push((cfg.id.clone(), cfg.label.clone()));
         }
     }
-    let mut connected = chat_tools::for_task(app, &on);
+    let mut connected = chat_tools::turn::for_task(app, &on);
     // Plugin server keys can differ from the ids used in brief lines.
     connected.listed.retain(|(id, _, _)| {
         let key = on
             .chat_tools
             .iter()
             .find(|cfg| &cfg.id == id)
-            .map(chat_tools::server_key);
+            .map(chat_tools::server::server_key);
         !key.and_then(|key| connected.servers.get(&key))
             .is_some_and(|def| is_full_bridge(def, &app.exe_path))
     });

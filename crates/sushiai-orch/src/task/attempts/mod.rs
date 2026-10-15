@@ -16,3 +16,9 @@ pub(crate) use observations::{
     record_advice, record_advisor, record_cause, record_failure_signature, record_plan_run,
     retain_evidence, PlanRunObservation,
 };
+
+pub(crate) mod signals;
+
+pub(crate) mod native;
+
+pub(crate) mod inspection;

@@ -34,16 +34,10 @@ pub(in crate::engine) fn conflict_detail(
     base_ref: &str,
     new_sha: &str,
     files: &[String],
-    task_id: &str,
 ) -> String {
     format!(
-        "{base_ref} moved ahead to {}, and your changes were carried onto it. \
-         These files conflict: {}. Text files carry <<<<<<< / >>>>>>> markers; \
-         for a binary or deleted file, your version is `git show {}:<path>`. \
-         Resolve each one so both the base's change and yours survive, then finish the task.",
-        short_sha(new_sha),
-        files.join(", "),
-        crate::delivery::git::carry::wip_ref(task_id)
+        "{base_ref} moved ahead to {}, and your changes were carried onto it. These files conflict: {}.",
+        short_sha(new_sha), files.join(", ")
     )
 }
 

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::engine::owner_notice;
 #[cfg(test)]
-use crate::overseer;
+use crate::store::overseer;
 #[cfg(test)]
 use crate::task::AnsweredBy;
 #[cfg(test)]
@@ -146,6 +146,13 @@ impl App {
 mod tests {
     use super::*;
 
+    fn gate(verdict: owner_notice::Verdict) -> Option<owner_notice::Gate> {
+        Some(owner_notice::Gate {
+            verdict,
+            keys: vec!["t5|agent_question|A".to_string()],
+        })
+    }
+
     #[test]
     fn the_digest_is_due_only_at_its_hour_and_once_a_day() {
         assert!(digest_due(Some(8), 8, "2026-10-10", None));
@@ -219,7 +226,13 @@ mod tests {
             crate::engine::chat::overseer::TurnEnd::Reply("Which branch?\nmore".into()),
         );
         // The overseer answered during the turn: no owner note, still the cost.
-        app.record_overseer(overseer::Entry::new("answered", "/r", Some("t2"), "q"));
+        app.record_overseer(crate::task::notes::overseer::Entry::new(
+            "answered",
+            "/r",
+            Some("t2"),
+            "q",
+            crate::clock::now_ms(),
+        ));
         end(
             0,
             "t2",
@@ -232,12 +245,6 @@ mod tests {
             crate::engine::chat::overseer::TurnEnd::Failed("harness exploded".into()),
         );
         // The turn settled its question itself: kept as `done`, never a notice.
-        let gate = |verdict| {
-            Some(owner_notice::Gate {
-                verdict,
-                keys: vec!["t5|agent_question|A".to_string()],
-            })
-        };
         crate::engine::chat::overseer::record_overseer_end(
             &app,
             "/r",
@@ -275,6 +282,11 @@ mod tests {
             Some("Retried it.\nSecond line.")
         );
         assert_eq!(resolved.decision, None);
+    }
+
+    #[test]
+    fn duplicate_and_deferred_overseer_replies_keep_only_the_held_decision() {
+        let (app, _dir) = test_app();
         // A duplicate and a deferred reply are logged as skipped with the reply behind them.
         for (verdict, text) in [
             (owner_notice::Verdict::Duplicate, owner_notice::DUPLICATE),

@@ -18,8 +18,8 @@ use crate::engine::decision::implement_attempt_count;
 use crate::engine::state::App;
 #[cfg(test)]
 use crate::engine::test_support::task_with_status;
-use crate::overseer;
 use crate::store;
+use crate::store::overseer;
 use crate::task::AnsweredBy;
 use crate::task::AttemptStatus;
 use crate::task::Failure;
@@ -290,8 +290,14 @@ impl App {
             }
             let line = entry_text(&metrics);
             let detail = format!("{line}\n{}", repo_line(&all));
-            let entry = overseer::Entry::new("done", &task.repo, Some(&task.id), &line)
-                .with_detail(&detail);
+            let entry = crate::task::notes::overseer::Entry::new(
+                "done",
+                &task.repo,
+                Some(&task.id),
+                &line,
+                crate::clock::now_ms(),
+            )
+            .with_detail(&detail);
             if matches!(overseer::append_task_once(&self.data_dir, &entry), Ok(true)) {
                 let _ = self.events_tx.send(Event::Overseer {
                     entry: Box::new(entry),

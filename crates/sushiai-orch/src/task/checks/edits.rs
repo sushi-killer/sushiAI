@@ -72,40 +72,20 @@ pub(crate) fn rewrite_command(
     Ok(())
 }
 
-pub(crate) fn append_final(task: &mut Task, commands: &[String], child: &str, now: i64) -> bool {
+pub(crate) fn append_regression(task: &mut Task, finding: &str, run: Option<&str>) {
     let task = &mut task.data;
-    let mut changed = false;
-    for command in commands {
-        let command = command.trim();
-        if task
-            .verify
-            .iter()
-            .chain(&task.final_verify)
-            .any(|current| current.trim() == command)
-        {
-            continue;
-        }
-        task.final_verify.push(command.to_string());
-        task.decisions.push(format!(
-            "Orchestrator: added {command} to finalVerify for subtask {child}"
-        ));
-        changed = true;
-    }
-    if changed {
-        task.updated_at = now;
-    }
-    changed
-}
-
-pub(crate) fn append_regression(task: &mut Task, finding: &str, run: &str) {
-    let task = &mut task.data;
-    task.criteria
-        .push(format!("Review finding {finding} is fixed -- check: {run}"));
-    task.checks.push(Check {
-        criterion: task.criteria.len() - 1,
-        run: run.to_string(),
-        baseline: Some(Baseline::Fail),
+    let criterion = format!("Review finding {finding} is fixed");
+    task.criteria.push(match run {
+        Some(command) => format!("{criterion} -- check: {command}"),
+        None => criterion,
     });
+    if let Some(command) = run {
+        task.checks.push(Check {
+            criterion: task.criteria.len() - 1,
+            run: command.to_string(),
+            baseline: Some(Baseline::Fail),
+        });
+    }
 }
 
 /// The file/protection adapter has resolved its IO; adoption may not weaken a

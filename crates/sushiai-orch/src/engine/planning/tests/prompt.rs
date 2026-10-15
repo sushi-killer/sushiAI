@@ -17,6 +17,11 @@ fn every_plan_brief_says_measurement_is_an_orchd_check() {
         build_subtask_plan_retry_brief("r", &v, ""),
     ];
     for b in &briefs {
+        assert_eq!(
+            b.matches("Measurement belongs to orchd's checks").count(),
+            1,
+            "{b}"
+        );
         for needle in [
             "unix sockets",
             "$ORCHD_BASE_SHA",

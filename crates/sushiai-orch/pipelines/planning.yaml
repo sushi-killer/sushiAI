@@ -1,0 +1,23 @@
+version: 1
+entry: prepare
+transitions:
+  - { from: prepare, on: ready, to: draft }
+  - { from: prepare, on: retry, to: prepare }
+  - { from: prepare, on: stopped, to: cleanup }
+  - { from: draft, on: ready, to: review }
+  - { from: draft, on: retry, to: prepare }
+  - { from: draft, on: malformed, to: clarify }
+  - { from: draft, on: stopped, to: cleanup }
+  - { from: clarify, on: retry, to: prepare }
+  - { from: clarify, on: complete, to: return }
+  - { from: review, on: ready, to: questions }
+  - { from: review, on: retry, to: prepare }
+  - { from: review, on: complete, to: return }
+  - { from: questions, on: ready, to: split }
+  - { from: questions, on: complete, to: return }
+  - { from: split, on: ready, to: command }
+  - { from: split, on: complete, to: return }
+  - { from: command, on: ready, to: finish }
+  - { from: command, on: complete, to: return }
+  - { from: finish, on: complete, to: return }
+  - { from: cleanup, on: complete, to: return }

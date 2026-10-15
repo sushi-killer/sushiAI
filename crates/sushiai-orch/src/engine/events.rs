@@ -12,8 +12,8 @@ impl App {
 
 impl App {
     /// Appends one overseer action to `overseer.jsonl` and broadcasts it.
-    pub(crate) fn record_overseer(&self, entry: crate::overseer::Entry) {
-        if crate::overseer::append(&self.data_dir, &entry).is_ok() {
+    pub(crate) fn record_overseer(&self, entry: crate::task::notes::overseer::Entry) {
+        if crate::store::overseer::append(&self.data_dir, &entry).is_ok() {
             let _ = self.events_tx.send(Event::Overseer {
                 entry: Box::new(entry),
             });

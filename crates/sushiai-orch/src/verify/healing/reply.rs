@@ -12,19 +12,19 @@ use serde_json::json;
 pub(crate) const MAX_REASON_CHARS: usize = 300;
 
 /// The outermost JSON object of a judge's reply, whatever surrounds it.
-fn judge_json(text: &str) -> Option<serde_json::Value> {
+pub(crate) fn judge_json(text: &str) -> Option<serde_json::Value> {
     let (start, end) = (text.find('{')?, text.rfind('}')?);
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-fn str_field(v: &serde_json::Value, key: &str) -> String {
+pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> String {
     v.get(key)
         .and_then(|x| x.as_str())
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
 }
 
-fn reason_of(v: &serde_json::Value) -> String {
+pub(crate) fn reason_of(v: &serde_json::Value) -> String {
     let r = str_field(v, "reason");
     if r.is_empty() {
         "no reason given".to_string()

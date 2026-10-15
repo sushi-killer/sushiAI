@@ -1,7 +1,7 @@
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness_schema;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
 use crate::harness;
 use crate::harness::cancel::CancelToken;
@@ -61,7 +61,6 @@ pub(super) async fn run_helper(
         write_readonly_claude_settings_with_profile(
             route,
             app,
-            &key_path,
             settings,
             &deny_read,
             &settings_path,
@@ -90,19 +89,22 @@ pub(super) async fn run_helper(
         json: schema,
         path: &schema_path,
     };
-    let result = run_harness_schema(
+    let result = run_harness(
         app,
-        &task.id,
-        0,
-        RunTrack::No,
-        worktree,
-        &req,
-        CostTag::task(STAGE, &route.id),
-        brief,
-        &events_path,
+        RunIdentity {
+            id: &task.id,
+            attempt_n: 0,
+            track: RunTrack::No,
+            tag: CostTag::task(STAGE, &route.id),
+        },
+        RunInvocation {
+            request: &req,
+            brief,
+            events: &events_path,
+            schema: Some(output),
+        },
         &CancelToken::new(),
         Guard::helper(name, app.helper_timeout()),
-        Some(&output),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);

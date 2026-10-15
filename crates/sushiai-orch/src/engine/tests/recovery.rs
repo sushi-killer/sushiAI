@@ -55,7 +55,10 @@ async fn recover_on_start_continues_after_unreadable_task_and_failed_saves() {
 
     let mut advisor = task_with_status(TaskStatus::Queued);
     advisor.fixture_data().created_at = 4;
-    advisor.fixture_data().attempts.push(attempt_with_failure(1, "advisor"));
+    advisor
+        .fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "advisor"));
     app.store.save_task(&advisor).unwrap();
     let helper = app
         .store
@@ -117,7 +120,9 @@ async fn recover_on_start_starts_timers_after_listing_failures() {
 
 fn running_implement_task(app: &App, dir: &Path) -> (Task, PathBuf) {
     let mut task = task_with_status(TaskStatus::Running);
-    task.fixture_data().attempts.push(attempt_with_failure(1, "x"));
+    task.fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "x"));
     let attempt = &mut task.fixture_data().attempts[0];
     attempt.status = AttemptStatus::Running;
     attempt.failure = None;
@@ -155,10 +160,16 @@ async fn a_run_that_ended_while_the_daemon_was_down_is_resumed_from_its_files() 
     assert_eq!(recovery::resumable_attempt(&app, &task), Some(0));
 
     // The loop follows it and gets the outcome run_harness would have given.
-    let outcome = recovery::follow_run(&app.arc(), &task, 0, &CancelToken::new(), Guard::off())
-        .await
-        .ok()
-        .expect("outcome");
+    let outcome = recovery::follow_run(
+        &app.arc(),
+        &task,
+        &task.attempts[0],
+        &CancelToken::new(),
+        Guard::off(),
+    )
+    .await
+    .ok()
+    .expect("outcome");
     assert_eq!(outcome.error.as_deref(), Some("boom"));
     assert_eq!(outcome.session_id.as_deref(), Some("s1"));
     assert_eq!(outcome.cost_usd, Some(0.5));
@@ -276,7 +287,13 @@ fn adopted(app: &App, dir: &Path, raw: &str) -> (Task, i32) {
 async fn follow_within(app: &App, task: &Task, guard: Guard) -> harness::RunOutcome {
     tokio::time::timeout(
         Duration::from_secs(20),
-        recovery::follow_run(&app.arc(), task, 0, &CancelToken::new(), guard),
+        recovery::follow_run(
+            &app.arc(),
+            task,
+            &task.attempts[0],
+            &CancelToken::new(),
+            guard,
+        ),
     )
     .await
     .expect("the guard never stopped the adopted run")

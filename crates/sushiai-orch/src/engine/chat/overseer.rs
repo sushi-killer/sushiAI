@@ -3,8 +3,8 @@ use crate::clock::now_ms;
 use crate::engine::owner_notice;
 use crate::engine::state::App;
 use crate::harness::native::error::RunError;
-use crate::overseer;
-use crate::overseer_state;
+use crate::store::overseer;
+use crate::store::overseer_state;
 
 /// How an overseer turn ended, for the log.
 pub(in crate::engine) enum TurnEnd {
@@ -65,8 +65,14 @@ pub(in crate::engine) fn record_overseer_end(app: &App, repo: &str, record: Over
         TurnEnd::Silent if cost_usd.is_some() => ("done", "Finished".to_string(), None),
         TurnEnd::Silent => return,
     };
-    let mut entry = overseer::Entry::new(kind, repo, task_id, &text)
-        .with_detail(detail.as_deref().unwrap_or(&text));
+    let mut entry = crate::task::notes::overseer::Entry::new(
+        kind,
+        repo,
+        task_id,
+        &text,
+        crate::clock::now_ms(),
+    )
+    .with_detail(detail.as_deref().unwrap_or(&text));
     // Only a notice (or the held one) remembers its decisions.
     let tells = matches!(kind, "asked_owner" | "digest")
         || (kind == "skipped" && verdict == Some(Verdict::Deferred));
@@ -123,7 +129,16 @@ pub(super) fn finish_overseer(
             TurnEnd::Failed(error) => format!("failed: {error}"),
             TurnEnd::Silent => "no reply".to_string(),
         };
-        overseer_state::add_decision(&app.data_dir, repo, now_ms(), reason, task_id, &outcome);
+        overseer_state::add_decision(
+            &app.data_dir,
+            repo,
+            &crate::task::notes::wake::WakeDecision {
+                at: now_ms(),
+                reason,
+                task_id,
+                outcome: &outcome,
+            },
+        );
         if let Turn::Overseer { held, about, .. } = turn {
             let gate = match &mut end {
                 TurnEnd::Reply(reply) => {

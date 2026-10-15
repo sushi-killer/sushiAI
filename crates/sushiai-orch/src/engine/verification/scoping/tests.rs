@@ -1,4 +1,4 @@
-use crate::engine::answer_policy::is_shared_check;
+use crate::engine::answer_policy::authority::is_shared_check;
 use crate::engine::test_support::git_in;
 use crate::engine::test_support::init_git_repo;
 use crate::engine::test_support::task_with_status;
@@ -16,6 +16,75 @@ use crate::verify::scoping::filter_scoped_planned;
 #[cfg(test)]
 mod scoped_task_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_live_parent_keeps_child_checks_and_an_owner_edit_after_restart() {
+        use crate::engine::run_control::{TaskControl, TaskSignals};
+        use crate::task::amendment::Amendment;
+        use crate::task::checks::authority::{CheckAuthority, Origin};
+
+        let (app, _dir) = test_app();
+        let mut parent = task_with_status(TaskStatus::Running);
+        parent.fixture_data().criteria = vec!["Owner's acceptance".into()];
+        parent.fixture_data().held_out = Some(crate::task::Check {
+            criterion: 0,
+            run: "owner-check".into(),
+            baseline: Some(crate::task::Baseline::Fail),
+        });
+        app.store.save_task(&parent).unwrap();
+        parent
+            .queue_pending_amendment(
+                Amendment {
+                    criteria: Some(vec!["Owner's queued criterion".into()]),
+                    ..Default::default()
+                },
+                Origin::Owner,
+                &CheckAuthority::default(),
+                1,
+            )
+            .unwrap();
+        app.store.save_task_with_pending(&parent, None).unwrap();
+        let signals = TaskSignals::new();
+        app.controls.lock().unwrap().insert(
+            parent.id.clone(),
+            TaskControl {
+                signals: signals.clone(),
+                handle: tokio::spawn(async {}),
+            },
+        );
+        let mut child = task_with_status(TaskStatus::Running);
+        child.fixture_data().parent = Some(parent.id.clone());
+        let commands = vec!["npm run ci".into()];
+        assert!(super::super::add_parent_checks(&app, &child, &commands));
+        let stored = app.store.load_task(&parent.id).unwrap().unwrap();
+        assert_eq!(
+            stored.pending_amendment,
+            *signals.pending_amend.lock().unwrap()
+        );
+        assert!(stored.final_verify.is_empty());
+        assert!(super::super::add_parent_checks(&app, &child, &commands));
+        let cold = crate::store::Store::new(app.data_dir.clone()).unwrap();
+        let mut reloaded = cold.load_task(&parent.id).unwrap().unwrap();
+        assert!(matches!(
+            reloaded.settle_pending_amendment(&CheckAuthority::default(), 2),
+            crate::task::amendment::storage::Settlement::Applied
+        ));
+        cold.save_task_with_pending(&reloaded, stored.pending_amendment.as_ref())
+            .unwrap();
+        let reloaded = cold.load_task(&parent.id).unwrap().unwrap();
+        assert_eq!(reloaded.criteria, ["Owner's queued criterion"]);
+        assert_eq!(reloaded.final_verify, commands);
+        assert_eq!(reloaded.planner_tests.sources, parent.planner_tests.sources);
+        assert!(reloaded.held_out == parent.held_out);
+        assert_eq!(
+            reloaded
+                .decisions
+                .iter()
+                .filter(|line| line.contains("added npm run ci to finalVerify"))
+                .count(),
+            1
+        );
+    }
 
     fn repo() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();

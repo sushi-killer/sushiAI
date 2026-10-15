@@ -1,4 +1,5 @@
-use crate::engine::review::narrow_basis;
+use crate::engine::lifecycle::execution::RunReceipt;
+use crate::engine::review::narrow::narrow_basis;
 use crate::engine::time_budget;
 use crate::harness;
 use crate::task::attempts::{self as observations, AttemptReport};
@@ -10,12 +11,10 @@ use std::path::Path;
 
 pub(in crate::engine) async fn capture_run_interruption(
     task: &mut Task,
-    idx: usize,
+    run: &RunReceipt,
     outcome: &harness::RunOutcome,
-    worktree: &Path,
-    base_sha: &str,
-    budget_mins: f64,
 ) -> Option<(FailureKind, String)> {
+    let (idx, worktree, base_sha) = (run.idx, &run.worktree, &run.base_sha);
     let (kind, detail) = if outcome.time_budget {
         (
             FailureKind::TimeBudget,
@@ -50,8 +49,11 @@ pub(in crate::engine) async fn capture_run_interruption(
             .unwrap_or_default()
     };
     if outcome.time_budget {
-        let report =
-            time_budget::report_after_budget(budget_mins, outcome.final_text.as_deref(), &changed);
+        let report = time_budget::report_after_budget(
+            run.settings.implement_budget_mins,
+            outcome.final_text.as_deref(),
+            &changed,
+        );
         let declines = task.attempts[idx].declines.clone();
         observations::record_report(
             task,
@@ -66,6 +68,20 @@ pub(in crate::engine) async fn capture_run_interruption(
     observations::record_changed_files(task, idx, changed);
     record_diff_stat(task, idx, worktree).await;
     Some((kind, detail))
+}
+
+pub(in crate::engine) async fn record_changed_files(
+    task: &mut Task,
+    run: &RunReceipt,
+) -> Vec<String> {
+    let (worktree, own) = (run.worktree.clone(), task.own_diff());
+    let changed =
+        tokio::task::spawn_blocking(move || own.changed_files(&worktree).unwrap_or_default())
+            .await
+            .unwrap_or_default();
+    observations::record_changed_files(task, run.idx, changed.clone());
+    record_diff_stat(task, run.idx, &run.worktree).await;
+    changed
 }
 
 /// The files the task changed since the last full review that no open finding

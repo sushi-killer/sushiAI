@@ -26,11 +26,13 @@ pub(super) async fn setup_worktree(
     sandbox: Option<&TaskSandbox>,
     cancel: &CancelToken,
 ) -> Result<(), String> {
-    crate::worktree_env::run_setup(
+    crate::worktree_env::WorktreeEnvironment::new(
         repo,
         worktree,
         &augmented_path(),
         crate::verify::command::verify_timeout(),
+    )
+    .setup(
         |script| crate::verify::command::build_verify_command(worktree, script, sandbox, ""),
         cancel.cancelled(),
     )
@@ -240,33 +242,7 @@ impl App {
                 None => entries.push(entry("kept", 0)),
             }
         }
-        for repo in &repos {
-            let repo_path = PathBuf::from(repo);
-            let listed = tokio::task::spawn_blocking({
-                let repo_path = repo_path.clone();
-                move || crate::git::worktree::linked_worktrees(&repo_path)
-            })
-            .await
-            .unwrap_or_default();
-            for path in listed {
-                if known.contains(&canon(&path.to_string_lossy())) {
-                    continue;
-                }
-                let p = path.clone();
-                let bytes = tokio::task::spawn_blocking(move || crate::git::worktree::dir_size(&p))
-                    .await
-                    .unwrap_or(0);
-                entries.push(json!({
-                    "path": path.to_string_lossy(), "task": null, "action": "unknown", "bytes": bytes
-                }));
-            }
-            if !dry_run {
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::git::worktree::prune_worktrees(&repo_path)
-                })
-                .await;
-            }
-        }
+        entries.extend(unknown_worktrees(&repos, &known, dry_run).await);
         Ok(json!({
             "dryRun": dry_run,
             "worktrees": entries,
@@ -323,4 +299,40 @@ impl App {
         }
         (entries, total)
     }
+}
+
+async fn unknown_worktrees(
+    repos: &[String],
+    known: &std::collections::HashSet<PathBuf>,
+    dry_run: bool,
+) -> Vec<serde_json::Value> {
+    let mut entries = Vec::new();
+    for repo in repos {
+        let repo_path = PathBuf::from(repo);
+        let listed = tokio::task::spawn_blocking({
+            let repo_path = repo_path.clone();
+            move || crate::git::worktree::linked_worktrees(&repo_path)
+        })
+        .await
+        .unwrap_or_default();
+        for path in listed {
+            if known.contains(&std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())) {
+                continue;
+            }
+            let p = path.clone();
+            let bytes = tokio::task::spawn_blocking(move || crate::git::worktree::dir_size(&p))
+                .await
+                .unwrap_or(0);
+            entries.push(json!({
+                "path": path.to_string_lossy(), "task": null, "action": "unknown", "bytes": bytes
+            }));
+        }
+        if !dry_run {
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::git::worktree::prune_worktrees(&repo_path)
+            })
+            .await;
+        }
+    }
+    entries
 }

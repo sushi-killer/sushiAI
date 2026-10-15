@@ -34,7 +34,7 @@ pub(crate) fn load_base_runs(data_dir: &Path) -> HashMap<(String, String), Verif
         .unwrap_or_default();
     let mut rows = rows;
     for row in rows.iter_mut() {
-        crate::test_failures::hydrate_lists(data_dir, &mut row.outcome);
+        crate::verify::test_lists::hydrate_lists(data_dir, &mut row.outcome);
     }
     let poisoned = rows
         .iter()

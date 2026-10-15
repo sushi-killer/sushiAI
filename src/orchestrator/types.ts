@@ -263,6 +263,7 @@ export type QuestionKind =
   | "dependency_ended"
   | "impossible"
   | "preexisting_failure"
+  | "pr_check"
   | "budget"
   | "protected_path"
   | "permission"

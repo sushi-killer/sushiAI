@@ -1,5 +1,5 @@
 use crate::clock::now_ms;
-use crate::engine::answer_policy::check_authority;
+use crate::engine::answer_policy::authority::check_authority;
 use crate::engine::planning::draft::PlanDraft;
 use crate::engine::planning::records::store_draft;
 use crate::engine::run_control::TaskSignals;
@@ -33,7 +33,7 @@ pub(super) async fn publish(
     settings: &Settings,
     signals: &TaskSignals,
 ) -> Result<Publication, String> {
-    apply_pending_amendment(app, task, &signals.pending_amend, &signals.cancel).await;
+    apply_pending_amendment(app, task, &signals.pending_amend, &signals.cancel).await?;
     let lock = app.task_lock(&task.id);
     let _guard = lock.lock().unwrap();
     let mut fresh = app
@@ -50,7 +50,10 @@ pub(super) async fn publish(
         return Ok(Publication::Ended);
     }
     let pending = signals.pending_amend.lock().unwrap();
-    let outcome = if pending.is_some() || !proposal.based_on.matches(&fresh) {
+    let outcome = if fresh.pending_amendment.is_some()
+        || pending.is_some()
+        || !proposal.based_on.matches(&fresh)
+    {
         end(
             &mut fresh,
             proposal.attempt,

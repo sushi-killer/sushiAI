@@ -1,5 +1,5 @@
 use crate::engine::chat_tools;
-use crate::engine::chat_tools::Kind;
+use crate::engine::chat_tools::access::Kind;
 use crate::engine::leases::relative_to_worktree;
 use crate::engine::messages;
 use crate::engine::run_control::HookContext;
@@ -75,18 +75,18 @@ fn mcp_kind(app: &App, tool_name: &str) -> Kind {
     let cfg = settings
         .chat_tools
         .iter()
-        .find(|c| chat_tools::sanitize(&chat_tools::server_key(c)) == server);
+        .find(|c| chat_tools::server::sanitize(&chat_tools::server::server_key(c)) == server);
     let overrides = cfg.map(|c| c.overrides.clone()).unwrap_or_default();
     let known = cfg
-        .and_then(|c| chat_tools::load_cache(app).remove(&c.id))
+        .and_then(|c| chat_tools::catalog::load_cache(app).remove(&c.id))
         .and_then(|d| {
             d.tools
                 .into_iter()
-                .find(|t| chat_tools::sanitize(&t.name) == tool)
+                .find(|t| chat_tools::server::sanitize(&t.name) == tool)
         });
     match known {
-        Some(t) => chat_tools::classify(&t.name, t.read_only, &overrides),
-        None => chat_tools::classify(tool, None, &overrides),
+        Some(t) => chat_tools::access::classify(&t.name, t.read_only, &overrides),
+        None => chat_tools::access::classify(tool, None, &overrides),
     }
 }
 

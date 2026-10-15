@@ -211,6 +211,10 @@ pub struct TaskData {
     pub eval_check: Option<EvalCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_amendment: Option<crate::task::amendment::PendingAmendment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_checks: Vec<crate::task::VerifyOutcome>,
     /// Where the brief consistency check stands for this task.
     #[serde(default, skip_serializing_if = "BriefCheck::is_default")]
     pub brief_check: BriefCheck,

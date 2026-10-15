@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"session-a"}
+{"type":"result","total_cost_usd":0.4,"usage":{"input_tokens":100,"output_tokens":20},"result":"report-a"}

@@ -2,7 +2,8 @@ use crate::clock::now_ms;
 use crate::engine::decision::implement_attempt_count;
 use crate::engine::graph::base::parent_base_preflight;
 use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
-use crate::engine::protected::{needs_prepare, prepare_tests};
+use crate::engine::protected::prepare::needs_prepare;
+use crate::engine::protected::prepare::prepare_tests;
 use crate::engine::run_control::TaskSignals;
 use crate::engine::state::App;
 use crate::engine::verification::base::amendments::apply_pending_amendment;
@@ -44,7 +45,6 @@ pub(in crate::engine::graph) async fn prepare_parent(
     let task_id = task.id.clone();
     let task_id = task_id.as_str();
     let cancel = &signals.cancel;
-    let pending_answer = &signals.pending_answer;
     let pending_amend = &signals.pending_amend;
     // Before the first child starts: the parent's checks judge the base, not
     // the children's work. Idempotent across relaunches.
@@ -66,12 +66,13 @@ pub(in crate::engine::graph) async fn prepare_parent(
                 && implement_attempt_count(t) == 0
         });
     let dependencies_before = task.depends_on.clone();
-    if none_started
-        && !parent_base_preflight(app, task, pending_answer, pending_amend, cancel).await
-    {
+    if none_started && !parent_base_preflight(app, task, signals).await {
         return false;
     }
-    apply_pending_amendment(app, task, pending_amend, cancel).await;
+    if let Err(error) = apply_pending_amendment(app, task, pending_amend, cancel).await {
+        eprintln!("orch: applying amendment to {} failed: {error}", task.id);
+        return false;
+    }
     if task.depends_on != dependencies_before {
         task.resume_phase(TaskStatus::Queued, crate::clock::now_ms());
         task.touch(now_ms());

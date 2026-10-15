@@ -45,7 +45,7 @@ fn shared_check_refusal(command: &str) -> String {
 
 /// Who asks for a removal: the owner, or anyone else (the overseer, a chat or
 /// MCP client, the answer policy, the judge, a feasibility ruling).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Origin {
     Owner,
     Other,
@@ -88,7 +88,7 @@ pub(crate) fn criterion_commands(task: &TaskData, n: usize) -> Vec<String> {
 }
 
 /// The command a criterion's `-- check:` part names.
-fn text_check(text: &str) -> Option<String> {
+pub(super) fn text_check(text: &str) -> Option<String> {
     let (_, cmd) = text.split_once("-- check:")?;
     let cmd = cmd.trim();
     (!cmd.is_empty()).then(|| cmd.to_string())

@@ -7,6 +7,9 @@ pub(crate) enum Starter {
 }
 
 impl Task {
+    pub(crate) fn clear_limit_pause(&mut self) {
+        self.data.queue.paused_until = None;
+    }
     pub(crate) fn clear_park(&mut self) {
         self.data.queue.park = None;
     }
@@ -24,6 +27,9 @@ impl Task {
     }
     pub(crate) fn start_queued(&mut self, by: Starter, restart_children: bool, now: i64) {
         let task = &mut self.data;
+        if by == Starter::Owner {
+            task.queue.paused_until = None;
+        }
         if restart_children {
             task.queue.restart_children = true;
             task.question = None;
@@ -35,7 +41,6 @@ impl Task {
         }
         let resumed = task.queue.park.take().is_some();
         task.queue.stopped_explicitly = false;
-        task.loop_state.stuck_retries = 0;
         if resumed {
             task.decisions.push("Owner: resumed a parked task".into());
         }
@@ -87,15 +92,5 @@ impl Task {
         if task.status == TaskStatus::Stopped || task.queue.park.is_some() {
             task.question = None;
         }
-    }
-    pub(crate) fn defer_stuck_retry(&mut self, limit: u32, until: i64) -> Option<u32> {
-        self.data.question = None;
-        if self.loop_state.stuck_retries >= limit {
-            return None;
-        }
-        self.data.loop_state.stuck_retries += 1;
-        self.data.queue.paused_until = Some(until);
-        self.data.status = TaskStatus::Queued;
-        Some(self.loop_state.stuck_retries)
     }
 }

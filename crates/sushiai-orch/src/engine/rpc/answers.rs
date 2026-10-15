@@ -15,7 +15,6 @@ use crate::engine::questions::reply::Reply;
 use crate::engine::state::App;
 use crate::engine::verification::base::answers::record_owner_base_check;
 use crate::engine::verification::base::answers::PRE_EXISTING_DROP;
-use crate::overseer;
 use crate::task::is_option;
 use crate::task::messages::ORCHESTRATOR;
 use crate::task::AnsweredBy;
@@ -98,11 +97,12 @@ impl App {
                 .insert(p.id.clone(), caller);
             // Only a turn orchd woke is the overseer; the owner's chat is not.
             if p.source.as_deref() == Some("overseer") {
-                self.record_overseer(overseer::Entry::answered(
+                self.record_overseer(crate::task::notes::overseer::Entry::answered(
                     &task.repo,
                     &task.id,
                     task.question.as_ref(),
                     &p.answer,
+                    crate::clock::now_ms(),
                 ));
             }
         } else {
@@ -116,6 +116,13 @@ impl App {
         };
         if p.answer.trim().eq_ignore_ascii_case("stop") {
             return self.stop_answer(&mut task, &reply, caller);
+        }
+        if task
+            .question
+            .as_ref()
+            .is_some_and(|question| question.kind == QuestionKind::PrCheck)
+        {
+            return self.retry_pr_check(&task, &reply, caller);
         }
 
         if task
@@ -204,6 +211,40 @@ impl App {
         self.advance_graph(&task.repo);
         serde_json::to_value(&task).map_err(|e| e.to_string())
     }
+    fn retry_pr_check(
+        &self,
+        before: &crate::task::Task,
+        reply: &Reply,
+        caller: AnsweredBy,
+    ) -> Result<serde_json::Value, String> {
+        if caller != AnsweredBy::Owner || !reply.text.trim().eq_ignore_ascii_case("retry") {
+            return Err("the owner must choose retry or stop for the PR check failure".into());
+        }
+        let expected = crate::task::checks::snapshot::CheckSnapshot::capture(before);
+        let question = serde_json::to_value(&before.question).map_err(|error| error.to_string())?;
+        let task = self.update_task_checked(&before.id, |fresh| {
+            if fresh.status != TaskStatus::Waiting
+                || fresh.archived
+                || fresh.queue.park.is_some()
+                || fresh.pending_amendment.is_some()
+                || !expected.matches(fresh)
+                || serde_json::to_value(&fresh.question).map_err(|error| error.to_string())?
+                    != question
+            {
+                return Err("the PR check question changed before the answer".into());
+            }
+            if !fresh.authorize_pr_check_retry() {
+                return Err("the task has no PR check repair to retry".into());
+            }
+            let question = fresh.take_question();
+            record_answer_for(fresh, question.as_ref(), reply, caller);
+            fresh.resume_phase(TaskStatus::Queued, now_ms());
+            Ok(())
+        })?;
+        self.start_task_loop(task.id.clone());
+        serde_json::to_value(task).map_err(|error| error.to_string())
+    }
+
     fn apply_unparked_answer(
         &self,
         id: &str,
@@ -267,7 +308,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|q| is_daily_budget_run_anyway(q, &reply.text))
             {
-                task.allow_daily_budget(crate::costs::today(now_ms()));
+                task.allow_daily_budget(crate::policy::calendar::day(now_ms()));
             }
             task.clear_question();
             task.resume_phase(TaskStatus::Queued, crate::clock::now_ms());

@@ -276,10 +276,10 @@ impl App {
             if let Some(caller) = caller {
                 record_answer_for(current, question.as_ref(), &crate::engine::questions::reply::Reply { text: (answer.trim()).to_string(), default_evidence: (default_evidence).map(str::to_string), like: (like).map(str::to_string) }, caller);
             } else if let Some(question) = task.question.as_ref() {
-                record_policy_answer(
-                    current, question, answer, "policy",
-                    "a dependency that ended is retried once", 0,
-                );
+                record_policy_answer(current,
+question,
+&crate::engine::answer_policy::AutomaticAnswer::Policy { text: (answer).to_string(), evidence: ("a dependency that ended is retried once").to_string() },
+0);
             }
             current.clear_question();
             if was_parent && !is_parent(current, &fresh) {

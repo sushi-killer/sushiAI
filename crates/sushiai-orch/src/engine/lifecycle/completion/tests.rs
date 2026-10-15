@@ -1,11 +1,12 @@
-use super::delivery::finish_attempt;
 use super::Tail;
+use crate::engine::lifecycle::attempt_files::AttemptFiles;
+use crate::engine::questions::parking::QuestionSlot;
+use crate::engine::run_control::TaskSignals;
 use crate::engine::state::App;
 use crate::engine::test_support::{git_in, init_git_repo, task_with_status, test_app};
-use crate::harness::cancel::CancelToken;
 use crate::task::{AttemptStatus, Stage, TaskStatus};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 struct ReleaseCommit(PathBuf);
 
@@ -115,21 +116,16 @@ async fn finish_saved_landing(
     std::fs::create_dir_all(&run_dir).unwrap();
     let mut attempt_budget = 1;
     let mut permit = None;
+    let signals = TaskSignals::new();
     assert!(matches!(
-        finish_attempt(
-            &app,
-            &fixture.task_id,
-            &mut task,
-            0,
-            1,
-            Path::new(&worktree),
-            &run_dir,
-            &mut attempt_budget,
-            &Arc::new(Mutex::new(None)),
-            &CancelToken::new(),
-            &mut permit
-        )
-        .await,
+        AttemptFiles::new(0, 1, PathBuf::from(worktree), run_dir)
+            .finish(
+                &app,
+                &mut task,
+                &mut attempt_budget,
+                &mut QuestionSlot::new(&signals, &mut permit)
+            )
+            .await,
         Tail::Return
     ));
     let saved = app.store.load_task(&fixture.task_id).unwrap().unwrap();
@@ -245,20 +241,14 @@ async fn stopping_during_a_branch_commit_keeps_the_owner_stop_after_the_commit_f
         let mut task = task;
         let run_dir = delivery_app.store.run_dir(&delivery_id, 1);
         std::fs::create_dir_all(&run_dir).unwrap();
-        finish_attempt(
-            &delivery_app,
-            &delivery_id,
-            &mut task,
-            0,
-            1,
-            &worktree,
-            &run_dir,
-            &mut 1,
-            &Arc::new(Mutex::new(None)),
-            &signals.cancel,
-            &mut None,
-        )
-        .await
+        AttemptFiles::new(0, 1, worktree, run_dir)
+            .finish(
+                &delivery_app,
+                &mut task,
+                &mut 1,
+                &mut QuestionSlot::new(&signals, &mut None),
+            )
+            .await
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while !entered.exists() {

@@ -112,7 +112,8 @@ pub(super) async fn draft_plan(app: &Arc<App>, task: &Task) -> Option<PrPlan> {
             drafted
         }
     };
-    let body = final_body(&task, checked, &secrets, home.as_deref());
+    let commits = super::validation::recorded_commits(&task).await;
+    let body = final_body(&task, checked, &secrets, home.as_deref(), &commits);
     let plan = PrPlan {
         branch,
         title,

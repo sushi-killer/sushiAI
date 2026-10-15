@@ -4,7 +4,7 @@ use crate::engine::decision::EXHAUSTED_ANSWER_PREFIX;
 use crate::engine::ladder;
 use crate::engine::questions::answers::non_owner_refusal;
 use crate::engine::questions::answers::overseer_allowed_answers;
-use crate::engine::questions::parking::park_for_answer;
+use crate::engine::questions::parking::QuestionSlot;
 use crate::engine::questions::wake::wake_orchestrator_for_done;
 use crate::engine::run_control::TaskControl;
 use crate::engine::state::App;
@@ -50,7 +50,17 @@ async fn waiting_wakes(auto_answer: bool, kind: QuestionKind) -> usize {
     let parked = {
         let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
-            park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await;
         })
     };
     while pending.lock().unwrap().is_none() {
@@ -141,7 +151,17 @@ async fn an_agent_sourced_answer_is_an_orchestrator_line_and_never_the_owners() 
         let (app, pending, cancel, _id) =
             (app.clone(), pending.clone(), cancel.clone(), id.clone());
         tokio::spawn(async move {
-            let answered = park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            let answered = QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await;
             (answered, task)
         })
     };
@@ -242,7 +262,17 @@ async fn the_overseer_wake_carries_the_typed_question_and_its_allowed_answers() 
     let parked = {
         let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
-            park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await;
         })
     };
     while pending.lock().unwrap().is_none() {
@@ -276,7 +306,7 @@ async fn an_exhausted_failure_goes_to_the_overseer_with_no_extra_turn() {
         .push(crate::engine::test_support::attempt_with_failure(
             1, "verify",
         ));
-    let id = task.id.clone();
+    app.store.save_task(&task).unwrap();
     let mut budget = 1;
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
@@ -285,15 +315,18 @@ async fn an_exhausted_failure_goes_to_the_overseer_with_no_extra_turn() {
         tokio::spawn(async move {
             let signal = fail_and_continue(
                 &app,
-                &id,
                 &mut task,
-                0,
-                FailureKind::Verify,
-                "npm test failed".into(),
+                crate::engine::decision::failure(FailureKind::Verify, "npm test failed".into()),
                 &mut budget,
-                &pending,
-                &cancel,
-                &mut None,
+                &mut QuestionSlot::new(
+                    &crate::engine::run_control::TaskSignals {
+                        resume: Default::default(),
+                        cancel: cancel.clone(),
+                        pending_answer: pending.clone(),
+                        pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    },
+                    &mut None,
+                ),
             )
             .await;
             (matches!(signal, LoopSignal::Stop), task)
@@ -374,6 +407,7 @@ async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
         ));
     task.fixture_data().loop_state.approach_changed_after = Some(1);
     let id = task.id.clone();
+    app.store.save_task(&task).unwrap();
     let mut budget = 1;
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
@@ -381,6 +415,7 @@ async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -389,19 +424,22 @@ async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
         },
     );
     let waiter = {
-        let (app, pending, cancel, id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
+        let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
         tokio::spawn(async move {
             let signal = fail_and_continue(
                 &app,
-                &id,
                 &mut task,
-                0,
-                FailureKind::Verify,
-                "npm test failed".into(),
+                crate::engine::decision::failure(FailureKind::Verify, "npm test failed".into()),
                 &mut budget,
-                &pending,
-                &cancel,
-                &mut None,
+                &mut QuestionSlot::new(
+                    &crate::engine::run_control::TaskSignals {
+                        resume: Default::default(),
+                        cancel: cancel.clone(),
+                        pending_answer: pending.clone(),
+                        pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    },
+                    &mut None,
+                ),
             )
             .await;
             (matches!(signal, LoopSignal::Stop), task)
@@ -445,7 +483,6 @@ async fn an_exhausted_failure_never_waits_when_no_overseer_turn_starts() {
         .push(crate::engine::test_support::attempt_with_failure(
             1, "verify",
         ));
-    let id = task.id.clone();
     app.store.save_task(&task).unwrap();
     let mut budget = 1;
     let pending = Arc::new(StdMutex::new(None));
@@ -454,15 +491,18 @@ async fn an_exhausted_failure_never_waits_when_no_overseer_turn_starts() {
     let waiter = tokio::spawn(async move {
         fail_and_continue(
             &app2,
-            &id,
             &mut task,
-            0,
-            FailureKind::Verify,
-            "npm test failed".into(),
+            crate::engine::decision::failure(FailureKind::Verify, "npm test failed".into()),
             &mut budget,
-            &pending2,
-            &cancel2,
-            &mut None,
+            &mut QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel2.clone(),
+                    pending_answer: pending2.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            ),
         )
         .await;
         task

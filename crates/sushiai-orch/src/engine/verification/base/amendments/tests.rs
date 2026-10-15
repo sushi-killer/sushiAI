@@ -99,7 +99,8 @@ async fn retiring_a_loop_keeps_both_owner_edits_accepted_around_live_amendment_b
             &running_signals.pending_amend,
             &running_signals.cancel,
         )
-        .await;
+        .await
+        .unwrap();
         task
     });
     let reached = tokio::time::timeout(Duration::from_secs(10), async {
@@ -205,7 +206,9 @@ async fn an_idle_amendment_that_meets_a_new_loop_is_queued_without_overwriting_i
         Some("new-active-session")
     );
     assert!(signals.pending_amend.lock().unwrap().is_some());
-    apply_pending_amendment(&app, &mut saved, &signals.pending_amend, &signals.cancel).await;
+    apply_pending_amendment(&app, &mut saved, &signals.pending_amend, &signals.cancel)
+        .await
+        .unwrap();
     let saved = app.store.load_task(&id).unwrap().unwrap();
     assert_eq!(saved.criteria, ["accepted idle owner contract"]);
     assert_eq!(saved.verify, ["accepted-owner-command"]);

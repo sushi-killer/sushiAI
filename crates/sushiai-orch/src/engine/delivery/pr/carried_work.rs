@@ -1,10 +1,12 @@
 use crate::delivery::pr::checkout::TempWorktree;
+use crate::engine::graph::carry::{CarryFailure, CarryTree};
 use crate::engine::graph::landing::Landing;
 use crate::engine::state::App;
 use crate::engine::verification::scoping::split_deferred;
 use crate::harness::cancel::CancelToken;
 use crate::task::attempt::FailureKind;
 use crate::task::state::Task;
+use crate::task::VerifyOutcome;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +22,7 @@ pub(super) struct CarriedWork {
     pub(super) committed: Result<String, String>,
     pub(super) conflicted: bool,
     pub(super) contained: bool,
+    pub(super) failed_check: Option<VerifyOutcome>,
 }
 pub(super) async fn carry_work(
     app: &Arc<App>,
@@ -34,23 +37,24 @@ pub(super) async fn carry_work(
     };
     let mut work = task.clone();
     let before = work.decisions.len();
-    let outcome = crate::engine::graph::carry::CarryRun::new(
-        app,
-        &mut work,
-        None,
-        run_dir,
-        &CancelToken::new(),
-    )
-    .in_worktree(&temp.path)
-    .onto(upstream, "Another task", &finals)
-    .await;
+    let cancel = CancelToken::new();
+    let tree = CarryTree::new(&temp.path, run_dir, None, &cancel);
+    let mut outcome = tree.onto(app, &mut work, upstream, &finals).await;
+    // An already-carried branch can owe a new check after an Owner revokes a waiver.
+    if matches!(outcome, Ok(false)) && task.base_sha == work.base_sha {
+        outcome = tree.check_carried(app, &mut work, upstream, &finals).await;
+    }
     let conflicted = matches!(
         &outcome,
-        Err(Landing::Failed {
+        Err(CarryFailure::Delivery(Landing::Failed {
             kind: FailureKind::Conflict,
             ..
-        })
+        }))
     );
+    let failed_check = match &outcome {
+        Err(CarryFailure::Check(failed)) => Some((**failed).clone()),
+        _ => None,
+    };
     let contained = matches!(outcome, Ok(true));
     let committed = match outcome {
         Ok(false) => {
@@ -69,7 +73,11 @@ pub(super) async fn carry_work(
             .map_err(|e| format!("could not commit the carried work: {e}"))
         }
         Ok(true) => Err(format!("{upstream} already contains this work")),
-        Err(Landing::Failed { detail, .. }) => Err(detail),
+        Err(CarryFailure::Check(ref failed)) => Err(format!(
+            "post-carry check {} failed: {}",
+            failed.command, failed.tail
+        )),
+        Err(CarryFailure::Delivery(Landing::Failed { detail, .. })) => Err(detail),
         Err(_) => Err("the carry was interrupted".to_string()),
     };
     Ok(CarriedWork {
@@ -78,5 +86,6 @@ pub(super) async fn carry_work(
         committed,
         conflicted,
         contained,
+        failed_check,
     })
 }

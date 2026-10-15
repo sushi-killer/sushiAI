@@ -816,6 +816,7 @@ const QUESTION_STAGE: Record<QuestionKind, Stage> = {
   plan_question: "brief",
   attempts_failing: "verify",
   preexisting_failure: "verify",
+  pr_check: "verify",
   review_no_verdict: "review",
   review_dispute: "review",
   dependency_ended: "implement",

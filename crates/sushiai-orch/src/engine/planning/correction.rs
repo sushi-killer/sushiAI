@@ -1,11 +1,12 @@
 use crate::clock::now_ms;
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
 use crate::engine::decision::record_failure;
+use crate::engine::planning::draft::PlanDraft;
 use crate::engine::planning::publication::{publish, PlanProposal, Publication};
 use crate::engine::planning::records::write_planner_run_files;
-use crate::engine::review::review_request;
+use crate::engine::review::native::review_request;
 use crate::engine::run_control::TaskSignals;
 use crate::engine::state::App;
 use crate::harness;
@@ -14,6 +15,7 @@ use crate::harness::guard::Guard;
 use crate::harness::native::error::RunError;
 use crate::policy::routing::Harness;
 use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
 use crate::task::checks::snapshot::CheckSnapshot;
 use crate::task::FailureKind;
 use crate::task::Stage;
@@ -32,123 +34,189 @@ pub(in crate::engine) enum Uncorrected {
     Ended,
 }
 
-/// A brief-check contradiction in plan attempt `idx`'s draft: resumes that
-/// attempt's planner session with a short correction turn and stores the
-/// corrected draft. No session, a failed run or an unparseable reply is
-/// `Fresh`; a timed-out planner fails the task.
-pub(in crate::engine) async fn correct_draft(
-    app: &Arc<App>,
-    task_id: &str,
-    idx: usize,
-    route: &Route,
-    conflict: &str,
-    signals: &TaskSignals,
-) -> Result<crate::engine::planning::draft::PlanDraft, Uncorrected> {
-    let cancel = &signals.cancel;
-    let fresh = |why: &str| Uncorrected::Fresh(why.to_string());
-    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
-        return Err(fresh("the task could not be read"));
-    };
-    let Some(session) = task.attempts.get(idx).and_then(|a| a.session_id.clone()) else {
-        return Err(fresh("the planner attempt has no session id"));
-    };
-    if task.cost_budget().is_some_and(|b| task.cost_usd >= b) {
-        return Err(fresh("the cost budget is reached"));
-    }
-    let settings = app.settings.read().unwrap().clone();
-    let attempt_n = task.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
-    let at =
-        crate::task::attempts::start(&mut task, Stage::Plan, route, "brief correction", now_ms());
-    app.save_task_logged(&task);
-    app.broadcast_task(&task);
+/// One admitted continuation of the planner session that wrote a contradictory draft.
+pub(in crate::engine) struct PlannerCorrection<'a> {
+    task: Task,
+    index: usize,
+    route: &'a Route,
+    session: String,
+    based_on: CheckSnapshot,
+    limit: std::time::Duration,
+}
 
-    let worktree = PathBuf::from(&task.worktree);
-    let run_dir = app.store.run_dir(task_id, attempt_n).join("plan");
-    let _ = std::fs::create_dir_all(&run_dir);
-    let (mcp_path, settings_path, key_path) =
-        write_planner_run_files(app, route, &settings, &run_dir);
-    let req = harness::RunRequest {
-        resume: Some(&session),
-        ..review_request(route, &worktree, &mcp_path, &settings_path, &[])
-    };
-    let brief_text = crate::engine::planning::prompt::build_plan_correction_brief(
-        conflict,
-        &task.variant(),
-        task.parent.is_none(),
-    );
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
-    let limit = app.planner_timeout();
-    let based_on = CheckSnapshot::capture(&task);
-    let result = run_harness(
-        app,
-        task_id,
-        attempt_n,
-        RunTrack::Attempt,
-        &worktree,
-        &req,
-        CostTag::task("plan", &route.id),
-        &brief_text,
-        &run_dir.join("events.jsonl"),
-        cancel,
-        Guard::helper("planner", limit),
-    )
-    .await;
-    let _ = std::fs::remove_file(&key_path);
-    if let Ok(Some(reloaded)) = app.store.load_task(task_id) {
-        task = reloaded;
-    }
-    let o = match result {
-        Ok(o) => o,
-        Err(RunError::Cancelled) => return Err(Uncorrected::Cancelled(at)),
-        Err(RunError::Io(msg) | RunError::NotFound(msg)) => {
-            if cancel.is_cancelled() || task.status != crate::task::TaskStatus::Drafting {
-                return Err(Uncorrected::Cancelled(at));
-            }
-            return correction_failed(
-                app,
-                &mut task,
-                at,
-                FailureKind::Error,
-                format!("the resumed run could not start: {msg}"),
-            );
-        }
-    };
-    let observation = correction_observation(route.harness, &o, &settings.prices);
-    task = app
-        .update_task(task_id, |task| {
-            crate::task::attempts::record_plan_run(task, at, observation);
-        })
-        .map_err(|_| Uncorrected::Ended)?;
-    if cancel.is_cancelled() || task.status != crate::task::TaskStatus::Drafting {
-        return Err(Uncorrected::Cancelled(at));
-    }
-    if o.timed_out {
-        return Err(settle_correction_timeout(
-            app,
-            &mut task,
-            at,
-            o.error.clone(),
-            limit,
-        ));
-    }
-    let draft = match correction_reply(o) {
-        Ok(draft) => draft,
-        Err((kind, why)) => return correction_failed(app, &mut task, at, kind, why),
-    };
-    let proposal = PlanProposal {
-        based_on,
-        draft,
-        attempt: at,
-    };
-    match publish(app, &mut task, proposal, &settings, signals).await {
-        Ok(Publication::Installed(draft)) => Ok(*draft),
-        Ok(Publication::Retry) => Err(Uncorrected::Superseded),
-        Ok(Publication::Ended)
-            if task.attempts[at].status == crate::task::AttemptStatus::Running =>
+impl<'a> PlannerCorrection<'a> {
+    pub(in crate::engine) fn resume(
+        app: &Arc<App>,
+        task_id: &str,
+        source: usize,
+        route: &'a Route,
+    ) -> Result<Self, Uncorrected> {
+        let fresh = |why: &str| Uncorrected::Fresh(why.to_string());
+        let lock = app.task_lock(task_id);
+        let guard = lock.lock().unwrap();
+        let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+            return Err(fresh("the task could not be read"));
+        };
+        if task.status != crate::task::TaskStatus::Drafting
+            || task.archived
+            || task.queue.park.is_some()
         {
-            Err(Uncorrected::Cancelled(at))
+            return Err(Uncorrected::Ended);
         }
-        Ok(Publication::Ended) | Err(_) => Err(Uncorrected::Ended),
+        if task.pending_amendment.is_some() || task.question.is_some() {
+            return Err(Uncorrected::Superseded);
+        }
+        let Some(session) = task.attempts.get(source).and_then(|a| a.session_id.clone()) else {
+            return Err(fresh("the planner attempt has no session id"));
+        };
+        if task
+            .cost_budget()
+            .is_some_and(|budget| task.cost_usd >= budget)
+        {
+            return Err(fresh("the cost budget is reached"));
+        }
+        let index = crate::task::attempts::start(
+            &mut task,
+            Stage::Plan,
+            route,
+            "brief correction",
+            now_ms(),
+        );
+        app.store.save_task(&task).map_err(|_| Uncorrected::Ended)?;
+        drop(guard);
+        app.broadcast_task(&task);
+        Ok(Self {
+            based_on: CheckSnapshot::capture(&task),
+            task,
+            index,
+            route,
+            session,
+            limit: app.planner_timeout(),
+        })
+    }
+
+    pub(in crate::engine) async fn run(
+        mut self,
+        app: &Arc<App>,
+        conflict: &str,
+        signals: &TaskSignals,
+    ) -> Result<PlanDraft, Uncorrected> {
+        let settings = app.settings.read().unwrap().clone();
+        let result = self.launch(app, &settings, conflict, &signals.cancel).await;
+        self.accept(app, &settings, result, signals).await
+    }
+
+    async fn launch(
+        &self,
+        app: &Arc<App>,
+        settings: &Settings,
+        conflict: &str,
+        cancel: &crate::harness::cancel::CancelToken,
+    ) -> Result<harness::RunOutcome, RunError> {
+        let worktree = PathBuf::from(&self.task.worktree);
+        let attempt_n = self.task.attempts[self.index].n;
+        let run_dir = app.store.run_dir(&self.task.id, attempt_n).join("plan");
+        let _ = std::fs::create_dir_all(&run_dir);
+        let (mcp_path, settings_path, key_path) =
+            write_planner_run_files(app, self.route, settings, &run_dir);
+        let request = harness::RunRequest {
+            resume: Some(&self.session),
+            ..review_request(self.route, &worktree, &mcp_path, &settings_path, &[])
+        };
+        let brief = crate::engine::planning::prompt::build_plan_correction_brief(
+            conflict,
+            &self.task.variant(),
+            self.task.parent.is_none(),
+        );
+        let _ = std::fs::write(run_dir.join("brief.md"), &brief);
+        let result = run_harness(
+            app,
+            RunIdentity {
+                id: &self.task.id,
+                attempt_n,
+                track: RunTrack::Attempt,
+                tag: CostTag::task("plan", &self.route.id),
+            },
+            RunInvocation {
+                request: &request,
+                brief: &brief,
+                events: &run_dir.join("events.jsonl"),
+                schema: None,
+            },
+            cancel,
+            Guard::helper("planner", self.limit),
+        )
+        .await;
+        let _ = std::fs::remove_file(&key_path);
+        result
+    }
+
+    async fn accept(
+        &mut self,
+        app: &Arc<App>,
+        settings: &Settings,
+        result: Result<harness::RunOutcome, RunError>,
+        signals: &TaskSignals,
+    ) -> Result<PlanDraft, Uncorrected> {
+        let cancel = &signals.cancel;
+        if let Ok(Some(reloaded)) = app.store.load_task(&self.task.id) {
+            self.task = reloaded;
+        }
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(RunError::Cancelled) => return Err(Uncorrected::Cancelled(self.index)),
+            Err(RunError::Io(message) | RunError::NotFound(message)) => {
+                if cancel.is_cancelled() || self.task.status != crate::task::TaskStatus::Drafting {
+                    return Err(Uncorrected::Cancelled(self.index));
+                }
+                return correction_failed(
+                    app,
+                    &mut self.task,
+                    self.index,
+                    FailureKind::Error,
+                    format!("the resumed run could not start: {message}"),
+                );
+            }
+        };
+        let observation = correction_observation(self.route.harness, &outcome, &settings.prices);
+        self.task = app
+            .update_task(&self.task.id, |task| {
+                crate::task::attempts::record_plan_run(task, self.index, observation);
+            })
+            .map_err(|_| Uncorrected::Ended)?;
+        if cancel.is_cancelled() || self.task.status != crate::task::TaskStatus::Drafting {
+            return Err(Uncorrected::Cancelled(self.index));
+        }
+        if outcome.timed_out {
+            return Err(settle_correction_timeout(
+                app,
+                &mut self.task,
+                self.index,
+                outcome.error.clone(),
+                self.limit,
+            ));
+        }
+        let draft = match correction_reply(outcome) {
+            Ok(draft) => draft,
+            Err((kind, why)) => {
+                return correction_failed(app, &mut self.task, self.index, kind, why)
+            }
+        };
+        let proposal = PlanProposal {
+            based_on: self.based_on.clone(),
+            draft,
+            attempt: self.index,
+        };
+        match publish(app, &mut self.task, proposal, settings, signals).await {
+            Ok(Publication::Installed(draft)) => Ok(*draft),
+            Ok(Publication::Retry) => Err(Uncorrected::Superseded),
+            Ok(Publication::Ended)
+                if self.task.attempts[self.index].status == crate::task::AttemptStatus::Running =>
+            {
+                Err(Uncorrected::Cancelled(self.index))
+            }
+            Ok(Publication::Ended) | Err(_) => Err(Uncorrected::Ended),
+        }
     }
 }
 
@@ -217,3 +285,6 @@ fn correction_observation(
         usage: None,
     }
 }
+
+#[cfg(test)]
+mod tests;

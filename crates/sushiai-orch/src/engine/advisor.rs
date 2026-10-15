@@ -1,14 +1,13 @@
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
 use crate::engine::cost::replay_run_cost;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::review::native::{review_request, write_readonly_claude_settings_with_profile};
 use crate::engine::state::App;
 #[cfg(test)]
 use crate::engine::test_support::assert_helper_timeout;
 #[cfg(test)]
 use crate::engine::test_support::slow_helper_task;
-use crate::harness;
 use crate::harness::cancel::CancelToken;
 use crate::harness::guard::helper_timeout_message;
 use crate::harness::guard::Guard;
@@ -22,13 +21,60 @@ use crate::task::AttemptStatus;
 use crate::task::FailureKind;
 use crate::task::Stage;
 use crate::task::Task;
-use std::path::Path;
-#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Longest advice kept, in characters.
 const MAX_ADVICE_CHARS: usize = 1500;
+
+/// Why a failed implementation needs advice before its next attempt.
+pub(in crate::engine) enum AdviceTrigger<'a> {
+    Retry(&'a Route),
+    RepeatedFinding,
+}
+
+struct AdviceTarget<'a> {
+    failed: usize,
+    attempt_n: u32,
+    failure_detail: String,
+    route: &'a Route,
+}
+
+impl<'a> AdviceTarget<'a> {
+    fn select(task: &Task, settings: &'a Settings, trigger: AdviceTrigger<'_>) -> Option<Self> {
+        let failed = task
+            .attempts
+            .iter()
+            .rposition(|a| a.stage == Stage::Implement)?;
+        let attempt = &task.attempts[failed];
+        let failure = attempt.failure.as_ref()?;
+        if attempt.status != AttemptStatus::Failed
+            || failure.kind == FailureKind::Blocked
+            || attempt.advice.is_some()
+            || attempt.advisor_cost_usd.is_some()
+        {
+            return None;
+        }
+        let variant = task.variant();
+        let planner = variant.plan_route_id(settings);
+        let advisor = settings.routes.iter().find(|r| r.id == planner)?;
+        if let AdviceTrigger::Retry(next_route) = trigger {
+            if advisor.id == next_route.id
+                || (advisor.harness == next_route.harness
+                    && advisor.model.is_some()
+                    && advisor.model == next_route.model)
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            failed,
+            attempt_n: attempt.n,
+            failure_detail: failure.detail.clone(),
+            route: advisor,
+        })
+    }
+}
 
 /// One read-only call on the task's planner route about the implement attempt
 /// that just failed, made before the next attempt starts. The answer is
@@ -37,59 +83,29 @@ const MAX_ADVICE_CHARS: usize = 1500;
 /// A failed attempt is advised at most once: a run that was stopped or gave
 /// no answer is not paid for again. Never fails the task: no route, an
 /// escalation to the advisor's own model, a failed or stopped run or an
-/// empty answer all just mean no advice. `force` skips the check that the
-/// advisor is not the model about to implement: a repeated review finding
-/// gets a fresh diagnosis even when the tier went up to the planner's route.
-#[allow(clippy::too_many_arguments)]
+/// empty answer all just mean no advice. `RepeatedFinding` allows a fresh diagnosis even
+/// when the next attempt uses the planner's route.
 pub(super) async fn run_advisor_before_retry(
     app: &Arc<App>,
     task: &mut Task,
     settings: &Settings,
-    next_route: &Route,
-    worktree: &Path,
-    base_sha: &str,
-    force: bool,
+    trigger: AdviceTrigger<'_>,
     cancel: &CancelToken,
 ) -> Option<f64> {
-    let failed = task
-        .attempts
-        .iter()
-        .rposition(|a| a.stage == Stage::Implement)?;
-    let attempt = &task.attempts[failed];
-    let failure = attempt.failure.as_ref()?;
-    if attempt.status != AttemptStatus::Failed
-        || failure.kind == FailureKind::Blocked
-        || attempt.advice.is_some()
-        || attempt.advisor_cost_usd.is_some()
-    {
-        return None;
-    }
-    let variant = task.variant();
-    let planner = variant.plan_route_id(settings);
-    let advisor = settings.routes.iter().find(|r| r.id == planner)?;
-    if !force
-        && (advisor.id == next_route.id
-            || (advisor.harness == next_route.harness
-                && advisor.model.is_some()
-                && advisor.model == next_route.model))
-    {
-        return None;
-    }
-    let attempt_n = attempt.n;
-    let failure_detail = failure.detail.clone();
-
-    let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
+    let target = AdviceTarget::select(task, settings, trigger)?;
+    let worktree = PathBuf::from(&task.worktree);
+    let (wt, base) = (worktree.clone(), task.base_sha.clone());
     let diff = tokio::task::spawn_blocking(move || {
         crate::git::changes::diff_full(&wt, &base, 20_000).unwrap_or_default()
     })
     .await
     .unwrap_or_default();
     let brief_text =
-        crate::engine::attempts::advisor::build_advisor_brief(task, &diff, &failure_detail);
+        crate::engine::attempts::advisor::build_advisor_brief(task, &diff, &target.failure_detail);
 
     let run_dir = app
         .store
-        .claim_helper_run_dir(&task.id, "advisor", Some(attempt_n))
+        .claim_helper_run_dir(&task.id, "advisor", Some(target.attempt_n))
         .ok()?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
@@ -98,44 +114,31 @@ pub(super) async fn run_advisor_before_retry(
     let settings_path = run_dir.join("settings.json");
     let key_path = run_dir.join("key");
     let deny_read = vec![app.data_dir.to_string_lossy().to_string()];
-    if matches!(advisor.harness, Harness::Claude) {
+    if matches!(target.route.harness, Harness::Claude) {
         write_readonly_claude_settings_with_profile(
-            advisor,
+            target.route,
             app,
-            &key_path,
             settings,
             &deny_read,
             &settings_path,
         );
     }
-    let req = harness::RunRequest {
-        harness: advisor.harness,
-        worktree,
-        model: advisor.model.as_deref(),
-        effort: advisor.effort.as_deref(),
-        max_budget_usd: None,
-        review: true,
-        task_run: false,
-        task_sandbox: None,
-        mcp_config: Some(&mcp_path),
-        settings_path: Some(&settings_path),
-        network_allowed: false,
-        codex_mcp: &[],
-        images: &[],
-        repo_settings: true,
-        resume: None,
-    };
+    let req = review_request(target.route, &worktree, &mcp_path, &settings_path, &[]);
     let limit = app.helper_timeout();
     let result = run_harness(
         app,
-        &task.id,
-        attempt_n,
-        RunTrack::No,
-        worktree,
-        &req,
-        CostTag::task("advisor", &advisor.id),
-        &brief_text,
-        &events_path,
+        RunIdentity {
+            id: &task.id,
+            attempt_n: target.attempt_n,
+            track: RunTrack::No,
+            tag: CostTag::task("advisor", &target.route.id),
+        },
+        RunInvocation {
+            request: &req,
+            brief: &brief_text,
+            events: &events_path,
+            schema: None,
+        },
         cancel,
         Guard::helper("advisor", limit),
     )
@@ -151,7 +154,7 @@ pub(super) async fn run_advisor_before_retry(
                 .unwrap_or(0.0);
             crate::task::attempts::record_advisor(
                 task,
-                failed,
+                target.failed,
                 cost,
                 read_cancelled_fingerprint(&events_path),
             );
@@ -163,13 +166,13 @@ pub(super) async fn run_advisor_before_retry(
         task.record_decision(helper_timeout_message("advisor", limit));
     }
     let cost = outcome.cost_usd.unwrap_or(0.0);
-    crate::task::attempts::record_advisor(task, failed, cost, outcome.fingerprint.clone());
+    crate::task::attempts::record_advisor(task, target.failed, cost, outcome.fingerprint.clone());
     let text = outcome.final_text.unwrap_or_default();
     let advice = text.trim();
     if outcome.error.is_none() && !advice.is_empty() {
         crate::task::attempts::record_advice(
             task,
-            failed,
+            target.failed,
             truncate_chars(advice, MAX_ADVICE_CHARS),
         );
     }
@@ -182,20 +185,26 @@ mod timeout_tests {
 
     #[tokio::test]
     async fn advisor_timed_out_gives_no_advice_and_is_not_retried() {
-        let (app, _dir, mut task, route) = slow_helper_task();
+        let (app, _dir, mut task, _route) = slow_helper_task();
         let settings = app.settings.read().unwrap().clone();
-        let worktree = PathBuf::from(&task.worktree);
-        let base = task.base_sha.clone();
         let cancel = CancelToken::new();
         let cost = run_advisor_before_retry(
-            &app, &mut task, &settings, &route, &worktree, &base, true, &cancel,
+            &app,
+            &mut task,
+            &settings,
+            AdviceTrigger::RepeatedFinding,
+            &cancel,
         )
         .await;
         assert!(cost.is_some());
         assert!(task.attempts[0].advice.is_none());
         assert!(task.attempts[0].advisor_cost_usd.is_some());
         assert!(run_advisor_before_retry(
-            &app, &mut task, &settings, &route, &worktree, &base, true, &cancel
+            &app,
+            &mut task,
+            &settings,
+            AdviceTrigger::RepeatedFinding,
+            &cancel
         )
         .await
         .is_none());

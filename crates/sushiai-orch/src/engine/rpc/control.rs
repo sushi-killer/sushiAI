@@ -35,6 +35,18 @@ impl App {
             .unwrap()
             .get(&p.id)
             .is_some_and(|c| !c.signals.cancel.is_cancelled());
+        self.update_task_checked(&p.id, |task| {
+            if task.archived {
+                return Err("task is archived; unarchive it first".to_string());
+            }
+            task.clear_limit_pause();
+            Ok(())
+        })?;
+        if already_running {
+            if let Some(control) = self.controls.lock().unwrap().get(&p.id) {
+                control.signals.resume.notify_one();
+            }
+        }
         if !already_running {
             let task = self
                 .store
@@ -118,7 +130,7 @@ impl App {
             );
         };
         let all = self.repo_tasks(&task.repo);
-        let redirect = match crate::engine::land::resolve_landing_branch(&branch, &all) {
+        let redirect = match crate::task::graph::landing::resolve_landing_branch(&branch, &all) {
             Ok(redirect) => redirect,
             Err(reason) => {
                 self.update_task(&p.id, |task| {
@@ -268,7 +280,7 @@ impl App {
     async fn checked_landing_branch(
         &self,
         task: &crate::task::Task,
-        redirect: crate::engine::land::LandingRedirect,
+        redirect: crate::task::graph::landing::LandingRedirect,
     ) -> Result<String, String> {
         let branch = redirect.branch.clone();
         let (land_on_default, repo) = (

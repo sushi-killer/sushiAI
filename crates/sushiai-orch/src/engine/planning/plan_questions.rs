@@ -153,7 +153,15 @@ impl PlannerRound {
             if !overseer {
                 continue;
             }
-            record_policy_answer(task, &asked_q, &answer, "policy", &q.evidence, attempt_n);
+            record_policy_answer(
+                task,
+                &asked_q,
+                &crate::engine::answer_policy::AutomaticAnswer::Policy {
+                    text: answer.to_string(),
+                    evidence: q.evidence.to_string(),
+                },
+                attempt_n,
+            );
             app.broadcast_log(
                 task_id,
                 attempt_n,

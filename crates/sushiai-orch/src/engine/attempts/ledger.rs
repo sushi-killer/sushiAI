@@ -1,7 +1,8 @@
 use crate::clock::now_ms;
+use crate::engine::attempts::pricing::ProviderRun;
+use crate::engine::attempts::run::RunIdentity;
 use crate::engine::state::App;
 use crate::harness;
-use crate::policy::routing::Harness;
 
 /// What a run is for, so its cost record names the stage. `repo` is set for
 /// a run that is no task's (audit, evolution proposal, chat): its `task_id`
@@ -16,18 +17,22 @@ pub(crate) struct CostTag {
 /// Appends the run's cost record. A resumed Claude session's own total
 /// covers its earlier runs too, so its record is priced from this run's
 /// streamed messages when it has any.
-pub(crate) fn record_run(
+pub(in crate::engine) fn record_run(
     app: &App,
-    task_id: &str,
-    attempt_n: u32,
-    tag: &CostTag,
-    run: (Harness, Option<&str>, bool),
+    identity: &RunIdentity<'_>,
+    provider: ProviderRun<'_>,
     outcome: &harness::RunOutcome,
     started_at: i64,
 ) {
-    let (harness, req_model, resumed) = run;
+    let RunIdentity {
+        id: task_id,
+        attempt_n,
+        tag,
+        ..
+    } = identity;
+    let harness = provider.harness;
     let (mut cost, mut estimated) = (outcome.cost_usd.unwrap_or(0.0), outcome.cost_estimated);
-    if harness == Harness::Claude && resumed {
+    if provider.claude_resume().is_some() {
         if let Some(own) = outcome.streamed_cost(&app.settings.read().unwrap().prices) {
             cost = own;
             estimated = true;
@@ -46,7 +51,7 @@ pub(crate) fn record_run(
         .fingerprint
         .as_ref()
         .and_then(|f| f.models.first().cloned())
-        .or_else(|| req_model.map(str::to_string))
+        .or_else(|| provider.model.map(str::to_string))
         .unwrap_or_else(|| "unknown".into());
     let ended = now_ms();
     crate::store::costs::append(
@@ -57,7 +62,7 @@ pub(crate) fn record_run(
             task_id: is_task.then(|| task_id.to_string()),
             run_id: (!is_task && !task_id.is_empty()).then(|| task_id.to_string()),
             stage: tag.stage.to_string(),
-            attempt: (is_task && tag.has_attempt).then_some(attempt_n),
+            attempt: (is_task && tag.has_attempt).then_some(*attempt_n),
             route_id: tag.route_id.clone(),
             harness,
             model,

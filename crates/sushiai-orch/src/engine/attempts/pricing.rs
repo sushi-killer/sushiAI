@@ -4,8 +4,32 @@ use crate::harness::guard::Guard;
 use crate::harness::guard::Trip;
 use crate::policy::pricing::Price;
 use crate::policy::routing::Harness;
-use crate::task::Attempt;
-use crate::task::Stage;
+use crate::task::attempt::Attempt;
+use crate::task::attempt::Stage;
+
+/// The provider and session whose usage a native run reports.
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderRun<'a> {
+    pub(crate) harness: Harness,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) resume: Option<&'a str>,
+}
+
+impl<'a> ProviderRun<'a> {
+    pub(super) fn claude_resume(self) -> Option<&'a str> {
+        self.resume.filter(|_| self.harness == Harness::Claude)
+    }
+}
+
+impl<'a> From<&harness::RunRequest<'a>> for ProviderRun<'a> {
+    fn from(request: &harness::RunRequest<'a>) -> Self {
+        Self {
+            harness: request.harness,
+            model: request.model,
+            resume: request.resume,
+        }
+    }
+}
 
 /// Prices a run the harness reported no cost for: Codex from its token
 /// usage, Claude from its streamed messages (marked estimated).
@@ -34,11 +58,10 @@ pub(crate) fn price_resumed_attempt(
     app: &App,
     task_id: &str,
     attempt_n: u32,
-    harness: Harness,
-    resume: Option<&str>,
+    provider: ProviderRun<'_>,
     outcome: &mut harness::RunOutcome,
 ) {
-    let Some(session) = resume.filter(|_| harness == Harness::Claude) else {
+    let Some(session) = provider.claude_resume() else {
         return;
     };
     let task = app.store.load_task(task_id).ok().flatten();

@@ -1,16 +1,16 @@
 use crate::api::validation::validate_task_id;
 use crate::clock::now_ms;
-use crate::engine::answer_policy::check_authority;
-use crate::engine::answer_policy::shared_check_amend_refusal;
+use crate::engine::answer_policy::authority::check_authority;
+use crate::engine::answer_policy::authority::shared_check_amend_refusal;
 use crate::engine::decision::implement_attempt_count;
 use crate::engine::graph::dependencies::DEPENDENCY_QUESTION;
 use crate::engine::state::App;
 use crate::engine::verification::base::checks::baseline_on_base;
 use crate::harness::cancel::CancelToken;
 use crate::task::amendment::Amendment;
-use crate::task::amendment::PendingAmendment;
 use crate::task::checks::authority::Origin;
 use crate::task::TaskStatus;
+use crate::verify::command_gate::{gate_checks, gate_cwd, gate_held_out};
 use serde_json::json;
 
 impl App {
@@ -33,6 +33,23 @@ impl App {
         crate::task::amendment::ensure_amendable(&task)?;
         self.resolve_amend_dependencies(&task, &mut amendment)?;
         amendment.validate_indices(&task)?;
+        let mut refused = Vec::new();
+        let gate = gate_cwd(&task);
+        if let Some(checks) = amendment.checks.take() {
+            amendment.checks = Some(gate_checks(&gate, checks, &mut refused));
+        }
+        if let Some(held) = amendment.held_out.take() {
+            amendment.held_out = Some(gate_held_out(&gate, held, &mut refused));
+        }
+        if !refused.is_empty() {
+            task = self.update_task(&id, |fresh| {
+                for line in &refused {
+                    if !fresh.decisions.contains(line) {
+                        fresh.record_decision(line.clone());
+                    }
+                }
+            })?;
+        }
         let fields = amendment.fields();
         let dependencies_amended = amendment.depends_on.is_some();
         if amendment.verify.is_some() {
@@ -59,15 +76,11 @@ impl App {
         amendment: &Amendment,
         origin: Origin,
     ) -> Result<(), String> {
-        let id = task.id.clone();
         if origin == Origin::Other {
             let mut effective = task.clone();
-            if let Some(ctrl) = self.controls.lock().unwrap().get(&id) {
-                if let Some(pending) = ctrl.signals.pending_amend.lock().unwrap().as_ref() {
-                    let settings = self.settings.read().unwrap().clone();
-                    effective =
-                        pending.preview(task, &check_authority(&settings, task), now_ms())?;
-                }
+            if let Some(pending) = &task.pending_amendment {
+                let settings = self.settings.read().unwrap().clone();
+                effective = pending.preview(task, &check_authority(&settings, task), now_ms())?;
             }
             let settings = self.settings.read().unwrap();
             if let Some(why) = shared_check_amend_refusal(&settings, &effective, amendment) {
@@ -131,7 +144,7 @@ impl App {
     }
     fn queue_live_amendment_locked(
         &self,
-        task: &crate::task::Task,
+        task: &mut crate::task::Task,
         amendment: &Amendment,
         origin: Origin,
     ) -> Result<bool, String> {
@@ -146,22 +159,17 @@ impl App {
             .filter(|c| !c.signals.cancel.is_cancelled())
         {
             let mut slot = ctrl.signals.pending_amend.lock().unwrap();
-            let effective = match slot.as_ref() {
-                Some(pending) => {
-                    pending.preview(task, &check_authority(&settings, task), now_ms())?
-                }
-                None => task.clone(),
-            };
-            amendment.validate_indices(&effective)?;
-            if origin == Origin::Other {
-                if let Some(why) = shared_check_amend_refusal(&settings, &effective, amendment) {
-                    return Err(why);
-                }
-            }
-            match slot.as_mut() {
-                Some(pending) => pending.merge(amendment.clone(), origin),
-                None => *slot = Some(PendingAmendment::capture(task, amendment.clone(), origin)),
-            }
+            let expected = task.pending_amendment.clone();
+            task.queue_pending_amendment(
+                amendment.clone(),
+                origin,
+                &check_authority(&settings, task),
+                now_ms(),
+            )?;
+            self.store
+                .save_task_with_pending(task, expected.as_ref())
+                .map_err(|error| error.to_string())?;
+            *slot = task.pending_amendment.clone();
             return Ok(true);
         }
 
@@ -182,7 +190,9 @@ impl App {
         amendment
             .clone()
             .apply_authorized(&mut task, origin, &authority, now_ms())?;
-        baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
+        if task.status != TaskStatus::Waiting {
+            baseline_on_base(&self.arc(), &mut task, &CancelToken::new()).await;
+        }
         let mut pending = false;
         let updated = self.update_task_checked(&id, |fresh| {
             crate::task::amendment::ensure_amendable(fresh)?;

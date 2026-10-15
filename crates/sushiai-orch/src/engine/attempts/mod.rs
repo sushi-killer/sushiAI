@@ -9,6 +9,7 @@ pub mod resume;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+mod active;
 pub(super) mod cache;
 pub(super) mod configure;
 pub(super) mod ledger;

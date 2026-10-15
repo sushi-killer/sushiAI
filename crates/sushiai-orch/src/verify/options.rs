@@ -1,4 +1,4 @@
-use crate::harness::environment::augmented_path;
+use crate::verify::command_gate::command_refusal;
 use std::path::Path;
 
 /// Planners sometimes put a check only a person or the reviewer can do into
@@ -7,35 +7,10 @@ use std::path::Path;
 /// parse as shell, or whose program doesn't exist here, becomes a criterion
 /// for the reviewer instead. Returns `(runnable, for_review)`.
 pub(crate) fn split_verify_commands(cwd: &Path, commands: &[String]) -> (Vec<String>, Vec<String>) {
-    let runs = |args: &[&str]| {
-        std::process::Command::new("/bin/sh")
-            .args(args)
-            .current_dir(cwd)
-            .env("PATH", augmented_path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    };
-    commands.iter().cloned().partition(|cmd| {
-        if !runs(&["-n", "-c", cmd]) {
-            return false;
-        }
-        // Only a plain leading word is checked: a path may be created by
-        // the task itself, and grouping/quoting is left to `sh -n` above.
-        match cmd
-            .split_whitespace()
-            .find(|w| !w.contains('=') && !matches!(*w, "(" | "{" | "!"))
-        {
-            Some(p)
-                if p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) =>
-            {
-                runs(&["-c", "command -v \"$1\"", "sh", p])
-            }
-            _ => true,
-        }
-    })
+    commands
+        .iter()
+        .cloned()
+        .partition(|cmd| command_refusal(cwd, cmd).is_none())
 }
 
 /// The package runner the repo's lockfile names: pnpm, yarn, bun, else npm.

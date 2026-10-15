@@ -14,38 +14,46 @@ fn resume_eligibility_requires_a_retryable_session_on_the_same_route() {
     let mut previous = attempt_with_failure(1, "verify");
     previous.session_id = Some("sess-1".into());
     task.fixture_data().attempts.push(previous);
-    for kind in [FailureKind::Verify, FailureKind::TimeBudget] {
-        task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = kind;
-        assert!(resume_attempt(&task, &route, false, false).is_some());
-        assert!(resume_attempt(&task, &route, true, false).is_none());
-        assert!(resume_attempt(&task, &route, false, true).is_none());
+    for kind in [
+        FailureKind::Verify,
+        FailureKind::Conflict,
+        FailureKind::TimeBudget,
+    ] {
+        task.fixture_data().attempts[0]
+            .failure
+            .as_mut()
+            .unwrap()
+            .kind = kind;
+        assert!(resume_attempt(&task, &route, false).is_some());
+        assert!(resume_attempt(&task, &route, true).is_none());
         let mut changed = route.clone();
         changed.id = "other".into();
-        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        assert!(resume_attempt(&task, &changed, false).is_none());
         changed = route.clone();
         changed.harness = Harness::Codex;
-        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        assert!(resume_attempt(&task, &changed, false).is_none());
         changed = route.clone();
         changed.model = Some("opus".into());
-        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        assert!(resume_attempt(&task, &changed, false).is_none());
         for session in [None, Some(String::new())] {
             task.fixture_data().attempts[0].session_id = session;
-            assert!(resume_attempt(&task, &route, false, false).is_none());
+            assert!(resume_attempt(&task, &route, false).is_none());
         }
         task.fixture_data().attempts[0].session_id = Some("sess-1".into());
     }
-    for kind in [
-        FailureKind::Loop,
-        FailureKind::Conflict,
-        FailureKind::Review,
-    ] {
-        task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = kind;
-        assert!(
-            resume_attempt(&task, &route, false, false).is_none(),
-            "{kind:?}"
-        );
+    for kind in [FailureKind::Loop, FailureKind::Review] {
+        task.fixture_data().attempts[0]
+            .failure
+            .as_mut()
+            .unwrap()
+            .kind = kind;
+        assert!(resume_attempt(&task, &route, false).is_none(), "{kind:?}");
     }
-    task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = FailureKind::Review;
+    task.fixture_data().attempts[0]
+        .failure
+        .as_mut()
+        .unwrap()
+        .kind = FailureKind::Review;
     task.fixture_data().attempts[0].review = Some(ReviewResult {
         verdict: Verdict::Fail,
         findings: vec!["[P1] wrong".into()],
@@ -55,7 +63,7 @@ fn resume_eligibility_requires_a_retryable_session_on_the_same_route() {
         criteria: vec![],
     });
     assert!(last_review_repeated(&task));
-    assert!(resume_attempt(&task, &route, false, false).is_none());
+    assert!(resume_attempt(&task, &route, false).is_none());
 }
 
 #[test]
@@ -155,7 +163,9 @@ fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
     assert_eq!(task.tier, Tier::Standard);
     assert_eq!(task.tier_fallback.as_deref(), Some("no planner tier"));
     // The same failure again moves the task up a tier: the note goes.
-    task.fixture_data().attempts.push(attempt_with_failure(2, "sig-a"));
+    task.fixture_data()
+        .attempts
+        .push(attempt_with_failure(2, "sig-a"));
     assert!(advance_after_failure(&mut task, 4));
     assert_eq!(task.tier, Tier::Hard);
     assert_eq!(task.tier_fallback, None);
@@ -453,7 +463,9 @@ fn varying_id_errors_stop_at_twice_the_attempt_budget() {
         .map(|n| error_attempt(n, AttemptStatus::Failed))
         .collect();
     assert!(advance_after_failure(&mut task, 4));
-    task.fixture_data().attempts.push(error_attempt(8, AttemptStatus::Failed));
+    task.fixture_data()
+        .attempts
+        .push(error_attempt(8, AttemptStatus::Failed));
     assert!(!advance_after_failure(&mut task, 4));
 }
 

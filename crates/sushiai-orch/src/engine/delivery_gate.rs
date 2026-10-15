@@ -1,7 +1,7 @@
 use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
-use crate::task::checks::snapshot::CheckSnapshot;
+use crate::task::checks::admission::CheckAdmission;
 use crate::task::Task;
 
 pub(in crate::engine) enum DeliveryGate {
@@ -16,7 +16,7 @@ pub(in crate::engine) fn begin_delivery(
     app: &App,
     task: &mut Task,
     cancel: &CancelToken,
-    expected: &CheckSnapshot,
+    expected: &CheckAdmission,
 ) -> Result<DeliveryGate, String> {
     {
         let lock = app.task_lock(&task.id);
@@ -38,7 +38,7 @@ pub(in crate::engine) fn begin_delivery(
             .unwrap()
             .get(&task.id)
             .is_some_and(|control| control.signals.pending_amend.lock().unwrap().is_some());
-        if pending {
+        if pending || fresh.pending_amendment.is_some() {
             app.store
                 .save_task(task)
                 .map_err(|error| error.to_string())?;
@@ -72,25 +72,24 @@ pub(in crate::engine) fn publish_carry(
     if cancel.is_cancelled() || !fresh.carry_allowed(before) {
         return Ok(DeliveryGate::Stopped);
     }
-    if !CheckSnapshot::capture(before).matches(&fresh) {
+    if !CheckAdmission::capture(before).matches(&fresh) {
         return Ok(DeliveryGate::Recheck);
     }
     let controls = app.controls.lock().unwrap();
     let mut pending = controls
         .get(&task.id)
         .map(|control| control.signals.pending_amend.lock().unwrap());
-    let carried = match pending.as_deref().and_then(|slot| slot.as_ref()) {
-        Some(edit) => match edit.carry_forward(before, task) {
-            Ok(carried) => Some(carried),
-            Err(_) => return Ok(DeliveryGate::Recheck),
-        },
-        None => None,
-    };
+    let expected = fresh.pending_amendment.clone();
+    let mut published = task.clone();
+    published.adopt_pending_amendment(&fresh);
+    if published.carry_pending_amendment(&fresh).is_err() {
+        return Ok(DeliveryGate::Recheck);
+    }
     app.store
-        .save_task(task)
+        .save_task_with_pending(&published, expected.as_ref())
         .map_err(|error| error.to_string())?;
-    if let (Some(slot), Some(edit)) = (pending.as_deref_mut(), carried) {
-        *slot = Some(edit);
+    if let Some(slot) = pending.as_deref_mut() {
+        *slot = published.pending_amendment.clone();
     }
     Ok(DeliveryGate::Ready)
 }

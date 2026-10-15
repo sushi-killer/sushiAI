@@ -12,10 +12,7 @@ pub mod git;
 pub mod harness;
 pub mod legacy;
 pub mod loop_detect;
-pub mod overseer;
-pub mod overseer_state;
 pub mod policy;
-pub mod precedents;
 #[path = "../../process.rs"]
 pub mod process;
 pub mod procs;
@@ -25,7 +22,6 @@ pub mod sandbox;
 pub mod skill;
 pub mod store;
 pub mod task;
-pub mod test_failures;
 pub mod timeline;
 pub mod verify;
 pub mod worktree_env;

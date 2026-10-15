@@ -117,6 +117,39 @@ fn plan(o: &Options, adhoc_name: &str) -> Result<Vec<Value>, String> {
     let repo = crate::git::history::repo_toplevel(&o.repo).map_err(|e| e.to_string())?;
     let repo_str = repo.to_string_lossy().to_string();
     let arms = arms(o)?;
+    let jobs = jobs(o, adhoc_name)?;
+    let mut out = vec![];
+    // Resolve each base once so every arm and repeat starts from one commit.
+    let mut resolved: Vec<String> = vec![];
+    for (_, name, base, _, _) in &jobs {
+        let sha = crate::git::history::resolve_commit(&repo, base)
+            .map_err(|e| format!("task \"{name}\": base \"{base}\" does not resolve: {e}"))?;
+        resolved.push(sha);
+    }
+    for arm in &arms {
+        for ((set, name, _, request, check), sha) in jobs.iter().zip(&resolved) {
+            for _ in 0..o.repeat {
+                let mut p = json!({
+                    "repo": repo_str,
+                    "base": sha,
+                    "request": request,
+                    "evalSet": set,
+                    "evalName": name,
+                });
+                if let Some(c) = check {
+                    p["evalCheck"] = json!(c);
+                }
+                if let Some(v) = arm {
+                    p["variant"] = v.clone();
+                }
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn jobs(o: &Options, adhoc_name: &str) -> Result<Vec<Job>, String> {
     // (set, name, base, request, check)
     let mut jobs: Vec<Job> = vec![];
     if let Some(request) = &o.request {
@@ -184,35 +217,7 @@ fn plan(o: &Options, adhoc_name: &str) -> Result<Vec<Value>, String> {
             .filter(|j| o.only.is_empty() || o.only.contains(&j.1))
             .collect();
     }
-    let mut out = vec![];
-    // Resolve each base once so every arm and repeat starts from one commit.
-    let mut resolved: Vec<String> = vec![];
-    for (_, name, base, _, _) in &jobs {
-        let sha = crate::git::history::resolve_commit(&repo, base)
-            .map_err(|e| format!("task \"{name}\": base \"{base}\" does not resolve: {e}"))?;
-        resolved.push(sha);
-    }
-    for arm in &arms {
-        for ((set, name, _, request, check), sha) in jobs.iter().zip(&resolved) {
-            for _ in 0..o.repeat {
-                let mut p = json!({
-                    "repo": repo_str,
-                    "base": sha,
-                    "request": request,
-                    "evalSet": set,
-                    "evalName": name,
-                });
-                if let Some(c) = check {
-                    p["evalCheck"] = json!(c);
-                }
-                if let Some(v) = arm {
-                    p["variant"] = v.clone();
-                }
-                out.push(p);
-            }
-        }
-    }
-    Ok(out)
+    Ok(jobs)
 }
 
 fn create_all(o: &Options, adhoc_name: &str, call: &Caller) -> Result<Value, String> {

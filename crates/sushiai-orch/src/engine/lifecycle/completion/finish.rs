@@ -1,391 +1,201 @@
-use crate::clock::now_ms;
-use crate::engine::answer_policy::origin_of_last_answer;
-use crate::engine::baseline::judge_against_base;
-use crate::engine::baseline::BaseVerdict;
-use crate::engine::decision::fail_and_continue;
-use crate::engine::decision::record_failure;
-use crate::engine::decision::LoopSignal;
-use crate::engine::graph::base::apply_base_check_answer;
-use crate::engine::lifecycle::base_wait::carry_after_base_moves;
-use crate::engine::lifecycle::base_wait::BaseRetry;
-use crate::engine::lifecycle::completion::admission::back_to_review;
-use crate::engine::lifecycle::completion::delivery::finish_attempt;
-use crate::engine::lifecycle::completion::Tail;
-use crate::engine::lifecycle::final_checks::run_final_checks;
-use crate::engine::lifecycle::final_checks::FinalChecks;
+use super::base_question::FinalQuestion;
+use super::final_results::{FinalCheckRun, FinalFailures};
+use super::retry::after_failure;
+use super::Tail;
+use crate::engine::delivery::pr::repair::step::{settle_step, StepOutcome};
+use crate::engine::lifecycle::attempt_files::AttemptFiles;
+use crate::engine::lifecycle::final_checks::{run_final_checks, FinalChecks};
 use crate::engine::lifecycle::interruption::interrupt_attempt;
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::questions::reply::Reply;
-use crate::engine::rate_limit::counted_attempts;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
-use crate::engine::verification::base::answers::base_retry_requested;
-use crate::engine::verification::base::answers::command_named_by_task;
-use crate::engine::verification::base::answers::is_kept;
-use crate::engine::verification::base::answers::keep_check;
-use crate::engine::verification::base::answers::keep_planned_checks;
-use crate::engine::verification::base::answers::record_owner_base_check;
-use crate::engine::verification::base::answers::KEPT_BY_TASK_TARGET;
-use crate::engine::verification::base::checks::failing_on_base;
-use crate::engine::verification::base::checks::note_flaky_base_checks;
-use crate::engine::verification::base::questions::pre_existing_question;
-use crate::engine::verification::context::record_check_decisions;
-use crate::engine::verification::context::record_check_outcomes;
+use crate::engine::verification::context::{
+    record_check_decisions, record_check_outcomes, CheckContext,
+};
 use crate::engine::verification::healing::preflight::settle_base_preflight;
-use crate::engine::verification::scoping::deferred_line;
-use crate::engine::verification::scoping::split_deferred;
-use crate::harness::cancel::CancelToken;
+use crate::engine::verification::runner::CheckRunner;
+use crate::engine::verification::scoping::{deferred_line, split_deferred};
 use crate::policy::settings::Settings;
 use crate::task::attempts::{self as observations, VerifyObservation};
-use crate::task::FailureKind;
-use crate::task::Task;
-use crate::task::TaskStatus;
-use crate::task::VerifyOutcome;
-use crate::task::PRE_EXISTING_RETRY;
-use crate::verify::load::timed_out_under_load;
-use std::path::Path;
+use crate::task::{FailureKind, Task};
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
-/// What a failing final check tells the next attempt.
-fn final_failure_detail(failed: &VerifyOutcome) -> String {
-    format!(
-        "Final check {} exited {}.\n{}",
-        failed.command,
-        failed
-            .code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        failed.tail
-    )
+/// Accepted attempt files, their configuration snapshot and any concurrent finals.
+pub(in crate::engine) struct ReviewedAttempt<'a> {
+    files: AttemptFiles,
+    settings: &'a Settings,
+    finished: Option<FinalChecks>,
 }
 
-/// Settles retained final results, or runs the checks for an accepted attempt.
-/// A failing final is a Verify failure or a pre-existing-check question.
-#[allow(clippy::too_many_arguments)]
-pub(in crate::engine) async fn finish_after_review(
-    app: &Arc<App>,
-    task_id: &str,
-    task: &mut Task,
-    idx: usize,
-    attempt_n: u32,
-    worktree: &Path,
-    run_dir: &Path,
-    settings: &Settings,
-    finished: Option<FinalChecks>,
-    attempt_budget: &mut u32,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> Tail {
-    // Settle the base preflight before interpreting final results or landing.
-    if !settle_base_preflight(app, task, cancel).await {
-        interrupt_attempt(app, task, idx);
-        *permit = None;
-        app.finish_task_loop(task_id);
-        return Tail::Return;
+impl<'a> ReviewedAttempt<'a> {
+    pub(in crate::engine) fn new(
+        files: AttemptFiles,
+        settings: &'a Settings,
+        finished: Option<FinalChecks>,
+    ) -> Self {
+        Self {
+            files,
+            settings,
+            finished,
+        }
     }
-    // The commands the parent runs anyway are left out of this run; the
-    // stored `finalVerify` is not changed.
-    let (to_run, deferred) = split_deferred(app, settings, task);
-    record_check_decisions(task, deferred.iter().map(|c| deferred_line(c)).collect());
-    if !to_run.is_empty() {
-        // Not through the verify cache: it keys on the diff alone and
-        // would hand back the fast checks' results.
-        let FinalChecks {
-            results: final_results,
-            skipped,
-        } = match finished {
-            Some(finished) => finished,
-            None => {
-                let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
-                run_final_checks(
-                    app,
-                    task,
-                    worktree,
-                    run_dir,
-                    &task.base_sha,
-                    &to_run,
-                    sandbox.as_ref(),
-                    cancel,
-                    None,
-                )
-                .await
-            }
-        };
-        record_check_decisions(task, skipped);
-        record_check_outcomes(app, task, &final_results);
-        if cancel.is_cancelled() {
-            interrupt_attempt(app, task, idx);
-            *permit = None;
-            app.finish_task_loop(task_id);
-            return Tail::Return;
-        }
-        observations::record_verify(
-            task,
-            idx,
-            VerifyObservation::Appended(final_results.clone()),
-        );
-        let failed_finals: Vec<VerifyOutcome> = final_results
-            .iter()
-            .filter(|v| v.code != Some(0))
-            .cloned()
-            .collect();
-        // Every failing final goes through the base lookup (cache, else the
-        // in-flight job, else a job started now), never a second run.
-        let base_dir = run_dir.join("final-base");
-        let mut on_base: Vec<(VerifyOutcome, VerifyOutcome)> = Vec::new();
-        let mut ordinary: Vec<VerifyOutcome> = Vec::new();
-        for failed in failed_finals {
-            if timed_out_under_load(&failed) {
-                ordinary.push(failed);
-                continue;
-            }
-            match failing_on_base(app, task, &failed, &base_dir, cancel).await {
-                Some(base_run) => on_base.push((failed, base_run)),
-                None => ordinary.push(failed),
-            }
-        }
-        if cancel.is_cancelled() {
-            interrupt_attempt(app, task, idx);
-            *permit = None;
-            app.finish_task_loop(task_id);
-            return Tail::Return;
-        }
-        note_flaky_base_checks(app, task, &to_run);
-        // A base failure the plan explains (the files it names are created
-        // by the plan) or the owner kept is an ordinary failure.
-        let names: Vec<String> = on_base.iter().map(|(f, _)| f.command.clone()).collect();
-        let kept = keep_planned_checks(app, task, &names);
-        let mut pre_existing: Vec<VerifyOutcome> = Vec::new();
-        for (failed, base_run) in on_base {
-            // A check the task is meant to turn green is never waived.
-            if !kept.contains(&failed.command)
-                && !is_kept(task, &failed.command)
-                && command_named_by_task(task, &failed.command)
-            {
-                keep_check(task, &failed.command, KEPT_BY_TASK_TARGET);
-            }
-            if kept.contains(&failed.command) || is_kept(task, &failed.command) {
-                ordinary.push(failed);
-                continue;
-            }
-            // The base is red too: only a failure the base lacks is the task's.
-            match judge_against_base(app, task, &failed, &base_run, worktree, run_dir, cancel).await
-            {
-                BaseVerdict::Waived => {}
-                BaseVerdict::NewFailures(own) => ordinary.push(*own),
-                BaseVerdict::Unclear => pre_existing.push(base_run),
-            }
-        }
-        if !kept.is_empty() {
-            task.touch(now_ms());
-            app.save_task_logged(task);
-            app.broadcast_task(task);
-        }
-        let ordinary_detail = ordinary
-            .iter()
-            .map(final_failure_detail)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if pre_existing.is_empty() {
-            if !ordinary.is_empty() {
-                return match fail_and_continue(
-                    app,
-                    task_id,
-                    task,
-                    idx,
-                    FailureKind::Verify,
-                    ordinary_detail,
-                    attempt_budget,
-                    pending_answer,
-                    cancel,
-                    permit,
-                )
-                .await
-                {
-                    LoopSignal::Continue => {
-                        *permit = None;
-                        Tail::Continue
-                    }
-                    LoopSignal::Stop => {
-                        *permit = None;
-                        app.finish_task_loop(task_id);
-                        Tail::Return
-                    }
-                };
-            }
-        } else {
-            // The failure is older than this task: no retry can fix it. The
-            // owner decides, once for all of them, and no attempt is spent.
-            let mut detail: Vec<String> = pre_existing
-                .iter()
-                .map(|b| {
-                    let failed = final_results.iter().find(|v| v.command == b.command);
-                    failed.map(final_failure_detail).unwrap_or_default()
-                })
-                .collect();
-            if !ordinary_detail.is_empty() {
-                detail.push(ordinary_detail.clone());
-            }
-            record_failure(task, idx, FailureKind::Verify, detail.join("\n\n"));
-            let question = pre_existing_question(&pre_existing, &task.base_sha);
-            let assumed = task.assumptions.len();
-            let already_retried = base_retry_requested(task, &question.commands, &task.base_sha);
-            let answer = if already_retried {
-                PRE_EXISTING_RETRY.to_string()
-            } else {
-                task.ask(question.clone(), task.updated_at);
-                task.resume_phase(TaskStatus::Waiting, task.updated_at);
-                task.touch(now_ms());
-                let Some(answer) = wait_for_answer(app, task, pending_answer, cancel, permit).await
-                else {
-                    *permit = None;
-                    app.finish_task_loop(task_id);
-                    return Tail::Return;
-                };
-                answer
-            };
-            let policy_answered = task.assumptions.len() > assumed;
-            if !already_retried {
-                let base_sha = task.base_sha.clone();
-                record_owner_base_check(
-                    task,
-                    &question.commands,
-                    &base_sha,
-                    &answer,
-                    policy_answered,
-                );
-            }
-            let settings = app.settings.read().unwrap().clone();
-            let origin = origin_of_last_answer(task);
-            // Every removal goes through `remove_check_command`; a refused
-            // command stays and the answer counts as a retry for it.
-            if apply_base_check_answer(&settings, task, &question, &answer, origin) {
-                app.verify_cache.lock().unwrap().remove(task_id);
-            }
-            let kept_all =
-                !question.commands.is_empty() && question.commands.iter().all(|c| is_kept(task, c));
-            if kept_all {
-                let mut details: Vec<String> = final_results
-                    .iter()
-                    .filter(|result| question.commands.contains(&result.command))
-                    .map(final_failure_detail)
-                    .collect();
-                if !ordinary_detail.is_empty() {
-                    details.push(ordinary_detail.clone());
-                }
-                return match fail_and_continue(
-                    app,
-                    task_id,
-                    task,
-                    idx,
-                    FailureKind::Verify,
-                    details.join("\n\n"),
-                    attempt_budget,
-                    pending_answer,
-                    cancel,
-                    permit,
-                )
-                .await
-                {
-                    LoopSignal::Continue => {
-                        *permit = None;
-                        Tail::Continue
-                    }
-                    LoopSignal::Stop => {
-                        *permit = None;
-                        app.finish_task_loop(task_id);
-                        Tail::Return
-                    }
-                };
-            }
-            let stays = question
-                .commands
-                .iter()
-                .any(|c| task.final_verify.contains(c));
-            if stays {
-                // Retry (any other answer): one more attempt on the newest
-                // base, even when the attempt budget is spent.
-                match carry_after_base_moves(app, task, worktree, pending_answer, cancel, permit)
-                    .await
-                {
-                    BaseRetry::Ready => {}
-                    BaseRetry::Conflict(detail) => {
-                        record_failure(task, idx, FailureKind::Conflict, detail);
-                    }
-                    BaseRetry::Stopped => {
-                        interrupt_attempt(app, task, idx);
-                        *permit = None;
-                        app.finish_task_loop(task_id);
-                        return Tail::Return;
-                    }
-                }
-                *attempt_budget = (*attempt_budget).max(counted_attempts(task) + 1);
-                task.touch(now_ms());
-                app.save_task_logged(task);
-                app.broadcast_task(task);
-                *permit = None;
+
+    pub(in crate::engine) async fn finish(
+        self,
+        app: &Arc<App>,
+        task: &mut Task,
+        budget: &mut u32,
+        slot: &mut QuestionSlot<'_>,
+    ) -> Tail {
+        let cancel = slot.cancel().clone();
+        match settle_base_preflight(app, task, &cancel).await {
+            Ok(()) => {}
+            Err(WaitEnd::Changed) => {
+                slot.release();
                 return Tail::Continue;
             }
-            // Every listed check is gone: the attempt is not failed by them.
-            crate::task::transitions::reopen(task, idx, now_ms());
-            task.resume_phase(TaskStatus::Running, task.updated_at);
-            task.touch(now_ms());
-            app.save_task_logged(task);
-            app.broadcast_task(task);
-            // The failing check cost the attempt its review: it is judged
-            // again, never landed without a verdict.
-            if ordinary.is_empty()
-                && task.attempts[idx].review.is_none()
-                && !settings.review.is_empty()
-            {
-                task.record_decision(format!(
-                    "Orchestrator: attempt {attempt_n} reviewed again because its review was discarded by a check that failed on the base"
-                ));
-                return back_to_review(app, task, idx, permit);
+            Err(WaitEnd::Stopped) => return self.files.interrupt(app, task, slot),
+        }
+        let (commands, deferred) = split_deferred(app, self.settings, task);
+        record_check_decisions(
+            task,
+            deferred
+                .iter()
+                .map(|command| deferred_line(command))
+                .collect(),
+        );
+        if !commands.is_empty() {
+            let final_checks = match self.finished {
+                Some(finished) => finished,
+                None => self.files.run_finals(app, task, &commands, &cancel).await,
+            };
+            record_check_decisions(task, final_checks.skipped);
+            record_check_outcomes(app, task, &final_checks.results);
+            if cancel.is_cancelled() {
+                return self.files.interrupt(app, task, slot);
             }
-            if !ordinary.is_empty() {
-                return match fail_and_continue(
-                    app,
-                    task_id,
-                    task,
-                    idx,
-                    FailureKind::Verify,
-                    ordinary_detail,
-                    attempt_budget,
-                    pending_answer,
-                    cancel,
-                    permit,
-                )
+            observations::record_verify(
+                task,
+                self.files.idx,
+                VerifyObservation::Appended(final_checks.results.clone()),
+            );
+            let Some(mut failures) = (FinalCheckRun {
+                commands: &commands,
+                results: final_checks.results,
+            })
+            .classify(app, task, &self.files, &cancel)
+            .await
+            else {
+                return self.files.interrupt(app, task, slot);
+            };
+            if let Some(tail) = self
+                .files
+                .repair_failures(app, task, &mut failures, slot)
                 .await
+            {
+                return tail;
+            }
+            if !failures.pre_existing.is_empty() {
+                if let Some(tail) = FinalQuestion::new(&self.files, task, failures)
+                    .settle(app, task, budget, slot)
+                    .await
                 {
-                    LoopSignal::Continue => {
-                        *permit = None;
-                        Tail::Continue
-                    }
-                    LoopSignal::Stop => {
-                        *permit = None;
-                        app.finish_task_loop(task_id);
-                        Tail::Return
-                    }
-                };
+                    return tail;
+                }
+            } else if !failures.ordinary.is_empty() {
+                return after_failure(
+                    app,
+                    task,
+                    crate::engine::decision::failure(
+                        FailureKind::Verify,
+                        failures.ordinary_detail(),
+                    ),
+                    budget,
+                    slot,
+                )
+                .await;
             }
         }
+        self.files.finish(app, task, budget, slot).await
     }
-    finish_attempt(
-        app,
-        task_id,
-        task,
-        idx,
-        attempt_n,
-        worktree,
-        run_dir,
-        attempt_budget,
-        pending_answer,
-        cancel,
-        permit,
-    )
-    .await
+}
+
+impl AttemptFiles {
+    async fn repair_failures(
+        &self,
+        app: &Arc<App>,
+        task: &mut Task,
+        failures: &mut FinalFailures,
+        slot: &mut QuestionSlot<'_>,
+    ) -> Option<Tail> {
+        let unresolved: Vec<_> = failures
+            .results
+            .iter()
+            .filter(|result| {
+                failures
+                    .ordinary
+                    .iter()
+                    .chain(&failures.pre_existing)
+                    .any(|failed| failed.command == result.command)
+            })
+            .cloned()
+            .collect();
+        for failed in unresolved {
+            match settle_step(app, task, self, &failed, slot).await {
+                StepOutcome::NotRepair => return None,
+                StepOutcome::Waived => {
+                    failures
+                        .ordinary
+                        .retain(|result| result.command != failed.command);
+                    failures
+                        .pre_existing
+                        .retain(|result| result.command != failed.command);
+                }
+                StepOutcome::Retry | StepOutcome::Changed => {
+                    slot.release();
+                    return Some(Tail::Continue);
+                }
+                StepOutcome::Waiting | StepOutcome::Stopped => {
+                    slot.release();
+                    app.finish_task_loop(&task.id);
+                    return Some(Tail::Return);
+                }
+            }
+        }
+        None
+    }
+    async fn run_finals(
+        &self,
+        app: &Arc<App>,
+        task: &Task,
+        commands: &[String],
+        cancel: &crate::harness::cancel::CancelToken,
+    ) -> FinalChecks {
+        // The verify cache contains the fast check set rather than these finals.
+        let sandbox = app.task_sandbox(&task.repo, &self.worktree, &self.run_dir);
+        run_final_checks(
+            CheckRunner::from_context(
+                CheckContext::new(app, Some(&task.id)).with_gate("final checks"),
+                &self.worktree,
+                sandbox.as_ref(),
+                &task.base_sha,
+                cancel,
+            ),
+            task,
+            commands,
+            None,
+        )
+        .await
+    }
+
+    pub(super) fn interrupt(
+        &self,
+        app: &Arc<App>,
+        task: &mut Task,
+        slot: &mut QuestionSlot<'_>,
+    ) -> Tail {
+        interrupt_attempt(app, task, self.idx);
+        slot.release();
+        app.finish_task_loop(&task.id);
+        Tail::Return
+    }
 }

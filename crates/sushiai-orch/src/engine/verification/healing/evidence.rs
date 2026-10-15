@@ -1,11 +1,10 @@
-use crate::engine::review::evidence_scope;
-use crate::engine::review::save_evidence;
+use crate::engine::review::evidence::evidence_scope;
+use crate::engine::review::evidence::save_evidence;
 use crate::engine::state::App;
 use crate::engine::verification::context::record_check_outcomes;
 use crate::engine::verification::context::CheckContext;
 use crate::engine::verification::runner::run_verify_commands;
 use crate::harness::cancel::CancelToken;
-use crate::sandbox::TaskSandbox;
 use crate::task::review::ReviewResult;
 use crate::task::state::Task;
 use crate::verify::healing::scope::same_failure;
@@ -17,28 +16,22 @@ use std::sync::Arc;
 /// images the attempt left under `artifacts/`. A failing command is a
 /// decision line, never a failed attempt.
 pub(in crate::engine) async fn capture_screenshots(
-    app: &App,
+    runner: crate::engine::verification::runner::CheckRunner<'_>,
     task: &mut Task,
     idx: usize,
-    worktree: &Path,
     run_dir: &Path,
-    sandbox: Option<&TaskSandbox>,
-    cancel: &CancelToken,
 ) {
+    let crate::engine::verification::runner::CheckRunner {
+        ctx,
+        cwd: worktree,
+        cancel,
+        ..
+    } = runner;
+    let app = ctx.app;
     let Some(cmd) = task.brief_check.screenshot.clone() else {
         return;
     };
-    let ran = run_verify_commands(
-        crate::engine::verification::runner::CheckRunner::from_context(
-            CheckContext::new(app, Some(&task.id)),
-            worktree,
-            sandbox,
-            &task.base_sha,
-            cancel,
-        ),
-        std::slice::from_ref(&cmd),
-    )
-    .await;
+    let ran = run_verify_commands(runner, std::slice::from_ref(&cmd)).await;
     record_check_outcomes(app, task, &ran);
     if cancel.is_cancelled() {
         return;

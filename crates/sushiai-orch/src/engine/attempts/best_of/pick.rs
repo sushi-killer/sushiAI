@@ -1,10 +1,12 @@
-use crate::engine::attempts::best_of::evaluate::Eval;
+use crate::engine::attempts::best_of::candidate::EvaluatedCandidates;
+use crate::engine::attempts::best_of::run::BestOfRun;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::review::review_request;
-use crate::engine::review::select_review_route_with;
-use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::review::native::review_request;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
+use crate::engine::review::routing::select_review_route_with;
 use crate::engine::state::App;
 use crate::git::own_diff::OwnDiff;
 use crate::harness::cancel::CancelToken;
@@ -12,32 +14,28 @@ use crate::harness::guard::helper_timeout_message;
 use crate::harness::guard::Guard;
 use crate::harness::native::error::RunError;
 use crate::policy::routing::Harness;
-use crate::policy::routing::Route;
-use crate::policy::settings::Settings;
-use crate::task::Task;
 use std::path::Path;
 use std::sync::Arc;
 
 /// One read-only run that reads both diffs and answers with a `sushi-pick`
 /// block; `Some((b_wins, why))`, or `None` when the reply had none.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_pick(
     app: &Arc<App>,
-    task: &Task,
-    task_id: &str,
-    attempt_n: u32,
-    settings: &Settings,
-    a_route: &Route,
-    b_route: &Route,
-    worktree: &Path,
-    wt_b: &Path,
-    own: &OwnDiff,
+    run: &BestOfRun<'_>,
+    candidates: &EvaluatedCandidates,
     decisions: &mut Vec<String>,
-    eval_a: &Eval,
-    eval_b: &Eval,
-    deny_read: &[String],
     cancel: &CancelToken,
 ) -> Result<(Option<(bool, String)>, f64), RunError> {
+    let primary = &run.primary;
+    let task = primary.task;
+    let task_id = task.id.as_str();
+    let attempt_n = primary.attempt_n;
+    let settings = primary.settings;
+    let a_route = &candidates.a.run.route;
+    let b_route = &candidates.b.run.route;
+    let worktree = candidates.a.run.worktree.as_path();
+    let wt_b = candidates.b.run.worktree.as_path();
+    let (eval_a, eval_b) = (&candidates.a.checks, &candidates.b.checks);
     // The reviewer on the other family; without a review route, whichever
     // family candidate a was not.
     let route = select_review_route_with(
@@ -50,7 +48,7 @@ pub(super) async fn run_pick(
     .filter(|r| r.harness != a_route.harness)
     .unwrap_or(b_route)
     .clone();
-    let (diff_a, diff_b) = candidate_diffs(worktree, wt_b, own).await;
+    let (diff_a, diff_b) = candidate_diffs(worktree, wt_b, &task.own_diff()).await;
     let brief_text = crate::engine::attempts::pick::build_pick_brief(
         task,
         &crate::engine::attempts::pick::PickCandidate {
@@ -77,9 +75,8 @@ pub(super) async fn run_pick(
         write_readonly_claude_settings_with_profile(
             &route,
             app,
-            &key_path,
             settings,
-            deny_read,
+            run.deny_read,
             &settings_path,
         );
     }
@@ -88,14 +85,18 @@ pub(super) async fn run_pick(
     let limit = app.helper_timeout();
     let res = run_harness(
         app,
-        task_id,
-        attempt_n,
-        RunTrack::No,
-        worktree,
-        &req,
-        CostTag::task("pick", &route.id),
-        &brief_text,
-        &events,
+        RunIdentity {
+            id: task_id,
+            attempt_n,
+            track: RunTrack::No,
+            tag: CostTag::task("pick", &route.id),
+        },
+        RunInvocation {
+            request: &req,
+            brief: &brief_text,
+            events: &events,
+            schema: None,
+        },
         cancel,
         Guard::helper("best-of pick", limit),
     )

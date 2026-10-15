@@ -3,7 +3,15 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -18,7 +26,7 @@ out() {
 }
 report='"```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```"'
 case "$input" in
-  *'## Conflict-only attempt'*) printf 'base\nchild\n' > README.md; out "$report" ;;
+  *'## Base moved'*) printf 'base\nchild\n' > README.md; out "$report" ;;
   *'You review a coding task plan'*) out '"{\"findings\": []}"' ;;
   *sushi-plan*)
     case "$input" in
@@ -170,7 +178,6 @@ fn conflicting_retry(parent: bool) {
     let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
     let daemon = Daemon::spawn(&[("ORCHD_CLAUDE_BIN", script.to_str().unwrap())]);
     configure(&daemon.socket, false);
-    cheap_route_on_claude(&daemon);
     let repo = repo();
     let id = create(&daemon.socket, repo.path(), parent);
     let waiting = preexisting_question(&daemon.socket, &id);
@@ -189,15 +196,18 @@ fn conflicting_retry(parent: bool) {
         "{finished}"
     );
     assert!(
-        decisions(&finished)
+        !decisions(&finished)
             .iter()
-            .any(|d| d.contains("conflict-only attempt")),
+            .any(|d| d.contains("conflict-only")),
         "{finished}"
     );
     let implementing = attempts(&finished);
     assert_eq!(implementing.len(), if parent { 1 } else { 2 }, "{finished}");
     let conflict = implementing.last().unwrap();
-    assert_eq!(conflict["routeId"], "claude-cheap", "{finished}");
+    assert!(
+        conflict["reason"].as_str().unwrap().starts_with("tier "),
+        "{finished}"
+    );
     let brief = std::fs::read_to_string(
         daemon
             .data_dir()
@@ -208,7 +218,7 @@ fn conflicting_retry(parent: bool) {
             .join("brief.md"),
     )
     .unwrap();
-    assert!(brief.contains("## Conflict-only attempt"), "{brief}");
+    assert!(brief.contains("## Base moved"), "{brief}");
     assert!(
         brief.contains("README.md") && brief.contains(&base[..7]),
         "{brief}"
@@ -231,12 +241,12 @@ fn conflicting_retry(parent: bool) {
 }
 
 #[test]
-fn a_parent_carries_landed_child_commits_into_a_conflict_only_attempt() {
+fn a_parent_carries_landed_child_commits_into_an_ordinary_step() {
     conflicting_retry(true);
 }
 
 #[test]
-fn a_final_retry_carries_conflicts_into_a_conflict_only_attempt() {
+fn a_final_retry_carries_conflicts_into_an_ordinary_step() {
     conflicting_retry(false);
 }
 
@@ -424,6 +434,29 @@ fn a_parent_keeps_carried_children_when_landing_on_the_default_branch_is_refused
     }
 }
 
+fn assert_finished_retry(repo: &Path, finished: &Value, parent: bool, answered_by: &str) {
+    if parent {
+        assert!(attempts(finished).is_empty(), "{finished}");
+        for (file, expected) in [("README.md", "child"), ("second.txt", "second")] {
+            assert_eq!(
+                git_out(
+                    repo,
+                    &[
+                        "show",
+                        &format!("{}:{file}", finished["branch"].as_str().unwrap())
+                    ]
+                ),
+                expected,
+                "{finished}"
+            );
+        }
+    }
+    assert_eq!(
+        finished["questionHistory"][0]["answeredBy"], answered_by,
+        "{finished}"
+    );
+}
+
 fn retry_survives_restart(
     parent: bool,
     policy: bool,
@@ -506,22 +539,6 @@ fn retry_survives_restart(
     let finished = done(&socket, &id);
     assert_eq!(finished["baseSha"], base, "{finished}");
     assert_eq!(preexisting_count(&finished), 1, "{finished}");
-    if parent {
-        assert!(attempts(&finished).is_empty(), "{finished}");
-        for (file, expected) in [("README.md", "child"), ("second.txt", "second")] {
-            assert_eq!(
-                git_out(
-                    repo.path(),
-                    &[
-                        "show",
-                        &format!("{}:{file}", finished["branch"].as_str().unwrap())
-                    ]
-                ),
-                expected,
-                "{finished}"
-            );
-        }
-    }
     let expected = if policy {
         "policy"
     } else if agent {
@@ -529,10 +546,7 @@ fn retry_survives_restart(
     } else {
         "owner"
     };
-    assert_eq!(
-        finished["questionHistory"][0]["answeredBy"], expected,
-        "{finished}"
-    );
+    assert_finished_retry(repo.path(), &finished, parent, expected);
     let worktrees = clean_worktrees(&socket, repo.path());
     stop_daemon(&socket);
     let _ = wait_for_exit(second);

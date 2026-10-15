@@ -1,13 +1,14 @@
 use crate::clock::now_ms;
+use crate::engine::answer_policy::authority::remove_check_command;
 use crate::engine::answer_policy::origin_of_last_answer;
-use crate::engine::answer_policy::remove_check_command;
 use crate::engine::baseline::judge_against_base;
 use crate::engine::baseline::BaseVerdict;
 use crate::engine::lifecycle::base_wait::carry_after_base_moves;
 use crate::engine::lifecycle::base_wait::BaseRetry;
 use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::questions::reply::Reply;
+use crate::engine::persistence::contract::{ContractInput, Publication};
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
+use crate::engine::run_control::TaskSignals;
 use crate::engine::state::App;
 use crate::engine::verification::base::amendments::apply_pending_amendment;
 use crate::engine::verification::base::answers::answerer_label;
@@ -19,6 +20,7 @@ use crate::engine::verification::base::answers::keep_check;
 use crate::engine::verification::base::answers::keep_planned_checks;
 use crate::engine::verification::base::answers::record_owner_base_check;
 use crate::engine::verification::base::answers::KEEP_ALL;
+use crate::engine::verification::base::answers::KEPT_BY_PLAN;
 use crate::engine::verification::base::answers::KEPT_BY_TASK_TARGET;
 use crate::engine::verification::base::answers::PRE_EXISTING_DROP;
 use crate::engine::verification::base::checks::failing_on_base;
@@ -28,7 +30,6 @@ use crate::engine::verification::base::questions::parent_checks_question;
 use crate::engine::verification::base::questions::pre_existing_question;
 use crate::harness::cancel::CancelToken;
 use crate::policy::settings::Settings;
-use crate::task::amendment::PendingAmendment;
 use crate::task::checks::authority::Origin;
 use crate::task::is_option;
 use crate::task::Question;
@@ -39,8 +40,6 @@ use crate::task::VerifyOutcome;
 use crate::task::PRE_EXISTING_RETRY;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::oneshot;
 
 /// Applies the owner's (or the policy's) answer to a base-check question of
 /// any task: `drop all` removes the commands, `keep all` records that they
@@ -90,14 +89,17 @@ pub(in crate::engine) fn apply_base_check_answer(
 pub(in crate::engine) async fn parent_base_preflight(
     app: &Arc<App>,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    pending_amend: &Arc<StdMutex<Option<PendingAmendment>>>,
-    cancel: &CancelToken,
+    signals: &TaskSignals,
 ) -> bool {
+    let cancel = &signals.cancel;
+    let pending_amend = &signals.pending_amend;
     loop {
         // An amendment made while this loop was live (or parked on the
         // question) reaches every pass.
-        apply_pending_amendment(app, task, pending_amend, cancel).await;
+        if let Err(error) = apply_pending_amendment(app, task, pending_amend, cancel).await {
+            eprintln!("orch: applying amendment to {} failed: {error}", task.id);
+            return false;
+        }
         start_final_base_jobs(app, task);
         let unkept: Vec<String> = task
             .verify
@@ -106,6 +108,7 @@ pub(in crate::engine) async fn parent_base_preflight(
             .filter(|c| !base_check_answered(task, c, &task.base_sha))
             .cloned()
             .collect();
+        let input = ContractInput::capture(task);
         let mut failed = failing_twice_on_base(app, task, &unkept, cancel).await;
         if cancel.is_cancelled() {
             mark_stopped_if_not_already(app, &task.id).await;
@@ -113,12 +116,17 @@ pub(in crate::engine) async fn parent_base_preflight(
         }
         // The plan creates the files a check names: kept by rule, no question.
         let names: Vec<String> = failed.iter().map(|f| f.command.clone()).collect();
-        let kept = keep_planned_checks(app, task, &names);
-        if !kept.is_empty() {
-            task.touch(now_ms());
-            app.save_task_logged(task);
-            app.broadcast_task(task);
-        }
+        let kept = match publish_planned_keeps(app, task, &input, &names, cancel) {
+            Ok(kept) => kept,
+            Err(ParentGate::Again) => {
+                let Ok(Some(fresh)) = app.store.load_task(&task.id) else {
+                    return false;
+                };
+                *task = fresh;
+                continue;
+            }
+            Err(_) => return false,
+        };
         failed.retain(|f| !kept.contains(&f.command));
         if failed.is_empty() {
             return true;
@@ -129,9 +137,19 @@ pub(in crate::engine) async fn parent_base_preflight(
         task.touch(now_ms());
         let task_id = task.id.clone();
         let assumed = task.assumptions.len();
-        let Some(answer) = wait_for_answer(app, task, pending_answer, cancel, &mut None).await
-        else {
-            return false;
+        let answer = match QuestionSlot::new(signals, &mut None)
+            .answer(app, task)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(WaitEnd::Changed) => {
+                let Ok(Some(fresh)) = app.store.load_task(&task.id) else {
+                    return false;
+                };
+                *task = fresh;
+                continue;
+            }
+            Err(WaitEnd::Stopped) => return false,
         };
         let policy_answered = task.assumptions.len() > assumed;
         if is_option(&answer, "stop") {
@@ -185,9 +203,9 @@ pub(in crate::engine) async fn parent_finals_on_base(
     app: &Arc<App>,
     task: &mut Task,
     results: Vec<VerifyOutcome>,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
+    signals: &TaskSignals,
 ) -> ParentGate {
+    let cancel = &signals.cancel;
     let failing_finals: Vec<VerifyOutcome> = results
         .iter()
         .filter(|v| v.code != Some(0))
@@ -218,11 +236,14 @@ pub(in crate::engine) async fn parent_finals_on_base(
         task.ask(question.clone(), now_ms());
         task.resume_phase(TaskStatus::Waiting, crate::clock::now_ms());
         task.touch(now_ms());
-        let Some(answer) = wait_for_answer(app, task, pending_answer, cancel, &mut None).await
-        else {
-            return ParentGate::End;
-        };
-        answer
+        match QuestionSlot::new(signals, &mut None)
+            .answer(app, task)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(WaitEnd::Changed) => return ParentGate::Again,
+            Err(WaitEnd::Stopped) => return ParentGate::End,
+        }
     };
     let policy_answered = task.assumptions.len() > assumed;
     if is_option(&answer, "stop") {
@@ -259,7 +280,7 @@ pub(in crate::engine) async fn parent_finals_on_base(
                 .iter()
                 .any(|c| task.final_verify.contains(c)))
     {
-        return retry_parent_base(app, task, pending_answer, cancel).await;
+        return retry_parent_base(app, task, &mut QuestionSlot::new(signals, &mut None)).await;
     }
     if kept_all {
         app.save_task_logged(task);
@@ -282,6 +303,7 @@ async fn classify_parent_finals(
     failing_finals: &[VerifyOutcome],
     cancel: &CancelToken,
 ) -> Result<(Vec<VerifyOutcome>, Vec<String>), ParentGate> {
+    let input = ContractInput::capture(task);
     let dir = app
         .store
         .task_dir(&task.id)
@@ -298,17 +320,22 @@ async fn classify_parent_finals(
         return Err(ParentGate::End);
     }
     let names: Vec<String> = on_base.iter().map(|b| b.command.clone()).collect();
-    let kept = keep_planned_checks(app, task, &names);
-    if !kept.is_empty() {
-        task.touch(now_ms());
-        app.save_task_logged(task);
-        app.broadcast_task(task);
-    }
+    let kept = publish_planned_keeps(app, task, &input, &names, cancel)?;
     on_base.retain(|b| !kept.contains(&b.command) && !is_kept(task, &b.command));
     // The base is red too: only a failure the base lacks is the parent's.
-    let wt = PathBuf::from(&task.worktree);
     let mut unclear: Vec<VerifyOutcome> = Vec::new();
     let mut judged: Vec<String> = Vec::new();
+    let (judge_id, judge_base) = (task.id.clone(), task.base_sha.clone());
+    let judge_worktree = std::path::PathBuf::from(&task.worktree).clone();
+    let judge_sandbox = app.task_sandbox(&task.repo, &judge_worktree, &dir);
+    let judge_runner = crate::engine::verification::runner::CheckRunner::from_context(
+        crate::engine::verification::context::CheckContext::new(app, Some(&judge_id))
+            .with_gate("final checks"),
+        &judge_worktree,
+        judge_sandbox.as_ref(),
+        &judge_base,
+        cancel,
+    );
     for base_run in on_base {
         let Some(failed) = failing_finals
             .iter()
@@ -322,7 +349,18 @@ async fn classify_parent_finals(
             keep_check(task, &base_run.command, KEPT_BY_TASK_TARGET);
             continue;
         }
-        match judge_against_base(app, task, failed, &base_run, &wt, &dir, cancel).await {
+        match judge_against_base(
+            app,
+            task,
+            crate::engine::baseline::Comparison {
+                failed,
+                base: &base_run,
+            },
+            &dir,
+            judge_runner,
+        )
+        .await
+        {
             BaseVerdict::Waived => judged.push(base_run.command.clone()),
             BaseVerdict::NewFailures(_) => {}
             BaseVerdict::Unclear => unclear.push(base_run),
@@ -331,14 +369,67 @@ async fn classify_parent_finals(
     Ok((unclear, judged))
 }
 
+fn publish_planned_keeps(
+    app: &App,
+    task: &mut Task,
+    input: &ContractInput,
+    names: &[String],
+    cancel: &CancelToken,
+) -> Result<Vec<String>, ParentGate> {
+    let mut proposed = task.clone();
+    let kept = keep_planned_checks(app, &mut proposed, names);
+    if kept.is_empty() {
+        return Ok(kept);
+    }
+    let publication = input
+        .publish(app, task, cancel, |fresh| {
+            for command in &kept {
+                keep_check(fresh, command, KEPT_BY_PLAN);
+            }
+            Ok(fresh
+                .assumptions
+                .iter()
+                .enumerate()
+                .filter(|(index, current)| {
+                    current.overturned
+                        && task.assumptions.get(*index).is_some_and(|local| {
+                            local.question == current.question && local.commands == current.commands
+                        })
+                })
+                .filter_map(|(index, current)| {
+                    current.owner_answer.clone().map(|answer| (index, answer))
+                })
+                .collect::<Vec<_>>())
+        })
+        .map_err(|error| {
+            eprintln!(
+                "orch: publishing parent planned checks for {} failed: {error}",
+                task.id
+            );
+            ParentGate::End
+        })?;
+    match publication {
+        Publication::Applied(revocations) => {
+            for (index, answer) in revocations {
+                task.overturn_assumption(index, answer);
+            }
+            for command in &kept {
+                keep_check(task, command, KEPT_BY_PLAN);
+            }
+            Ok(kept)
+        }
+        Publication::Deferred(WaitEnd::Changed) => Err(ParentGate::Again),
+        Publication::Deferred(WaitEnd::Stopped) => Err(ParentGate::End),
+    }
+}
+
 async fn retry_parent_base(
     app: &Arc<App>,
     task: &mut Task,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
+    slot: &mut QuestionSlot<'_>,
 ) -> ParentGate {
     let wt = PathBuf::from(&task.worktree);
-    match carry_after_base_moves(app, task, &wt, pending_answer, cancel, &mut None).await {
+    match carry_after_base_moves(app, task, &wt, slot).await {
         BaseRetry::Ready => {}
         BaseRetry::Conflict(detail) => {
             task.resume_phase(TaskStatus::Running, crate::clock::now_ms());
@@ -347,6 +438,7 @@ async fn retry_parent_base(
             app.broadcast_task(task);
             return ParentGate::Conflict(detail);
         }
+        BaseRetry::Changed => return ParentGate::Again,
         BaseRetry::Stopped => return ParentGate::End,
     }
     app.save_task_logged(task);

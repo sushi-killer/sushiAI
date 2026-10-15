@@ -1,157 +1,56 @@
-# Orchd simplification: draft checkpoint
+# Orchd simplification: integration status
 
-This change is incomplete and must remain a draft. The strict Rust architecture
-gate remains enabled and rejects the remaining oversized functions, mixed files,
-and module dependencies. There are no registered size or dependency exceptions.
-The implementation scope closed at 05:30 MSK on 15 October 2026; subsequent work
-is limited to verification, review findings, documentation, and preserving this
-checkpoint. Passing targeted regressions does not satisfy the architecture gate.
+The original eight-step goal and all twelve research recommendations remain in scope. The resumed integration also includes the five live requirements: post-carry failure judgement, one agent repair before an owner question, code-owned PR Validation, durable owner controls, and Base moved briefs for parent landing conflicts. Final readiness requires the same-source proof and review recorded in [PR #93](https://github.com/sushi-killer/sushiAI/pull/93); source organization alone is not a green result.
 
-[The measured inventory](orchd-simplify-inventory.md) maps every original file
-with at least 1,000 lines to its current owner and records all remaining large
-files. Comparable post-rustfmt runtime lines grew from 55,066 to 63,596; test
-lines grew from 63,680 to 69,601. The configured gate reports 209 violations
-and zero exceptions. The inventory distinguishes actual removals from moves.
+## Original plan and canonical owners
 
-## Sources and integration
+| Step                            | Implementation                                                                                                          | Acceptance evidence                                      |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Reuse settled lab work and main | Original base `d177c71d` plus settled amendment delta; main `7d539587` integrated into the feature branch               | Merge parent and verified local commit                   |
+| One pure Task mutation owner    | Private mutable data; typed criteria, authority, captured edits, amendments, baseline and attempt operations            | Full RPC and recovery replay                             |
+| Remove ERROR_STREAK only        | Its state and normalization are removed; exact-call/edit, stall, permission, cancellation and budget guards remain      | Stream, runner and isolation suite                       |
+| Native timeout continuation     | No report-only turn; early session capture, existing same-session eligibility and fresh fallback; current amended brief | Runner suite and one successful real Claude canary       |
+| Compact executor contract       | Compiled YAML and current-plan resume; planning measurement instruction occurs once                                     | Prompt snapshots and template checks                     |
+| Modular monolith and strict CI  | Task/policy pure roots; typed module operations; explicit imports and crate-local standards with zero exceptions        | Configured inventory and normal architecture gate        |
+| RPC/runner proof on both OSes   | Durable controls, replay, repair, carry, provenance and parent-gate regressions                                         | Same-source macOS and Linux CI                           |
+| One reviewed PR                 | Existing Draft PR #93; full independent review completed                                                                | Full and delta review, verified commit and GitHub checks |
 
-The integration base is `d177c71d63f0969480c8328a9ffdc09113cecf40`, including
-merged #88, #89, and #90. The lab amendment task's settled final commit is
-`c16c27bec9ea0e988ca84f2738aab76d655b44b3`. Only its delta after
-`03c81608d60d82273aa193fa5169ec6fc2313ce7` was imported. The merged work was
-not implemented again. No terminal performance change is included.
+The source map is in [architecture](architecture.md) and [measured inventory](orchd-simplify-inventory.md). Runtime relocation, actual removed logic and test/data movement are reported separately. The comparison baseline remains `d177c71d`; the current tree also includes upstream main `7d539587`, so upstream changes are not credited as this feature's implementation.
 
-The full owner brief and research remain preserved separately, including all
-twelve recommendations and the historical lab snapshot. That snapshot is not a
-current performance benchmark. Recorded costs are provider estimates rather
-than invoices; missing Codex cost values do not imply free execution. The old
-ERROR_STREAK comment's 13 interruptions among 186 tasks is a different sample
-from the research's 24 tasks and 155 retained implementation attempts.
+## Review and regression boundaries
 
-## Implemented behavior
+The resumed full independent review found no P0. Its substantive findings are covered by guarded publication of asynchronous contract edits, raw parent-check receipts, and persistent repair association and cause history. Accepted pending amendments prevent a stale helper result from changing the contract. The admitted publication adopts actual registration observations without replacing unrelated local review observations. Parent planned-check handling preserves Owner revocations across a later local save.
 
-- `Task` owns production mutations through pure operations. Its persisted JSON
-  shape and RPC names remain unchanged. Only test fixtures have direct mutable
-  access. Planner, repository, owner, and unknown origins retain distinct
-  authority; a textual mention of a command cannot remove its executable check.
-- Captured positional edits carry their original content precondition. A replay
-  cannot delete the neighboring criterion after indices shift. A new positional
-  RPC is a new operation.
-- Plan admission, pending amendment retirement, start admission, and delivery
-  publication serialize against the same task lock. Fully parent-drafted
-  children enter Queued after parent and dependency admission; ordinary drafts
-  still require planning. Answer-derived edits publish before native admission.
-  A stale answer retry retains the current best-of receipt within the same
-  attempt; it does not adopt the primary raw result. Baseline IO runs outside
-  standard mutex guards; its result must match the full current plan snapshot.
-  Screenshot changes also invalidate that identity. Native planner results carry
-  the input snapshot, apply accepted edits first, and discard stale proposals.
-  Relay-base moves publish through the same guarded carry operation before
-  native-attempt admission. Carry can re-anchor a
-  pending edit only across a change of base with the same check contract.
-- Final checks must authorize the current plan before delivery starts. A
-  stopped or changed task refuses late carry publication, including manual PR
-  retries. First queued carries have a separate gate from delivery admission.
-  Restart recovery recognizes only a clean commit with matching task and
-  attempt trailers. Entering delivery resets a previous dirty-checkout timer
-  once; retries preserve that timer and record the first waiting reason.
-- Red tool results no longer trigger ERROR_STREAK. Exact repeated calls and
-  edits, stalls, cancellation, budgets, and attempt caps remain enforced.
-- Time-budget expiry preserves the received report or a deterministic handoff;
-  it no longer starts a report-only model turn. The existing early native
-  session parser supplies continuation IDs. Verify and TimeBudget may resume
-  through the existing route, model, harness, conflict, and best-of gates.
-  Resume rejection falls back within the same attempt and accounts usage once.
-- A resumed brief contains the current criteria, checks, verification commands,
-  and plan. Removed requirements appear only in labeled history. Prompt
-  instructions cover local planning and diagnosis without adding another
-  advisor, judge, or replanning stage. Skills, delegation flags, permissions,
-  and the native sandbox policy are unchanged.
+An ephemeral pure check-admission receipt also includes explicit owner answers and overturned assumptions. It prevents a completed native turn, helper or carry from restoring a revoked waiver during its later save. Automatic observations do not reject their own publication. The persisted check snapshot and cache identity stay byte-identical; measured output, usage and cost survive a rejected control decision.
 
-## Canonical owners and actual consolidation
+PR readiness carries that authority through asynchronous preparation to each actual push/create dispatch. Typed IO preparation retains the exact commit and remote lease; command dispatch shares the owner mutation lock. Conflict and check repair share a current-intent handoff that leaves an eligible queued resolution with a live task control. The factual PR receipt uses the same lock and preserves owner updates.
 
-`task/` replaces the old mutable model facade. `engine/planning/` owns planning;
-`harness/` owns native processes and sessions; `verify/` owns check execution and
-evidence; `delivery/` owns Git delivery operations; `api/` owns protocol and MCP
-adapters; `store/` owns persistence. `engine/mod.rs` declares modules rather than
-providing a production import umbrella. Engine orchestration is split into
-planning, attempts, lifecycle, verification, graph, questions, permissions, chat,
-audit, and PR operations with explicit imports.
+Integration regressions also cover cancelled-run accounting, a native timeout receipt retained across a pending amendment, and a blocked implementer report published before automatic answering. Obsolete preflight results cannot replay a carried native run. Relay carry publishes the original task identity, the new base and relay boundary together, preserving earlier relay work and current owner controls.
 
-The old model, brief, harness, Git, MCP, RPC-task, task-loop, base-check,
-verification, healing, plan, graph, permissions, questions, and PR monolith paths
-are removed. Most of that code was relocated, not deleted. Remaining lifecycle
-code is still oversized and is a draft blocker. IO orchestration remains in
-engine where it requires the existing application lock and persistence owner.
+Repair regressions cover an interrupted replacement, a native time-budget continuation and cause history A→B→A. The deterministic stop-during-Git case checks final Stopped state, the explicit-stop flag, one attempt and exact cost. Source inspection alone did not establish a final-Done cancellation defect.
 
-Actual removals and consolidations include ERROR_STREAK and its normalization
-state; the post-timeout report model invocation, sole prompt, and golden;
-duplicate criterion/check edit paths; duplicate pending-amendment publication;
-three interruption diff branches; and duplicate temporary PR checkout cleanup.
-The separate fallible evolution log writer and best-effort store log writer
-retain their different contracts. Character-count clipping and byte-count
-clipping likewise remain distinct.
+Prompt proof covers all 44 kinds. Exactly three PR instruction goldens change and seven planning goldens lose one duplicated measurement paragraph; the other 34 kinds are byte-identical. All four planning builders still emit the measurement instruction, and a count assertion prevents duplicate copies.
 
-No new workspace crate, actor, revision or generation field, storage migration,
-generic mutable context, or artificial request bag was introduced.
+The parent landing regression drives the actual graph caller, advances the base without sync, resolves the real conflict through a Base moved agent step, and checks the landed tree. Parent checks retain raw ordinary/final/grounded/scrubbed held-out receipts and typed waivers even with no implementation attempt. Completed check receipts retain the original command commit and tree independently of later carry.
 
-## Verification checkpoint
+## Owner addition: pipeline schemas in YAML
 
-The complete workspace, including every test target, compiles. Targeted native
-and replay proofs include:
+The resumed owner request adds compiled task, planning and delivery definitions
+under `pipelines/`, with private typed loaders under `policy/pipelines/`.
+Their coordinators consume the declared transitions. Existing Rust operations
+retain mandatory gates and actual receipt types. The stage catalog is YAML too,
+with unchanged public RPC fields. The definitions have no runtime override,
+command expressions or new persisted stage cursor. [Pipeline documentation](orchd-pipelines.md)
+maps the files and their behavior proof. This addition belongs to the same final
+source snapshot, review and macOS/Linux acceptance gate.
 
-| Behavior                                           | Actual result |
-| -------------------------------------------------- | ------------- |
-| Planner publication and stop/authority boundaries  | 5 passed      |
-| Original owner-amendment integration cases         | 10 passed     |
-| Dirty-checkout wait and rereview integration       | 2 passed      |
-| Answer-healing publication and retained B receipt  | 5 passed      |
-| PR completion                                      | 32 passed     |
-| PR carry and owner-stop retry                      | 9 passed      |
-| Public shared-check authority RPC                  | 1 passed      |
-| Time-budget and continuation runner cases          | 9 passed      |
-| Best-of native cases                               | 4 passed      |
-| Completion receipts, restart, cancellation         | 4 passed      |
-| Concurrent owner amendments and screenshots        | 4 passed      |
-| Delivery and queued carry admission                | 6 passed      |
-| Late amendment during real final checks            | 1 passed      |
-| Dependency amendment versus first native attempt   | 1 passed      |
-| Genuine task start versus accepted owner amendment | 1 passed      |
+## Final acceptance and delivery
 
-The ten-case amendment binary includes the publication and direct-store finish
-fixes. It predates only the final cancellation-cleanup parity change, which
-requires the separately pinned final CI to establish current-source coverage.
+One immutable source snapshot must pass `npm run ci`, the full Rust workspace suite, denied-warning Clippy, rustfmt, the configured architecture gate and the required desktop smoke. The same source is checked on macOS and Linux. One authorized Claude canary uses a disposable native profile and an existing account, records early session identity, TimeBudget, same-session completion, transcript, helper count and usage, and leaves live CLI/configuration unchanged. A failed authentication attempt is not a successful canary.
 
-The task-start regression fails with the old start body: a successful Owner RPC
-is overwritten by the stale task copy. It passes with the locked fresh read,
-mutation, and save. The production body is the only difference in that negative
-proof. Existing parent-check coverage runs the actual parent loop and commits
-the newly accepted Owner check marker.
+Deslop precedes review. The review budget is one full pass and one substantive-fix P0/P1 delta; their actual results belong in the final proof record. The attempted additional installed-Codex review was rejected by automatic approval review because it could transmit source to another service/account; it did not run and was not bypassed. The internal independent review remains part of the proof.
 
-The generic AST checker has 32 synthetic tests, including negative oversized,
-forbidden dependency, macro, alias, lexical shadowing, and configuration cases.
-The final overall CI, full workspace suite, desktop smoke, native Claude canary,
-and remote check verdicts are recorded with the final checkpoint evidence.
-They are not implied by the targeted results above. The final pinned CI,
-native canary, and remote checks were pending when this checkpoint was
-committed; the PR body and local owner report record their later verdicts.
-
-Independent review completed one full pass and one P0/P1 delta. The five P1
-findings concerned idle amendment/start races, pending retirement, queued carry,
-screenshot identity, and stopped/stale PR publication. The genuine start caller
-found in the delta has a separate negative and positive regression. The
-additional installed Codex review was refused by automatic approval review
-because it could transmit repository source to an external service/account;
-that command did not run and was not bypassed.
-
-The full diagnostic suite subsequently exposed planner publication, relay-base
-publication, and early-delivery dirty-wait regressions. Their changes have
-targeted proof or an explicitly pending immutable replay. A read-only follow-up
-also identified an unproven stop-versus-failure-save risk in legacy
-`draft_run::fail_run` and `correction::settle_correction_timeout`: their final
-failure save is not covered by the new parsed-result publication lock. No
-universal stop-atomicity claim is made for those writers. The frozen integration
-source is fingerprinted for the final CI and native canary.
+A release fragment and a bounded Lessons entry accompany the change. Only the existing PR #93 is updated after the verified local commit. The owner merges main; no package, release or deployment is included. A canary establishes correctness for its synthetic case, not an improvement in first-pass success rate. Historical recorded costs are provider estimates, not invoices; missing Codex costs do not establish free execution.
 
 ## All twelve research recommendations remain in the plan
 
@@ -168,7 +67,7 @@ source is fingerprinted for the final CI and native canary.
 | 9   | Small harness adapter contract                 | Native continuation remains on the existing adapter; next unify run/resume/cancel/events/usage/permissions and pilot app-server with CLI fallback.                                                                            |
 | 10  | Optional test-runner evidence adapters         | Preserve code-owned gates; next move runner-specific structured evidence out of orchestration while letting the agent investigate unknown failures.                                                                           |
 | 11  | Measure useful results and owner interventions | RPC/runner replay and one canary provide correctness evidence, not a first-pass benchmark. Next compare identical cases/base/environment with engine/harness/model fingerprints, owner actions, time, failures, and overhead. |
-| 12  | Prompts, skills, and a few profiles            | Compact executor instructions now; extend existing profiles after measurement, without a workflow DSL.                                                                                                                        |
+| 12  | Prompts, skills, and a few profiles            | Compact executor instructions now; extend existing profiles after measurement, through closed typed operations.                                                                                                               |
 
 The follow-up order remains: environment and resource ownership (#2/#8),
 contract/state/delivery (#1/#3/#7), recovery/evidence (#6/#10), matched evaluations

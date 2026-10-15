@@ -3,10 +3,10 @@ use crate::engine::availability::wait_for_harness;
 use crate::engine::cost::wait_while_over_budget;
 use crate::engine::lines::variant_route_line;
 use crate::engine::planning::records::write_planner_run_files;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::slots::SlotPermit;
 use crate::engine::state::App;
 use crate::task::Stage;
-use crate::task::TaskStatus;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -74,11 +74,10 @@ pub(in crate::engine::planning) async fn prepare_round(
     choice: &(String, String),
     signals: &crate::engine::run_control::TaskSignals,
     permit: &mut Option<SlotPermit>,
-) -> Option<PlannerRound> {
+) -> Result<PlannerRound, WaitEnd> {
     let cancel = &signals.cancel;
-    let pending_answer = &signals.pending_answer;
     if cancel.is_cancelled() {
-        return None;
+        return Err(WaitEnd::Stopped);
     }
     // The very first round already holds the slot `run_task_loop`
     // acquired before calling in; a round that starts fresh right after
@@ -91,52 +90,46 @@ pub(in crate::engine::planning) async fn prepare_round(
         };
         match acquired {
             Some(p) => *permit = Some(p),
-            None => return None,
+            None => return Err(WaitEnd::Stopped),
         }
     }
 
     let mut task = match app.store.load_task(task_id) {
         Ok(Some(t)) => t,
-        _ => return None,
+        _ => return Err(WaitEnd::Stopped),
     };
-    crate::engine::verification::base::amendments::apply_pending_amendment(
+    if let Err(error) = crate::engine::verification::base::amendments::apply_pending_amendment(
         app,
         &mut task,
         &signals.pending_amend,
         cancel,
     )
-    .await;
-    if !wait_while_over_budget(
-        app,
-        task_id,
-        &mut task,
-        "plan",
-        TaskStatus::Drafting,
-        pending_answer,
-        cancel,
-        permit,
-    )
     .await
     {
-        return None;
+        eprintln!("orch: applying amendment to {task_id} failed: {error}");
+        return Err(WaitEnd::Stopped);
     }
-
-    if !wait_for_harness(
-        app,
-        task_id,
-        &mut task,
-        TaskStatus::Drafting,
-        pending_answer,
-        cancel,
-        permit,
-    )
-    .await
+    if cancel.is_cancelled()
+        || task.archived
+        || task.queue.park.is_some()
+        || matches!(
+            task.status,
+            crate::task::TaskStatus::Stopped
+                | crate::task::TaskStatus::Failed
+                | crate::task::TaskStatus::Done
+        )
     {
-        return None;
+        return Err(WaitEnd::Stopped);
     }
+    if task.pending_amendment.is_some() || signals.pending_amend.lock().unwrap().is_some() {
+        return Err(WaitEnd::Changed);
+    }
+    let mut slot = QuestionSlot::new(signals, permit);
+    wait_while_over_budget(app, &mut task, "plan", &mut slot).await?;
+    wait_for_harness(app, &mut task, &mut slot).await?;
     let settings = app.settings.read().unwrap().clone();
-    let route = select_route(app, &mut task, &settings, choice)?;
-    Some(PlannerRound::new(app, task, route, settings))
+    let route = select_route(app, &mut task, &settings, choice).ok_or(WaitEnd::Stopped)?;
+    Ok(PlannerRound::new(app, task, route, settings))
 }
 
 fn select_route(
@@ -178,3 +171,6 @@ fn select_route(
 
     Some(route)
 }
+
+#[cfg(test)]
+mod tests;

@@ -24,6 +24,7 @@ fn hold_stop_control(app: &App, task: &Task) -> CancelToken {
         task.id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: Arc::new(StdMutex::new(None)),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -45,17 +46,27 @@ async fn start_stop_question_wait(app: &Arc<App>, mut task: Task) -> oneshot::Re
     let id = task.id.clone();
     let handle = tokio::spawn(async move {
         let _id = task.id.clone();
-        assert!(
-            wait_for_answer(&loop_app, &mut task, &loop_pending, &loop_cancel, &mut None,)
-                .await
-                .is_none()
-        );
+        assert!(matches!(
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: loop_cancel.clone(),
+                    pending_answer: loop_pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None))
+                },
+                &mut None
+            )
+            .answer(&loop_app, &mut task)
+            .await,
+            Err(WaitEnd::Stopped)
+        ));
         let _ = done.send(task);
     });
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel,
                 pending_answer,
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -419,6 +430,7 @@ async fn a_stopped_task_closes_a_plan_question_but_shutdown_keeps_it() {
                     )
                 },
                 &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: cancel.clone(),
                     pending_answer: pending.clone(),
                     pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),

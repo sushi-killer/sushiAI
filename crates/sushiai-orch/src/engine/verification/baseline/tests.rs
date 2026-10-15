@@ -85,16 +85,18 @@ mod grounded_checks_tests {
         )];
         let cancel = CancelToken::new();
         let repo_name = repo.to_string_lossy().into_owned();
+        let sandbox = app.task_sandbox(&repo_name, &repo, dir.path());
         let run = || {
             run_verify_cached(
-                &app,
+                crate::engine::verification::runner::CheckRunner::from_context(
+                    crate::engine::verification::context::CheckContext::new(&app, Some("task")),
+                    &repo,
+                    sandbox.as_ref(),
+                    &base,
+                    &cancel,
+                ),
                 "task",
-                &repo_name,
-                &repo,
-                dir.path(),
-                &base,
                 &commands,
-                &cancel,
             )
         };
         let (first, lines) = run().await;

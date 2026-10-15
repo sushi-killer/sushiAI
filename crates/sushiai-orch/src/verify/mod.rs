@@ -15,3 +15,6 @@ pub(crate) mod output;
 pub(crate) mod passes;
 pub mod review;
 pub(crate) mod scoping;
+
+pub(crate) mod command_gate;
+pub(crate) mod test_lists;

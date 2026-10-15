@@ -8,9 +8,10 @@
 use crate::api::events::Event;
 use crate::clock::now_ms;
 use crate::engine::attempts::ledger::CostTag;
-use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
-use crate::engine::review::{review_request, write_readonly_claude_settings_with_profile};
+use crate::engine::review::native::review_request;
+use crate::engine::review::native::write_readonly_claude_settings_with_profile;
 use crate::engine::state::App;
 use crate::harness;
 use crate::harness::cancel::CancelToken;
@@ -182,7 +183,6 @@ pub(in crate::engine) fn prepare_run(
         write_readonly_claude_settings_with_profile(
             route,
             app,
-            &key_path,
             settings,
             &deny_read,
             &settings_path,
@@ -213,14 +213,18 @@ async fn run(
             let events_path = dir.join("events.jsonl");
             let result = run_harness(
                 app,
-                &audit.id,
-                0,
-                RunTrack::No,
-                &repo,
-                &req,
-                CostTag::repo("audit", &route.id, &audit.repo),
-                &brief_text,
-                &events_path,
+                RunIdentity {
+                    id: &audit.id,
+                    attempt_n: 0,
+                    track: RunTrack::No,
+                    tag: CostTag::repo("audit", &route.id, &audit.repo),
+                },
+                RunInvocation {
+                    request: &req,
+                    brief: &brief_text,
+                    events: &events_path,
+                    schema: None,
+                },
                 &cancel,
                 Guard::off(),
             )

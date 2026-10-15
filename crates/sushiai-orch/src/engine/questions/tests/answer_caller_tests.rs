@@ -1,7 +1,7 @@
 use crate::api::events::Event;
 use crate::engine::planning::graph::subtask_request;
 use crate::engine::planning::questions::ask_plan_question;
-use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::parking::QuestionSlot;
 use crate::engine::run_control::TaskControl;
 use crate::engine::test_support::task_with_status;
 use crate::engine::test_support::test_app;
@@ -58,6 +58,7 @@ async fn the_parked_loop_records_each_real_caller() {
             id.clone(),
             TaskControl {
                 signals: crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
                     cancel: cancel.clone(),
                     pending_answer: pending.clone(),
                     pending_amend: Arc::new(StdMutex::new(None)),
@@ -69,8 +70,18 @@ async fn the_parked_loop_records_each_real_caller() {
         let loop_app = app.clone();
         let waiter = tokio::spawn(async move {
             let _id = task.id.clone();
-            let reply = wait_for_answer(&loop_app, &mut task, &pending, &cancel, &mut None).await;
-            assert_eq!(reply.as_deref(), Some("B"));
+            let reply = QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .answer(&loop_app, &mut task)
+            .await;
+            assert_eq!(reply.as_deref(), Ok("B"));
             task
         });
         wait_until_parked(&mut events, &id).await;
@@ -108,6 +119,7 @@ async fn a_parked_plan_answer_records_the_lead_and_planner_context_keeps_it() {
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: Arc::new(StdMutex::new(None)),
@@ -134,6 +146,7 @@ async fn a_parked_plan_answer_records_the_lead_and_planner_context_keeps_it() {
                 )
             },
             &crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: cancel.clone(),
                 pending_answer: pending.clone(),
                 pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),

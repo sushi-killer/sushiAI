@@ -1,4 +1,4 @@
-use crate::engine::planning::correction::correct_draft;
+use crate::engine::planning::correction::PlannerCorrection;
 use crate::engine::planning::correction::Uncorrected;
 use crate::engine::planning::run::run_plan_stage;
 use crate::engine::planning::run::PlanOutcome;
@@ -88,7 +88,9 @@ async fn planner_correction_timed_out_fails_instead_of_redrafting() {
     task.fixture_data().attempts[0].stage = Stage::Plan;
     task.fixture_data().attempts[0].session_id = Some("s".into());
     app.store.save_task(&task).unwrap();
-    let result = correct_draft(&app, &task.id, 0, &route, "conflict", &TaskSignals::new()).await;
+    let correction = PlannerCorrection::resume(&app, &task.id, 0, &route)
+        .unwrap_or_else(|_| panic!("the saved planner session must resume"));
+    let result = correction.run(&app, "conflict", &TaskSignals::new()).await;
     assert!(matches!(result, Err(Uncorrected::Failed)));
     let task = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Failed);

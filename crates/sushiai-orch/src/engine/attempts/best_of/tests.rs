@@ -1,7 +1,12 @@
+use crate::engine::attempts::best_of::candidate::{
+    CandidateEvidence, CandidateRun, EvaluatedCandidates,
+};
 use crate::engine::attempts::best_of::evaluate::disqualify_restored;
 use crate::engine::attempts::best_of::evaluate::Eval;
 use crate::engine::attempts::best_of::pick::run_pick;
+use crate::engine::attempts::best_of::run::BestOfRun;
 use crate::engine::attempts::best_of::sibling::create_sibling;
+use crate::engine::attempts::prepare::ImplementRun;
 use crate::engine::decision::implement_attempt_count;
 use crate::engine::test_support::attempt_with_failure;
 use crate::engine::test_support::init_git_repo;
@@ -13,19 +18,20 @@ use crate::policy::routing::Harness;
 use crate::policy::routing::Tier;
 use crate::policy::settings::Settings;
 use crate::policy::variant::Variant;
-use crate::task::Attempt;
-use crate::task::CheckTally;
-use crate::task::PlannedTest;
-use crate::task::Stage;
-use crate::task::TaskStatus;
+use crate::task::attempt::Attempt;
+use crate::task::attempt::CheckTally;
+use crate::task::attempt::Stage;
+use crate::task::checks::types::PlannedTest;
+use crate::task::state::TaskStatus;
 use std::path::PathBuf;
 
 #[cfg(test)]
 mod route_tests {
     use super::{
         attempt_with_failure, implement_attempt_count, run_pick, second_route, slow_helper_task,
-        task_with_status, Attempt, CancelToken, CheckTally, Eval, Harness, PathBuf, Settings,
-        Stage, TaskStatus, Tier, Variant,
+        task_with_status, Attempt, BestOfRun, CancelToken, CandidateEvidence, CandidateRun,
+        CheckTally, Eval, EvaluatedCandidates, Harness, ImplementRun, PathBuf, Settings, Stage,
+        TaskStatus, Tier, Variant,
     };
 
     #[tokio::test]
@@ -34,34 +40,47 @@ mod route_tests {
         let mut settings = app.settings.read().unwrap().clone();
         settings.review = route.id.clone();
         let worktree = PathBuf::from(&task.worktree);
-        let eval = Eval {
-            passed: true,
-            verify_ok: true,
-            failing: 0,
-            verify: vec![],
-            tally: CheckTally::default(),
+        let candidate = || CandidateEvidence {
+            run: CandidateRun {
+                route: route.clone(),
+                worktree: worktree.clone(),
+                run_dir: app.store.run_dir(&task.id, 1),
+                outcome: Ok(crate::harness::RunOutcome::default()),
+                cost: 0.0,
+            },
+            checks: Eval {
+                passed: true,
+                verify_ok: true,
+                failing: 0,
+                verify: vec![],
+                tally: CheckTally::default(),
+            },
+            restored: vec![],
+        };
+        let candidates = EvaluatedCandidates {
+            a: candidate(),
+            b: candidate(),
+            decisions: vec![],
+        };
+        let run_dir = app.store.run_dir(&task.id, 1);
+        let run = BestOfRun {
+            primary: ImplementRun {
+                task: &task,
+                route: &route,
+                settings: &settings,
+                worktree: &worktree,
+                attempt_n: 1,
+                run_dir: &run_dir,
+            },
+            secondary: &route,
+            brief: "",
+            deny_read: &[],
         };
         let mut decisions = Vec::new();
-        let (pick, _) = run_pick(
-            &app,
-            &task,
-            &task.id,
-            1,
-            &settings,
-            &route,
-            &route,
-            &worktree,
-            &worktree,
-            &task.own_diff(),
-            &mut decisions,
-            &eval,
-            &eval,
-            &[],
-            &CancelToken::new(),
-        )
-        .await
-        .ok()
-        .expect("the picker must start");
+        let (pick, _) = run_pick(&app, &run, &candidates, &mut decisions, &CancelToken::new())
+            .await
+            .ok()
+            .expect("the picker must start");
         assert!(pick.is_none());
         assert_eq!(decisions, ["best-of pick timed out after 0.25s"]);
         assert_eq!(

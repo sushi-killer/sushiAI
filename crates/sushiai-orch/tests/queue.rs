@@ -7,7 +7,12 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::{cheap_route_on_claude, fake_harness_script};
+use common::polling::{poll_until, wait_until};
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -43,7 +48,7 @@ fn daemon(gates: &Path) -> (Daemon, tempfile::TempDir) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));
     settings["review"] = serde_json::json!("");
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
-    // A conflict-only attempt runs on the cheap route: keep it on the fake.
+    // A route for the cheap tier that runs on the fake harness.
     cheap_route_on_claude(&daemon);
     (daemon, scripts)
 }
@@ -54,27 +59,15 @@ fn repo_on_work_branch() -> tempfile::TempDir {
     repo
 }
 
-fn create(
-    daemon: &Daemon,
-    repo: &Path,
-    name: &str,
-    verify: &str,
-    paths: &[&str],
-    land: bool,
-) -> String {
-    let task = daemon.request(
-        "task.create",
-        serde_json::json!({
-            "repo": repo.to_str().unwrap(),
-            "title": format!("Add {name}"),
-            "goal": format!("FILE_{name}: write the file"),
-            "verify": [verify],
-            "paths": paths,
-            "land": land,
-            "start": false,
-        }),
-    );
-    task["id"].as_str().unwrap().to_string()
+fn create(daemon: &Daemon, repo: &Path, name: &str, mut params: serde_json::Value) -> String {
+    params["repo"] = serde_json::json!(repo.to_str().unwrap());
+    params["title"] = serde_json::json!(format!("Add {name}"));
+    params["goal"] = serde_json::json!(format!("FILE_{name}: write the file"));
+    params["start"] = serde_json::json!(false);
+    daemon.request("task.create", params)["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn start(daemon: &Daemon, id: &str) {
@@ -136,17 +129,13 @@ fn tasks_whose_plans_overlap_but_whose_edits_do_not_start_together_and_both_land
         &daemon,
         root,
         "one",
-        "test -f one.txt",
-        &["shared.txt"],
-        true,
+        serde_json::json!({"verify": ["test -f one.txt"], "paths": ["shared.txt"], "land": true}),
     );
     let two = create(
         &daemon,
         root,
         "two",
-        "test -f two.txt",
-        &["shared.txt"],
-        true,
+        serde_json::json!({"verify": ["test -f two.txt"], "paths": ["shared.txt"], "land": true}),
     );
     hold(gates.path(), "one");
     hold(gates.path(), "two");
@@ -198,18 +187,14 @@ fn a_real_conflict_gives_one_more_attempt_on_the_newest_base_and_lands_with_both
         &daemon,
         root,
         "a",
-        "grep -q a shared.txt",
-        &["shared.txt"],
-        true,
+        serde_json::json!({"verify": ["grep -q a shared.txt"], "paths": ["shared.txt"], "land": true}),
     );
     // Both create `shared.txt`: b conflicts once a has landed.
     let b = create(
         &daemon,
         root,
         "b",
-        "grep -q a shared.txt && grep -q b shared.txt",
-        &["shared.txt"],
-        true,
+        serde_json::json!({"verify": ["grep -q a shared.txt && grep -q b shared.txt"], "paths": ["shared.txt"], "land": true}),
     );
     hold(gates.path(), "a");
     hold(gates.path(), "b");
@@ -256,17 +241,13 @@ fn tasks_with_disjoint_paths_run_at_the_same_time() {
         &daemon,
         repo.path(),
         "one",
-        "test -f one.txt",
-        &["src/one"],
-        false,
+        serde_json::json!({"verify": ["test -f one.txt"], "paths": ["src/one"], "land": false}),
     );
     let two = create(
         &daemon,
         repo.path(),
         "two",
-        "test -f two.txt",
-        &["src/two"],
-        false,
+        serde_json::json!({"verify": ["test -f two.txt"], "paths": ["src/two"], "land": false}),
     );
     hold(gates.path(), "one");
     hold(gates.path(), "two");
@@ -333,11 +314,14 @@ fn hook_edit_refuses_a_file_another_live_task_really_changed_and_not_one_it_only
         &daemon,
         repo.path(),
         "early",
-        "test -f early.txt",
-        &["planned"],
-        false,
+        serde_json::json!({"verify": ["test -f early.txt"], "paths": ["planned"], "land": false}),
     );
-    let b = create(&daemon, repo.path(), "two", "test -f two.txt", &[], false);
+    let b = create(
+        &daemon,
+        repo.path(),
+        "two",
+        serde_json::json!({"verify": ["test -f two.txt"], "paths": [], "land": false}),
+    );
     hold(gates.path(), "early");
     hold(gates.path(), "two");
     start(&daemon, &a);
@@ -402,8 +386,18 @@ fn a_task_waiting_for_a_global_slot_shows_the_slot_wait() {
     settings["parallel"] = serde_json::json!(1);
     daemon.request("settings.set", serde_json::json!({"settings": settings}));
     let repo = init_git_repo();
-    let one = create(&daemon, repo.path(), "one", "test -f one.txt", &[], false);
-    let two = create(&daemon, repo.path(), "two", "test -f two.txt", &[], false);
+    let one = create(
+        &daemon,
+        repo.path(),
+        "one",
+        serde_json::json!({"verify": ["test -f one.txt"], "paths": [], "land": false}),
+    );
+    let two = create(
+        &daemon,
+        repo.path(),
+        "two",
+        serde_json::json!({"verify": ["test -f two.txt"], "paths": [], "land": false}),
+    );
     hold(gates.path(), "one");
     start(&daemon, &one);
     wait_for("one running", || started(gates.path(), "one"));

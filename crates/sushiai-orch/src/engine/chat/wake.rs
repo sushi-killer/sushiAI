@@ -4,8 +4,7 @@ use super::turn::ScheduledTurn;
 use super::turn::Turn;
 use crate::engine::messages;
 use crate::engine::state::App;
-use crate::overseer;
-use crate::overseer_state;
+use crate::store::overseer_state;
 use crate::task::state::TaskStatus;
 use std::path::Path;
 
@@ -183,11 +182,12 @@ pub(in crate::engine) fn wake_overseer(app: &App, repo: &str, request: WakeReque
     };
     let about = app.wake_questions(repo, reason, task_id);
     let held = app.hold_for_overseer(repo, reason, task_id);
-    app.record_overseer(overseer::Entry::new(
+    app.record_overseer(crate::task::notes::overseer::Entry::new(
         "woke",
         repo,
         task_id,
         &format!("Woke for {reason}"),
+        crate::clock::now_ms(),
     ));
     save(app, repo, &session);
     let wake_ids: Vec<String> = task_id.map(str::to_string).into_iter().collect();
@@ -246,11 +246,12 @@ fn claim_overseer_turn(
                     app.hand_over_unwoken(repo, reason, task_id);
                     "no route"
                 };
-                app.record_overseer(overseer::Entry::new(
+                app.record_overseer(crate::task::notes::overseer::Entry::new(
                     "skipped",
                     repo,
                     task_id,
                     &format!("Not woken ({reason}): {why}"),
+                    crate::clock::now_ms(),
                 ));
             }
             None

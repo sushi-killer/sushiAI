@@ -1,11 +1,11 @@
-use super::{prepare::prepare_pr, record::record_publication};
+use self::carry::carry_admission;
+use super::{admission::Admission, prepare::prepare_pr, record::record_publication};
 use crate::api::validation::validate_task_id;
 use crate::delivery::pr::command::run_cmd;
 use crate::delivery::pr::command::GIT_TIMEOUT;
 use crate::delivery::pr::error::PrError;
 use crate::delivery::pr::error::PrRefusal;
 use crate::delivery::pr::in_flight::InFlight;
-use crate::delivery::pr::publication::{PrContent, Publication};
 use crate::delivery::pr::request::PrParams;
 use crate::engine::state::App;
 use crate::task::delivery::PrPlan;
@@ -33,35 +33,30 @@ impl App {
         }
         validate_task_id(&self.store, &p.id).map_err(PrRefusal::Invalid)?;
         let _guard = InFlight::take(&p.id)?;
-        let (task, publication) = prepare_pr(self, &p).await?;
-        let Publication {
-            content:
-                PrContent {
-                    branch,
-                    title: _,
-                    body: _,
-                },
-            repo,
-            base,
-            local,
-        } = &publication;
+        let (mut task, publication) = prepare_pr(self, &p).await?;
         // The same carry as the automatic pull request: never push a stale base.
         let owner_plan = PrPlan {
-            branch: branch.clone(),
+            branch: publication.content.branch.clone(),
             title: p.title.clone().unwrap_or_default(),
             body: p.body.clone().unwrap_or_default(),
             branch_from: crate::task::delivery::BranchFrom::Owner,
         };
-        run_cmd("git", &["fetch", "origin", base], repo, GIT_TIMEOUT).await?;
+        run_cmd(
+            "git",
+            &["fetch", "origin", &publication.base],
+            &publication.repo,
+            GIT_TIMEOUT,
+        )
+        .await?;
         let up_to_date = run_cmd(
             "git",
             &[
                 "merge-base",
                 "--is-ancestor",
-                &format!("origin/{base}"),
-                local,
+                &format!("origin/{}", publication.base),
+                &publication.local,
             ],
-            repo,
+            &publication.repo,
             GIT_TIMEOUT,
         )
         .await
@@ -80,35 +75,37 @@ impl App {
             crate::engine::delivery::pr::pending::spawn_open_pr(self, &p.id);
             return Ok(serde_json::to_value(&queued).map_err(|e| e.to_string())?);
         }
-        match crate::engine::delivery::pr::carry::carry_for_pr(&self.arc(), &task, Some(owner_plan))
-            .await?
-        {
-            crate::engine::delivery::pr::carry::PrCarry::Ready => {}
-            crate::engine::delivery::pr::carry::PrCarry::Contained => {
-                return Err(PrRefusal::Contained(base.clone()).into());
-            }
-            crate::engine::delivery::pr::carry::PrCarry::Resolving(files) => {
-                return Err(PrRefusal::Resolving {
-                    base: base.clone(),
-                    files,
+        loop {
+            let admission =
+                carry_admission(&self.arc(), &task, owner_plan.clone(), &publication.base).await?;
+            let (fresh, mut next) = prepare_pr(self, &p).await?;
+            next.content.body = super::validation::body(self, &fresh, next.content.body).await?;
+            let push = next.prepare_push(&fresh.branch).await?;
+            let push = match admission.dispatch(self, &p.id, push)? {
+                Admission::Ready(write) => write,
+                Admission::Changed(current) => {
+                    task = *current;
+                    continue;
                 }
-                .into());
-            }
-            crate::engine::delivery::pr::carry::PrCarry::Failed(reason) => {
-                return Err(PrRefusal::CarryFailed(reason).into());
-            }
-            crate::engine::delivery::pr::carry::PrCarry::Deferred => {
-                return Err(PrRefusal::TaskChanged.into());
-            }
-            crate::engine::delivery::pr::carry::PrCarry::Environment(reason) => {
-                return Err(PrRefusal::CarryFailed(format!(
-                    "the setup of the carry worktree failed (environment): {reason}"
-                ))
-                .into());
-            }
+                Admission::Deferred => return Err(PrRefusal::TaskChanged.into()),
+            };
+            let local_sha = push.finish().await?;
+            let open = next.prepare_open(&local_sha).await?;
+            let open = match admission.dispatch(self, &p.id, open)? {
+                Admission::Ready(write) => write,
+                Admission::Changed(current) => {
+                    task = *current;
+                    continue;
+                }
+                Admission::Deferred => return Err(PrRefusal::TaskChanged.into()),
+            };
+            let receipt = open.finish().await?;
+            return record_publication(self, &p, &next, receipt);
         }
-        let local_sha = publication.push(&task.branch).await?;
-        let receipt = publication.open(&local_sha).await?;
-        record_publication(self, &p, &publication, receipt)
     }
 }
+
+mod carry;
+
+#[cfg(test)]
+mod tests;

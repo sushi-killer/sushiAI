@@ -1,5 +1,5 @@
 use crate::api::validation::validate_task_id;
-use crate::engine::lifecycle::carry::carry_onto_newest_base;
+use crate::engine::lifecycle::carry::{carry_onto_newest_base, carry_relay_onto_parent, BaseCarry};
 use crate::engine::planning::graph::overlapping_path;
 use crate::engine::state::App;
 use crate::git::paths::short_sha;
@@ -128,7 +128,11 @@ impl App {
         }
     }
 
-    pub(super) async fn carry_part_onto_parent(&self, task: &mut Task, cancel: &CancelToken) {
+    pub(super) async fn carry_part_onto_parent(
+        &self,
+        task: &mut Task,
+        cancel: &CancelToken,
+    ) -> BaseCarry {
         let worktree = PathBuf::from(&task.worktree);
         if let Some(chain_base) = task.queue.relay_base.clone() {
             if let Some(parent) = task
@@ -154,32 +158,12 @@ impl App {
                 .await
                 .unwrap_or(false);
                 if needs_carry {
-                    let (wt, base) = (worktree.clone(), chain_base.clone());
-                    let uncommitted = tokio::task::spawn_blocking(move || {
-                        crate::delivery::git::carry::uncommit_to(&wt, &base)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())));
-                    match uncommitted {
-                        Ok(()) => {
-                            crate::task::transitions::move_base(task, chain_base);
-                            task.record_base_ref(Some(parent.branch.clone()));
-                            carry_onto_newest_base(self, task, &worktree, cancel).await;
-                            task.record_relay_base(Some(task.base_sha.clone()));
-                            return;
-                        }
-                        Err(error) => {
-                            task.record_decision(format!(
-                                "Rebase: could not carry the relay onto the parent: {error}"
-                            ));
-                            return;
-                        }
-                    }
+                    return carry_relay_onto_parent(self, task, &parent, &chain_base, cancel).await;
                 }
             }
-            return;
+            return BaseCarry::Ready;
         }
-        carry_onto_newest_base(self, task, &worktree, cancel).await;
+        carry_onto_newest_base(self, task, &worktree, cancel).await
     }
 
     pub(super) async fn handle_task_sync(

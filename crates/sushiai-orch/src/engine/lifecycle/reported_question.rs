@@ -10,10 +10,9 @@ use crate::engine::lifecycle::report::ImplementerReport;
 use crate::engine::permissions::capabilities::{
     apply_no_tool_answer, missing_tool_claim, no_tool_question, tool_to_enable,
 };
+use crate::engine::persistence::contract::ContractInput;
 use crate::engine::questions::exhausted::{settle_exhausted_answer, wait_for_exhausted_answer};
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::run_control::TaskSignals;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
 use crate::task::{AskedBy, FailureKind, Question, QuestionKind, Task, TaskStatus};
 use std::sync::Arc;
@@ -27,14 +26,13 @@ pub(in crate::engine) enum Action {
 pub(in crate::engine) async fn resolve(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
     report: &ImplementerReport,
-    signals: &TaskSignals,
-    permit: &mut Option<SlotPermit>,
     budget: u32,
+    slot: &mut QuestionSlot<'_>,
 ) -> Action {
+    let idx = task.attempts.len() - 1;
     if let Some(claim) = parse_impossible(&report.final_text, task.criteria.len()) {
-        return impossible(app, task, idx, &claim, signals, permit).await;
+        return impossible(app, task, &claim, slot).await;
     }
     let Some(report) = report
         .report
@@ -46,46 +44,57 @@ pub(in crate::engine) async fn resolve(
     record_failure(task, idx, FailureKind::Blocked, report.question.clone());
     let base = ladder::base_tails(app, &task.base_sha);
     if !advance_after_failure_with(task, budget, &base) {
-        return match wait_for_exhausted_answer(
-            app,
-            task,
-            &signals.pending_answer,
-            &signals.cancel,
-            permit,
-        )
-        .await
-        {
-            Some(answered) => {
+        return match wait_for_exhausted_answer(app, task, slot).await {
+            Ok(answered) => {
                 settle_exhausted_answer(app, task, idx, &answered.text);
                 Action::Retry(2)
             }
-            None => Action::Stop,
+            Err(WaitEnd::Changed) => Action::Retry(0),
+            Err(WaitEnd::Stopped) => Action::Stop,
         };
     }
     if let Some(capability) = missing_tool_claim(&report.question) {
-        return missing_tool(app, task, &capability, signals, permit).await;
+        return missing_tool(app, task, &capability, slot).await;
     }
-    ask_agent(app, task, idx, report, signals, permit).await
+    ask_agent(app, task, report, slot).await
 }
 
 async fn impossible(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
     claim: &Impossible,
-    signals: &TaskSignals,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> Action {
+    let idx = task.attempts.len() - 1;
     let question = impossible_question(task, claim);
+    let admission = ContractInput::capture(task);
     record_failure(task, idx, FailureKind::Blocked, question.text.clone());
     task.mark_attempt_blocked(idx);
+    let publication = crate::task::attempts::inspection::BlockedInspection::capture(task, idx)
+        .and_then(|inspection| {
+            admission.publish(app, task, slot.cancel(), |fresh| inspection.apply(fresh))
+        });
+    match publication {
+        Ok(publication) => match publication.into_result() {
+            Ok(()) => {}
+            Err(WaitEnd::Changed) => return Action::Retry(0),
+            Err(WaitEnd::Stopped) => return Action::Stop,
+        },
+        Err(error) => {
+            eprintln!(
+                "orch: publishing blocked attempt {} failed: {error}",
+                task.id
+            );
+            return Action::Stop;
+        }
+    }
     task.ask(question.clone(), task.updated_at);
     task.resume_phase(TaskStatus::Waiting, task.updated_at);
     task.touch(now_ms());
-    let Some(answer) =
-        wait_for_answer(app, task, &signals.pending_answer, &signals.cancel, permit).await
-    else {
-        return Action::Stop;
+    let answer = match slot.answer(app, task).await {
+        Ok(answer) => answer,
+        Err(WaitEnd::Changed) => return Action::Retry(0),
+        Err(WaitEnd::Stopped) => return Action::Stop,
     };
     if let Some(index) = impossible_drop_target(&question, &answer) {
         let settings = app.settings.read().unwrap().clone();
@@ -102,8 +111,7 @@ async fn missing_tool(
     app: &Arc<App>,
     task: &mut Task,
     capability: &str,
-    signals: &TaskSignals,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> Action {
     let enable = tool_to_enable(app, task, capability);
     task.ask(
@@ -112,10 +120,10 @@ async fn missing_tool(
     );
     task.resume_phase(TaskStatus::Waiting, task.updated_at);
     task.touch(now_ms());
-    let Some(answer) =
-        wait_for_answer(app, task, &signals.pending_answer, &signals.cancel, permit).await
-    else {
-        return Action::Stop;
+    let answer = match slot.answer(app, task).await {
+        Ok(answer) => answer,
+        Err(WaitEnd::Changed) => return Action::Retry(0),
+        Err(WaitEnd::Stopped) => return Action::Stop,
     };
     apply_no_tool_answer(app, task, capability, &answer);
     task.touch(now_ms());
@@ -127,11 +135,10 @@ async fn missing_tool(
 async fn ask_agent(
     app: &Arc<App>,
     task: &mut Task,
-    idx: usize,
     report: &Report,
-    signals: &TaskSignals,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> Action {
+    let idx = task.attempts.len() - 1;
     let mut question = Question::new(
         report.question.clone(),
         vec![],
@@ -147,8 +154,8 @@ async fn ask_agent(
     task.ask(question, task.updated_at);
     task.resume_phase(TaskStatus::Waiting, task.updated_at);
     task.touch(now_ms());
-    match wait_for_answer(app, task, &signals.pending_answer, &signals.cancel, permit).await {
-        Some(_) => Action::Retry(0),
-        None => Action::Stop,
+    match slot.answer(app, task).await {
+        Ok(_) | Err(WaitEnd::Changed) => Action::Retry(0),
+        Err(WaitEnd::Stopped) => Action::Stop,
     }
 }

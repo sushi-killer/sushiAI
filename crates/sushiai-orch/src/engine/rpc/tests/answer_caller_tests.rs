@@ -15,7 +15,7 @@ use crate::engine::test_support::task_with_status;
 #[cfg(test)]
 use crate::engine::test_support::test_app;
 
-use crate::overseer;
+use crate::store::overseer;
 
 use crate::task::AnsweredBy;
 
@@ -163,6 +163,7 @@ async fn a_normal_question_is_still_answerable_through_mcp() {
         id.clone(),
         TaskControl {
             signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
                 cancel: CancelToken::new(),
                 pending_answer: Arc::new(StdMutex::new(Some(tx))),
                 pending_amend: Arc::new(StdMutex::new(None)),

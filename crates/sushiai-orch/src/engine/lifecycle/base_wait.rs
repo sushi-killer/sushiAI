@@ -1,12 +1,9 @@
 use crate::clock::now_ms;
 use crate::engine::lifecycle::carry::carry_onto_newest_base;
 use crate::engine::lifecycle::carry::BaseCarry;
-use crate::engine::questions::parking::wait_for_answer;
-use crate::engine::questions::reply::Reply;
-use crate::engine::slots::SlotPermit;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
 use crate::git::paths::short_sha;
-use crate::harness::cancel::CancelToken;
 use crate::task::is_option;
 use crate::task::AskedBy;
 use crate::task::Question;
@@ -18,9 +15,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
 /// How often a task that waits for its base branch to move looks at it.
 const BASE_MOVE_POLL: Duration = Duration::from_secs(1);
@@ -111,6 +106,7 @@ async fn follow_origin(repo: &Path, base_ref: &str) {
 pub(in crate::engine) enum BaseRetry {
     Ready,
     Conflict(String),
+    Changed,
     Stopped,
 }
 
@@ -121,84 +117,18 @@ pub(in crate::engine) async fn carry_after_base_moves(
     app: &Arc<App>,
     task: &mut Task,
     worktree: &Path,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
+    slot: &mut QuestionSlot<'_>,
 ) -> BaseRetry {
+    let cancel = slot.cancel().clone();
     let mut failed_carries = 0;
     loop {
-        if let Some(base_ref) = task.base_ref.clone() {
-            let mut noted = false;
-            let mut fetched_at: Option<tokio::time::Instant> = None;
-            let waited_from = tokio::time::Instant::now();
-            let resume_status = task.status;
-            let mut timed_out = false;
-            loop {
-                if fetched_at.is_none_or(|at| at.elapsed() >= BASE_FETCH_EVERY) {
-                    fetched_at = Some(tokio::time::Instant::now());
-                    follow_origin(Path::new(&task.repo), &base_ref).await;
-                }
-                let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
-                let now = tokio::task::spawn_blocking(move || {
-                    crate::git::history::resolve_commit(&wt, &r)
-                })
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-                if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
-                    break;
-                }
-                if waited_from.elapsed() >= base_wait_max() {
-                    timed_out = true;
-                    break;
-                }
-                if !noted {
-                    noted = true;
-                    permit.take();
-                    // Shown as waiting, with its reason; the claim on files
-                    // goes, so a task that waits blocks no one.
-                    app.leases.lock().unwrap().remove(&task.id);
-                    task.resume_phase(TaskStatus::Queued, task.updated_at);
-                    task.set_wait(Some(Wait::Dependency {
-                        titles: vec![format!(
-                            "{BASE_WAIT_TITLE}{base_ref} (retrying; waits at most {} min)",
-                            base_wait_max().as_secs() / 60
-                        )],
-                    }));
-                    task.record_decision(format!(
-                        "Orchestrator: waiting for {base_ref} to move past {} before the retry",
-                        short_sha(&task.base_sha)
-                    ));
-                    task.touch(now_ms());
-                    app.save_task_logged(task);
-                    app.broadcast_task(task);
-                    app.advance_queue(&task.repo);
-                }
-                tokio::select! {
-                    _ = cancel.cancelled() => return BaseRetry::Stopped,
-                    _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
-                }
-            }
-            if noted {
-                task.set_wait(None);
-                task.resume_phase(resume_status, task.updated_at);
-            }
-            if timed_out {
-                task.record_decision(format!(
-                    "Orchestrator: {base_ref} did not move past {} in {} min; the check is judged against the base as it is",
-                    short_sha(&task.base_sha),
-                    base_wait_max().as_secs() / 60
-                ));
-                record_base_waited_out(task, &task.base_sha.clone());
-            }
-            task.touch(now_ms());
-            app.save_task_logged(task);
-            app.broadcast_task(task);
+        if !wait_for_base_move(app, task, worktree, slot).await {
+            return BaseRetry::Stopped;
         }
         if cancel.is_cancelled() {
             return BaseRetry::Stopped;
         }
-        match carry_onto_newest_base(app, task, worktree, cancel).await {
+        match carry_onto_newest_base(app, task, worktree, &cancel).await {
             BaseCarry::Ready => return BaseRetry::Ready,
             BaseCarry::Stale => continue,
             BaseCarry::Stopped => return BaseRetry::Stopped,
@@ -216,10 +146,10 @@ pub(in crate::engine) async fn carry_after_base_moves(
                 );
                 task.resume_phase(TaskStatus::Waiting, task.updated_at);
                 task.touch(now_ms());
-                let _task_id = task.id.clone();
-                let Some(answer) = wait_for_answer(app, task, pending_answer, cancel, permit).await
-                else {
-                    return BaseRetry::Stopped;
+                let answer = match slot.answer(app, task).await {
+                    Ok(answer) => answer,
+                    Err(WaitEnd::Changed) => return BaseRetry::Changed,
+                    Err(WaitEnd::Stopped) => return BaseRetry::Stopped,
                 };
                 if is_option(&answer, "stop") {
                     task.resume_phase(TaskStatus::Stopped, task.updated_at);
@@ -249,6 +179,83 @@ pub(in crate::engine) async fn carry_after_base_moves(
             }
         }
     }
+}
+
+async fn wait_for_base_move(
+    app: &Arc<App>,
+    task: &mut Task,
+    worktree: &Path,
+    slot: &mut QuestionSlot<'_>,
+) -> bool {
+    let cancel = slot.cancel().clone();
+    if let Some(base_ref) = task.base_ref.clone() {
+        let mut noted = false;
+        let mut fetched_at: Option<tokio::time::Instant> = None;
+        let waited_from = tokio::time::Instant::now();
+        let resume_status = task.status;
+        let mut timed_out = false;
+        loop {
+            if fetched_at.is_none_or(|at| at.elapsed() >= BASE_FETCH_EVERY) {
+                fetched_at = Some(tokio::time::Instant::now());
+                follow_origin(Path::new(&task.repo), &base_ref).await;
+            }
+            let (wt, r) = (worktree.to_path_buf(), base_ref.clone());
+            let now =
+                tokio::task::spawn_blocking(move || crate::git::history::resolve_commit(&wt, &r))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+            if now.as_deref().is_none_or(|sha| sha != task.base_sha) {
+                break;
+            }
+            if waited_from.elapsed() >= base_wait_max() {
+                timed_out = true;
+                break;
+            }
+            if !noted {
+                noted = true;
+                slot.release();
+                // Shown as waiting, with its reason; the claim on files
+                // goes, so a task that waits blocks no one.
+                app.leases.lock().unwrap().remove(&task.id);
+                task.resume_phase(TaskStatus::Queued, task.updated_at);
+                task.set_wait(Some(Wait::Dependency {
+                    titles: vec![format!(
+                        "{BASE_WAIT_TITLE}{base_ref} (retrying; waits at most {} min)",
+                        base_wait_max().as_secs() / 60
+                    )],
+                }));
+                task.record_decision(format!(
+                    "Orchestrator: waiting for {base_ref} to move past {} before the retry",
+                    short_sha(&task.base_sha)
+                ));
+                task.touch(now_ms());
+                app.save_task_logged(task);
+                app.broadcast_task(task);
+                app.advance_queue(&task.repo);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return false,
+                _ = tokio::time::sleep(BASE_MOVE_POLL) => {}
+            }
+        }
+        if noted {
+            task.set_wait(None);
+            task.resume_phase(resume_status, task.updated_at);
+        }
+        if timed_out {
+            task.record_decision(format!(
+                "Orchestrator: {base_ref} did not move past {} in {} min; the check is judged against the base as it is",
+                short_sha(&task.base_sha),
+                base_wait_max().as_secs() / 60
+            ));
+            record_base_waited_out(task, &task.base_sha.clone());
+        }
+        task.touch(now_ms());
+        app.save_task_logged(task);
+        app.broadcast_task(task);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -329,14 +336,12 @@ mod carry_retry_tests {
         task.fixture_data().worktree = dir.path().join("missing").to_string_lossy().into_owned();
         app.store.save_task(&task).unwrap();
         let worktree = PathBuf::from(&task.worktree);
-        let pending = Arc::new(StdMutex::new(None));
+        let signals = crate::engine::run_control::TaskSignals::new();
         let result = carry_after_base_moves(
             &app,
             &mut task,
             &worktree,
-            &pending,
-            &CancelToken::new(),
-            &mut None,
+            &mut QuestionSlot::new(&signals, &mut None),
         )
         .await;
         match result {
@@ -360,11 +365,15 @@ mod carry_retry_tests {
         task.fixture_data().base_ref = None;
         app.store.save_task(&task).unwrap();
         let worktree = PathBuf::from(&task.worktree);
-        let pending = Arc::new(StdMutex::new(None));
-        let cancel = CancelToken::new();
+        let signals = crate::engine::run_control::TaskSignals::new();
         let waiting = tokio::time::timeout(
             Duration::from_secs(5),
-            carry_after_base_moves(&app, &mut task, &worktree, &pending, &cancel, &mut None),
+            carry_after_base_moves(
+                &app,
+                &mut task,
+                &worktree,
+                &mut QuestionSlot::new(&signals, &mut None),
+            ),
         )
         .await;
         assert!(waiting.is_err(), "the owner is asked");

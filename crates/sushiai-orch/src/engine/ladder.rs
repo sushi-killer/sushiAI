@@ -11,9 +11,11 @@
 #[cfg(test)]
 use crate::engine::decision::fail_and_continue;
 #[cfg(test)]
-use crate::engine::lifecycle::completion::delivery::finish_attempt;
+use crate::engine::lifecycle::attempt_files::AttemptFiles;
 #[cfg(test)]
-use crate::engine::questions::reply::Reply;
+use crate::engine::questions::parking::QuestionSlot;
+#[cfg(test)]
+use crate::engine::run_control::TaskSignals;
 #[cfg(test)]
 use crate::policy::variant::Variant;
 #[cfg(test)]
@@ -24,12 +26,6 @@ use crate::task::AskedBy;
 use crate::task::Attempt;
 #[cfg(test)]
 use crate::task::Question;
-#[cfg(test)]
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
-#[cfg(test)]
-use tokio::sync::oneshot;
 
 #[cfg(test)]
 use crate::engine::decision::advance_after_failure;
@@ -56,7 +52,6 @@ use crate::engine::test_support::task_with_status;
 #[cfg(test)]
 use crate::engine::test_support::test_app;
 use crate::harness::cancel::CancelToken;
-use crate::overseer;
 use crate::policy::routing::Route;
 use crate::policy::settings::Settings;
 use crate::prompts::clip::truncate_chars;
@@ -71,7 +66,7 @@ use crate::task::UnreviewedPart;
 use serde_json::json;
 use std::time::Duration;
 
-use crate::overseer::Entry;
+use crate::task::notes::overseer::Entry;
 
 /// Decision line a changed approach leaves for the owner to read.
 pub(super) fn approach_line(attempt_n: u32) -> String {
@@ -113,7 +108,7 @@ pub(super) fn base_tails<'a>(app: &'a App, base_sha: &str) -> impl Fn(&str) -> O
 /// failing test also fails on the base, or a test passed and failed on the
 /// same tree. A change that breaks a test it did not touch is not.
 pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> bool {
-    let signals = crate::precedents::attempt_signals(task, at);
+    let signals = crate::task::attempts::signals::attempt_signals(task, at);
     if signals.iter().any(|s| s == "timeout" || s == "install") {
         return true;
     }
@@ -126,11 +121,11 @@ pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> boo
         .iter()
         .filter(|o| o.code != Some(0))
         .any(|o| {
-            let now = crate::precedents::failing_tests(&o.tail);
+            let now = crate::policy::test_output::failing_tests(&o.tail);
             if now.is_empty() {
                 return false;
             }
-            let on_base = base(&o.command).map(|t| crate::precedents::failing_tests(&t));
+            let on_base = base(&o.command).map(|t| crate::policy::test_output::failing_tests(&t));
             if on_base.is_some_and(|b| now.iter().all(|t| b.contains(t))) {
                 return true;
             }
@@ -142,7 +137,7 @@ pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> boo
                         .verify
                         .iter()
                         .filter(|e| e.command == o.command)
-                        .any(|e| crate::precedents::failing_tests(&e.tail) != now)
+                        .any(|e| crate::policy::test_output::failing_tests(&e.tail) != now)
             })
         })
 }
@@ -472,7 +467,8 @@ impl App {
                 "asked_owner",
                 &task.repo,
                 Some(&task.id),
-                &truncate_chars(&text, overseer::MAX_TEXT_CHARS),
+                &truncate_chars(&text, crate::task::notes::overseer::MAX_TEXT_CHARS),
+                crate::clock::now_ms(),
             )
             .with_detail(&text)
             .with_decision(&[key]),
@@ -522,7 +518,8 @@ impl App {
                 "asked_owner",
                 &task.repo,
                 Some(&task.id),
-                &truncate_chars(&report, overseer::MAX_TEXT_CHARS),
+                &truncate_chars(&report, crate::task::notes::overseer::MAX_TEXT_CHARS),
+                crate::clock::now_ms(),
             )
             .with_detail(&report)
             .with_decision(&[key]),
@@ -566,10 +563,6 @@ mod tests {
         a
     }
 
-    fn pending() -> Arc<StdMutex<Option<oneshot::Sender<Reply>>>> {
-        Arc::new(StdMutex::new(None))
-    }
-
     #[test]
     fn timeouts_do_not_count_toward_the_same_failure_stop() {
         let mut slow = task_with_status(TaskStatus::Running);
@@ -598,23 +591,18 @@ mod tests {
         task.fixture_data().title = "Ship the change".into();
         task.fixture_data().attempts = vec![attempt_with_failure(1, "verify:boom")];
         app.store.save_task(&task).unwrap();
-        let (id, pending) = (task.id.clone(), pending());
+        let id = task.id.clone();
+        let signals = TaskSignals::new();
         let mut budget = 1;
         let mut permit = None;
-        let cancel = CancelToken::new();
 
         // Budget spent: one changed approach, not a question.
         let signal = fail_and_continue(
             &app,
-            &id,
             &mut task,
-            0,
-            FailureKind::Verify,
-            "boom".into(),
+            decision::failure(FailureKind::Verify, "boom".into()),
             &mut budget,
-            &pending,
-            &cancel,
-            &mut permit,
+            &mut QuestionSlot::new(&signals, &mut permit),
         )
         .await;
         assert!(matches!(signal, LoopSignal::Continue));
@@ -631,15 +619,10 @@ mod tests {
         budget = 2;
         let signal = fail_and_continue(
             &app,
-            &id,
             &mut task,
-            1,
-            FailureKind::Verify,
-            "boom".into(),
+            decision::failure(FailureKind::Verify, "boom".into()),
             &mut budget,
-            &pending,
-            &cancel,
-            &mut permit,
+            &mut QuestionSlot::new(&signals, &mut permit),
         )
         .await;
         assert!(matches!(signal, LoopSignal::Stop));
@@ -708,7 +691,7 @@ mod tests {
         let mut task = task_with_status(TaskStatus::Running);
         task.fixture_data().attempts = (1..=3).map(broken_untouched_test).collect();
         // The signal is there (the failing file is outside the diff) ...
-        assert!(!crate::precedents::attempt_signals(&task, 2).is_empty());
+        assert!(!crate::task::attempts::signals::attempt_signals(&task, 2).is_empty());
         // ... but nothing backs it up: it is the approach, not the environment.
         assert!(!advance_after_failure(&mut task, 10));
         assert_eq!(
@@ -816,24 +799,18 @@ mod tests {
         parent.fixture_data().unreviewed = false;
         app.store.save_task(&parent).unwrap();
         let mut permit = None;
-        let pending = Arc::new(StdMutex::new(None));
+        let signals = TaskSignals::new();
         let run_dir = dir.path().join("run");
         std::fs::create_dir(&run_dir).unwrap();
         let wt = repo.clone();
-        finish_attempt(
-            &app,
-            "parent",
-            &mut parent,
-            0,
-            1,
-            &wt,
-            &run_dir,
-            &mut 3,
-            &pending,
-            &CancelToken::new(),
-            &mut permit,
-        )
-        .await;
+        AttemptFiles::new(0, 1, wt, run_dir)
+            .finish(
+                &app,
+                &mut parent,
+                &mut 3,
+                &mut QuestionSlot::new(&signals, &mut permit),
+            )
+            .await;
         assert!(parent.unreviewed, "{:?}", parent.decisions);
         assert!(
             !parent.decisions.iter().any(|d| d.starts_with("Land:")),

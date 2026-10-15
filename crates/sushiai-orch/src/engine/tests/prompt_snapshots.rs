@@ -33,6 +33,21 @@ fn prompt_snapshot_impossible_criterion_judge() {
 }
 
 #[test]
+fn prompt_snapshot_planner_check_judge() {
+    snapshot(
+        "answer_policy_planner_check_judge",
+        &answer_policy::planner_check_brief(
+            "Clicking Save writes settings.json -- check: `npm test -- save`",
+            &[
+                "node --test tests/save.test.cjs".to_string(),
+                "held-out check (criterion 1)".to_string(),
+            ],
+            "The design writes settings through the store, so tests/save.test.cjs has no save() to call.",
+        ),
+    );
+}
+
+#[test]
 fn prompt_snapshot_test_claim_judge() {
     let task = snapshot_task();
     snapshot(

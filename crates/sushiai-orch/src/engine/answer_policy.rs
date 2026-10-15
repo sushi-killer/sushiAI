@@ -673,11 +673,18 @@ pub(super) async fn try_policy_answer(
         return None;
     }
     let question = task.question.clone()?;
-    if !policy_open(app, task, &question) {
+    // A claim on a criterion whose checks are all the planner's is settled
+    // here, policy on or off: it never reaches the owner.
+    let planner_check = question.kind == QuestionKind::Impossible
+        && question
+            .criterion
+            .is_some_and(|n| planner_check_criterion(&app.settings.read().unwrap(), task, n));
+    if !planner_check && !policy_open(app, task, &question) {
         return None;
     }
     let attempt_n = task.attempts.last().map(|a| a.n).unwrap_or(0);
     let (answer, by, evidence) = match question.kind {
+        _ if planner_check => settle_planner_check(app, task, &question, attempt_n, cancel).await?,
         QuestionKind::Impossible => {
             let (answer, reason) =
                 judge_impossible(app, task, &question, attempt_n, cancel).await?;
@@ -762,8 +769,28 @@ async fn judge_impossible(
 ) -> Option<(String, String)> {
     let (n, evidence) = impossible_parts(question)?;
     let criterion = task.criteria.get(n)?.clone();
-    let (_, route, fallback) = check_route_for(app, &task.variant())?;
-    let route = route?;
+    let brief_text = impossible_brief(&criterion, &evidence);
+    let reply = run_answer_judge(app, task, &brief_text, attempt_n, cancel)
+        .await
+        .ok()?;
+    match parse_judgement(&reply)? {
+        Judgement::Verified(reason) => Some(("drop criterion".to_string(), reason)),
+        Judgement::Refuted(reason) => Some(("retry".to_string(), reason)),
+    }
+}
+
+/// One read-only answer judge turn on `brief_text`: its final text, or why
+/// there is none (no judge route, a failed run).
+async fn run_answer_judge(
+    app: &Arc<App>,
+    task: &mut Task,
+    brief_text: &str,
+    attempt_n: u32,
+    cancel: &CancelToken,
+) -> Result<String, &'static str> {
+    const NO_ROUTE: &str = "no judge route is set";
+    let (_, route, fallback) = check_route_for(app, &task.variant()).ok_or(NO_ROUTE)?;
+    let route = route.ok_or(NO_ROUTE)?;
     if let Some(note) = fallback {
         task.decisions.push(format!("Answer judge: {note}"));
     }
@@ -772,7 +799,7 @@ async fn judge_impossible(
     let run_dir = app
         .store
         .claim_helper_run_dir(&task.id, "answer-judge", Some(attempt_n))
-        .ok()?;
+        .map_err(|_| "the judge run could not start")?;
     let mcp_path = run_dir.join("mcp.json");
     let _ = std::fs::write(&mcp_path, br#"{"mcpServers":{}}"#);
     let settings_path = run_dir.join("settings.json");
@@ -788,8 +815,7 @@ async fn judge_impossible(
             &settings_path,
         );
     }
-    let brief_text = impossible_brief(&criterion, &evidence);
-    let _ = std::fs::write(run_dir.join("brief.md"), &brief_text);
+    let _ = std::fs::write(run_dir.join("brief.md"), brief_text);
     let events_path = run_dir.join("events.jsonl");
     let req = harness::RunRequest {
         repo_settings: false,
@@ -805,28 +831,246 @@ async fn judge_impossible(
         &worktree,
         &req,
         CostTag::task("answer_judge", &route.id),
-        &brief_text,
+        brief_text,
         &events_path,
         cancel,
         Guard::helper("answer judge", limit),
     )
     .await;
     let _ = std::fs::remove_file(&key_path);
-    // A cancelled or failed judge run asks the owner; the wait that follows
+    // A cancelled or failed judge run gives no answer; the wait that follows
     // sees the cancellation itself.
-    let outcome = result.ok()?;
+    let outcome = result.map_err(|_| "the judge run failed")?;
     if outcome.timed_out {
         task.decisions
             .push(helper_timeout_message("answer judge", limit));
     }
     task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
     if outcome.error.is_some() {
-        return None;
+        return Err("the judge run failed");
     }
-    match parse_judgement(&outcome.final_text.unwrap_or_default())? {
-        Judgement::Verified(reason) => Some(("drop criterion".to_string(), reason)),
-        Judgement::Refuted(reason) => Some(("retry".to_string(), reason)),
+    Ok(outcome.final_text.unwrap_or_default())
+}
+
+/// The answer that records a judge's rewrite of a criterion's check; the
+/// loop runs the next attempt on it, as on `retry`.
+pub(super) const REWRITE_CHECK: &str = "rewrite check";
+
+/// Whether criterion `n` of `task` has a check command and every one of them
+/// is the planner's (`removal_refusal` lets a non-owner remove them all).
+pub(super) fn planner_check_criterion(settings: &Settings, task: &Task, n: usize) -> bool {
+    let commands: Vec<String> = criterion_commands(task, n)
+        .into_iter()
+        .filter(|c| !flat_command(c).is_empty())
+        .collect();
+    !commands.is_empty() && removal_refusal(settings, task, &commands, Origin::Other).is_none()
+}
+
+/// Criterion `n`'s check commands as an agent may see them: the held-out
+/// check by its label.
+fn shown_criterion_commands(task: &Task, n: usize) -> Vec<String> {
+    let mut out: Vec<String> = task
+        .checks
+        .iter()
+        .filter(|c| c.criterion == n)
+        .map(|c| c.run.clone())
+        .collect();
+    if task.held_out.as_ref().is_some_and(|h| h.criterion == n) {
+        out.push(brief::held_out_label(n));
     }
+    if let Some(cmd) = task.criteria.get(n).and_then(|t| text_check(t)) {
+        out.push(cmd);
+    }
+    out.dedup();
+    out
+}
+
+pub(super) fn planner_check_brief(criterion: &str, checks: &[String], evidence: &str) -> String {
+    format!(
+        "{}\n\n{}\n",
+        engine_text("answer_policy_planner_check_judge"),
+        json!({"criterion": criterion, "checks": checks, "evidence": evidence})
+    )
+}
+
+#[derive(Debug, PartialEq)]
+enum PlannerVerdict {
+    Drop(String),
+    Rewrite {
+        command: String,
+        criterion_text: String,
+        reason: String,
+    },
+    Retry(String),
+}
+
+fn parse_planner_verdict(text: &str) -> Option<PlannerVerdict> {
+    let v = judge_json(text)?;
+    let reason = reason_of(&v);
+    match str_field(&v, "verdict").to_ascii_lowercase().as_str() {
+        "drop" => Some(PlannerVerdict::Drop(reason)),
+        "retry" => Some(PlannerVerdict::Retry(reason)),
+        "rewrite" => {
+            let command = v.get("command")?.as_str()?.trim().to_string();
+            (!command.is_empty()).then(|| PlannerVerdict::Rewrite {
+                command,
+                criterion_text: str_field(&v, "criterionText"),
+                reason,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Replaces every check command of criterion `n` (its checks, a held-out
+/// check on it, its `-- check:` part, and the same commands in `verify` and
+/// `finalVerify`) with `command`, recorded as the planner's. `criterion_text`,
+/// when given, is the criterion's new wording. Nothing changes on an `Err`.
+pub(super) fn rewrite_criterion_check(
+    settings: &Settings,
+    task: &mut Task,
+    n: usize,
+    command: &str,
+    criterion_text: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let new = command.trim().to_string();
+    let old_text = task
+        .criteria
+        .get(n)
+        .cloned()
+        .ok_or_else(|| format!("there is no criterion {n}"))?;
+    let shown_old = shown_criterion_commands(task, n);
+    let visible_old: Vec<String> = task
+        .checks
+        .iter()
+        .filter(|c| c.criterion == n)
+        .map(|c| c.run.clone())
+        .chain(text_check(&old_text))
+        .collect();
+    if new.is_empty() {
+        return Err("the new command is empty".to_string());
+    }
+    if shown_old.iter().all(|c| *c == new) {
+        return Err("the new command is the old one".to_string());
+    }
+    let wording = if criterion_text.is_empty() {
+        &old_text
+    } else {
+        criterion_text
+    };
+    let prose = wording
+        .split_once("-- check:")
+        .map_or(wording, |(prose, _)| prose)
+        .trim();
+    let text = match text_check(&old_text) {
+        Some(_) => format!("{prose} -- check: {new}"),
+        None => prose.to_string(),
+    };
+    if text.is_empty() {
+        return Err("the new criterion text is empty".to_string());
+    }
+    if text != old_text {
+        amend_criterion(settings, task, n, &text)?;
+    }
+    for c in task.checks.iter_mut().filter(|c| c.criterion == n) {
+        c.run = new.clone();
+    }
+    if let Some(h) = task.held_out.as_mut().filter(|h| h.criterion == n) {
+        h.run = new.clone();
+    }
+    for c in task
+        .verify
+        .iter_mut()
+        .chain(task.final_verify.iter_mut())
+        .filter(|c| visible_old.contains(c))
+    {
+        *c = new.clone();
+    }
+    // Several old commands became one: it runs once.
+    let mut kept = false;
+    task.checks
+        .retain(|c| c.criterion != n || !std::mem::replace(&mut kept, true));
+    for list in [&mut task.verify, &mut task.final_verify] {
+        let mut first = true;
+        list.retain(|c| *c != new || std::mem::replace(&mut first, false));
+    }
+    if !task.planner_tests.sources.iter().any(|s| s.command == new) {
+        task.planner_tests.sources.push(SourcedCheck {
+            command: new.clone(),
+            source: CheckSource::Planner,
+        });
+    }
+    let mut line = format!(
+        "Answer judge: criterion {n} check {} rewritten to {new} ({reason})",
+        shown_old.join(", ")
+    );
+    if text != old_text {
+        line.push_str(&format!("; criterion amended to: {text}"));
+    }
+    task.decisions.push(line);
+    Ok(())
+}
+
+/// Settles an impossible claim on a criterion whose checks are all the
+/// planner's, without the owner: the judge drops, rewrites or retries it.
+/// When no judge turn can (the criterion's answer budget is spent, no judge
+/// route, no usable reply), the criterion is dropped as an overturnable
+/// `policy` assumption: the owner's standing answer for a planner check.
+/// `None` only when cancelled.
+async fn settle_planner_check(
+    app: &Arc<App>,
+    task: &mut Task,
+    question: &Question,
+    attempt_n: u32,
+    cancel: &CancelToken,
+) -> Option<(String, &'static str, String)> {
+    let n = question.criterion?;
+    let why = if policy_answers(task, question) >= MAX_POLICY_ANSWERS {
+        format!("{MAX_POLICY_ANSWERS} automatic answers on this criterion are spent")
+    } else {
+        let criterion = task.criteria.get(n)?.clone();
+        let checks = shown_criterion_commands(task, n);
+        let evidence = question.evidence.clone().unwrap_or_default();
+        let brief_text = planner_check_brief(&criterion, &checks, &evidence);
+        let reply = run_answer_judge(app, task, &brief_text, attempt_n, cancel).await;
+        if cancel.is_cancelled() {
+            return None;
+        }
+        match reply.map(|r| parse_planner_verdict(&r)) {
+            Ok(Some(PlannerVerdict::Drop(reason))) => {
+                return Some(("drop criterion".to_string(), "judge", reason))
+            }
+            Ok(Some(PlannerVerdict::Retry(reason))) => {
+                return Some(("retry".to_string(), "judge", reason))
+            }
+            Ok(Some(PlannerVerdict::Rewrite {
+                command,
+                criterion_text,
+                reason,
+            })) => {
+                let settings = app.settings.read().unwrap().clone();
+                match rewrite_criterion_check(
+                    &settings,
+                    task,
+                    n,
+                    &command,
+                    &criterion_text,
+                    &reason,
+                ) {
+                    Ok(()) => return Some((REWRITE_CHECK.to_string(), "judge", reason)),
+                    Err(e) => format!("the judge's rewrite to {command} was not applied: {e}"),
+                }
+            }
+            Ok(None) => "the judge gave no usable reply".to_string(),
+            Err(e) => e.to_string(),
+        }
+    };
+    Some((
+        "drop criterion".to_string(),
+        "policy",
+        format!("{why}; every check of this criterion was written by the planner, so it is dropped without the owner"),
+    ))
 }
 
 /// The option of a plan or agent question that is phrased as the cautious or
@@ -1103,6 +1347,154 @@ mod tests {
     }
 
     #[test]
+    fn a_planner_check_verdict_reads_drop_rewrite_and_retry() {
+        assert_eq!(
+            parse_planner_verdict("{\"verdict\": \"drop\", \"reason\": \"gone\"}"),
+            Some(PlannerVerdict::Drop("gone".into()))
+        );
+        assert_eq!(
+            parse_planner_verdict("```json\n{\"verdict\": \"Retry\"}\n```"),
+            Some(PlannerVerdict::Retry("no reason given".into()))
+        );
+        assert_eq!(
+            parse_planner_verdict(
+                "{\"verdict\": \"rewrite\", \"command\": \" grep -q  x a.txt \", \"criterionText\": \"\", \"reason\": \"renamed\"}"
+            ),
+            Some(PlannerVerdict::Rewrite {
+                command: "grep -q  x a.txt".into(),
+                criterion_text: String::new(),
+                reason: "renamed".into(),
+            })
+        );
+        // A rewrite without a command, an unknown verdict or no JSON: unusable.
+        assert!(parse_planner_verdict("{\"verdict\": \"rewrite\", \"command\": \" \"}").is_none());
+        assert!(parse_planner_verdict("{\"verified\": true}").is_none());
+        assert!(parse_planner_verdict("no idea").is_none());
+    }
+
+    #[test]
+    fn only_a_criterion_whose_every_check_is_the_planners_qualifies() {
+        let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec![
+            "zero".into(),
+            "one -- check: grep -q one a.txt".into(),
+            "two".into(),
+        ];
+        sourced(&mut task, "grep -q one a.txt", CheckSource::Planner);
+        // No check at all: not settled here.
+        assert!(!planner_check_criterion(&settings, &task, 0));
+        assert!(planner_check_criterion(&settings, &task, 1));
+        task.checks.push(Check {
+            criterion: 2,
+            run: "test -f b.txt".into(),
+            baseline: Some(Baseline::Fail),
+        });
+        sourced(&mut task, "test -f b.txt", CheckSource::Planner);
+        assert!(planner_check_criterion(&settings, &task, 2));
+        // One repo or owner command among them keeps the owner's path.
+        task.held_out = Some(Check {
+            criterion: 2,
+            run: "npm test".into(),
+            baseline: Some(Baseline::Fail),
+        });
+        sourced(&mut task, "npm test", CheckSource::Repo);
+        assert!(!planner_check_criterion(&settings, &task, 2));
+        task.planner_tests.sources[0].source = CheckSource::Owner;
+        assert!(!planner_check_criterion(&settings, &task, 1));
+    }
+
+    #[test]
+    fn a_rewrite_replaces_every_check_of_the_criterion_and_records_it_as_the_planners() {
+        let settings = Settings::default();
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec![
+            "zero".into(),
+            "Saving works -- check: node --test tests/save.test.cjs".into(),
+        ];
+        task.visual_criteria = vec![task.criteria[1].clone()];
+        task.verify = vec!["true".into(), "node --test tests/save.test.cjs".into()];
+        task.checks = vec![
+            Check {
+                criterion: 0,
+                run: "test -f zero.txt".into(),
+                baseline: Some(Baseline::Fail),
+            },
+            Check {
+                criterion: 1,
+                run: "node --test tests/save.test.cjs".into(),
+                baseline: Some(Baseline::Fail),
+            },
+        ];
+        task.held_out = Some(Check {
+            criterion: 1,
+            run: "grep -q secret-held-out out.txt".into(),
+            baseline: Some(Baseline::Fail),
+        });
+        for c in [
+            "test -f zero.txt",
+            "node --test tests/save.test.cjs",
+            "grep -q secret-held-out out.txt",
+        ] {
+            sourced(&mut task, c, CheckSource::Planner);
+        }
+        let new = "grep -q saved settings.json";
+        rewrite_criterion_check(
+            &settings,
+            &mut task,
+            1,
+            new,
+            "",
+            "the test file was renamed",
+        )
+        .unwrap();
+        assert_eq!(task.criteria[1], format!("Saving works -- check: {new}"));
+        assert_eq!(task.visual_criteria, vec![task.criteria[1].clone()]);
+        assert_eq!(task.verify, vec!["true".to_string(), new.to_string()]);
+        let runs: Vec<(usize, &str)> = task
+            .checks
+            .iter()
+            .map(|c| (c.criterion, c.run.as_str()))
+            .collect();
+        assert_eq!(runs, vec![(0, "test -f zero.txt"), (1, new)]);
+        assert_eq!(task.checks[1].baseline, Some(Baseline::Fail));
+        assert_eq!(task.held_out.as_ref().unwrap().run, new);
+        assert!(!is_shared_check(&settings, &task, new));
+        assert_eq!(criterion_commands(&task, 1), vec![new, new, new]);
+        let line = task.decisions.last().unwrap();
+        assert!(
+            line.contains("node --test tests/save.test.cjs")
+                && line.contains(new)
+                && line.contains("the test file was renamed")
+                && line.contains("held-out check (criterion 1)")
+                && !line.contains("secret-held-out"),
+            "{line}"
+        );
+        // The judge's wording replaces the prose; the check part stays the new command.
+        rewrite_criterion_check(
+            &settings,
+            &mut task,
+            1,
+            "test -s settings.json",
+            "Save writes the file -- check: x",
+            "r",
+        )
+        .unwrap();
+        assert_eq!(
+            task.criteria[1],
+            "Save writes the file -- check: test -s settings.json"
+        );
+        // An empty command or the same command changes nothing.
+        let before = task.clone();
+        assert!(rewrite_criterion_check(&settings, &mut task, 1, " ", "", "r").is_err());
+        assert!(
+            rewrite_criterion_check(&settings, &mut task, 0, "test -f zero.txt", "", "r").is_err()
+        );
+        assert_eq!(task.checks, before.checks);
+        assert_eq!(task.decisions, before.decisions);
+    }
+
+    #[test]
     fn attempts_keep_failing_has_no_blind_continue_rule() {
         let mut task = task_with_status(TaskStatus::Waiting);
         task.attempts = vec![attempt_with_failure(1, "review:x")];
@@ -1329,6 +1721,104 @@ mod timeout_tests {
         assert_eq!(task.criteria, criteria);
         assert!(task.assumptions.is_empty());
         assert_helper_timeout(&task, "answer judge");
+    }
+}
+
+#[cfg(test)]
+mod planner_check_tests {
+    use super::*;
+
+    /// A waiting task whose criterion 0 has only a check of `source`, the
+    /// policy off, and an impossible claim on that criterion.
+    fn claimed(source: CheckSource) -> (Arc<App>, tempfile::TempDir, Task) {
+        let (app, dir, mut task, _) = slow_helper_task();
+        app.settings.write().unwrap().answer_policy = false;
+        task.criteria = vec!["Keep the API -- check: grep -q api api.txt".into()];
+        task.checks = vec![Check {
+            criterion: 0,
+            run: "grep -q api api.txt".into(),
+            baseline: Some(Baseline::Fail),
+        }];
+        task.planner_tests.sources = vec![SourcedCheck {
+            command: "grep -q api api.txt".into(),
+            source,
+        }];
+        let claim = brief::Impossible {
+            criterion: 0,
+            evidence: "the design has no api.txt".into(),
+        };
+        task.question = Some(impossible_question(&task, &claim));
+        task.status = TaskStatus::Waiting;
+        (app, dir, task)
+    }
+
+    fn only_answer(task: &Task) -> &Assumption {
+        assert_eq!(task.assumptions.len(), 1, "{:?}", task.assumptions);
+        &task.assumptions[0]
+    }
+
+    #[tokio::test]
+    async fn a_planner_check_without_a_judge_route_is_dropped_by_policy() {
+        let (app, _dir, mut task) = claimed(CheckSource::Planner);
+        app.settings.write().unwrap().brief_check_route = String::new();
+        let answer = try_policy_answer(&app, &mut task, &CancelToken::new()).await;
+        assert_eq!(answer.as_deref(), Some("drop criterion"));
+        assert!(task.question.is_none());
+        assert_eq!(task.status, TaskStatus::Queued);
+        let a = only_answer(&task);
+        assert_eq!(
+            (a.by.as_str(), a.kind),
+            ("policy", Some(QuestionKind::Impossible))
+        );
+        assert!(!a.overturned);
+        assert!(a.evidence.contains("no judge route"), "{}", a.evidence);
+        assert_eq!(task.loop_state.impossible_answers, vec![0]);
+        assert_eq!(chat::fake_overseer_calls(Path::new(&task.worktree)), 0);
+    }
+
+    #[tokio::test]
+    async fn a_planner_check_whose_judge_gives_no_reply_is_dropped_by_policy() {
+        // The fake judge is slow: it times out with no reply.
+        let (app, _dir, mut task) = claimed(CheckSource::Planner);
+        let answer = try_policy_answer(&app, &mut task, &CancelToken::new()).await;
+        assert_eq!(answer.as_deref(), Some("drop criterion"));
+        let a = only_answer(&task);
+        assert_eq!(a.by, "policy");
+        assert!(
+            a.evidence.contains("written by the planner"),
+            "{}",
+            a.evidence
+        );
+        assert_helper_timeout(&task, "answer judge");
+    }
+
+    #[tokio::test]
+    async fn a_planner_check_whose_answer_budget_is_spent_is_dropped_without_a_judge() {
+        let (app, _dir, mut task) = claimed(CheckSource::Planner);
+        let question = task.question.clone().unwrap();
+        for _ in 0..MAX_POLICY_ANSWERS {
+            record_policy_answer(&mut task, &question, "retry", "judge", "e", 1);
+        }
+        let answer = try_policy_answer(&app, &mut task, &CancelToken::new()).await;
+        assert_eq!(answer.as_deref(), Some("drop criterion"));
+        let last = task.assumptions.last().unwrap();
+        assert_eq!(last.by, "policy");
+        assert!(last.evidence.contains("spent"), "{}", last.evidence);
+        assert_eq!(chat::fake_overseer_calls(Path::new(&task.worktree)), 0);
+    }
+
+    #[tokio::test]
+    async fn a_repo_or_owner_check_is_left_to_the_owner() {
+        for source in [CheckSource::Repo, CheckSource::Owner] {
+            let (app, _dir, mut task) = claimed(source);
+            app.settings.write().unwrap().brief_check_route = String::new();
+            assert_eq!(
+                try_policy_answer(&app, &mut task, &CancelToken::new()).await,
+                None
+            );
+            assert!(task.question.is_some());
+            assert!(task.assumptions.is_empty());
+        }
     }
 }
 

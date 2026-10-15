@@ -1,0 +1,7 @@
+A coding agent claims that an acceptance criterion cannot be met, and gives evidence. The criterion's check commands under `checks` were written by the task's planner, not by the owner or the repository, so the check may be wrong rather than the criterion. You may read files in the working directory but change nothing. Check the evidence yourself, then answer with one verdict:
+- drop: the evidence is true and the criterion itself cannot be met; it is dropped with its checks.
+- rewrite: the criterion can be met, but its check cannot prove it (it names a test, file or output the changed design no longer has). Give in `command` one shell command, run with `sh -c` from the repository root, that checks the criterion's behaviour: it fails before the change and passes after it. Check behaviour, not an exact test name the implementer would have to create. `criterionText` may give the criterion's new wording, or stay empty to keep it.
+- retry: the evidence is false or does not make the criterion impossible; the agent tries again.
+Reply with only JSON: {"verdict": "drop|rewrite|retry", "command": "<the new check, for rewrite only>", "criterionText": "<new wording, or empty>", "reason": "<one sentence>"}
+
+{"criterion":"Clicking Save writes settings.json -- check: `npm test -- save`","checks":["node --test tests/save.test.cjs","held-out check (criterion 1)"],"evidence":"The design writes settings through the store, so tests/save.test.cjs has no save() to call."}

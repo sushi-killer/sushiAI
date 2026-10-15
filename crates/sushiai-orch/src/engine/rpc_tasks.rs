@@ -400,6 +400,8 @@ impl App {
             Some(b) => Some(self.backlog_slot(&repo, None, b.bucket, b.order)?),
             None => None,
         };
+        let mut refused = Vec::new();
+        let gate_root = repo_root.clone();
         let mut task = self
             .create_task_record(NewTask {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -408,8 +410,16 @@ impl App {
                 project_id,
                 title,
                 goal,
-                checks: valid_checks(p.checks, p.criteria.len()),
-                held_out: valid_check(p.held_out, p.criteria.len()),
+                checks: gate_checks(
+                    &gate_root,
+                    valid_checks(p.checks, p.criteria.len()),
+                    &mut refused,
+                ),
+                held_out: gate_held_out(
+                    &gate_root,
+                    valid_check(p.held_out, p.criteria.len()),
+                    &mut refused,
+                ),
                 criteria: p.criteria,
                 verify: p.verify,
                 final_verify: p.final_verify,
@@ -435,6 +445,9 @@ impl App {
                 created_at: now_ms(),
             })
             .await?;
+        if !refused.is_empty() {
+            task = self.update_task(&task.id, |t| t.decisions.extend(refused.clone()))?;
+        }
         if let Some(cmd) = p.screenshot.as_ref().filter(|c| !c.trim().is_empty()) {
             task = self.update_task(&task.id, |task| {
                 task.brief_check.screenshot = Some(cmd.trim().to_string());
@@ -1362,6 +1375,24 @@ impl App {
                 "check criterion {} is out of range: there are {criteria_len} criteria",
                 c.criterion
             ));
+        }
+        // Gated before the hand-over, so a pending amendment is gated too.
+        let mut refused = Vec::new();
+        let gate = gate_cwd(&task);
+        if let Some(checks) = amendment.checks.take() {
+            amendment.checks = Some(gate_checks(&gate, checks, &mut refused));
+        }
+        if let Some(held) = amendment.held_out.take() {
+            amendment.held_out = Some(gate_held_out(&gate, held, &mut refused));
+        }
+        if !refused.is_empty() {
+            task = self.update_task(&id, |t| {
+                for line in &refused {
+                    if !t.decisions.contains(line) {
+                        t.decisions.push(line.clone());
+                    }
+                }
+            })?;
         }
         let fields = amendment.fields();
         if amendment.verify.is_some() {

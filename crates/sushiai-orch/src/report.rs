@@ -3,9 +3,9 @@
 //! records and a few git facts, with no model call. `build` is pure; the
 //! engine gathers `Facts` and stores the result (`engine/report.rs`).
 
-use crate::brief;
-use crate::costs::CostRecord;
-use crate::model::{AttemptStatus, Stage, Task, TaskStatus, Verdict};
+use crate::store::costs::CostRecord;
+
+use crate::task::{AttemptStatus, Stage, Task, TaskStatus, Verdict};
 use std::collections::{BTreeMap, HashSet};
 
 /// What git says about the work; empty when the repository cannot tell.
@@ -91,7 +91,7 @@ pub fn graph_of<'a>(top: &'a Task, all: &'a [Task]) -> Vec<&'a Task> {
 }
 
 /// The last implement attempt that reached a review, if any.
-fn last_review(task: &Task) -> Option<&crate::model::ReviewResult> {
+fn last_review(task: &Task) -> Option<&crate::task::ReviewResult> {
     task.attempts
         .iter()
         .rev()
@@ -130,7 +130,7 @@ fn criterion_status(task: &Task, i: usize) -> Vec<String> {
             out.push(format!("grounded check {verdict}: `{}`", check.run));
         }
     }
-    let held = brief::held_out_label(i);
+    let held = crate::task::checks::commands::held_out_label(i);
     if let Some(v) = outcomes.iter().find(|v| v.command == held) {
         let verdict = if v.code == Some(0) {
             "passed"
@@ -437,22 +437,22 @@ mod tests {
     #[test]
     fn a_criterion_status_follows_its_ruling_by_index() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
-        task.criteria = vec!["Beta".into(), "Beta works".into()];
+        task.fixture_data().criteria = vec!["Beta".into(), "Beta works".into()];
         let mut attempt = crate::engine::test_support::attempt_with_failure(1, "x");
-        attempt.review = Some(crate::model::ReviewResult {
+        attempt.review = Some(crate::task::ReviewResult {
             verdict: Verdict::Fail,
             findings: Vec::new(),
             repeated: Vec::new(),
             severities: Vec::new(),
             details: Vec::new(),
-            criteria: vec![crate::model::CriterionRuling {
+            criteria: vec![crate::task::CriterionRuling {
                 criterion: "Beta works".into(),
                 index: Some(1),
                 met: Some(false),
                 evidence: None,
             }],
         });
-        task.attempts = vec![attempt];
+        task.fixture_data().attempts = vec![attempt];
         assert_eq!(criterion_status(&task, 1)[0], "unmet (review)");
         assert_eq!(criterion_status(&task, 0)[0], "not met at the last review");
     }
@@ -466,9 +466,9 @@ mod tests {
     #[test]
     fn unlanded_work_is_reported_and_absent_when_not_set() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Done);
-        task.branch = "task/feature".into();
-        task.base_ref = Some("work".into());
-        task.unlanded = Some(crate::model::Unlanded {
+        task.fixture_data().branch = "task/feature".into();
+        task.fixture_data().base_ref = Some("work".into());
+        task.fixture_data().unlanded = Some(crate::task::Unlanded {
             commits: 2,
             base: "work".into(),
         });
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(serialized["unlanded"]["commits"], 2);
         assert_eq!(serialized["unlanded"]["base"], "work");
 
-        task.unlanded = None;
+        task.fixture_data().unlanded = None;
         let report = build(&task, &[&task], &[], &Facts::default());
         assert!(!report.contains("Not landed:"));
         assert!(serde_json::to_value(&task)

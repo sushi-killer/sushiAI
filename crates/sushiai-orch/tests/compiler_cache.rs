@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sushiai_orch::engine::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
-use sushiai_orch::engine::verify::{run_verify_command, VerifyEnvironment};
+use sushiai_orch::harness::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
+use sushiai_orch::verify::command::run_verify_command;
+use sushiai_orch::verify::command::VerifyEnvironment;
 
 /// Written by a child `sh`, never through a descriptor of this process: a
 /// test thread that forks while it is open for writing makes the next exec

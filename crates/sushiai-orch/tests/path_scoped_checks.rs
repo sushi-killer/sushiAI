@@ -216,7 +216,7 @@ fn the_reader_uses_the_commit_and_rejects_unknown_keys() {
     }
     assert!(sushiai_orch::worktree_env::scoped_checks_at(repo.path(), "bad-revision").is_err());
     assert!(
-        sushiai_orch::git::show_file(repo.path(), &base, "absent.json")
+        sushiai_orch::git::history::show_file(repo.path(), &base, "absent.json")
             .unwrap()
             .is_none()
     );

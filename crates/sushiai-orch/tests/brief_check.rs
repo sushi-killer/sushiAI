@@ -217,7 +217,7 @@ fn helpers_folder_brief_check_does_not_borrow_implement_attempt_one() {
     let ns: std::collections::HashSet<u64> =
         attempts.iter().map(|a| a["n"].as_u64().unwrap()).collect();
     assert_eq!(ns.len(), attempts.len(), "{}", r.task);
-    let records = sushiai_orch::costs::read_all(r.daemon.data_dir());
+    let records = sushiai_orch::store::costs::read_all(r.daemon.data_dir());
     let check = records.iter().find(|c| c.stage == "brief_check").unwrap();
     assert!(check.attempt.is_none());
     assert_eq!(check.task_id.as_deref(), Some(id));

@@ -1,34 +1,37 @@
-use super::*;
-
-/// Simple glob match: `*` matches any run of characters (including `/`,
-/// deliberately simpler than shell globbing since protected paths are
-/// meant to be broad, e.g. `src/app/**`), `?` matches one character,
-/// anything else matches literally.
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_match_chars(&p, &t)
-}
-
-fn glob_match_chars(p: &[char], t: &[char]) -> bool {
-    if p.is_empty() {
-        return t.is_empty();
-    }
-    match p[0] {
-        '*' => {
-            if glob_match_chars(&p[1..], t) {
-                return true;
-            }
-            !t.is_empty() && glob_match_chars(p, &t[1..])
-        }
-        '?' => !t.is_empty() && glob_match_chars(&p[1..], &t[1..]),
-        c => !t.is_empty() && t[0] == c && glob_match_chars(&p[1..], &t[1..]),
-    }
-}
-
-pub fn matches_any_protected(path: &str, globs: &[String]) -> bool {
-    globs.iter().any(|g| glob_match(g, path))
-}
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::cost::replay_run_cost;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::slow_helper_task;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::harness::native::error::RunError;
+use crate::harness::run_files::read_cancelled_fingerprint;
+use crate::policy::paths::glob_match;
+use crate::policy::pricing::route_cost;
+use crate::policy::routing::route_strength;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::routing::Tier;
+use crate::policy::settings::Settings;
+use crate::store;
+use crate::task::Attempt;
+use crate::task::CriterionRuling;
+use crate::task::DeclineRuling;
+use crate::task::Fingerprint;
+use crate::task::ReviewResult;
+use crate::task::ReviewScope;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::Verdict;
+use crate::task::VerifyOutcome;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The weakest strength a reviewer or judge may have: never below the
 /// implementer's, and at least 2 for mechanical/standard work, 3 for hard.
@@ -227,7 +230,7 @@ fn named_artifact_paths(criterion: &str) -> Vec<String> {
         if rest.is_empty() || rest.trim_matches('/').is_empty() {
             continue;
         }
-        let entry = if crate::model::image_mime(Path::new(rest)).is_some() {
+        let entry = if crate::task::image_mime(Path::new(rest)).is_some() {
             token.trim_end_matches('.').to_string()
         } else {
             format!("artifacts/{}/*", rest.trim_end_matches('/'))
@@ -312,24 +315,6 @@ pub(super) fn attempt_screenshots(
     found
 }
 
-/// True for a path that is a test file: any directory component named `test`,
-/// `tests`, `__tests__`, `spec`, `specs` or `e2e`, or a file name with
-/// `.test.`, `.spec.` or `_test.` in it, or starting with `test_`.
-pub(super) fn is_test_path(path: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let Some((name, dirs)) = parts.split_last() else {
-        return false;
-    };
-    let is_dir_name =
-        |p: &str| matches!(p, "test" | "tests" | "__tests__" | "spec" | "specs" | "e2e");
-    dirs.iter().any(|d| is_dir_name(d))
-        || is_dir_name(name)
-        || name.contains(".test.")
-        || name.contains(".spec.")
-        || name.contains("_test.")
-        || name.starts_with("test_")
-}
-
 /// Copies the images the attempt wrote under `artifacts/` that `scope` allows
 /// into `evidence_dir` (flattened names), so they survive the worktree.
 /// Returns the copies.
@@ -382,7 +367,7 @@ fn attempt_images(worktree: &Path, since_ms: i64, scope: &EvidenceScope) -> Vec<
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
-            let is_image = crate::model::image_mime(&path).is_some() && scope.allows(&rel);
+            let is_image = crate::task::image_mime(&path).is_some() && scope.allows(&rel);
             let modified = meta
                 .modified()
                 .ok()
@@ -496,7 +481,7 @@ async fn route_lenses(
     review_route: &Route,
     cancel: &CancelToken,
     cost_usd: &mut f64,
-) -> (brief::Lenses, String) {
+) -> (crate::verify::review::routing::Lenses, String) {
     match route_turn(app, task_id, attempt_n, task, worktree, base_sha, review_route, cancel, cost_usd).await {
         Ok(routing) => {
             let chosen = routing.lenses.chosen();
@@ -508,7 +493,7 @@ async fn route_lenses(
             (routing.lenses, note)
         }
         Err(why) => (
-            brief::Lenses::ALL,
+            crate::verify::review::routing::Lenses::ALL,
             format!("Orchestrator: attempt {attempt_n} review route gave no areas ({why}); reviewing every area"),
         ),
     }
@@ -525,15 +510,16 @@ async fn route_turn(
     review_route: &Route,
     cancel: &CancelToken,
     cost_usd: &mut f64,
-) -> Result<brief::LensRouting, String> {
+) -> Result<crate::verify::review::routing::LensRouting, String> {
     let settings = app.settings.read().unwrap().clone();
     let route = route_turn_route(&settings, review_route);
     let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
-    let changed =
-        tokio::task::spawn_blocking(move || git::diff_name_only(&wt, &base).unwrap_or_default())
-            .await
-            .unwrap_or_default();
-    let brief_text = brief::build_route_brief(task, &changed);
+    let changed = tokio::task::spawn_blocking(move || {
+        crate::git::changes::diff_name_only(&wt, &base).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let brief_text = crate::verify::review::routing::build_route_brief(task, &changed);
     let run_dir = app
         .store
         .claim_helper_run_dir(task_id, "route-review", Some(attempt_n))
@@ -587,7 +573,7 @@ async fn route_turn(
             head_chars(&error, 200)
         ));
     }
-    brief::parse_lens_routing(&outcome.final_text.unwrap_or_default())
+    crate::verify::review::routing::parse_lens_routing(&outcome.final_text.unwrap_or_default())
         .ok_or_else(|| "the route turn gave no lenses".to_string())
 }
 
@@ -613,7 +599,7 @@ pub(super) async fn run_review(
     force_full: bool,
 ) -> Result<(ReviewResult, bool, ReviewSaw), ReviewFailure> {
     let wt = worktree.to_path_buf();
-    let tree = tokio::task::spawn_blocking(move || git::worktree_tree(&wt).ok())
+    let tree = tokio::task::spawn_blocking(move || crate::git::changes::worktree_tree(&wt).ok())
         .await
         .unwrap_or(None);
     // A retry after a failed review looks only at that review's open
@@ -629,9 +615,11 @@ pub(super) async fn run_review(
         String::new()
     } else {
         let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
-        tokio::task::spawn_blocking(move || git::diff_full(&wt, &base, 60_000).unwrap_or_default())
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || {
+            crate::git::changes::diff_full(&wt, &base, 60_000).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     };
 
     let evidence = task.variant().review_evidence;
@@ -673,19 +661,21 @@ pub(super) async fn run_review(
     };
     let declines = this_attempt.map(|a| a.declines.clone()).unwrap_or_default();
     let mut brief_text = match &narrow {
-        Some(n) => brief::build_narrow_review_brief(
+        Some(n) => crate::verify::review::brief::build_narrow_review_brief(
             task,
-            implementer_note,
-            agent_decisions,
-            verify_results,
-            &shown,
-            evidence_from,
-            &brief::NarrowReview {
+            &crate::verify::review::brief::ReviewEvidence {
+                implementer_note,
+                agent_decisions,
+                verify_results,
+                screenshots: &shown,
+                evidence_from,
+                declines: &declines,
+            },
+            &crate::verify::review::brief::NarrowReview {
                 open_criteria: &n.open_criteria,
                 settled_criteria: &n.settled,
                 delta: &n.delta,
             },
-            &declines,
         ),
         None => {
             let (lenses, note) = route_lenses(
@@ -700,23 +690,25 @@ pub(super) async fn run_review(
                 cost_usd,
             )
             .await;
-            task.decisions.push(note);
-            brief::build_review_brief(
+            task.record_decision(note);
+            crate::verify::review::brief::build_review_brief(
                 task,
-                implementer_note,
-                agent_decisions,
-                verify_results,
-                &shown,
-                evidence_from,
+                &crate::verify::review::brief::ReviewEvidence {
+                    implementer_note,
+                    agent_decisions,
+                    verify_results,
+                    screenshots: &shown,
+                    evidence_from,
+                    declines: &declines,
+                },
                 &diff,
-                &declines,
                 &lenses,
             )
         }
     };
     if after_no_verdict {
         brief_text.push('\n');
-        brief_text.push_str(&brief::review_retry_note());
+        brief_text.push_str(&crate::verify::review::brief::review_retry_note());
     }
 
     let run_dir = app
@@ -740,7 +732,7 @@ pub(super) async fn run_review(
             deny_read,
             None,
         );
-        let _ = store::write_json_atomic(&settings_path, &claude_settings);
+        let _ = store::files::write_json_atomic(&settings_path, &claude_settings);
     }
 
     let req = review_request(review_route, worktree, &mcp_path, &settings_path, &images);
@@ -762,8 +754,7 @@ pub(super) async fn run_review(
     {
         Ok(outcome) => {
             if outcome.timed_out {
-                task.decisions
-                    .push(helper_timeout_message("reviewer", limit));
+                task.record_decision(helper_timeout_message("reviewer", limit));
             }
             *cost_usd += outcome.cost_usd.unwrap_or(0.0);
             *fingerprint = outcome.fingerprint.clone();
@@ -775,7 +766,7 @@ pub(super) async fn run_review(
             }
             let text = outcome.final_text.unwrap_or_default();
             if let Some((mut result, recorded_as_pass)) =
-                brief::parse_review_with_rule(&text, &task.criteria)
+                crate::verify::review::reply::parse_review_with_rule(&text, &task.criteria)
             {
                 let scope = match &narrow {
                     Some(n) => {
@@ -784,7 +775,7 @@ pub(super) async fn run_review(
                     }
                     None => ReviewScope::Full,
                 };
-                let rulings = brief::parse_decline_rulings(&text);
+                let rulings = crate::verify::review::reply::parse_decline_rulings(&text);
                 return Ok((
                     result,
                     recorded_as_pass,
@@ -845,14 +836,16 @@ async fn narrow_inputs(
     );
     let delta = tokio::task::spawn_blocking(move || -> Option<String> {
         let files = match &old_base {
-            Some(old_base) => git::own_changes_between(&wt, &old_tree, old_base, &now, &base),
-            None => git::diff_trees_name_only(&wt, &old_tree, &now),
+            Some(old_base) => {
+                crate::git::changes::own_changes_between(&wt, &old_tree, old_base, &now, &base)
+            }
+            None => crate::git::changes::diff_trees_name_only(&wt, &old_tree, &now),
         }
         .ok()?;
         if files.is_empty() {
             return Some("(no file changed since the last review)".to_string());
         }
-        git::diff_trees(&wt, &old_tree, &now, &files, 60_000).ok()
+        crate::git::changes::diff_trees(&wt, &old_tree, &now, &files, 60_000).ok()
     })
     .await
     .ok()??;
@@ -923,7 +916,7 @@ pub(super) fn write_readonly_claude_settings_with_profile(
             );
         }
         if let Some(key) = &p.key {
-            if store::write_secret_file(key_path, key).is_ok() {
+            if store::files::write_secret_file(key_path, key).is_ok() {
                 profile_obj.insert(
                     "apiKeyHelper".to_string(),
                     serde_json::Value::String(format!(
@@ -940,7 +933,7 @@ pub(super) fn write_readonly_claude_settings_with_profile(
         .and_then(|id| app.secrets.read().unwrap().accounts.get(id).cloned())
     {
         if account.kind == "apiKey" {
-            if store::write_secret_file(key_path, &account.value).is_ok() {
+            if store::files::write_secret_file(key_path, &account.value).is_ok() {
                 profile_obj.insert(
                     "apiKeyHelper".into(),
                     serde_json::Value::String(format!(
@@ -950,8 +943,10 @@ pub(super) fn write_readonly_claude_settings_with_profile(
                 );
             }
         } else if account.kind == "subscription" {
-            let _ =
-                store::write_secret_file(&key_path.with_file_name("oauth-token"), &account.value);
+            let _ = store::files::write_secret_file(
+                &key_path.with_file_name("oauth-token"),
+                &account.value,
+            );
         }
     }
     let profile_value = if profile_obj.is_empty() {
@@ -966,7 +961,7 @@ pub(super) fn write_readonly_claude_settings_with_profile(
         deny_read,
         None,
     );
-    let _ = store::write_json_atomic(settings_path, &claude_settings);
+    let _ = store::files::write_json_atomic(settings_path, &claude_settings);
 }
 
 #[cfg(test)]
@@ -987,7 +982,7 @@ mod tests {
 
 #[cfg(test)]
 mod is_test_path_tests {
-    use super::is_test_path;
+    use crate::policy::paths::is_test_path;
 
     #[test]
     fn test_directories_and_file_names_count() {
@@ -1066,6 +1061,8 @@ mod timeout_tests {
             "{:?}",
             task.decisions
         );
-        assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 2);
+        assert!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&task.worktree)) <= 2
+        );
     }
 }

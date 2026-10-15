@@ -1,4 +1,50 @@
-use super::*;
+#[cfg(test)]
+use crate::task::checks::results::criteria_results;
+#[cfg(test)]
+use crate::task::Baseline;
+#[cfg(test)]
+use crate::task::Check;
+#[cfg(test)]
+use crate::task::CriterionRuling;
+#[cfg(test)]
+use crate::task::ReviewResult;
+#[cfg(test)]
+use crate::task::Verdict;
+
+use crate::clock::now_ms;
+use crate::engine::answer_policy::check_authority;
+use crate::engine::questions::exhausted::settle_exhausted_answer;
+use crate::engine::questions::exhausted::wait_for_exhausted_answer;
+use crate::engine::questions::reply::Reply;
+use crate::engine::rate_limit::counted_attempts;
+use crate::engine::slots::SlotPermit;
+use crate::engine::state::App;
+use crate::engine::stuck::retry_or_fail;
+#[cfg(test)]
+use crate::engine::test_support::attempt_with_failure;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+use crate::harness::cancel::CancelToken;
+use crate::policy::routing::Tier;
+use crate::policy::settings::Settings;
+use crate::prompts::clip::truncate_chars;
+use crate::task::checks::authority::Origin;
+use crate::task::AskedBy;
+use crate::task::Attempt;
+use crate::task::AttemptStatus;
+#[cfg(test)]
+use crate::task::CriterionStatus;
+use crate::task::Failure;
+use crate::task::FailureKind;
+use crate::task::FindingStatus;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::oneshot;
 
 const ERROR_KEYWORDS: &[&str] = &["error", "fail", "assert", "panic", "exception"];
 
@@ -208,32 +254,28 @@ pub fn decide_after_failure(input: &FailureDecisionInput) -> FailureDecision {
 
 pub(super) fn record_failure(task: &mut Task, idx: usize, kind: FailureKind, detail: String) {
     let signature = failure_signature(kind, &detail);
-    let a = &mut task.attempts[idx];
-    a.status = AttemptStatus::Failed;
-    a.ended_at = Some(now_ms());
-    a.failure = Some(Failure {
-        kind,
-        detail,
-        signature,
-    });
+    crate::task::attempts::end(
+        task,
+        idx,
+        crate::task::attempts::AttemptEnd::Failed(Failure {
+            kind,
+            detail,
+            signature,
+        }),
+        now_ms(),
+    );
 }
 
 /// How many *implement* attempts a task has made -- the plan attempt (if
 /// any) never counts against `maxAttempts`.
 pub(super) fn implement_attempt_count(task: &Task) -> u32 {
-    task.attempts
-        .iter()
-        .filter(|a| a.stage == Stage::Implement)
-        .count() as u32
+    crate::task::attempts::implement_count(task)
 }
 
 /// Implement attempts that ran to an end: an interrupted one (a restart, a
 /// limit pause) is no attempt for "has this task started implementing".
 pub(super) fn completed_implement_attempts(task: &Task) -> u32 {
-    task.attempts
-        .iter()
-        .filter(|a| a.stage == Stage::Implement && a.status != AttemptStatus::Interrupted)
-        .count() as u32
+    crate::task::attempts::completed_implement_count(task)
 }
 
 /// Whether the latest implement attempt failed on a landing conflict: the
@@ -339,31 +381,29 @@ pub(super) fn advance_after_failure_with(
     };
     match decide_after_failure(&input) {
         FailureDecision::NextAttempt { tier } => {
-            // The fallback note stays until the tier actually changes.
-            if tier != task.tier {
-                task.tier_fallback = None;
-            }
             if last_review_repeated(task) {
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Orchestrator: a review finding repeated -> advisor, tier {}",
                     tier.as_str()
                 ));
             }
-            task.tier = tier;
-            task.status = TaskStatus::Queued;
+            task.record_next_tier(tier);
+            task.resume_phase(TaskStatus::Queued, crate::clock::now_ms());
             true
         }
         FailureDecision::Waiting { question } => {
             let options: Vec<String> =
                 vec!["continue".into(), "change approach".into(), "stop".into()];
-            task.question = Some(Question::new(
+            let mut question = Question::new(
                 question,
                 options,
                 QuestionKind::AttemptsFailing,
                 AskedBy::Implement,
-            ));
-            task.question.as_mut().unwrap().failure_signature = Some(signature);
-            task.status = TaskStatus::Waiting;
+                crate::clock::now_ms(),
+            );
+            question.failure_signature = Some(signature);
+            task.ask(question, now_ms());
+            task.resume_phase(TaskStatus::Waiting, crate::clock::now_ms());
             false
         }
     }
@@ -382,7 +422,7 @@ pub(super) enum LoopSignal {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fail_and_continue(
     app: &Arc<App>,
-    task_id: &str,
+    _task_id: &str,
     task: &mut Task,
     idx: usize,
     kind: FailureKind,
@@ -402,8 +442,7 @@ pub(super) async fn fail_and_continue(
     }
     // Not persisted here: the wait does it itself, after the one-shot is
     // installed (see `wait_for_answer`).
-    let Some(answered) =
-        wait_for_exhausted_answer(app, task_id, task, pending_answer, cancel, permit).await
+    let Some(answered) = wait_for_exhausted_answer(app, task, pending_answer, cancel, permit).await
     else {
         return LoopSignal::Stop;
     };
@@ -421,53 +460,24 @@ pub(super) fn drop_criterion(
     n: usize,
     origin: Origin,
 ) -> Result<(), String> {
-    if n >= task.criteria.len() {
+    let Some(edit) = crate::task::checks::snapshot::CriterionEdit::capture(task, n) else {
         return Ok(());
-    }
-    if let Some(why) = removal_refusal(settings, task, &criterion_commands(task, n), origin) {
-        task.decisions
-            .push(format!("Orchestrator: criterion {n} stays: {why}"));
-        return Err(why);
-    }
-    let text = task.criteria.remove(n);
-    task.checks.retain(|c| c.criterion != n);
-    if task.held_out.as_ref().is_some_and(|h| h.criterion == n) {
-        task.held_out = None;
-    }
-    for c in task.checks.iter_mut().chain(task.held_out.as_mut()) {
-        if c.criterion > n {
-            c.criterion -= 1;
-        }
-    }
-    for review in task.attempts.iter_mut().filter_map(|a| a.review.as_mut()) {
-        review.criteria.retain(|r| r.index != Some(n));
-        for ruling in review.criteria.iter_mut() {
-            if let Some(i) = ruling.index.as_mut().filter(|i| **i > n) {
-                *i -= 1;
-            }
-        }
-    }
-    // Who dropped it is on the line: the report lists the criterion as not
-    // done, and the owner must not read a judge's drop as their own answer.
-    let by = match (origin, task.question_history.last().map(|h| h.answered_by)) {
-        (Origin::Owner, _) => "the owner",
-        (_, Some(AnsweredBy::Judge)) => "the answer judge",
-        (_, Some(AnsweredBy::Policy)) => "the answer policy",
-        (_, Some(AnsweredBy::Overseer)) => "the overseer",
-        (_, Some(AnsweredBy::Orchestrator)) => "the orchestrator",
-        (_, Some(AnsweredBy::Lead)) => "the lead",
-        _ => "an agent",
     };
-    task.decisions.push(format!(
-        "Orchestrator: dropped criterion {n} ({text}) as {by} answered"
-    ));
-    Ok(())
+    crate::task::checks::criteria::drop_criterion(
+        &check_authority(settings, task),
+        task,
+        &edit,
+        origin,
+    )
 }
 
 const IMPOSSIBLE_OPTIONS: [&str; 3] = ["drop criterion", "retry", "stop"];
 
 /// The owner question for a `sushi-impossible` claim.
-pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Question {
+pub(super) fn impossible_question(
+    task: &Task,
+    claim: &crate::engine::attempts::report::Impossible,
+) -> Question {
     let mut question = Question::new(
         format!(
             "Criterion {} cannot be met as written: {}. Evidence: {}",
@@ -476,6 +486,7 @@ pub(super) fn impossible_question(task: &Task, claim: &brief::Impossible) -> Que
         IMPOSSIBLE_OPTIONS.iter().map(|o| o.to_string()).collect(),
         QuestionKind::Impossible,
         AskedBy::Implement,
+        crate::clock::now_ms(),
     );
     question.criterion = Some(claim.criterion);
     question.evidence = Some(claim.evidence.clone());
@@ -506,9 +517,10 @@ mod grounded_checks_tests {
     #[test]
     fn dropping_a_criterion_removes_its_checks_and_shifts_the_later_ones() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.criteria = vec!["zero".into(), "one".into(), "two".into()];
-        task.checks = vec![check(0, "a"), check(1, "b"), check(2, "c"), check(1, "b2")];
-        task.held_out = Some(check(2, "h"));
+        task.fixture_data().criteria = vec!["zero".into(), "one".into(), "two".into()];
+        task.fixture_data().checks =
+            vec![check(0, "a"), check(1, "b"), check(2, "c"), check(1, "b2")];
+        task.fixture_data().held_out = Some(check(2, "h"));
         let _ = drop_criterion(&Settings::default(), &mut task, 1, Origin::Owner);
         assert_eq!(task.criteria, vec!["zero", "two"]);
         assert_eq!(task.checks, vec![check(0, "a"), check(1, "c")]);
@@ -530,7 +542,7 @@ mod grounded_checks_tests {
     #[test]
     fn dropping_a_criterion_shifts_the_stored_rulings_so_a_later_one_is_not_settled() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.criteria = vec!["A".into(), "B".into(), "C".into()];
+        task.fixture_data().criteria = vec!["A".into(), "B".into(), "C".into()];
         let ruling = |index, met| CriterionRuling {
             criterion: String::new(),
             index: Some(index),
@@ -546,7 +558,7 @@ mod grounded_checks_tests {
             details: Vec::new(),
             criteria: vec![ruling(0, false), ruling(1, true), ruling(2, false)],
         });
-        task.attempts = vec![attempt];
+        task.fixture_data().attempts = vec![attempt];
         let _ = drop_criterion(&Settings::default(), &mut task, 0, Origin::Owner);
         let kept: Vec<(Option<usize>, Option<bool>)> = task.attempts[0]
             .review
@@ -563,10 +575,46 @@ mod grounded_checks_tests {
     }
 
     #[test]
+    fn dropping_a_criterion_removes_its_command_from_every_place() {
+        let cmd = "node scripts/x.mjs";
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.fixture_data().criteria = vec![format!("zero -- check: {cmd}"), "one".into()];
+        task.fixture_data().checks = vec![check(0, cmd), check(1, cmd), check(1, "keep")];
+        task.fixture_data().held_out = Some(check(1, cmd));
+        task.fixture_data().verify = vec![cmd.into(), "node scripts/x.mjs --more".into()];
+        task.fixture_data().final_verify = vec![cmd.into()];
+        drop_criterion(&Settings::default(), &mut task, 0, Origin::Owner).unwrap();
+        assert_eq!(task.verify, vec!["node scripts/x.mjs --more"]);
+        assert!(task.final_verify.is_empty());
+        assert_eq!(task.checks, vec![check(0, "keep")]);
+        assert_eq!(task.held_out, None);
+        assert_eq!(
+            task.decisions.last().unwrap(),
+            &format!(
+                "Orchestrator: dropping criterion 0 also removed `{cmd}` from verify, finalVerify, checks, heldOut"
+            )
+        );
+        assert_eq!(task.decisions.len(), 2);
+    }
+
+    #[test]
+    fn a_non_owner_drop_keeps_a_repo_sourced_verify_duplicate() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.fixture_data().criteria = vec!["zero -- check: npm run ci".into(), "one".into()];
+        task.fixture_data().checks = vec![check(0, "npm run ci")];
+        task.fixture_data().verify = vec!["npm run ci".into()];
+        let r = drop_criterion(&Settings::default(), &mut task, 0, Origin::Other);
+        assert!(r.is_err());
+        assert_eq!(task.criteria.len(), 2);
+        assert_eq!(task.verify, vec!["npm run ci"]);
+        assert_eq!(task.checks.len(), 1);
+    }
+
+    #[test]
     fn the_impossible_question_round_trips_to_its_criterion() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.criteria = vec!["zero".into(), "one".into()];
-        let claim = brief::Impossible {
+        task.fixture_data().criteria = vec!["zero".into(), "one".into()];
+        let claim = crate::engine::attempts::report::Impossible {
             criterion: 1,
             evidence: "it contradicts zero".into(),
         };

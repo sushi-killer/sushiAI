@@ -18,8 +18,8 @@
 //! field from the whole log, so the "told once" memory survives a daemon
 //! restart and spans overseer sessions.
 
-use crate::model::{Question, QuestionKind};
 use crate::store;
+use crate::task::{Question, QuestionKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -184,7 +184,7 @@ impl Entry {
             line.to_string()
         };
         Entry {
-            ts: crate::model::now_ms(),
+            ts: crate::clock::now_ms(),
             repo: repo.to_string(),
             kind: kind.to_string(),
             task_id: task_id.map(str::to_string),
@@ -238,7 +238,7 @@ fn write_entries(data_dir: &Path, entries: &[Entry]) -> std::io::Result<()> {
         out.push_str(&serde_json::to_string(e).map_err(std::io::Error::other)?);
         out.push('\n');
     }
-    store::write_text_private(&path(data_dir), &out)
+    store::files::write_text_private(&path(data_dir), &out)
 }
 
 /// Newest first, optionally one repo, at most `limit` (default 200, max 2000).
@@ -281,7 +281,8 @@ mod tests {
             format!("{cmd} already fails on base 0123456: TOKEN=abc123 leaked output"),
             vec![],
             QuestionKind::PreexistingFailure,
-            crate::model::AskedBy::Verify,
+            crate::task::AskedBy::Verify,
+            crate::clock::now_ms(),
         );
         q.commands = vec![cmd.to_string(), "npm test".to_string()];
         let e = Entry::answered("/r", "t1", Some(&q), " keep all ");
@@ -298,7 +299,8 @@ mod tests {
             format!("{cmd}\nShould the retry limit be 3?"),
             vec![],
             QuestionKind::AgentQuestion,
-            crate::model::AskedBy::Verify,
+            crate::task::AskedBy::Verify,
+            crate::clock::now_ms(),
         );
         let e = Entry::answered("/r", "t1", Some(&q), "yes");
         assert_eq!(e.text, "Should the retry limit be 3? \u{2192} yes");
@@ -306,7 +308,8 @@ mod tests {
             "npm test",
             vec![],
             QuestionKind::AgentQuestion,
-            crate::model::AskedBy::Verify,
+            crate::task::AskedBy::Verify,
+            crate::clock::now_ms(),
         );
         assert_eq!(
             Entry::answered("/r", "t", Some(&only_code), "ok").text,

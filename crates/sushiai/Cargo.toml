@@ -26,3 +26,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 sha2 = "0.10"
+serde.workspace = true
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

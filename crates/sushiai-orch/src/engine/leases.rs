@@ -1,4 +1,33 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::planning::graph::overlapping_path;
+#[cfg(test)]
+use crate::engine::run_control::TaskControl;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::Question;
+#[cfg(test)]
+use crate::task::QuestionKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::task::Wait;
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 /// How often a running task's worktree diff is read into its lease.
 const LEASE_POLL: Duration = Duration::from_secs(2);
@@ -94,7 +123,7 @@ impl App {
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, ctrl)| (id.clone(), !ctrl.cancel.is_cancelled()))
+            .map(|(id, ctrl)| (id.clone(), !ctrl.signals.cancel.is_cancelled()))
             .collect();
         leases.retain(|id, _| {
             self.store.load_task(id).ok().flatten().is_some_and(|t| {
@@ -135,7 +164,7 @@ impl App {
                     .load_task(id)
                     .ok()
                     .flatten()
-                    .map(|t| t.title)
+                    .map(|t| t.title.clone())
                     .unwrap_or_else(|| id.clone());
                 return Some(Held {
                     task_id: id.clone(),
@@ -153,7 +182,7 @@ impl App {
             .unwrap()
             .get(&task.id)
             .map_or(task.status == TaskStatus::Stopped, |ctrl| {
-                ctrl.cancel.is_cancelled()
+                ctrl.signals.cancel.is_cancelled()
             })
     }
 
@@ -269,7 +298,7 @@ impl App {
             if !ended && !asking && self.file_blocked(&task) {
                 continue;
             }
-            if let Err(e) = self.update_task(&task.id, |t| t.queue.wait = None) {
+            if let Err(e) = self.update_task(&task.id, |t| t.set_wait(None)) {
                 eprintln!("orch: updating task {} failed: {e}", task.id);
             }
             if ended
@@ -363,16 +392,16 @@ impl App {
                 }));
             }
         }
-        Ok(permissions::decide_call(&self.arc(), &ctx, &p.payload).await)
+        Ok(crate::engine::permissions::hook::decide_call(&self.arc(), &ctx, &p.payload).await)
     }
 
     /// One decision line per distinct refusal; the task shows the `file` wait.
     fn append_lease_line(&self, task_id: &str, line: String, wait: Wait) {
         if let Err(e) = self.update_task(task_id, |task| {
             if !task.decisions.contains(&line) {
-                task.decisions.push(line);
+                task.record_decision(line);
             }
-            task.queue.wait = Some(wait);
+            task.set_wait(Some(wait));
         }) {
             eprintln!("orch: updating task {task_id} failed: {e}");
         }
@@ -417,10 +446,9 @@ pub(super) async fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool
     match app.acquire_lease(task, &changed, force) {
         None => {
             if matches!(task.queue.wait, Some(Wait::File { .. })) {
-                task.queue.wait = None;
-                task.decisions
-                    .push("Queue: the files it changed are free, starting".to_string());
-                task.updated_at = now_ms();
+                task.set_wait(None);
+                task.record_decision("Queue: the files it changed are free, starting".to_string());
+                task.touch(now_ms());
                 app.save_task_logged(task);
                 app.broadcast_task(task);
             }
@@ -429,11 +457,10 @@ pub(super) async fn pass_lease_gate(app: &Arc<App>, task: &mut Task, force: bool
         Some(held) => {
             let line = format!("Queue: {}", held.waits_line());
             if !task.decisions.contains(&line) {
-                task.decisions.push(line);
+                task.record_decision(line);
             }
-            task.queue.wait = Some(held.wait());
-            task.status = TaskStatus::Queued;
-            task.updated_at = now_ms();
+            task.set_wait(Some(held.wait()));
+            task.resume_phase(TaskStatus::Queued, now_ms());
             app.save_task_logged(task);
             app.broadcast_task(task);
             false
@@ -449,12 +476,14 @@ mod tests {
     async fn graph_control_stopped_holder_is_pruned_with_its_control_still_registered() {
         let (app, _dir) = test_app();
         let mut holder = task_with_status(TaskStatus::Running);
-        holder.paths = vec!["shared.txt".into()];
+        holder.fixture_data().paths = vec!["shared.txt".into()];
         app.store.save_task(&holder).unwrap();
         let control = TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
+            signals: crate::engine::run_control::TaskSignals {
+                cancel: CancelToken::new(),
+                pending_answer: Arc::new(StdMutex::new(None)),
+                pending_amend: Arc::new(StdMutex::new(None)),
+            },
             handle: tokio::spawn(std::future::pending()),
         };
         app.controls
@@ -463,7 +492,7 @@ mod tests {
             .insert(holder.id.clone(), control);
         assert!(app.acquire_lease(&holder, &holder.paths, false).is_none());
         let mut waiter = holder.clone();
-        waiter.id = "waiter".into();
+        waiter.fixture_data().id = "waiter".into();
         assert!(app.acquire_lease(&waiter, &waiter.paths, false).is_some());
         app.handle_task_stop(json!({"id": holder.id, "source": "lead"}))
             .await
@@ -488,26 +517,29 @@ mod tests {
     async fn graph_control_waiting_live_holder_keeps_its_lease() {
         let (app, _dir) = test_app();
         let mut holder = task_with_status(TaskStatus::Waiting);
-        holder.paths = vec!["shared.txt".into()];
-        holder.question = Some(Question::new(
+        holder.fixture_data().paths = vec!["shared.txt".into()];
+        holder.fixture_data().question = Some(Question::new(
             "Which way?",
             vec![],
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         ));
         app.store.save_task(&holder).unwrap();
         app.controls.lock().unwrap().insert(
             holder.id.clone(),
             TaskControl {
-                cancel: CancelToken::new(),
-                pending_answer: Arc::new(StdMutex::new(None)),
-                pending_amend: Arc::new(StdMutex::new(None)),
+                signals: crate::engine::run_control::TaskSignals {
+                    cancel: CancelToken::new(),
+                    pending_answer: Arc::new(StdMutex::new(None)),
+                    pending_amend: Arc::new(StdMutex::new(None)),
+                },
                 handle: tokio::spawn(std::future::pending()),
             },
         );
         assert!(app.acquire_lease(&holder, &holder.paths, false).is_none());
         let mut waiter = holder.clone();
-        waiter.id = "waiter".into();
+        waiter.fixture_data().id = "waiter".into();
         assert!(app.acquire_lease(&waiter, &waiter.paths, false).is_some());
         app.controls
             .lock()
@@ -522,21 +554,23 @@ mod tests {
     async fn a_lease_holds_only_the_files_really_changed() {
         let (app, _dir) = test_app();
         let mut holder = task_with_status(TaskStatus::Running);
-        holder.paths = vec!["planned.txt".into()];
+        holder.fixture_data().paths = vec!["planned.txt".into()];
         app.store.save_task(&holder).unwrap();
         app.controls.lock().unwrap().insert(
             holder.id.clone(),
             TaskControl {
-                cancel: CancelToken::new(),
-                pending_answer: Arc::new(StdMutex::new(None)),
-                pending_amend: Arc::new(StdMutex::new(None)),
+                signals: crate::engine::run_control::TaskSignals {
+                    cancel: CancelToken::new(),
+                    pending_answer: Arc::new(StdMutex::new(None)),
+                    pending_amend: Arc::new(StdMutex::new(None)),
+                },
                 handle: tokio::spawn(std::future::pending()),
             },
         );
         // The gate of a fresh task claims nothing: the plan is no claim.
         assert!(app.acquire_lease(&holder, &[], false).is_none());
         let mut other = holder.clone();
-        other.id = "other".into();
+        other.fixture_data().id = "other".into();
         app.store.save_task(&other).unwrap();
         assert!(app
             .acquire_lease(&other, &["planned.txt".into()], false)
@@ -551,7 +585,7 @@ mod tests {
             (holder.id.as_str(), "real.txt")
         );
         // The refused task shows the wait until the holder lapses.
-        other.queue.wait = Some(held.wait());
+        other.fixture_data().queue.wait = Some(held.wait());
         assert!(app.file_blocked(&other));
         app.controls
             .lock()
@@ -571,15 +605,17 @@ mod tests {
         app.controls.lock().unwrap().insert(
             holder.id.clone(),
             TaskControl {
-                cancel: CancelToken::new(),
-                pending_answer: Arc::new(StdMutex::new(None)),
-                pending_amend: Arc::new(StdMutex::new(None)),
+                signals: crate::engine::run_control::TaskSignals {
+                    cancel: CancelToken::new(),
+                    pending_answer: Arc::new(StdMutex::new(None)),
+                    pending_amend: Arc::new(StdMutex::new(None)),
+                },
                 handle: tokio::spawn(std::future::pending()),
             },
         );
         app.sync_lease(&holder.id, &["real.txt".into()]);
         let mut other = task_with_status(TaskStatus::Running);
-        other.queue.wait = Some(Wait::File {
+        other.fixture_data().queue.wait = Some(Wait::File {
             task_id: holder.id.clone(),
             title: "Holder".into(),
             path: "real.txt".into(),
@@ -595,12 +631,13 @@ mod tests {
             .queue
             .wait
             .is_some());
-        other.status = TaskStatus::Waiting;
-        other.question = Some(Question::new(
+        other.fixture_data().status = TaskStatus::Waiting;
+        other.fixture_data().question = Some(Question::new(
             "Which way?",
             vec![],
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         ));
         app.store.save_task(&other).unwrap();
         app.advance_queue(&other.repo);

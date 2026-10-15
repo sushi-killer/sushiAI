@@ -4,9 +4,44 @@
 //! The judgement of what to change is the model's; this module only picks
 //! what to ask about, holds the answer to fixed rules and keeps count.
 
-use super::*;
-use crate::brief::{ProposalBriefInput, ProposalExcerpt};
+#[cfg(test)]
+use super::append_line;
+
+#[cfg(test)]
+use crate::engine::evolution::ExcerptRef;
+
+use super::{evolution_dir, Signal, SignalKind};
+use crate::policy::keys::simple_hash;
+
+use crate::api::events::Event;
+use crate::clock::now_ms;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::state::App;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::Guard;
+use crate::policy::evolution::EvolutionSettings;
+use crate::policy::routing::Route;
+use crate::policy::routing::Tier;
+use crate::policy::settings::Settings;
+use crate::task::evolution::Proposal;
+use crate::task::evolution::ProposalCounts;
+use crate::task::evolution::ProposalForm;
+use crate::task::evolution::ProposalReply;
+use crate::task::evolution::ProposalStatus;
+use crate::task::evolution::Track;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::engine::decision::normalize_signature_line;
+use crate::engine::evolution::proposal::ProposalBriefInput;
+use crate::engine::evolution::proposal::ProposalExcerpt;
 use std::collections::{HashMap, HashSet};
 
 /// Verb stems of "make a check weaker", matched as word prefixes.
@@ -227,7 +262,7 @@ fn read_excerpt(data_dir: &Path, signal: &Signal) -> Option<ProposalExcerpt> {
     }
     let text = std::fs::read_to_string(&path).ok()?;
     let all: Vec<&str> = text.lines().collect();
-    let max = brief::MAX_PROPOSAL_EXCERPT_LINES;
+    let max = crate::engine::evolution::proposal::MAX_PROPOSAL_EXCERPT_LINES;
     let from = r.from_line.max(1);
     let to = r.to_line.max(from);
     let len = to - from + 1;
@@ -261,7 +296,7 @@ fn excerpts(data_dir: &Path, cluster: &Cluster) -> Vec<ProposalExcerpt> {
     newest
         .into_iter()
         .filter_map(|o| read_excerpt(data_dir, &o.signal))
-        .take(brief::MAX_PROPOSAL_OCCURRENCES)
+        .take(crate::engine::evolution::proposal::MAX_PROPOSAL_OCCURRENCES)
         .collect()
 }
 
@@ -515,7 +550,8 @@ impl App {
             let repo = cluster.main_repo().to_string();
             let path = PathBuf::from(&repo);
             let Ok(Ok(toplevel)) =
-                tokio::task::spawn_blocking(move || git::repo_toplevel(&path)).await
+                tokio::task::spawn_blocking(move || crate::git::history::repo_toplevel(&path))
+                    .await
             else {
                 continue;
             };
@@ -531,20 +567,21 @@ impl App {
                             .unwrap_or_else(|| t.goal.clone())
                     })
                     .unwrap_or_else(|| latest.detail.clone()),
-                base_sha: task.map(|t| t.base_sha).unwrap_or_default(),
+                base_sha: task.map(|t| t.base_sha.clone()).unwrap_or_default(),
             };
             let tasks = cluster.tasks();
             let (calls, usd) = (cluster.wasted_calls(), cluster.wasted_usd());
-            let brief_text = brief::build_proposal_brief(&ProposalBriefInput {
-                kind: &cluster.kind,
-                detail: &latest.detail,
-                repo: &repo,
-                occurrences: cluster.occurrences.len(),
-                tasks,
-                wasted_calls: calls,
-                wasted_usd: usd,
-                excerpts: &excerpts(&self.data_dir, &cluster),
-            });
+            let brief_text =
+                crate::engine::evolution::proposal::build_proposal_brief(&ProposalBriefInput {
+                    kind: &cluster.kind,
+                    detail: &latest.detail,
+                    repo: &repo,
+                    occurrences: cluster.occurrences.len(),
+                    tasks,
+                    wasted_calls: calls,
+                    wasted_usd: usd,
+                    excerpts: &excerpts(&self.data_dir, &cluster),
+                });
             let job = Job {
                 id: uuid::Uuid::new_v4().to_string(),
                 key: cluster.key.clone(),
@@ -705,8 +742,13 @@ async fn run_proposer(
     if let Some(_permit) = permit {
         let settings = app.settings.read().unwrap().clone();
         let (mcp_path, settings_path, key_path) =
-            super::audit::prepare_run(app, &route, &dir, &settings);
-        let req = super::audit::audit_request(&route, &job.toplevel, &mcp_path, &settings_path);
+            crate::engine::audit::run::prepare_run(app, &route, &dir, &settings);
+        let req = crate::engine::audit::run::audit_request(
+            &route,
+            &job.toplevel,
+            &mcp_path,
+            &settings_path,
+        );
         let result = run_harness(
             app,
             &job.id,
@@ -725,7 +767,7 @@ async fn run_proposer(
         if let Ok(outcome) = result {
             let text = outcome.final_text.clone().unwrap_or_default();
             // No parsable block stores nothing, so the next run retries.
-            if let Ok(reply) = brief::parse_proposal(&text) {
+            if let Ok(reply) = crate::engine::evolution::proposal::parse_proposal(&text) {
                 store_reply(app, &job, reply, &outcome).await;
             }
         }
@@ -844,7 +886,7 @@ mod tests {
         let (app, _dir) = test_app();
         let live = task_with_status(TaskStatus::Done);
         let mut archived = task_with_status(TaskStatus::Done);
-        archived.archived = true;
+        archived.fixture_data().archived = true;
         app.store.save_task(&live).unwrap();
         app.store.save_task(&archived).unwrap();
         let dir = evolution_dir(&app.data_dir);
@@ -1044,9 +1086,9 @@ mod tests {
 
     fn finished(id: &str, updated_at: i64) -> Task {
         let mut t = task_with_status(TaskStatus::Done);
-        t.id = id.into();
-        t.repo = "/r".into();
-        t.updated_at = updated_at;
+        t.fixture_data().id = id.into();
+        t.fixture_data().repo = "/r".into();
+        t.fixture_data().updated_at = updated_at;
         t
     }
 
@@ -1141,7 +1183,7 @@ mod tests {
         let mut p = proposal(ProposalStatus::Approved, "loop:x");
         p.task_id = Some("own".into());
         let mut running = finished("own", 500);
-        running.status = TaskStatus::Running;
+        running.fixture_data().status = TaskStatus::Running;
         assert!(!measure(
             &mut p,
             &[running],

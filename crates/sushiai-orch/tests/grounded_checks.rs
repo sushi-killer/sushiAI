@@ -668,8 +668,11 @@ fn task_create_validates_checks_and_refuses_the_retired_flag() {
         .unwrap()
         .contains("groundedChecks"));
 
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mcp.rs")).unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/api/mcp/schema.rs"
+    ))
+    .unwrap();
     assert_eq!(
         source.matches("\"variant\": {\"type\": \"object\"").count(),
         1

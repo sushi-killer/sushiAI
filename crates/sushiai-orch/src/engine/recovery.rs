@@ -1,9 +1,43 @@
-use super::*;
-use crate::store::RunFate;
+use crate::clock::now_ms;
+use crate::engine::attempts::ledger::record_run;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::observations::note_first_edit;
+use crate::engine::attempts::pricing::finalize_cost;
+use crate::engine::attempts::pricing::price_resumed_attempt;
+use crate::engine::attempts::secrets::run_secrets;
+use crate::engine::cost::settle_interrupted_advisor;
+use crate::engine::cost::settle_unfinished_cost;
+use crate::engine::state::App;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::Guard;
+use crate::harness::native::error::RunError;
+use crate::harness::native::redaction::redact;
+use crate::harness::process::group_alive;
+use crate::harness::process::run_group_alive;
+use crate::harness::run_files::remove_raw_output;
+use crate::harness::run_files::RunFiles;
+use crate::harness::run_files::{fate_of_run, RunFate};
+use crate::policy::routing::Harness;
+use crate::store::log::append_line;
+use crate::task::AttemptStatus;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub(super) mod interrupted;
+#[cfg(test)]
+mod interrupted_tests;
 
 impl App {
     /// Restores loops for in-flight work: interrupted attempts are marked
-    /// and requeued by the store, and queued or drafting tasks resume.
+    /// and requeued before queued or drafting tasks resume.
     /// Stopped tasks stay stopped. A `waiting` task needs no loop until
     /// its answer arrives (`task.answer` relaunches one).
     pub fn recover_on_start(&self) -> std::io::Result<()> {
@@ -12,7 +46,8 @@ impl App {
         self.release_stale_holds();
         self.retire_ladder_questions();
         let prices = self.settings.read().unwrap().prices.clone();
-        match self.store.recover_interrupted_with(
+        match interrupted::tasks(
+            &self.store,
             |task, idx| self.run_fate(task, idx),
             |task, idx| {
                 settle_unfinished_cost(task, idx, &self.store, &prices);
@@ -29,11 +64,11 @@ impl App {
             Err(e) => eprintln!("orch: recovering interrupted tasks failed: {e}"),
         }
         // Spend recorded before per-run cost records existed; a no-op once done.
-        crate::costs::backfill(&self.data_dir);
-        match self.store.recover_interrupted_audits() {
+        crate::store::costs::backfill(&self.data_dir);
+        match interrupted::audits(&self.store) {
             Ok(audits) => {
                 for a in audits {
-                    audit::broadcast(self, &a);
+                    crate::engine::audit::run::broadcast(self, &a);
                 }
             }
             Err(e) => eprintln!("orch: recovering interrupted audits failed: {e}"),
@@ -52,7 +87,7 @@ impl App {
             if t.status == TaskStatus::Stopped {
                 if t.question.is_some() {
                     self.close_stopped_task(&mut t);
-                    t.updated_at = now_ms();
+                    t.touch(now_ms());
                     self.save_task_logged(&t);
                     self.broadcast_task(&t);
                 }
@@ -60,7 +95,7 @@ impl App {
             }
             if t.status == TaskStatus::Done {
                 // The draft of a pull request a restart interrupted.
-                pr_draft::spawn_pr_on_done(self, &t);
+                crate::engine::delivery::pr::pending::spawn_pr_on_done(self, &t);
                 continue;
             }
             if matches!(
@@ -71,17 +106,17 @@ impl App {
                     | TaskStatus::Landing
             ) {
                 // A restart starts the dirty-checkout hour over.
-                let was_dirty = t.queue.dirty_since.take().is_some();
+                let was_dirty = t.take_dirty_wait().is_some();
                 if settle_interrupted_advisor(&mut t, &self.store, &prices) || was_dirty {
-                    t.updated_at = now_ms();
+                    t.touch(now_ms());
                     self.save_task_logged(&t);
                     self.broadcast_task(&t);
                 }
                 if t.status == TaskStatus::Drafting && t.queue.backlog.is_some() {
                     // Planning resumes but never rolls into implementing.
-                    self.spawn_task_loop(t.id, false);
+                    self.spawn_task_loop(t.id.clone(), false);
                 } else if t.status != TaskStatus::Queued || t.queue.backlog.is_none() {
-                    self.start_task_loop(t.id);
+                    self.start_task_loop(t.id.clone());
                 }
             }
         }
@@ -102,7 +137,7 @@ impl App {
             })
             .into_iter()
             .filter(|t| !t.archived)
-            .map(|t| t.repo)
+            .map(|t| t.repo.clone())
             .collect();
         repos.sort();
         repos.dedup();
@@ -220,20 +255,6 @@ impl App {
     }
 }
 
-/// `Resume` when the run's group lives or its exit file exists. The group is
-/// asked first: the wrapper writes the exit file before its group can die, so
-/// a run that ends between the two checks is seen as ended, never as lost.
-/// (Checking the file first let a run finishing at that instant be
-/// interrupted and requeued, a duplicate run.)
-pub(super) fn fate_of_run(exit: &Path, group_alive: impl FnOnce() -> bool) -> RunFate {
-    let alive = group_alive();
-    if alive || exit.exists() {
-        RunFate::Resume
-    } else {
-        RunFate::Interrupted
-    }
-}
-
 /// The attempt of `task` whose run a restarted daemon has to follow: the
 /// last implement attempt, still `running`, with its run files in place.
 pub(super) fn resumable_attempt(app: &App, task: &Task) -> Option<usize> {
@@ -293,7 +314,9 @@ pub(super) async fn follow_run(
             }
             if trip.is_none() {
                 let run = (attempt.harness, model.as_deref());
-                trip = guard.line(app, run, &line, &notes);
+                trip = crate::engine::attempts::pricing::guard_line(
+                    app, &mut guard, run, &line, &notes,
+                );
             }
         }
         caught_up = true;

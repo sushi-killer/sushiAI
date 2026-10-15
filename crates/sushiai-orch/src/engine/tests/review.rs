@@ -231,7 +231,7 @@ fn select_review_route_explicit_id() {
 
 fn visual_task(criteria: &[&str]) -> Task {
     let mut task = task_with_status(TaskStatus::Running);
-    task.criteria = criteria.iter().map(|c| c.to_string()).collect();
+    task.fixture_data().criteria = criteria.iter().map(|c| c.to_string()).collect();
     task
 }
 

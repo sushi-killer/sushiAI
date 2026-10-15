@@ -1,4 +1,81 @@
-use super::*;
+#[cfg(test)]
+use crate::engine::decision::impossible_question;
+#[cfg(test)]
+use crate::engine::verification::base::answers::record_owner_base_check;
+#[cfg(test)]
+use crate::policy::settings::AfterLand;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::CheckSource;
+#[cfg(test)]
+use crate::task::SourcedCheck;
+#[cfg(test)]
+use crate::task::VerifyOutcome;
+#[cfg(test)]
+use crate::task::Wait;
+#[cfg(test)]
+use crate::verify::repository::record_plan_check_sources;
+
+use crate::clock::now_ms;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::attribution::attributed_target;
+use crate::engine::brief_check::check_route_for;
+use crate::engine::decision::impossible_drop_target;
+use crate::engine::decision_memory::hard_limit;
+use crate::engine::lifecycle::base_wait::waits_for_base_move;
+#[cfg(test)]
+use crate::engine::lifecycle::base_wait::BASE_WAIT_TITLE;
+use crate::engine::lines::policy_answer_line;
+#[cfg(test)]
+use crate::engine::questions::answers::record_answer;
+use crate::engine::review::review_request;
+use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::assert_helper_timeout;
+#[cfg(test)]
+use crate::engine::test_support::attempt_with_failure;
+#[cfg(test)]
+use crate::engine::test_support::git_in;
+#[cfg(test)]
+use crate::engine::test_support::init_git_repo;
+#[cfg(test)]
+use crate::engine::test_support::planner_made;
+#[cfg(test)]
+use crate::engine::test_support::slow_helper_task;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+use crate::engine::verification::scoping::scoped_checks_for;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::policy::paths::glob_match;
+use crate::policy::routing::Harness;
+use crate::policy::settings::Settings;
+use crate::prompts::clip::truncate_chars;
+use crate::prompts::engine_text;
+use crate::task::amendment::Amendment;
+use crate::task::checks::authority::{criterion_commands, Origin};
+use crate::task::checks::commands::flat_command;
+use crate::task::is_option;
+use crate::task::AnsweredBy;
+use crate::task::AnsweredQuestion;
+use crate::task::Assumption;
+use crate::task::Question;
+use crate::task::QuestionKind;
+#[cfg(test)]
+use crate::task::Risk;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::task::PRE_EXISTING_RETRY;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Automatic answers per kind of question and cause on one task; the next
 /// question of that kind and cause goes on to the overseer and the owner.
@@ -55,12 +132,13 @@ pub(super) fn policy_open(app: &App, task: &Task, question: &Question) -> bool {
 /// Context needed by the pre-existing-failure policy. Keep filesystem and
 /// store reads here so the answer rule itself remains deterministic.
 fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool>, bool) {
-    let changed = git::changed_files(Path::new(&task.worktree), &task.base_sha).unwrap_or_default();
+    let changed = crate::git::changes::changed_files(Path::new(&task.worktree), &task.base_sha)
+        .unwrap_or_default();
     let targeted = question
         .commands
         .iter()
         .map(|command| {
-            base_check::is_task_target(task, command, &changed)
+            crate::engine::verification::base::answers::is_task_target(task, command, &changed)
                 || attributed_target(app, task, command)
         })
         .collect();
@@ -69,7 +147,8 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
         // Nothing lands on a default branch that landing may not move, so a
         // wait for it to move would never end.
         if !may_land_on_default
-            && git::default_branch(Path::new(&task.repo)).as_deref() == Some(base_ref.as_str())
+            && crate::git::branches::default_branch(Path::new(&task.repo)).as_deref()
+                == Some(base_ref.as_str())
         {
             return false;
         }
@@ -85,7 +164,7 @@ fn policy_base_context(app: &App, task: &Task, question: &Question) -> (Vec<bool
                     // moves nothing, so two red tasks never wait on each other.
                     && matches!(other.status, TaskStatus::Running | TaskStatus::Landing)
                     && !waits_for_base_move(other)
-                    && crate::model::same_repo_path(&other.repo, &task.repo)
+                    && crate::git::paths::same_repo_path(&other.repo, &task.repo)
                     && other.base_ref.as_ref() == Some(base_ref)
             })
     });
@@ -123,8 +202,8 @@ pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
     match question.kind {
         QuestionKind::Permission => {
             matches!(
-                permissions::parse_choice(answer),
-                permissions::Choice::Deny(_)
+                crate::policy::permissions::parse_choice(answer),
+                crate::policy::permissions::Choice::Deny(_)
             )
         }
         QuestionKind::ProtectedPath => is_option(answer, "reject"),
@@ -132,204 +211,93 @@ pub(super) fn is_refusal(question: &Question, answer: &str) -> bool {
     }
 }
 
-/// Leading tokens of a repo's own CI entry. A command segment that starts
-/// with one of these (after `cd <dir>` and `VAR=x`) is a CI entry.
-const CI_ENTRIES: [&[&str]; 11] = [
-    &["npm", "run", "ci"],
-    &["npm", "test"],
-    &["npm", "run", "test"],
-    &["pnpm", "test"],
-    &["pnpm", "run", "ci"],
-    &["pnpm", "ci"],
-    &["yarn", "test"],
-    &["yarn", "ci"],
-    &["cargo", "test"],
-    &["make", "test"],
-    &["make", "ci"],
-];
-
-pub(super) fn flat_command(command: &str) -> String {
-    command.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub(super) fn is_assignment(token: &str) -> bool {
-    token.split_once('=').is_some_and(|(name, _)| {
-        !name.is_empty()
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
-}
-
-/// Whether one shell segment runs a CI entry.
-fn segment_runs_ci(segment: &str) -> bool {
-    let mut tokens: Vec<&str> = segment.split_whitespace().collect();
-    loop {
-        match tokens.as_slice() {
-            ["cd", _, ..] | ["timeout", _, ..] => tokens.drain(..2),
-            ["env", ..] => tokens.drain(..1),
-            [first, ..] if is_assignment(first) => tokens.drain(..1),
-            _ => break,
-        };
-    }
-    CI_ENTRIES.iter().any(|entry| tokens.starts_with(entry))
-}
-
-/// The `&&`, `||`, `;`, `|` and newline separated parts of `command`.
-fn command_segments(command: &str) -> Vec<String> {
-    command
-        .replace("&&", "\n")
-        .replace("||", "\n")
-        .replace([';', '|'], "\n")
-        .replace(['(', ')'], " ")
-        .lines()
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// Whether any part of `command` runs a CI entry.
-pub(super) fn runs_ci_entry(command: &str) -> bool {
-    command_segments(command)
-        .iter()
-        .any(|segment| segment_runs_ci(segment))
-}
-
-/// Whether `command` is named in the owner's request.
-fn named_in_request(request: Option<&str>, command: &str) -> bool {
-    let command = flat_command(command);
-    !command.is_empty() && request.is_some_and(|r| flat_command(r).contains(&command))
-}
-
-/// A plain file name: no glob, and an extension after a non-empty name.
-fn is_plain_file(target: &str) -> bool {
-    !target.contains(['*', '?', '['])
-        && target
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.rsplit_once('.'))
-            .is_some_and(|(name, ext)| {
-                !name.is_empty()
-                    && !name.ends_with('.')
-                    && ext.chars().any(|c| c.is_ascii_alphabetic())
-                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            })
-}
-
-/// Whether every part of `command` names only targets the planner made: a
-/// planner test file, or a plain file that is absent on the base. A bare
-/// word, `$(…)` or a backtick in it, or a part without a target (`go test
-/// ./...`), fails.
-fn made_by_planner(task: &Task, command: &str) -> bool {
-    let command = flat_command(command);
-    let absent = base_check::targets_absent_on_base(&task.repo, &task.base_sha, &command);
-    let planner_made = |target: &String| {
-        let target = target.strip_prefix("./").unwrap_or(target);
-        task.planner_tests.files.iter().any(|f| f.path == target)
-            || (is_plain_file(target) && absent.iter().any(|a| a == target))
-    };
-    let segments = command_segments(&command);
-    !segments.is_empty()
-        && segments.iter().all(|segment| {
-            if segment.contains("$(") || segment.contains('`') {
-                return false;
-            }
-            let targets = base_check::check_targets(segment);
-            // Every word after the runner must be a flag or one of the
-            // targets: a bare word may name a directory or a path of the base.
-            let words = segment
-                .split_whitespace()
-                .skip_while(|word| is_assignment(word))
-                .skip(1)
-                .filter(|word| !word.starts_with('-'))
-                .count();
-            !targets.is_empty() && words == targets.len() && targets.iter().all(planner_made)
-        })
-}
-
-/// The source of one command of a plan, ruled once when the plan is stored:
-/// the owner's when the request names it, the repo's when it is a
-/// whole-repo suite or a verify command that is not about files the planner
-/// made, else the planner's.
-pub(super) fn classify_check_source(
-    task: &Task,
-    cwd: &Path,
-    command: &str,
-    in_verify: bool,
-) -> CheckSource {
-    if named_in_request(task.request.as_deref(), command) {
-        CheckSource::Owner
-    } else if verify::whole_repo_suite(cwd, command)
-        || (in_verify && !made_by_planner(task, command))
-    {
-        CheckSource::Repo
-    } else {
-        CheckSource::Planner
-    }
-}
-
-/// Older tasks stored the commands of the plan as bare strings. The same
-/// ruling as at plan time gives each its source, with the repo directory in
-/// place of the worktree; what it cannot decide is the repo's.
-pub(crate) fn migrate_check_sources(task: &mut Task) {
-    if task.planner_tests.legacy_commands.is_empty() {
-        return;
-    }
-    let legacy = std::mem::take(&mut task.planner_tests.legacy_commands);
-    let repo = PathBuf::from(&task.repo);
-    task.record_check_sources(|t, c, in_verify| {
-        if legacy.iter().any(|l| l == c) {
-            classify_check_source(t, &repo, c, in_verify)
-        } else {
-            CheckSource::Repo
-        }
-    });
-    // Only the commands the old build recorded are the plan's.
-    task.planner_tests
-        .sources
-        .retain(|s| legacy.contains(&s.command));
-}
-
-/// Whether only the owner may drop `command`. An agent may drop a check only
-/// when its recorded source is the planner, no setting names it and it runs
-/// no CI entry. A check
-/// of the repo or of the owner, and a command nobody recorded, is shared.
 pub(super) fn is_shared_check(settings: &Settings, task: &Task, command: &str) -> bool {
-    let command = flat_command(command);
-    if command.is_empty() {
-        return false;
-    }
-    let named_by_setting = scoped_checks_for(settings, task).iter().any(|e| {
-        e.repo
-            .as_deref()
-            .is_none_or(|r| crate::model::same_repo_path(r, &task.repo))
-            && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
-    }) || settings.after_land.iter().any(|a| {
-        crate::model::same_repo_path(&a.repo, &task.repo) && flat_command(&a.run) == command
-    });
-    let source = task
-        .planner_tests
-        .sources
-        .iter()
-        .find(|s| flat_command(&s.command) == command)
-        .map_or(CheckSource::Repo, |s| s.source);
-    named_by_setting || source != CheckSource::Planner || runs_ci_entry(&command)
+    check_authority(settings, task).is_shared(task, command)
 }
 
-/// The refusal for a non-owner who tries to drop `command`, a shared check.
-fn shared_check_refusal(command: &str) -> String {
-    format!(
-        "`{command}` is a shared check (not made by the planner for this task, or named by a setting or the owner): only the owner may drop it. An agent can answer \"{}\" or \"stop\", otherwise the owner decides",
-        PRE_EXISTING_RETRY
+pub(super) fn check_authority(
+    settings: &Settings,
+    task: &Task,
+) -> crate::task::checks::authority::CheckAuthority {
+    crate::task::checks::authority::CheckAuthority {
+        named: task
+            .planner_check_commands()
+            .into_iter()
+            .map(|(command, _)| command)
+            .chain(
+                task.planner_tests
+                    .sources
+                    .iter()
+                    .map(|source| source.command.clone()),
+            )
+            .filter(|command| {
+                let command = flat_command(command);
+                scoped_checks_for(settings, task).iter().any(|e| {
+                    e.repo
+                        .as_deref()
+                        .is_none_or(|r| crate::git::paths::same_repo_path(r, &task.repo))
+                        && (glob_match(&e.command, &command) || flat_command(&e.command) == command)
+                }) || settings.after_land.iter().any(|a| {
+                    crate::git::paths::same_repo_path(&a.repo, &task.repo)
+                        && flat_command(&a.run) == command
+                })
+            })
+            .collect(),
+    }
+}
+
+pub(super) fn removal_refusal(
+    settings: &Settings,
+    task: &Task,
+    commands: &[String],
+    origin: Origin,
+) -> Option<String> {
+    crate::task::checks::authority::removal_refusal(
+        &check_authority(settings, task),
+        task,
+        commands,
+        origin,
     )
 }
 
-/// Who asks for a removal: the owner, or anyone else (the overseer, a chat or
-/// MCP client, the answer policy, the judge, a feasibility ruling).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Origin {
-    Owner,
-    Other,
+pub(super) fn criterion_text_refusal(
+    settings: &Settings,
+    task: &Task,
+    i: usize,
+    new_text: &str,
+) -> Option<String> {
+    crate::task::checks::authority::criterion_text_refusal(
+        &check_authority(settings, task),
+        task,
+        i,
+        new_text,
+    )
+}
+
+pub(super) fn remove_check_command(
+    settings: &Settings,
+    task: &mut Task,
+    command: &str,
+    origin: Origin,
+) -> Result<(), String> {
+    crate::task::checks::authority::remove_check_command(
+        &check_authority(settings, task),
+        task,
+        command,
+        origin,
+    )
+}
+
+pub(super) fn shared_check_amend_refusal(
+    settings: &Settings,
+    task: &Task,
+    amendment: &Amendment,
+) -> Option<String> {
+    crate::task::checks::authority::shared_check_amend_refusal(
+        &check_authority(settings, task),
+        task,
+        amendment,
+    )
 }
 
 /// The origin of the answer the wait just recorded in the question history
@@ -339,81 +307,6 @@ pub(super) fn origin_of_last_answer(task: &Task) -> Origin {
         Some(AnsweredBy::Owner) | None => Origin::Owner,
         Some(_) => Origin::Other,
     }
-}
-
-/// THE choke point of check removal: every path that removes or replaces a
-/// command in `verify`, `finalVerify`, `checks` or the held-out check (a drop
-/// answer, a dropped criterion, an amendment, a feasibility ruling) asks here
-/// first. Anyone but the owner is refused when one of `commands` is shared;
-/// the caller then keeps the check and escalates to the owner.
-pub(super) fn removal_refusal(
-    settings: &Settings,
-    task: &Task,
-    commands: &[String],
-    origin: Origin,
-) -> Option<String> {
-    if origin == Origin::Owner {
-        return None;
-    }
-    commands
-        .iter()
-        .find(|c| is_shared_check(settings, task, c))
-        .map(|c| shared_check_refusal(c))
-}
-
-/// The commands that go with criterion `n`: its checks, a held-out check on
-/// it and the command its `-- check:` part names.
-pub(super) fn criterion_commands(task: &Task, n: usize) -> Vec<String> {
-    let mut out: Vec<String> = task
-        .checks
-        .iter()
-        .chain(task.held_out.as_ref())
-        .filter(|c| c.criterion == n)
-        .map(|c| c.run.clone())
-        .collect();
-    if let Some((_, cmd)) = task.criteria.get(n).and_then(|t| t.split_once("-- check:")) {
-        out.push(cmd.trim().to_string());
-    }
-    out
-}
-
-/// The command a criterion's `-- check:` part names.
-fn text_check(text: &str) -> Option<String> {
-    let (_, cmd) = text.split_once("-- check:")?;
-    let cmd = cmd.trim();
-    (!cmd.is_empty()).then(|| cmd.to_string())
-}
-
-/// The refusal for a judge replacing criterion `i` with `new_text` when that
-/// takes a shared check out of its `-- check:` part.
-pub(super) fn criterion_text_refusal(
-    settings: &Settings,
-    task: &Task,
-    i: usize,
-    new_text: &str,
-) -> Option<String> {
-    let old = task.criteria.get(i).and_then(|t| text_check(t))?;
-    if new_text.contains(&old) {
-        return None;
-    }
-    removal_refusal(settings, task, &[old], Origin::Other)
-}
-
-/// Removes `command` from `verify`, `finalVerify` and `checks`, unless
-/// `removal_refusal` says only the owner may.
-pub(super) fn remove_check_command(
-    settings: &Settings,
-    task: &mut Task,
-    command: &str,
-    origin: Origin,
-) -> Result<(), String> {
-    if let Some(why) = removal_refusal(settings, task, &[command.to_string()], origin) {
-        return Err(why);
-    }
-    task.verify.retain(|c| c != command);
-    task.final_verify.retain(|c| c != command);
-    task.checks.retain(|c| c.run != command);
-    Ok(())
 }
 
 /// Why a non-owner `answer` to `question` must not be given, when it removes
@@ -428,7 +321,10 @@ pub(super) fn shared_check_drop_refusal(
     answer: &str,
 ) -> Option<String> {
     let commands: Vec<String> = if question.kind == QuestionKind::PreexistingFailure {
-        if !is_option(answer, base_check::PRE_EXISTING_DROP) {
+        if !is_option(
+            answer,
+            crate::engine::verification::base::answers::PRE_EXISTING_DROP,
+        ) {
             return None;
         }
         question.commands.clone()
@@ -436,50 +332,6 @@ pub(super) fn shared_check_drop_refusal(
         criterion_commands(task, impossible_drop_target(question, answer)?)
     };
     removal_refusal(settings, task, &commands, Origin::Other)
-}
-
-/// The refusal for a non-owner amendment that removes a shared check from
-/// `verify`, `finalVerify`, `checks`, the held-out check or a criterion's
-/// `-- check:` part: the same rule as dropping one. `task` is the state the
-/// amendment lands on (see `effective_task`).
-pub(super) fn shared_check_amend_refusal(
-    settings: &Settings,
-    task: &Task,
-    amendment: &Amendment,
-) -> Option<String> {
-    let gone = |old: &[String], new: &Option<Vec<String>>| -> Vec<String> {
-        new.as_ref().map_or_else(Vec::new, |new| {
-            old.iter().filter(|c| !new.contains(c)).cloned().collect()
-        })
-    };
-    let old_checks: Vec<String> = task.checks.iter().map(|c| c.run.clone()).collect();
-    let new_checks = amendment
-        .checks
-        .as_ref()
-        .map(|cs| cs.iter().map(|c| c.run.clone()).collect::<Vec<_>>());
-    let mut removed = [
-        gone(&task.verify, &amendment.verify),
-        gone(&task.final_verify, &amendment.final_verify),
-        gone(&old_checks, &new_checks),
-    ]
-    .concat();
-    // The held-out check, when the amendment replaces or clears it.
-    if let (Some(old), Some(new)) = (&task.held_out, &amendment.held_out) {
-        if new.as_ref().is_none_or(|n| n.run != old.run) {
-            removed.push(old.run.clone());
-        }
-    }
-    // A criterion whose `-- check:` command is no longer named by any new
-    // criterion, and every criterion that falls off the end.
-    if let Some(new) = &amendment.criteria {
-        for (n, old) in task.criteria.iter().enumerate() {
-            let check_gone = text_check(old).is_some_and(|c| !new.iter().any(|t| t.contains(&c)));
-            if check_gone || n >= new.len() {
-                removed.extend(criterion_commands(task, n));
-            }
-        }
-    }
-    removal_refusal(settings, task, &removed, Origin::Other)
 }
 
 /// Whether the policy already gave `answer` to every check `question` is
@@ -498,7 +350,8 @@ fn covered_by_rule(task: &Task, question: &Question, answer: &str) -> bool {
     }
     question.commands.iter().all(|c| {
         earlier().any(|a| a.commands.contains(c))
-            || (answer == PRE_EXISTING_RETRY && base_check::non_owner_base_retry(task, c, None))
+            || (answer == PRE_EXISTING_RETRY
+                && crate::engine::verification::base::answers::non_owner_base_retry(task, c, None))
     })
 }
 
@@ -527,10 +380,10 @@ fn rule_answer_with_context(
             if question
                 .options
                 .iter()
-                .any(|option| option == base_check::KEEP_ALL)
+                .any(|option| option == crate::engine::verification::base::answers::KEEP_ALL)
             {
                 (
-                    base_check::KEEP_ALL,
+                    crate::engine::verification::base::answers::KEEP_ALL,
                     "the subtasks are meant to make the check pass: keep it, once",
                     None,
                 )
@@ -538,7 +391,7 @@ fn rule_answer_with_context(
                 let all_targeted = !targeted.is_empty() && targeted.iter().all(|value| *value);
                 if all_targeted {
                     (
-                        base_check::KEEP_ALL,
+                        crate::engine::verification::base::answers::KEEP_ALL,
                         "the task is meant to make the check pass",
                         None,
                     )
@@ -586,9 +439,9 @@ pub(super) fn record_policy_answer(
     attempt_n: u32,
 ) {
     if question.kind == QuestionKind::AttemptsFailing {
-        task.queue.rate_pauses = 0;
+        task.reset_rate_pauses();
     }
-    task.assumptions.push(Assumption {
+    task.record_assumption(Assumption {
         question: question.text.clone(),
         answer: answer.to_string(),
         evidence: evidence.to_string(),
@@ -600,12 +453,9 @@ pub(super) fn record_policy_answer(
         owner_answer: None,
     });
     if question.kind == QuestionKind::Impossible {
-        task.loop_state
-            .impossible_answers
-            .extend(question.criterion);
+        task.remember_impossible_answer(question.criterion);
     }
-    task.decisions
-        .push(policy_answer_line(&question.text, answer, by, evidence));
+    task.record_decision(policy_answer_line(&question.text, answer, by, evidence));
     let answered_by = if by == "judge" {
         AnsweredBy::Judge
     } else {
@@ -624,8 +474,14 @@ pub(super) fn record_answered_question(
 ) {
     if question.kind == QuestionKind::PreexistingFailure {
         let base_sha = task.base_sha.clone();
-        let by = base_check::answerer_name(Some(answered_by));
-        base_check::record_base_answer(task, &question.commands, &base_sha, by, answer);
+        let by = crate::engine::verification::base::answers::answerer_name(Some(answered_by));
+        crate::engine::verification::base::answers::record_base_answer(
+            task,
+            &question.commands,
+            &base_sha,
+            by,
+            answer,
+        );
     }
     // The owner's answers do not count against the orchestrator's continues.
     if question.kind == QuestionKind::AttemptsFailing
@@ -635,9 +491,9 @@ pub(super) fn record_answered_question(
         )
         && !is_option(answer, "stop")
     {
-        task.loop_state.non_owner_continues += 1;
+        task.count_non_owner_continue();
     }
-    task.question_history.push(AnsweredQuestion {
+    task.record_answer_history(AnsweredQuestion {
         question: question.text.clone(),
         options: question.options.clone(),
         kind: question.kind,
@@ -676,7 +532,7 @@ pub(super) async fn try_policy_answer(
             let refused =
                 shared_check_drop_refusal(&app.settings.read().unwrap(), task, &question, &answer);
             if let Some(why) = refused {
-                task.decisions.push(format!("Answer judge: {why}"));
+                task.record_decision(format!("Answer judge: {why}"));
                 return None;
             }
             (answer, "judge", reason)
@@ -698,9 +554,9 @@ pub(super) async fn try_policy_answer(
         attempt_n,
         policy_answer_line(&question.text, &answer, by, &evidence),
     );
-    task.question = None;
-    task.status = TaskStatus::Queued;
-    task.updated_at = now_ms();
+    task.clear_question();
+    task.resume_phase(TaskStatus::Queued, now_ms());
+    task.touch(now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
     Some(answer)
@@ -756,7 +612,7 @@ async fn judge_impossible(
     let (_, route, fallback) = check_route_for(app, &task.variant())?;
     let route = route?;
     if let Some(note) = fallback {
-        task.decisions.push(format!("Answer judge: {note}"));
+        task.record_decision(format!("Answer judge: {note}"));
     }
     let settings = app.settings.read().unwrap().clone();
     let worktree = PathBuf::from(&task.worktree);
@@ -807,10 +663,9 @@ async fn judge_impossible(
     // sees the cancellation itself.
     let outcome = result.ok()?;
     if outcome.timed_out {
-        task.decisions
-            .push(helper_timeout_message("answer judge", limit));
+        task.record_decision(helper_timeout_message("answer judge", limit));
     }
-    task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    task.charge(outcome.cost_usd.unwrap_or(0.0));
     if outcome.error.is_some() {
         return None;
     }
@@ -881,6 +736,7 @@ mod tests {
             opts(&["wide", "narrow"]),
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         question.default_option = Some(1);
         assert_eq!(
@@ -943,13 +799,13 @@ mod tests {
             &task,
             "pytest tests/test_new.py"
         ));
-        task.planner_tests.sources[0].source = CheckSource::Owner;
+        task.fixture_data().planner_tests.sources[0].source = CheckSource::Owner;
         assert!(is_shared_check(
             &settings,
             &task,
             "pytest tests/test_new.py"
         ));
-        task.planner_tests.sources[0].source = CheckSource::Planner;
+        task.fixture_data().planner_tests.sources[0].source = CheckSource::Planner;
         settings.after_land.push(AfterLand {
             repo: task.repo.clone(),
             run: "pytest tests/test_new.py".into(),
@@ -962,10 +818,13 @@ mod tests {
     }
 
     fn sourced(task: &mut Task, command: &str, source: CheckSource) {
-        task.planner_tests.sources.push(SourcedCheck {
-            command: command.into(),
-            source,
-        });
+        task.fixture_data()
+            .planner_tests
+            .sources
+            .push(SourcedCheck {
+                command: command.into(),
+                source,
+            });
     }
 
     #[test]
@@ -973,8 +832,8 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         init_git_repo(repo.path());
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo.path().to_string_lossy().into_owned();
-        task.base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        task.fixture_data().repo = repo.path().to_string_lossy().into_owned();
+        task.fixture_data().base_sha = git_in(repo.path(), &["rev-parse", "HEAD"]);
         let suites = [
             "go test ./...",
             "pytest",
@@ -986,10 +845,10 @@ mod tests {
             "cargo test --workspace",
             "pytest tests tests/new_test.py",
         ];
-        task.verify = suites.iter().map(|c| c.to_string()).collect();
-        task.verify.push("test -f new/a.txt".into());
-        task.criteria = vec!["x -- check: go test ./...".into()];
-        task.record_check_sources(|t, c, v| classify_check_source(t, repo.path(), c, v));
+        task.fixture_data().verify = suites.iter().map(|c| c.to_string()).collect();
+        task.fixture_data().verify.push("test -f new/a.txt".into());
+        task.fixture_data().criteria = vec!["x -- check: go test ./...".into()];
+        record_plan_check_sources(&mut task, repo.path());
         let settings = Settings::default();
         for command in suites {
             assert!(is_shared_check(&settings, &task, command), "{command}");
@@ -1001,7 +860,7 @@ mod tests {
     fn a_planner_check_that_cannot_pass_on_a_moved_base_is_droppable() {
         let settings = Settings::default();
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.criteria = vec![
+        task.fixture_data().criteria = vec![
             "The version is 9 -- check: grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet".into(),
         ];
         let command = "grep -qF 'pub const V: u32 = 9;' src/brief.rs && git diff --quiet";
@@ -1069,10 +928,10 @@ mod tests {
     #[test]
     fn the_impossible_question_yields_its_criterion_and_evidence() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.criteria = vec!["zero".into(), "one. Evidence: nope".into()];
+        task.fixture_data().criteria = vec!["zero".into(), "one. Evidence: nope".into()];
         // The criterion and the evidence hold the old separator: nothing is parsed back.
         let evidence = "see a. Evidence: b";
-        let claim = brief::Impossible {
+        let claim = crate::engine::attempts::report::Impossible {
             criterion: 1,
             evidence: evidence.into(),
         };
@@ -1096,12 +955,13 @@ mod tests {
     #[test]
     fn attempts_keep_failing_has_no_blind_continue_rule() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.attempts = vec![attempt_with_failure(1, "review:x")];
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "review:x")];
         let q = Question::new(
             "Attempts keep failing",
             opts(&["continue", "stop"]),
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         // The failure ladder owns this kind: a changed approach, never a
         // plain continue.
@@ -1119,7 +979,10 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let mut q = base_check::pre_existing_question(&failed, "0123456789");
+        let mut q = crate::engine::verification::base::questions::pre_existing_question(
+            &failed,
+            "0123456789",
+        );
         q.options = opts(options);
         q
     }
@@ -1149,7 +1012,8 @@ mod tests {
         let q = base_check_question(&["node --test tests/x.test.cjs"], &["drop all"]);
         assert!(shared_check_drop_refusal(&settings, &task, &q, "drop all").is_none());
         // Nothing is removed on a refusal: the owner's route is the only one.
-        task.verify = vec!["npm run ci".into(), "node --test tests/x.test.cjs".into()];
+        task.fixture_data().verify =
+            vec!["npm run ci".into(), "node --test tests/x.test.cjs".into()];
         let q = base_check_question(
             &["npm run ci", "node --test tests/x.test.cjs"],
             &["drop all"],
@@ -1161,7 +1025,7 @@ mod tests {
     #[test]
     fn a_base_check_rule_fires_once_per_command() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        let keep = base_check::KEEP_ALL;
+        let keep = crate::engine::verification::base::answers::KEEP_ALL;
         let first = base_check_question(&["a.sh", "b.sh"], &[keep, "drop all", "stop"]);
         let (answer, _) = rule_answer_with_context(&task, &first, 1, &[true, true], false).unwrap();
         assert_eq!(answer, keep);
@@ -1190,8 +1054,8 @@ mod tests {
     fn preexisting_policy_keeps_targets_retries_only_moving_bases_and_otherwise_defers() {
         let mut task = task_with_status(TaskStatus::Waiting);
         let command = "node --test tests/focus.test.cjs";
-        task.request = Some(format!("Make {command} pass"));
-        let question = base_check::pre_existing_question(
+        task.fixture_data().request = Some(format!("Make {command} pass"));
+        let question = crate::engine::verification::base::questions::pre_existing_question(
             &[VerifyOutcome {
                 command: command.into(),
                 code: Some(1),
@@ -1200,22 +1064,23 @@ mod tests {
             }],
             &task.base_sha,
         );
-        let targeted = base_check::is_task_target(&task, command, &[]);
+        let targeted =
+            crate::engine::verification::base::answers::is_task_target(&task, command, &[]);
         let (answer, evidence) =
             rule_answer_with_context(&task, &question, 1, &[targeted], false).unwrap();
-        assert_eq!(answer, base_check::KEEP_ALL);
+        assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
         assert!(evidence.contains("task is meant to make the check pass"));
 
-        task.request = None;
+        task.fixture_data().request = None;
         let path_command = "node --test crates/sushiai-orch/tests/base_retry.rs";
         let path_output = "error in crates/sushiai-orch/tests/base_retry.rs:17:2";
-        let path_target = base_check::is_task_target(
+        let path_target = crate::engine::verification::base::answers::is_task_target(
             &task,
             path_command,
             &["crates/sushiai-orch/tests/base_retry.rs".into()],
         );
         assert!(path_target);
-        let path_question = base_check::pre_existing_question(
+        let path_question = crate::engine::verification::base::questions::pre_existing_question(
             &[VerifyOutcome {
                 command: path_command.into(),
                 code: Some(1),
@@ -1226,7 +1091,7 @@ mod tests {
         );
         let (answer, _) =
             rule_answer_with_context(&task, &path_question, 1, &[path_target], false).unwrap();
-        assert_eq!(answer, base_check::KEEP_ALL);
+        assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
 
         let control =
             base_check_question(&["make verify"], &[PRE_EXISTING_RETRY, "drop all", "stop"]);
@@ -1236,12 +1101,16 @@ mod tests {
 
         let parent_options = base_check_question(
             &["make verify"],
-            &[base_check::KEEP_ALL, "drop all", "stop"],
+            &[
+                crate::engine::verification::base::answers::KEEP_ALL,
+                "drop all",
+                "stop",
+            ],
         );
         for base_moves in [false, true] {
             let (answer, evidence) =
                 rule_answer_with_context(&task, &parent_options, 1, &[false], base_moves).unwrap();
-            assert_eq!(answer, base_check::KEEP_ALL);
+            assert_eq!(answer, crate::engine::verification::base::answers::KEEP_ALL);
             assert!(evidence.contains("subtasks are meant to make the check pass"));
         }
 
@@ -1271,7 +1140,7 @@ mod answer_caller_tests {
             AnsweredBy::Owner,
         ] {
             let mut task = task_with_status(TaskStatus::Waiting);
-            let first = base_check::pre_existing_question(
+            let first = crate::engine::verification::base::questions::pre_existing_question(
                 &[VerifyOutcome {
                     command: "a.sh".into(),
                     code: Some(1),
@@ -1290,7 +1159,7 @@ mod answer_caller_tests {
             let mut new_command = first.clone();
             new_command.commands.push("b.sh".into());
             assert!(rule_answer(&task, &new_command, 1).is_some());
-            task.base_sha = "1234567890".into();
+            task.fixture_data().base_sha = "1234567890".into();
             assert_eq!(
                 rule_answer(&task, &first, 1).is_none(),
                 caller != AnsweredBy::Owner
@@ -1307,7 +1176,7 @@ mod timeout_tests {
     async fn answer_judge_timed_out_leaves_the_decision_to_the_owner() {
         let (app, _dir, mut task, _) = slow_helper_task();
         let criteria = task.criteria.clone();
-        let claim = brief::Impossible {
+        let claim = crate::engine::attempts::report::Impossible {
             criterion: 0,
             evidence: "the file is gone".into(),
         };
@@ -1337,15 +1206,15 @@ mod base_moves_tests {
         git_in(&repo, &["branch", "-M", "main"]);
         let on_main = |status| {
             let mut task = task_with_status(status);
-            task.repo = repo.display().to_string();
-            task.worktree = task.repo.clone();
-            task.base_ref = Some("main".into());
-            task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+            task.fixture_data().repo = repo.display().to_string();
+            task.fixture_data().worktree = task.repo.clone();
+            task.fixture_data().base_ref = Some("main".into());
+            task.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
             task
         };
         let task = on_main(TaskStatus::Waiting);
         let mut other = on_main(TaskStatus::Running);
-        other.id = "other".into();
+        other.fixture_data().id = "other".into();
         app.store.save_task(&task).unwrap();
         app.store.save_task(&other).unwrap();
         let question = Question::new(
@@ -1353,6 +1222,7 @@ mod base_moves_tests {
             vec![PRE_EXISTING_RETRY.into(), "stop".into()],
             QuestionKind::PreexistingFailure,
             AskedBy::Verify,
+            crate::clock::now_ms(),
         );
 
         let (_, base_moves) = policy_base_context(&app, &task, &question);
@@ -1381,11 +1251,11 @@ mod base_moves_tests {
             .insert(repo.display().to_string(), true);
         let on_main = |id: &str, status| {
             let mut task = task_with_status(status);
-            task.id = id.into();
-            task.repo = repo.display().to_string();
-            task.worktree = task.repo.clone();
-            task.base_ref = Some("main".into());
-            task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+            task.fixture_data().id = id.into();
+            task.fixture_data().repo = repo.display().to_string();
+            task.fixture_data().worktree = task.repo.clone();
+            task.fixture_data().base_ref = Some("main".into());
+            task.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
             task
         };
         let red = on_main("red", TaskStatus::Waiting);
@@ -1395,6 +1265,7 @@ mod base_moves_tests {
             vec![PRE_EXISTING_RETRY.into(), "stop".into()],
             QuestionKind::PreexistingFailure,
             AskedBy::Verify,
+            crate::clock::now_ms(),
         );
         let moves = |app: &App| policy_base_context(app, &red, &question).1;
 
@@ -1403,10 +1274,10 @@ mod base_moves_tests {
         let mut asking = on_main("asking", TaskStatus::Waiting);
         let queued = on_main("queued", TaskStatus::Queued);
         let mut in_wait = on_main("in_wait", TaskStatus::Running);
-        in_wait.queue.wait = Some(Wait::Dependency {
+        in_wait.fixture_data().queue.wait = Some(Wait::Dependency {
             titles: vec![format!("{} main (retrying)", BASE_WAIT_TITLE)],
         });
-        asking.question = Some(question.clone());
+        asking.fixture_data().question = Some(question.clone());
         for other in [&asking, &queued, &in_wait] {
             app.store.save_task(other).unwrap();
         }
@@ -1416,7 +1287,7 @@ mod base_moves_tests {
         app.store.save_task(&running).unwrap();
         assert!(moves(&app), "a running task can land");
         let mut landing = running.clone();
-        landing.status = TaskStatus::Landing;
+        landing.fixture_data().status = TaskStatus::Landing;
         app.store.save_task(&landing).unwrap();
         assert!(moves(&app), "a landing task moves the base");
     }
@@ -1430,6 +1301,7 @@ mod base_moves_tests {
             vec![],
             QuestionKind::PreexistingFailure,
             AskedBy::Verify,
+            crate::clock::now_ms(),
         );
         for _ in 0..MAX_POLICY_ANSWERS {
             record_policy_answer(&mut task, &spent, "keep all", "policy", "e", 1);
@@ -1443,6 +1315,7 @@ mod base_moves_tests {
                 vec!["retry".into(), "drop criterion".into()],
                 QuestionKind::Impossible,
                 AskedBy::Implement,
+                crate::clock::now_ms(),
             );
             q.criterion = Some(n);
             q
@@ -1453,6 +1326,7 @@ mod base_moves_tests {
             vec![],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         assert!(policy_open(&app, &task, &attempts));
 

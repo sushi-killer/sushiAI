@@ -5,7 +5,24 @@
 //! a write tool is never callable by the model: it proposes the call in a
 //! `sushi-action` block and the owner's OK runs exactly that call.
 
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::harness;
+use crate::harness::environment::augmented_path;
+use crate::harness::environment::resolve_binary;
+use crate::policy::routing::Harness;
+use crate::policy::settings::ChatToolConfig;
+use crate::policy::settings::Settings;
+use crate::prompts::engine_text;
+use crate::prompts::fill;
+use crate::store;
+use serde::Deserialize;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
+
 use serde::Serialize;
 use std::collections::BTreeMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -227,7 +244,7 @@ fn update_cache(app: &App, change: impl FnOnce(&mut BTreeMap<String, Discovery>)
     let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut cache = load_cache(app);
     change(&mut cache);
-    let _ = store::write_json_atomic(&cache_path(app), &cache);
+    let _ = store::files::write_json_atomic(&cache_path(app), &cache);
 }
 
 fn failed(status: &str, reason: impl Into<String>) -> Discovery {
@@ -416,7 +433,7 @@ async fn probe_claude(app: &App, key: &str, server: &serde_json::Value) -> Disco
     let dir = app.data_dir.join("chat-tools");
     let _ = std::fs::create_dir_all(&dir);
     let config = dir.join(format!("probe-{}.json", sanitize(key)));
-    let _ = store::write_json_atomic(&config, &json!({"mcpServers": {key: server}}));
+    let _ = store::files::write_json_atomic(&config, &json!({"mcpServers": {key: server}}));
     let mut cmd = tokio::process::Command::new(resolve_binary(Harness::Claude));
     cmd.args([
         "-p",
@@ -834,7 +851,7 @@ pub async fn execute(
     let dir = app.data_dir.join("chat-tools");
     let _ = std::fs::create_dir_all(&dir);
     let config = dir.join(format!("send-{}.json", sanitize(&key)));
-    store::write_json_atomic(&config, &json!({"mcpServers": {key.clone(): server}}))
+    store::files::write_json_atomic(&config, &json!({"mcpServers": {key.clone(): server}}))
         .map_err(|e| e.to_string())?;
     let argv = send_argv(&config, &claude_tool_name(&key, tool));
     let prompt = send_prompt(tool, args);

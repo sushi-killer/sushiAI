@@ -1,5 +1,5 @@
 #[test]
-fn resume_eligibility_requires_a_failed_check_session_on_the_same_route() {
+fn resume_eligibility_requires_a_retryable_session_on_the_same_route() {
     let mut task = task_with_status(TaskStatus::Running);
     let route = Route {
         id: "claude-sonnet".into(),
@@ -13,34 +13,40 @@ fn resume_eligibility_requires_a_failed_check_session_on_the_same_route() {
     };
     let mut previous = attempt_with_failure(1, "verify");
     previous.session_id = Some("sess-1".into());
-    task.attempts.push(previous);
-    assert!(resume_attempt(&task, &route, false, false).is_some());
-    assert!(resume_attempt(&task, &route, true, false).is_none());
-    assert!(resume_attempt(&task, &route, false, true).is_none());
-    let mut changed = route.clone();
-    changed.id = "other".into();
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
-    changed = route.clone();
-    changed.harness = Harness::Codex;
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
-    changed = route.clone();
-    changed.model = Some("opus".into());
-    assert!(resume_attempt(&task, &changed, false, false).is_none());
-    task.attempts[0].session_id = None;
-    assert!(resume_attempt(&task, &route, false, false).is_none());
-    task.attempts[0].session_id = Some("sess-1".into());
+    task.fixture_data().attempts.push(previous);
+    for kind in [FailureKind::Verify, FailureKind::TimeBudget] {
+        task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = kind;
+        assert!(resume_attempt(&task, &route, false, false).is_some());
+        assert!(resume_attempt(&task, &route, true, false).is_none());
+        assert!(resume_attempt(&task, &route, false, true).is_none());
+        let mut changed = route.clone();
+        changed.id = "other".into();
+        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        changed = route.clone();
+        changed.harness = Harness::Codex;
+        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        changed = route.clone();
+        changed.model = Some("opus".into());
+        assert!(resume_attempt(&task, &changed, false, false).is_none());
+        for session in [None, Some(String::new())] {
+            task.fixture_data().attempts[0].session_id = session;
+            assert!(resume_attempt(&task, &route, false, false).is_none());
+        }
+        task.fixture_data().attempts[0].session_id = Some("sess-1".into());
+    }
     for kind in [
         FailureKind::Loop,
         FailureKind::Conflict,
         FailureKind::Review,
     ] {
-        task.attempts[0].failure.as_mut().unwrap().kind = kind;
+        task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = kind;
         assert!(
             resume_attempt(&task, &route, false, false).is_none(),
             "{kind:?}"
         );
     }
-    task.attempts[0].review = Some(ReviewResult {
+    task.fixture_data().attempts[0].failure.as_mut().unwrap().kind = FailureKind::Review;
+    task.fixture_data().attempts[0].review = Some(ReviewResult {
         verdict: Verdict::Fail,
         findings: vec!["[P1] wrong".into()],
         repeated: vec!["[P1] wrong".into()],
@@ -71,7 +77,7 @@ fn a_resume_brief_keeps_failure_output_messages_and_new_owner_answers() {
         ("new answer", 101, AnsweredBy::Owner),
         ("policy answer", 102, AnsweredBy::Policy),
     ] {
-        task.question_history.push(AnsweredQuestion {
+        task.fixture_data().question_history.push(AnsweredQuestion {
             question: "Which fix?".into(),
             options: vec![],
             kind: QuestionKind::AttemptsFailing,
@@ -84,7 +90,7 @@ fn a_resume_brief_keeps_failure_output_messages_and_new_owner_answers() {
             commands: vec![],
         });
     }
-    let brief = brief::build_resume_brief(
+    let brief = crate::engine::attempts::resume::build_resume_brief(
         &task,
         &previous,
         "\n## Messages\n\nA peer's update",
@@ -143,13 +149,13 @@ fn failure_signature_uses_kind_and_truncates_to_120_chars() {
 #[test]
 fn a_retry_on_the_same_tier_keeps_the_fallback_note() {
     let mut task = task_with_status(TaskStatus::Running);
-    task.tier_fallback = Some("no planner tier".into());
-    task.attempts = vec![attempt_with_failure(1, "sig-a")];
+    task.fixture_data().tier_fallback = Some("no planner tier".into());
+    task.fixture_data().attempts = vec![attempt_with_failure(1, "sig-a")];
     assert!(advance_after_failure(&mut task, 4));
     assert_eq!(task.tier, Tier::Standard);
     assert_eq!(task.tier_fallback.as_deref(), Some("no planner tier"));
     // The same failure again moves the task up a tier: the note goes.
-    task.attempts.push(attempt_with_failure(2, "sig-a"));
+    task.fixture_data().attempts.push(attempt_with_failure(2, "sig-a"));
     assert!(advance_after_failure(&mut task, 4));
     assert_eq!(task.tier, Tier::Hard);
     assert_eq!(task.tier_fallback, None);
@@ -306,17 +312,21 @@ fn failed_with(kind: FailureKind, verify_codes: &[Option<i32>], changed: &[&str]
         })
         .collect();
     a.changed_files = changed.iter().map(|f| f.to_string()).collect();
-    task.attempts = vec![a];
+    task.fixture_data().attempts = vec![a];
     task
 }
 
 #[test]
 fn the_exhausted_question_offers_no_accept_option() {
-    for kind in [FailureKind::Review, FailureKind::Evidence, FailureKind::Verify] {
+    for kind in [
+        FailureKind::Review,
+        FailureKind::Evidence,
+        FailureKind::Verify,
+    ] {
         let mut task = failed_with(kind, &[Some(0), Some(0)], &["src/a.ts"]);
         assert!(!advance_after_failure(&mut task, 1));
         assert_eq!(
-            task.question.unwrap().options,
+            task.question.clone().unwrap().options,
             vec!["continue", "change approach", "stop"]
         );
     }
@@ -418,7 +428,7 @@ fn a_harness_error_that_changed_nothing_does_not_spend_the_attempt_budget() {
     assert_eq!(task.status, TaskStatus::Queued);
     // The same error three times in a row still reaches the owner.
     let mut task = failed_with(FailureKind::Error, &[Some(0)], &[]);
-    task.attempts = (1..=3)
+    task.fixture_data().attempts = (1..=3)
         .map(|n| {
             let mut a = attempt_with_failure(n, "error: boom");
             a.failure.as_mut().unwrap().kind = FailureKind::Error;
@@ -439,9 +449,11 @@ fn error_attempt(n: u32, status: AttemptStatus) -> Attempt {
 #[test]
 fn varying_id_errors_stop_at_twice_the_attempt_budget() {
     let mut task = task_with_status(TaskStatus::Running);
-    task.attempts = (1..=7).map(|n| error_attempt(n, AttemptStatus::Failed)).collect();
+    task.fixture_data().attempts = (1..=7)
+        .map(|n| error_attempt(n, AttemptStatus::Failed))
+        .collect();
     assert!(advance_after_failure(&mut task, 4));
-    task.attempts.push(error_attempt(8, AttemptStatus::Failed));
+    task.fixture_data().attempts.push(error_attempt(8, AttemptStatus::Failed));
     assert!(!advance_after_failure(&mut task, 4));
 }
 
@@ -458,12 +470,12 @@ fn errors_alternating_with_pauses_still_stop_but_pauses_alone_do_not_count() {
         attempts.push(error_attempt(n, status));
     }
     // Pauses that were real limit pauses stay out of the ceiling.
-    task.queue.paused_attempts = 4;
-    task.attempts = attempts.clone();
+    task.fixture_data().queue.paused_attempts = 4;
+    task.fixture_data().attempts = attempts.clone();
     assert!(advance_after_failure(&mut task, 4));
     // Interrupted attempts that were not limit pauses do count.
-    task.queue.paused_attempts = 0;
-    task.attempts = attempts;
+    task.fixture_data().queue.paused_attempts = 0;
+    task.fixture_data().attempts = attempts;
     assert!(!advance_after_failure(&mut task, 4));
 }
 
@@ -489,8 +501,8 @@ fn ids_and_hashes_do_not_change_a_signature_and_interrupted_attempts_do_not_brea
 #[test]
 fn a_criterion_dropped_by_the_judge_is_not_credited_to_the_owner() {
     let mut task = task_with_status(TaskStatus::Waiting);
-    task.criteria = vec!["zero".into(), "one".into()];
-    task.question_history.push(AnsweredQuestion {
+    task.fixture_data().criteria = vec!["zero".into(), "one".into()];
+    task.fixture_data().question_history.push(AnsweredQuestion {
         question: "Criterion 1 cannot be met as written: one. Evidence: e".into(),
         options: vec![],
         kind: QuestionKind::Impossible,

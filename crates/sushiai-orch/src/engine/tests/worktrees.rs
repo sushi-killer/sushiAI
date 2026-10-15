@@ -1,15 +1,15 @@
 
 fn task_with_evidence(app: &App, archived: bool, age_days: i64) -> (Task, PathBuf) {
     let mut task = task_with_status(TaskStatus::Done);
-    task.archived = archived;
-    task.updated_at = now_ms() - age_days * 24 * 60 * 60 * 1000;
+    task.fixture_data().archived = archived;
+    task.fixture_data().updated_at = now_ms() - age_days * 24 * 60 * 60 * 1000;
     let dir = app.store.run_dir(&task.id, 1).join("evidence");
     std::fs::create_dir_all(&dir).unwrap();
     let image = dir.join("panel.png");
     std::fs::write(&image, vec![0u8; 4096]).unwrap();
     let mut attempt = attempt_with_failure(1, "s");
     attempt.evidence = vec![image.display().to_string()];
-    task.attempts = vec![attempt];
+    task.fixture_data().attempts = vec![attempt];
     app.store.save_task(&task).unwrap();
     (task, dir)
 }
@@ -82,11 +82,11 @@ fn deliverable_fixture() -> (tempfile::TempDir, Task) {
     std::fs::write(wt.join("artifacts/inventory.md"), "report").unwrap();
     std::fs::write(wt.join("notes.md"), "untracked").unwrap();
     let mut task = task_with_status(TaskStatus::Done);
-    task.repo = repo.display().to_string();
-    task.worktree = wt.display().to_string();
-    task.goal = "Write `artifacts/inventory.md` and notes.md".into();
-    task.criteria = vec!["kept.md stays as it is".into()];
-    task.verify = vec!["test -s artifacts/inventory.md".into()];
+    task.fixture_data().repo = repo.display().to_string();
+    task.fixture_data().worktree = wt.display().to_string();
+    task.fixture_data().goal = "Write `artifacts/inventory.md` and notes.md".into();
+    task.fixture_data().criteria = vec!["kept.md stays as it is".into()];
+    task.fixture_data().verify = vec!["test -s artifacts/inventory.md".into()];
     (tmp, task)
 }
 
@@ -108,7 +108,7 @@ fn deliverables_outside_git_are_kept_before_the_worktree_goes() {
 #[test]
 fn a_landed_deliverable_is_placed_in_the_main_copy_without_overwriting() {
     let (tmp, mut task) = deliverable_fixture();
-    task.landed_sha = Some("abc".into());
+    task.fixture_data().landed_sha = Some("abc".into());
     let repo = tmp.path().join("repo");
     let dest = tmp.path().join("data/deliverables");
     let list = deliverables::collect(&task, &dest);
@@ -132,7 +132,7 @@ fn a_landed_deliverable_is_placed_in_the_main_copy_without_overwriting() {
         "newer",
     )
     .unwrap();
-    task.deliverables = Vec::new();
+    task.fixture_data().deliverables = Vec::new();
     let again = deliverables::collect(&task, &dest);
     assert!(again.iter().all(|d| d.placed.is_none()), "{again:?}");
     assert_eq!(
@@ -145,7 +145,7 @@ fn a_landed_deliverable_is_placed_in_the_main_copy_without_overwriting() {
 async fn releasing_a_failed_tasks_worktree_keeps_its_deliverables() {
     let (app, _dir) = test_app();
     let (_tmp, mut task) = deliverable_fixture();
-    task.status = TaskStatus::Failed;
+    task.fixture_data().status = TaskStatus::Failed;
     app.release_worktree(&mut task, "test").await;
     assert!(!Path::new(&task.worktree).exists());
     assert_eq!(task.deliverables.len(), 2);
@@ -159,7 +159,7 @@ async fn releasing_a_failed_tasks_worktree_keeps_its_deliverables() {
 #[test]
 fn the_report_lists_deliverables() {
     let (_tmp, mut task) = deliverable_fixture();
-    task.deliverables = vec![Deliverable {
+    task.fixture_data().deliverables = vec![Deliverable {
         path: "artifacts/inventory.md".into(),
         saved: "/data/deliverables/artifacts/inventory.md".into(),
         placed: Some("/repo/artifacts/inventory.md".into()),

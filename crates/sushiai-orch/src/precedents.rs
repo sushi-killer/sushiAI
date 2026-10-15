@@ -19,8 +19,8 @@
 //! panel. Nothing adopts a rule on its own, and a dismissed key is never
 //! proposed again.
 
-use crate::model::{AnsweredBy, AnsweredQuestion, Question, QuestionKind, Task};
-use crate::{engine, overseer, store};
+use crate::task::{AnsweredBy, AnsweredQuestion, Question, QuestionKind, Task};
+use crate::{overseer, store};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -122,14 +122,14 @@ pub fn path(data_dir: &Path) -> PathBuf {
 }
 
 fn load(data_dir: &Path) -> File {
-    store::read_json(&path(data_dir))
+    store::files::read_json(&path(data_dir))
         .ok()
         .flatten()
         .unwrap_or_default()
 }
 
 fn save(data_dir: &Path, file: &File) {
-    if let Err(e) = store::write_json_private(&path(data_dir), file) {
+    if let Err(e) = store::files::write_json_private(&path(data_dir), file) {
         eprintln!("orch: saving precedents failed: {e}");
     }
 }
@@ -185,7 +185,10 @@ pub fn key_of(
     let mut signals = signals.to_vec();
     signals.sort();
     let (what, opts) = if is_free(kind) {
-        (normalized(text), engine::option_part(options))
+        (
+            normalized(text),
+            crate::engine::owner_notice::option_part(options),
+        )
     } else {
         let mut commands: Vec<String> = commands.iter().map(|c| normalized(c)).collect();
         commands.sort();
@@ -193,7 +196,7 @@ pub fn key_of(
     };
     format!(
         "{}|{}|{}|{what}|{opts}",
-        engine::kind_name(kind),
+        crate::engine::owner_notice::kind_name(kind),
         failure_signature.unwrap_or(""),
         signals.join(",")
     )
@@ -269,7 +272,7 @@ pub fn attempt_signals(task: &Task, at: usize) -> Vec<String> {
         if outcome.load_timeout || outcome.code.is_none() {
             signals.insert("timeout");
         }
-        if engine::is_environment_result(outcome) {
+        if crate::verify::base_cache::is_environment_result(outcome) {
             signals.insert("install");
         }
         let now = failing_tests(&outcome.tail);
@@ -444,13 +447,15 @@ pub fn sync(data_dir: &Path, task: &Task) {
     let mut file = load(data_dir);
     let fresh_file = file.since == 0;
     if fresh_file {
-        file.since = crate::model::now_ms() - SINCE_GRACE_MS;
+        file.since = crate::clock::now_ms() - SINCE_GRACE_MS;
     }
     let seen = file.tasks.get(&task.id).copied().unwrap_or(0);
     let mut changed = fresh_file;
     let seen = seen.max(file.floor);
     for entry in task.question_history.iter().filter(|e| {
-        e.answered_at > seen && e.answered_at >= file.since && !engine::owner_only(e.kind)
+        e.answered_at > seen
+            && e.answered_at >= file.since
+            && !crate::engine::answer_policy::owner_only(e.kind)
     }) {
         let new = build(task, entry);
         let (key, answer) = (new.key.clone(), new.answer.clone());

@@ -6,7 +6,7 @@
 //! test, and cargo-style `... FAILED` lines. A name is accepted only when the
 //! line looks like a test id, so a log line is never taken for a test.
 
-use crate::model::VerifyOutcome;
+use crate::task::VerifyOutcome;
 use std::collections::BTreeSet;
 use std::path::Path;
 

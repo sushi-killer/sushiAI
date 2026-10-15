@@ -1,6 +1,30 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::attempts::pricing::price_claude_resume;
+use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
+use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::reply::Reply;
+use crate::engine::slots::SlotPermit;
+use crate::engine::state::App;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::policy::routing::Harness;
+use crate::store::Store;
+use crate::task::AskedBy;
+use crate::task::Attempt;
+use crate::task::AttemptStatus;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::task::Usage;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::oneshot;
 
-type Prices = std::collections::BTreeMap<String, crate::model::Price>;
+type Prices = std::collections::BTreeMap<String, crate::policy::pricing::Price>;
 
 /// What a Claude run spent, replayed from its saved `events.jsonl`: the
 /// CLI's own figure when its `result` made it to disk, else the priced
@@ -80,18 +104,7 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store,
             usage.cached += outcome.usage_cached;
         }
         if let Some(cost) = total {
-            let attempt = &mut task.attempts[idx];
-            attempt.cost_usd = Some(attempt.cost_usd.unwrap_or(0.0) + cost);
-            attempt.cost_estimated |= estimated;
-            let saved = attempt.usage.get_or_insert(Usage {
-                input: 0,
-                output: 0,
-                cached: 0,
-            });
-            saved.input += usage.input;
-            saved.output += usage.output;
-            saved.cached += usage.cached;
-            task.cost_usd += cost;
+            crate::task::costs::add_attempt_spend(task, idx, cost, estimated, usage);
         }
     }
     settle_interrupted_review(task, idx, store, prices);
@@ -114,8 +127,12 @@ pub(super) fn settle_interrupted_review(
             .map(|o| o.cost_usd.unwrap_or(0.0))
             .reduce(|a, b| a + b);
         if let Some(cost) = cost {
-            task.attempts[idx].review_cost_usd = Some(cost);
-            task.cost_usd += cost;
+            crate::task::costs::settle_helper(
+                task,
+                idx,
+                crate::task::costs::HelperStage::Review,
+                cost,
+            );
         }
     }
 }
@@ -146,8 +163,7 @@ pub(super) fn settle_interrupted_advisor(task: &mut Task, store: &Store, prices:
     let Some(cost) = cost else {
         return false;
     };
-    task.attempts[idx].advisor_cost_usd = Some(cost);
-    task.cost_usd += cost;
+    crate::task::costs::settle_helper(task, idx, crate::task::costs::HelperStage::Advisor, cost);
     true
 }
 
@@ -181,14 +197,14 @@ async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Op
     }
     let data = app.data_dir.clone();
     let now = now_ms();
-    let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
+    let records = tokio::task::spawn_blocking(move || crate::store::costs::read_all(&data))
         .await
         .ok()?;
     let (day, spent) = crate::costs::spend_today(&records, now);
     if spent < budget || task.daily_budget_ok_day.as_deref() == Some(day.as_str()) {
         return None;
     }
-    task.decisions.push(format!(
+    task.record_decision(format!(
         "Orchestrator: daily budget ${budget:.2} reached (${spent:.2} spent on {day} UTC); the {run} run waits for the owner"
     ));
     Some(Question::new(
@@ -197,8 +213,7 @@ async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Op
         ),
         vec![DAILY_RUN_ANYWAY.into(), "stop".into()],
         QuestionKind::DailyBudget,
-        asked_by_run(run),
-    ))
+        asked_by_run(run), crate::clock::now_ms()))
 }
 
 /// The stage a budget gate's `run` argument names.
@@ -231,7 +246,7 @@ pub(super) async fn wait_while_over_budget(
     loop {
         let question = if let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
             let step = task.variant().max_cost_usd;
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
                 task.cost_usd
             ));
@@ -242,25 +257,22 @@ pub(super) async fn wait_while_over_budget(
                 ),
                 vec!["raise".into(), "stop".into()],
                 QuestionKind::Budget,
-                asked_by_run(run),
-            )
+                asked_by_run(run), crate::clock::now_ms())
         } else if let Some(q) = daily_budget_question(app, task, run).await {
             q
         } else {
             break;
         };
-        task.question = Some(question.clone());
-        task.status = TaskStatus::Waiting;
-        task.updated_at = now_ms();
+        task.ask(question.clone(), now_ms());
         waited = true;
-        match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
+        match wait_for_answer(app, task, pending_answer, cancel, permit).await {
             None => return false,
             Some(answer) => {
                 if is_budget_raise(&question, &answer) {
-                    task.budget_raises += 1;
+                    task.raise_budget();
                 }
                 if is_daily_budget_run_anyway(&question, &answer) {
-                    task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
+                    task.allow_daily_budget(crate::costs::today(now_ms()));
                 }
             }
         }
@@ -268,8 +280,7 @@ pub(super) async fn wait_while_over_budget(
     if !waited {
         return true;
     }
-    task.status = resume_status;
-    task.updated_at = now_ms();
+    task.resume_phase(resume_status, now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
     if permit.is_none() {

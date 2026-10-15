@@ -565,7 +565,7 @@ pub fn poll_task_status(daemon: &Daemon, task_id: &str) -> serde_json::Value {
     poll_deadline(|| {
         let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
         let status = task["status"].as_str().unwrap_or("");
-        if status != "queued" && status != "running" {
+        if status != "queued" && status != "running" && status != "landing" {
             return Some(task);
         }
         last = task;
@@ -686,8 +686,9 @@ pub fn poll_until(
 /// First attempt leaves FIRST (verify wants SECOND) and a handoff; the
 /// retry creates SECOND. Every invocation's argv goes to $ARGS_LOG.
 pub const FAKE_RETRY_SCRIPT: &str = r#"#!/bin/sh
-cat > /dev/null
 printf '%s\n' "$*" >> "$ARGS_LOG"
+call=$(wc -l < "$ARGS_LOG" | tr -d ' ')
+cat > "$ARGS_LOG.brief.$call"
 case " $* " in
   *" --resume "*)
     if [ "$REJECT_RESUME" = 1 ]; then echo 'session not found' >&2; exit 1; fi ;;

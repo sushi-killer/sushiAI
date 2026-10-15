@@ -1,4 +1,13 @@
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::engine::lifecycle::carry::carry_onto_newest_base;
+use crate::engine::planning::graph::overlapping_path;
+use crate::engine::state::App;
+use crate::git::paths::short_sha;
+use crate::harness::cancel::CancelToken;
+use crate::task::Task;
+use serde::Deserialize;
+use serde_json::json;
+use std::path::PathBuf;
 
 impl App {
     fn graph_root(&self, task_id: &str) -> Result<Task, String> {
@@ -38,12 +47,14 @@ impl App {
             return Err("task is archived".into());
         }
         let (wt, reference) = (PathBuf::from(&root.worktree), base.clone());
-        let base_head = tokio::task::spawn_blocking(move || git::resolve_commit(&wt, &reference))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+        let base_head = tokio::task::spawn_blocking(move || {
+            crate::git::history::resolve_commit(&wt, &reference)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
         if !force {
-            let all = self.repo_tasks(&root.repo);
+            let all = self.repo_tasks(&root.repo.clone());
             let mut ids = vec![root.id.clone()];
             loop {
                 let before = ids.len();
@@ -65,11 +76,12 @@ impl App {
                 .collect();
             held.extend(self.leased_paths(&ids));
             let (wt, reference) = (PathBuf::from(&root.worktree), base_head.clone());
-            let incoming =
-                tokio::task::spawn_blocking(move || git::incoming_paths(&wt, &reference))
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .map_err(|e| e.to_string())?;
+            let incoming = tokio::task::spawn_blocking(move || {
+                crate::delivery::git::carry::incoming_paths(&wt, &reference)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
             if overlapping_path(&incoming, &held).is_some() {
                 return Ok(
                     json!({"id": root.id, "synced": false, "overlap": true, "conflicts": []}),
@@ -77,15 +89,17 @@ impl App {
             }
         }
         let (wt, reference) = (PathBuf::from(&root.worktree), base_head);
-        let merged = tokio::task::spawn_blocking(move || git::merge_base(&wt, &reference))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string());
+        let merged = tokio::task::spawn_blocking(move || {
+            crate::delivery::git::carry::merge_base(&wt, &reference)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string());
         match merged {
-            Ok(git::BaseMerge::Unchanged) => {
+            Ok(crate::delivery::git::carry::BaseMerge::Unchanged) => {
                 Ok(json!({"id": root.id, "synced": false, "conflicts": []}))
             }
-            Ok(git::BaseMerge::Merged { head }) => {
+            Ok(crate::delivery::git::carry::BaseMerge::Merged { head }) => {
                 self.append_decision(
                     &root.id,
                     format!(
@@ -96,7 +110,7 @@ impl App {
                 );
                 Ok(json!({"id": root.id, "synced": true, "head": head, "conflicts": []}))
             }
-            Ok(git::BaseMerge::Conflicts { files }) => {
+            Ok(crate::delivery::git::carry::BaseMerge::Conflicts { files }) => {
                 self.append_decision(
                     &root.id,
                     format!(
@@ -122,34 +136,40 @@ impl App {
                 .as_ref()
                 .and_then(|id| self.store.load_task(id).ok().flatten())
             {
-                let base = self.graph_root(&task.id).ok().and_then(|t| t.base_ref);
+                let base = self
+                    .graph_root(&task.id)
+                    .ok()
+                    .and_then(|t| t.base_ref.clone());
                 let (wt, branch, from) =
                     (worktree.clone(), parent.branch.clone(), chain_base.clone());
                 let needs_carry = tokio::task::spawn_blocking(move || {
-                    let Some(base) = base.and_then(|r| git::resolve_commit(&wt, &r).ok()) else {
+                    let Some(base) =
+                        base.and_then(|r| crate::git::history::resolve_commit(&wt, &r).ok())
+                    else {
                         return false;
                     };
-                    git::is_ancestor(&wt, &base, &from) == Some(false)
-                        && git::is_ancestor(&wt, &base, &branch) == Some(true)
+                    crate::git::history::is_ancestor(&wt, &base, &from) == Some(false)
+                        && crate::git::history::is_ancestor(&wt, &base, &branch) == Some(true)
                 })
                 .await
                 .unwrap_or(false);
                 if needs_carry {
                     let (wt, base) = (worktree.clone(), chain_base.clone());
-                    let uncommitted =
-                        tokio::task::spawn_blocking(move || git::uncommit_to(&wt, &base))
-                            .await
-                            .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
+                    let uncommitted = tokio::task::spawn_blocking(move || {
+                        crate::delivery::git::carry::uncommit_to(&wt, &base)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())));
                     match uncommitted {
                         Ok(()) => {
-                            task.base_sha = chain_base;
-                            task.base_ref = Some(parent.branch);
+                            crate::task::transitions::move_base(task, chain_base);
+                            task.record_base_ref(Some(parent.branch.clone()));
                             carry_onto_newest_base(self, task, &worktree, cancel).await;
-                            task.queue.relay_base = Some(task.base_sha.clone());
+                            task.record_relay_base(Some(task.base_sha.clone()));
                             return;
                         }
                         Err(error) => {
-                            task.decisions.push(format!(
+                            task.record_decision(format!(
                                 "Rebase: could not carry the relay onto the parent: {error}"
                             ));
                             return;

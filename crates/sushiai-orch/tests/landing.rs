@@ -59,6 +59,17 @@ fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
     poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
+fn until_dirty_landing(daemon: &Daemon, id: &str) -> serde_json::Value {
+    wait_until("the dirty checkout landing wait", || {
+        let task = daemon.request("task.get", serde_json::json!({"id": id}));
+        let terminal = matches!(task["status"].as_str(), Some("done" | "failed" | "stopped"));
+        let waiting = task["status"] == "landing"
+            && task["dirtySince"].is_i64()
+            && decisions(&task).contains("uncommitted changes");
+        (terminal || waiting).then_some(task)
+    })
+}
+
 fn decisions(task: &serde_json::Value) -> String {
     task["decisions"]
         .as_array()
@@ -160,9 +171,7 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     let task = create(&daemon, root, "one", "test -f one.txt", true);
     let id = task["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": id}));
-    let waiting = poll_until(&daemon, &id, |s| {
-        matches!(s, "landing" | "done" | "failed" | "stopped")
-    });
+    let waiting = until_dirty_landing(&daemon, &id);
     assert_eq!(waiting["status"], "landing", "{waiting}");
     assert!(
         decisions(&waiting).contains("uncommitted changes"),
@@ -174,12 +183,16 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     );
     assert_eq!(git_out(root, &["rev-parse", "work"]), before);
 
+    let dirty_since = waiting["dirtySince"].clone();
+    assert!(dirty_since.is_i64(), "{waiting}");
+
     // A retry with the checkout still dirty changes nothing.
     daemon.request("task.start", serde_json::json!({"id": id}));
     // Absence check: this window gives a forbidden landing time to happen.
     std::thread::sleep(Duration::from_millis(1500));
     let still = daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(still["status"], "landing", "{still}");
+    assert_eq!(still["dirtySince"], dirty_since, "{still}");
     assert_eq!(
         std::fs::read_to_string(root.join("README.md")).unwrap(),
         "hello\nmy edit\n"
@@ -922,9 +935,7 @@ fn a_rereview_after_the_landing_waited_reviews_the_same_attempt_again() {
     let y = create(&daemon, root, "y", &verify, true);
     let id = y["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": id}));
-    let waiting = poll_until(&daemon, &id, |s| {
-        matches!(s, "landing" | "done" | "failed" | "stopped")
-    });
+    let waiting = until_dirty_landing(&daemon, &id);
     assert_eq!(waiting["status"], "landing", "{waiting}");
 
     // The branch moves in a file the review saw, then the checkout is clean.

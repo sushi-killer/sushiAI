@@ -132,7 +132,7 @@ impl TaskSandbox {
         for project in std::iter::once(inputs.repo_root)
             .chain(inputs.known_project_folders.iter().map(PathBuf::as_path))
         {
-            denied_read_roots.push(crate::git::worktree_path(
+            denied_read_roots.push(crate::git::worktree::worktree_path(
                 project,
                 inputs.sushiai_home,
                 inputs.worktree_root,
@@ -226,13 +226,46 @@ impl TaskSandbox {
     }
 }
 
+/// Seatbelt's later rules reopen this run and worktree under denied roots.
+pub fn to_sbpl(sandbox: &TaskSandbox) -> String {
+    let quoted = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    for path in &sandbox.denied_read_roots {
+        profile.push_str(&format!("(deny file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_exceptions {
+        profile.push_str(&format!("(allow file-read* (subpath {}))\n", quoted(path)));
+    }
+    for path in &sandbox.read_metadata_paths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (literal {}))\n",
+            quoted(path)
+        ));
+    }
+    for path in &sandbox.read_metadata_subpaths {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (subpath {}))\n",
+            quoted(path)
+        ));
+    }
+    profile.push_str("(deny file-write* (subpath \"/\"))\n");
+    for path in &sandbox.write_roots {
+        profile.push_str(&format!("(allow file-write* (subpath {}))\n", quoted(path)));
+    }
+    profile.push_str(&format!(
+        "(deny network-outbound (remote unix-socket (path-literal {})))\n",
+        quoted(&sandbox.daemon_socket),
+    ));
+    profile
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        engine::task_sandbox_profile,
         harness,
-        model::{SandboxMode, Settings},
+        policy::settings::{SandboxMode, Settings},
+        sandbox::to_sbpl as task_sandbox_profile,
     };
 
     fn policy(root: &Path, projects: &[PathBuf]) -> TaskSandbox {
@@ -311,7 +344,8 @@ mod tests {
             ".tasks",
             absolute.to_str().unwrap(),
         ] {
-            let worktree = crate::git::worktree_path(&repo, &sushiai_home, setting, "task/own");
+            let worktree =
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, "task/own");
             let built = TaskSandbox::build(Inputs {
                 repo_root: &repo,
                 worktree: &worktree,
@@ -330,8 +364,8 @@ mod tests {
             });
             for denied in [
                 sushiai_home.join("worktrees.noindex"),
-                crate::git::worktree_path(&repo, &sushiai_home, setting, ""),
-                crate::git::worktree_path(&sibling, &sushiai_home, setting, ""),
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, ""),
+                crate::git::worktree::worktree_path(&sibling, &sushiai_home, setting, ""),
                 retained.clone(),
             ] {
                 assert!(
@@ -386,7 +420,7 @@ mod tests {
             let worktree = if setting == "orchestrator/worktrees" {
                 data.join("worktrees/own")
             } else {
-                crate::git::worktree_path(&repo, &sushiai_home, setting, "task/own")
+                crate::git::worktree::worktree_path(&repo, &sushiai_home, setting, "task/own")
             };
             let sibling = worktree.with_file_name("task-other");
             let foreign = sushiai_home.join("worktrees.noindex/other-repo/task-other");

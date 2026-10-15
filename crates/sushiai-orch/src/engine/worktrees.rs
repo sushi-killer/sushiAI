@@ -1,4 +1,13 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::harness::cancel::CancelToken;
+use crate::harness::environment::augmented_path;
+use crate::sandbox::TaskSandbox;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Worktree lifecycle: a task's worktree is removed once the task no longer
 /// needs it (done, archived, deleted, `worktrees.gc`) and recreated from its
@@ -21,8 +30,8 @@ pub(super) async fn setup_worktree(
         repo,
         worktree,
         &augmented_path(),
-        verify::verify_timeout(),
-        |script| verify::build_verify_command(worktree, script, sandbox, ""),
+        crate::verify::command::verify_timeout(),
+        |script| crate::verify::command::build_verify_command(worktree, script, sandbox, ""),
         cancel.cancelled(),
     )
     .await
@@ -57,18 +66,19 @@ impl App {
         let removed = tokio::task::spawn_blocking(move || {
             let mut saved = false;
             if save {
-                saved = git::save_wip(Path::new(&wt), &id).map_err(|e| e.to_string())?;
+                saved = crate::delivery::git::commit::save_wip(Path::new(&wt), &id)
+                    .map_err(|e| e.to_string())?;
             }
-            let bytes = git::dir_size(Path::new(&wt));
-            git::remove_task_worktree(Path::new(&repo), Path::new(&wt));
+            let bytes = crate::git::worktree::dir_size(Path::new(&wt));
+            crate::delivery::git::recovery::remove_task_worktree(Path::new(&repo), Path::new(&wt));
             Ok::<_, String>((bytes, saved))
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
         match removed {
             Ok((bytes, saved)) => {
-                task.worktree_removed = true;
-                task.decisions.push(format!(
+                task.record_worktree_removed(true);
+                task.record_decision(format!(
                     "Worktree: removed {} ({why}{}; {})",
                     task.worktree,
                     if saved {
@@ -76,7 +86,7 @@ impl App {
                     } else {
                         ""
                     },
-                    if git::branch_exists(Path::new(&task.repo), &task.branch) {
+                    if crate::git::branches::branch_exists(Path::new(&task.repo), &task.branch) {
                         format!("the work is on {}", task.branch)
                     } else {
                         format!(
@@ -88,8 +98,7 @@ impl App {
                 Some(bytes)
             }
             Err(e) => {
-                task.decisions
-                    .push(format!("Worktree: kept, could not save its work ({e})"));
+                task.record_decision(format!("Worktree: kept, could not save its work ({e})"));
                 None
             }
         }
@@ -132,7 +141,7 @@ impl App {
     /// restoring the work saved to the wip ref. `true` when it recreated one.
     pub(super) async fn ensure_worktree(&self, task: &mut Task) -> Result<bool, String> {
         if has_worktree(&task.worktree) {
-            task.worktree_removed = false;
+            task.record_worktree_removed(false);
             return Ok(false);
         }
         let (repo, wt, branch, id) = (
@@ -142,13 +151,18 @@ impl App {
             task.id.clone(),
         );
         let restored = tokio::task::spawn_blocking(move || {
-            git::restore_worktree(Path::new(&repo), Path::new(&wt), &branch, &id)
+            crate::delivery::git::recovery::restore_worktree(
+                Path::new(&repo),
+                Path::new(&wt),
+                &branch,
+                &id,
+            )
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("could not recreate the worktree of {}: {e}", task.branch))?;
-        task.worktree_removed = false;
-        task.decisions.push(format!(
+        task.record_worktree_removed(false);
+        task.record_decision(format!(
             "Worktree: recreated {} from {}{}",
             task.worktree,
             task.branch,
@@ -201,9 +215,11 @@ impl App {
                     _ => false,
                 };
             let size_path = task.worktree.clone();
-            let bytes = tokio::task::spawn_blocking(move || git::dir_size(Path::new(&size_path)))
-                .await
-                .unwrap_or(0);
+            let bytes = tokio::task::spawn_blocking(move || {
+                crate::git::worktree::dir_size(Path::new(&size_path))
+            })
+            .await
+            .unwrap_or(0);
             if !wanted {
                 entries.push(entry("kept", 0));
                 continue;
@@ -216,7 +232,7 @@ impl App {
             match self.release_worktree(&mut task, "gc").await {
                 Some(bytes) => {
                     freed += bytes;
-                    task.updated_at = now_ms();
+                    task.touch(now_ms());
                     self.save_task_logged(&task);
                     self.broadcast_task(&task);
                     entries.push(entry("removed", bytes));
@@ -228,7 +244,7 @@ impl App {
             let repo_path = PathBuf::from(repo);
             let listed = tokio::task::spawn_blocking({
                 let repo_path = repo_path.clone();
-                move || git::linked_worktrees(&repo_path)
+                move || crate::git::worktree::linked_worktrees(&repo_path)
             })
             .await
             .unwrap_or_default();
@@ -237,7 +253,7 @@ impl App {
                     continue;
                 }
                 let p = path.clone();
-                let bytes = tokio::task::spawn_blocking(move || git::dir_size(&p))
+                let bytes = tokio::task::spawn_blocking(move || crate::git::worktree::dir_size(&p))
                     .await
                     .unwrap_or(0);
                 entries.push(json!({
@@ -245,7 +261,10 @@ impl App {
                 }));
             }
             if !dry_run {
-                let _ = tokio::task::spawn_blocking(move || git::prune_worktrees(&repo_path)).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::git::worktree::prune_worktrees(&repo_path)
+                })
+                .await;
             }
         }
         Ok(json!({
@@ -277,7 +296,7 @@ impl App {
         let mut total = 0u64;
         for dir in dirs {
             let d = dir.clone();
-            let bytes = tokio::task::spawn_blocking(move || git::dir_size(&d))
+            let bytes = tokio::task::spawn_blocking(move || crate::git::worktree::dir_size(&d))
                 .await
                 .unwrap_or(0);
             if !dry_run && std::fs::remove_dir_all(&dir).is_err() {
@@ -292,9 +311,14 @@ impl App {
             }));
         }
         if !dry_run && !entries.is_empty() {
-            for a in &mut task.attempts {
-                a.evidence.retain(|p| Path::new(p).exists());
-            }
+            let present: Vec<String> = task
+                .attempts
+                .iter()
+                .flat_map(|attempt| &attempt.evidence)
+                .filter(|path| Path::new(path).exists())
+                .cloned()
+                .collect();
+            crate::task::attempts::retain_evidence(task, &present);
             self.save_task_logged(task);
         }
         (entries, total)

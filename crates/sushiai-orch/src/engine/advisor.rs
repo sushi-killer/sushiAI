@@ -1,4 +1,31 @@
-use super::*;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::cost::replay_run_cost;
+use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::assert_helper_timeout;
+#[cfg(test)]
+use crate::engine::test_support::slow_helper_task;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::harness::native::error::RunError;
+use crate::harness::run_files::read_cancelled_fingerprint;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
+use crate::prompts::clip::truncate_chars;
+use crate::task::AttemptStatus;
+use crate::task::FailureKind;
+use crate::task::Stage;
+use crate::task::Task;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Longest advice kept, in characters.
 const MAX_ADVICE_CHARS: usize = 1500;
@@ -52,11 +79,13 @@ pub(super) async fn run_advisor_before_retry(
     let failure_detail = failure.detail.clone();
 
     let (wt, base) = (worktree.to_path_buf(), base_sha.to_string());
-    let diff =
-        tokio::task::spawn_blocking(move || git::diff_full(&wt, &base, 20_000).unwrap_or_default())
-            .await
-            .unwrap_or_default();
-    let brief_text = brief::build_advisor_brief(task, &diff, &failure_detail);
+    let diff = tokio::task::spawn_blocking(move || {
+        crate::git::changes::diff_full(&wt, &base, 20_000).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let brief_text =
+        crate::engine::attempts::advisor::build_advisor_brief(task, &diff, &failure_detail);
 
     let run_dir = app
         .store
@@ -120,23 +149,29 @@ pub(super) async fn run_advisor_before_retry(
             let cost = replay_run_cost(&events_path, &settings.prices)
                 .and_then(|o| o.cost_usd)
                 .unwrap_or(0.0);
-            task.attempts[failed].advisor_cost_usd = Some(cost);
-            task.attempts[failed].advisor_fingerprint = read_cancelled_fingerprint(&events_path);
+            crate::task::attempts::record_advisor(
+                task,
+                failed,
+                cost,
+                read_cancelled_fingerprint(&events_path),
+            );
             return Some(cost);
         }
         Err(RunError::Io(_) | RunError::NotFound(_)) => return None,
     };
     if outcome.timed_out {
-        task.decisions
-            .push(helper_timeout_message("advisor", limit));
+        task.record_decision(helper_timeout_message("advisor", limit));
     }
     let cost = outcome.cost_usd.unwrap_or(0.0);
-    task.attempts[failed].advisor_cost_usd = Some(cost);
-    task.attempts[failed].advisor_fingerprint = outcome.fingerprint.clone();
+    crate::task::attempts::record_advisor(task, failed, cost, outcome.fingerprint.clone());
     let text = outcome.final_text.unwrap_or_default();
     let advice = text.trim();
     if outcome.error.is_none() && !advice.is_empty() {
-        task.attempts[failed].advice = Some(truncate_chars(advice, MAX_ADVICE_CHARS));
+        crate::task::attempts::record_advice(
+            task,
+            failed,
+            truncate_chars(advice, MAX_ADVICE_CHARS),
+        );
     }
     Some(cost)
 }

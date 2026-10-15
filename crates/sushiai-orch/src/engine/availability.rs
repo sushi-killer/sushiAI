@@ -4,7 +4,29 @@
 //! route on a missing harness is swapped for the nearest route of an
 //! available one, and with no harness at all a task waits for the owner.
 
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::lifecycle::interruption::mark_stopped_if_not_already;
+use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::reply::Reply;
+use crate::engine::slots::SlotPermit;
+use crate::engine::state::App;
+use crate::harness::cancel::CancelToken;
+use crate::harness::environment::augmented_path;
+use crate::harness::environment::resolve_binary;
+use crate::policy::pricing::route_cost;
+use crate::policy::routing::route_strength;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
+use crate::task::AskedBy;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::oneshot;
 
 const HARNESSES: [Harness; 2] = [Harness::Claude, Harness::Codex];
 
@@ -91,8 +113,7 @@ fn install_question() -> Question {
         ),
         vec!["retry".to_string()],
         QuestionKind::HarnessMissing,
-        AskedBy::Implement,
-    )
+        AskedBy::Implement, crate::clock::now_ms())
 }
 
 impl App {
@@ -139,7 +160,7 @@ impl App {
 
     /// The orchestrator chat's route, moved to an available harness.
     pub(super) fn chat_route(&self, settings: &Settings) -> Option<Route> {
-        let wanted = chat::orchestrator_route(settings)?;
+        let wanted = crate::engine::chat::launch::orchestrator_route(settings)?;
         self.usable_route(settings, wanted).map(|(route, _)| route)
     }
 
@@ -179,12 +200,11 @@ pub(super) async fn wait_for_harness(
         return true;
     }
     while !app.any_harness_available() {
-        task.decisions
-            .push("Orchestrator: no agent CLI found; waiting for one to be installed".to_string());
-        task.question = Some(install_question());
-        task.status = TaskStatus::Waiting;
-        task.updated_at = now_ms();
-        if wait_for_answer(app, task_id, task, pending_answer, cancel, permit)
+        task.record_decision(
+            "Orchestrator: no agent CLI found; waiting for one to be installed".to_string(),
+        );
+        task.ask(install_question(), now_ms());
+        if wait_for_answer(app, task, pending_answer, cancel, permit)
             .await
             .is_none()
         {
@@ -192,8 +212,7 @@ pub(super) async fn wait_for_harness(
         }
         app.refresh_availability();
     }
-    task.status = resume_status;
-    task.updated_at = now_ms();
+    task.resume_phase(resume_status, now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
     if permit.is_none() {

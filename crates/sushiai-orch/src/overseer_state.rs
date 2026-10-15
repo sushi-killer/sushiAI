@@ -11,8 +11,8 @@
 //! orchd rewrites Tasks and Plan when a wake starts and adds one Decisions line
 //! when it ends. Check output is never written here.
 
-use crate::model::{Task, TaskStatus};
 use crate::store;
+use crate::task::{Task, TaskStatus};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -27,7 +27,7 @@ static STATE: Mutex<()> = Mutex::new(());
 pub fn path(data_dir: &Path, repo: &str) -> PathBuf {
     data_dir
         .join("overseer")
-        .join(format!("{}.md", crate::engine::simple_hash(repo)))
+        .join(format!("{}.md", crate::policy::keys::simple_hash(repo)))
 }
 
 fn status_label(status: TaskStatus) -> String {
@@ -121,7 +121,7 @@ fn write(data_dir: &Path, repo: &str, text: &str) {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = store::write_text_private(&file, text);
+    let _ = store::files::write_text_private(&file, text);
 }
 
 /// Starts a wake: rewrites Tasks and Plan from `all` (every task of the host)

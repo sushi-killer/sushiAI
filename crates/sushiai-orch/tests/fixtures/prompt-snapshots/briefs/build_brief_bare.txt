@@ -26,6 +26,7 @@ When a criterion cannot be met as written (its premise is wrong, or it contradic
 - Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.
 - Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.
 - Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
+- Plan your local steps, investigate tool failures and revise your approach using the evidence. Use the harness's native context and compaction to carry the work forward within this task's permissions and budget.
 - Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).
 
 ## Current state

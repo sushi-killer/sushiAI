@@ -8,7 +8,22 @@
 //! entry with the text [`DEFERRED`] carries the keys of a notice held for the
 //! morning, and its detail is the notice.
 
-use super::*;
+#[cfg(test)]
+use crate::task::AskedBy;
+
+use crate::clock::now_ms;
+use crate::engine::answer_policy::owner_only;
+use crate::engine::digest;
+use crate::engine::state::App;
+use crate::policy::settings::Settings;
+use crate::store;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
+
 use crate::overseer::Entry;
 
 /// Log text of a notice held back by quiet hours.
@@ -243,7 +258,7 @@ impl App {
         tasks
             .into_iter()
             .filter(|t| t.status == TaskStatus::Waiting && !t.archived)
-            .filter_map(|t| Some((t.id, t.question?.asked_at.unwrap_or(0))))
+            .filter_map(|t| Some((t.id.clone(), t.question.as_ref()?.asked_at.unwrap_or(0))))
             .collect()
     }
 
@@ -351,7 +366,7 @@ impl App {
             kind_title: crate::overseer::question_title(question.kind, &question.text),
             parked_at: now,
         });
-        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &parked) {
+        if let Err(e) = store::files::write_json_atomic(&self.quiet_parked_path(), &parked) {
             eprintln!("orch: recording a parked question failed: {e}");
         }
     }
@@ -418,7 +433,7 @@ impl App {
                 lines.len(),
                 lines.join("\n")
             );
-            if !chat::post_note(self, &repo, &text) {
+            if !crate::engine::chat::store::post_note(self, &repo, &text) {
                 continue;
             }
             let keys: Vec<String> = listed.iter().map(|(p, _)| p.decision_key.clone()).collect();
@@ -435,7 +450,7 @@ impl App {
             .into_iter()
             .filter(|p| left.contains(&p.decision_key))
             .collect();
-        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &rest) {
+        if let Err(e) = store::files::write_json_atomic(&self.quiet_parked_path(), &rest) {
             eprintln!("orch: updating parked questions failed: {e}");
         }
     }
@@ -500,7 +515,7 @@ impl App {
         }
         for (entry, keys) in held.into_iter().rev() {
             let text = entry.detail.clone().unwrap_or_else(|| entry.text.clone());
-            if !chat::post_note(self, &entry.repo, &text) {
+            if !crate::engine::chat::store::post_note(self, &entry.repo, &text) {
                 continue;
             }
             let mut told = Entry::new("asked_owner", &entry.repo, entry.task_id.as_deref(), &text)
@@ -544,6 +559,7 @@ mod tests {
                 options.iter().map(|o| o.to_string()).collect(),
                 QuestionKind::PlanQuestion,
                 AskedBy::Plan,
+                crate::clock::now_ms(),
             );
             q.asked_at = Some(1_000);
             q
@@ -562,6 +578,7 @@ mod tests {
             vec!["A".into(), "B".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Plan,
+            crate::clock::now_ms(),
         );
         first.asked_at = Some(1_000);
         let mut second = first.clone();

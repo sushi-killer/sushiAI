@@ -3,7 +3,21 @@
 //! is read from settings, the repo's preset and the task's recorded facts;
 //! nothing here decides how a stage runs.
 
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::policy::routing::Tier;
+use crate::policy::settings::Settings;
+use crate::task::AskedBy;
+use crate::task::AttemptStatus;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::task::Verdict;
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 /// The stages in run order, then the side stages.
@@ -94,10 +108,11 @@ fn task_state(
     let seen = |s: &str| spent.get(s).is_some_and(|x| x.seen);
     let of = |stage: Stage| task.attempts.iter().filter(move |a| a.stage == stage);
     let last_verify = || {
-        task.attempts
-            .iter()
-            .rev()
-            .find(|a| a.verify.iter().any(|v| !brief::is_held_out(v)))
+        task.attempts.iter().rev().find(|a| {
+            a.verify
+                .iter()
+                .any(|v| !crate::verify::evidence::is_held_out(v))
+        })
     };
     let stopped = matches!(task.status, TaskStatus::Failed | TaskStatus::Stopped);
     if !enabled && id != "brief" && id != "question" {
@@ -164,7 +179,7 @@ fn task_state(
                 let failed = a
                     .verify
                     .iter()
-                    .any(|v| !brief::is_held_out(v) && v.code != Some(0));
+                    .any(|v| !crate::verify::evidence::is_held_out(v) && v.code != Some(0));
                 if failed {
                     "failed"
                 } else {
@@ -177,7 +192,7 @@ fn task_state(
                 a.verify
                     .iter()
                     .rev()
-                    .find(|v| brief::is_held_out(v))
+                    .find(|v| crate::verify::evidence::is_held_out(v))
                     .map(|v| v.code == Some(0))
             });
             match held {

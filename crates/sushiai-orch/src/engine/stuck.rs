@@ -2,7 +2,11 @@
 //! a pause, twice at most, and then ends `Failed` with the reason in its
 //! decisions and one note to the orchestrator.
 
-use super::*;
+#[cfg(test)]
+use crate::task::TaskStatus;
+
+use crate::clock::now_ms;
+use crate::task::Task;
 
 /// How long a stuck task pauses before its next try, in seconds; a test run
 /// may shorten it with `ORCHD_STUCK_PAUSE_SECS`.
@@ -22,20 +26,16 @@ fn pause_secs() -> i64 {
 /// sleeps through `paused_until` holding no slot). `false`: it has failed and
 /// the caller must stop asking about it.
 pub(super) fn retry_or_fail(task: &mut Task, reason: &str) -> bool {
-    task.question = None;
-    let tried = task.loop_state.stuck_retries;
-    if tried < MAX_RETRIES {
-        task.loop_state.stuck_retries += 1;
-        task.decisions.push(format!(
+    task.clear_question();
+    if let Some(tried) = task.defer_stuck_retry(MAX_RETRIES, now_ms() + pause_secs() * 1000) {
+        task.record_decision(format!(
             "{RETRY_PREFIX}{reason}; trying again in {} s (retry {} of {MAX_RETRIES})",
             pause_secs(),
-            tried + 1
+            tried
         ));
-        task.queue.paused_until = Some(now_ms() + pause_secs() * 1000);
-        task.status = TaskStatus::Queued;
         return true;
     }
-    task.decisions.push(format!(
+    task.record_decision(format!(
         "Failed: {reason}; {MAX_RETRIES} later retries did not help"
     ));
     task.mark_failed();

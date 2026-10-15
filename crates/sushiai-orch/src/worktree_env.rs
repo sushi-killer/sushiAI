@@ -88,15 +88,19 @@ fn parse_setup(text: &str) -> Result<SetupFile, String> {
 }
 
 /// Check policy comes from the base commit, never the task's edited file.
-pub fn scoped_checks_at(repo: &Path, rev: &str) -> Result<Vec<crate::model::ScopedCheck>, String> {
-    let Some(text) = crate::git::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
+pub fn scoped_checks_at(
+    repo: &Path,
+    rev: &str,
+) -> Result<Vec<crate::policy::settings::ScopedCheck>, String> {
+    let Some(text) =
+        crate::git::history::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
     else {
         return Ok(Vec::new());
     };
     Ok(parse_setup(&text)?
         .scoped_checks
         .into_iter()
-        .map(|entry| crate::model::ScopedCheck {
+        .map(|entry| crate::policy::settings::ScopedCheck {
             repo: Some(repo.to_string_lossy().into_owned()),
             command: entry.command,
             paths: entry.paths,
@@ -112,7 +116,8 @@ pub struct FormatCommand {
 }
 
 pub fn format_command_at(repo: &Path, rev: &str) -> Result<Option<FormatCommand>, String> {
-    let Some(text) = crate::git::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
+    let Some(text) =
+        crate::git::history::show_file(repo, rev, SETUP_FILE).map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
@@ -267,7 +272,7 @@ async fn run_script(
     cmd.envs(env);
     if !sandboxed && !env.contains_key("RUSTC_WRAPPER") {
         if let Some(cache) =
-            crate::engine::compiler_cache::CompilerCache::for_worktree(worktree, path)
+            crate::harness::compiler_cache::CompilerCache::for_worktree(worktree, path)
         {
             cache.apply(&mut cmd);
         }

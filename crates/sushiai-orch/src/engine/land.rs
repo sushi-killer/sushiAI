@@ -1,4 +1,19 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::graph::landing::Landing;
+use crate::engine::reports::record_landing;
+use crate::engine::state::App;
+use crate::engine::verification::scoping::split_deferred;
+use crate::git::paths::short_sha;
+use crate::harness::cancel::CancelToken;
+use crate::policy::settings::AfterLand;
+use crate::task::FailureKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// How often a task waiting `landing` is tried again.
 const LANDING_RETRY: Duration = Duration::from_secs(120);
@@ -70,11 +85,11 @@ async fn mark_redirected_landed(
         let Ok(Some(mut done)) = app.store.load_task(&redirected.id) else {
             continue;
         };
-        done.base_ref = Some(branch.to_string());
-        done.landed_sha = Some(sha.to_string());
-        done.landed_at = Some(now_ms());
-        done.unlanded = None;
-        done.decisions.push(format!(
+        done.record_base_ref(Some(branch.to_string()));
+        done.record_landed(Some(sha.to_string()));
+        done.stamp_landing(now_ms());
+        done.record_unlanded(None);
+        done.record_decision(format!(
             "Land: task {} ({}) landed this work at {}",
             task.title,
             task.id,
@@ -82,7 +97,7 @@ async fn mark_redirected_landed(
         ));
         super::reports::refresh_diff_stat(&mut done).await;
         app.write_report(&mut done).await;
-        done.updated_at = now_ms();
+        done.touch(now_ms());
         let _ = app.store.save_task(&done);
         app.broadcast_task(&done);
     }
@@ -110,7 +125,7 @@ pub(super) async fn land_on_base(
         (s.may_land_on_default(&task.repo), s.after_land.clone())
     };
     let Some(original_branch) = task.base_ref.clone() else {
-        task.decisions.push(
+        task.record_decision(
             "Land: refused, the task was not started from a branch; the work stays on its own branch"
                 .to_string(),
         );
@@ -120,26 +135,22 @@ pub(super) async fn land_on_base(
     let redirect = match resolve_landing_branch(&original_branch, &all) {
         Ok(redirect) => redirect,
         Err(reason) => {
-            task.decisions.push(reason);
+            task.record_decision(reason);
             return Landing::NoParent;
         }
     };
     let branch = redirect.branch.clone();
-    task.decisions.extend(redirect.decisions.clone());
-    // A fresh landing (not the 2-minute retry) starts the dirty hour over.
-    if task.status != TaskStatus::Landing {
-        task.queue.dirty_since = None;
-    }
+    task.record_decisions(redirect.decisions.clone());
     let repo = PathBuf::from(&task.repo);
     if !land_on_default {
         let r = repo.clone();
-        let default = tokio::task::spawn_blocking(move || git::default_branch(&r))
+        let default = tokio::task::spawn_blocking(move || crate::git::branches::default_branch(&r))
             .await
             .unwrap_or(None);
         if default.as_deref() == Some(branch.as_str()) {
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Land: refused, {} The work stays on {}",
-                crate::model::land_on_default_refusal(&branch, &task.repo),
+                crate::policy::delivery::land_on_default_refusal(&branch, &task.repo),
                 task.branch
             ));
             return Landing::DefaultBranchRefused;
@@ -153,20 +164,22 @@ pub(super) async fn land_on_base(
             .any(|done| done.landed_sha.is_none())
         {
             let (r, start, target) = (repo.clone(), task.base_sha.clone(), branch.clone());
-            match tokio::task::spawn_blocking(move || git::merge_base_of(&r, &start, &target))
-                .await
-                .unwrap_or_else(|e| Err(git::GitError(e.to_string())))
+            match tokio::task::spawn_blocking(move || {
+                crate::git::history::merge_base_of(&r, &start, &target)
+            })
+            .await
+            .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())))
             {
-                Ok(base) => task.base_sha = base,
+                Ok(base) => crate::task::transitions::move_base(task, base),
                 Err(e) => {
-                    task.decisions.push(format!(
+                    task.record_decision(format!(
                         "Land: refused, could not find the merge base for redirected branch {branch}: {e}; the work stays on its own branch"
                     ));
                     return Landing::NoParent;
                 }
             }
         }
-        task.base_ref = Some(branch.clone());
+        task.record_base_ref(Some(branch.clone()));
     }
 
     let lock = app.landing_lock(&format!("base\0{}\0{branch}", task.repo));
@@ -193,18 +206,20 @@ pub(super) async fn land_on_base(
         } else {
             "Another commit"
         };
-        match carry_and_check(
-            app, task, idx, worktree, run_dir, &branch, first, &finals, cancel,
-        )
-        .await
+        match crate::engine::graph::carry::CarryRun::new(app, task, idx, run_dir, cancel)
+            .in_worktree(worktree)
+            .onto(&branch, first, &finals)
+            .await
         {
             Ok(true) => {
                 let (r, b) = (repo.clone(), branch.clone());
-                task.landed_sha =
-                    tokio::task::spawn_blocking(move || git::resolve_commit(&r, &b).ok())
-                        .await
-                        .unwrap_or(None);
-                task.unlanded = None;
+                let landed = tokio::task::spawn_blocking(move || {
+                    crate::git::history::resolve_commit(&r, &b).ok()
+                })
+                .await
+                .unwrap_or(None);
+                task.record_landed(landed);
+                task.record_unlanded(None);
                 if let Some(sha) = task.landed_sha.as_deref() {
                     mark_redirected_landed(app, task, &branch, sha, &redirect.done_tasks).await;
                 }
@@ -224,48 +239,51 @@ pub(super) async fn land_on_base(
             task.base_sha.clone(),
         );
         let moved = tokio::task::spawn_blocking(move || {
-            git::commit(&wt, &title, &tid, attempt_n)?;
-            let sha = git::head_sha(&wt)?;
-            let moved = git::move_branch(&r, &b, &sha);
-            if !matches!(moved, Ok(git::BranchMove::Done { .. })) {
+            crate::delivery::git::commit::commit(&wt, &title, &tid, attempt_n)?;
+            let sha = crate::git::history::head_sha(&wt)?;
+            let moved = crate::git::branches::move_branch(&r, &b, &sha);
+            if !matches!(moved, Ok(crate::git::branches::BranchMove::Done { .. })) {
                 // Keep the work, uncommitted, for the next try to carry.
-                let _ = git::uncommit_to(&wt, &base);
+                let _ = crate::delivery::git::carry::uncommit_to(&wt, &base);
             }
             moved.map(|m| (sha, m))
         })
         .await
-        .unwrap_or_else(|e| Err(git::GitError(e.to_string())));
-        if !matches!(moved, Ok((_, git::BranchMove::Dirty { .. }))) {
-            task.queue.dirty_since = None;
+        .unwrap_or_else(|e| Err(crate::git::GitError(e.to_string())));
+        if !matches!(
+            moved,
+            Ok((_, crate::git::branches::BranchMove::Dirty { .. }))
+        ) {
+            task.end_dirty_wait();
         }
         match moved {
-            Ok((sha, git::BranchMove::Done { checkout })) => {
-                task.landed_sha = Some(sha.clone());
-                task.unlanded = None;
-                task.decisions
-                    .push(format!("Land: landed on {branch} at {}", short_sha(&sha)));
+            Ok((sha, crate::git::branches::BranchMove::Done { checkout })) => {
+                task.record_landed(Some(sha.clone()));
+                task.record_unlanded(None);
+                task.record_decision(format!("Land: landed on {branch} at {}", short_sha(&sha)));
                 mark_redirected_landed(app, task, &branch, &sha, &redirect.done_tasks).await;
                 record_landing(task).await;
                 run_after_land(task, &checkout, &after_land).await;
                 return Landing::Landed;
             }
-            Ok((_, git::BranchMove::Dirty { checkout })) => {
-                let since = *task.queue.dirty_since.get_or_insert_with(now_ms);
+            Ok((_, crate::git::branches::BranchMove::Dirty { checkout })) => {
+                let first_wait = task.queue.dirty_since.is_none();
+                let since = task.begin_dirty_wait(now_ms());
                 if now_ms() - since >= dirty_limit_ms() {
-                    task.queue.dirty_since = None;
+                    task.end_dirty_wait();
                     let line = format!(
                         "Land: gave up, {} still has uncommitted changes; the work stays on {}",
                         checkout.display(),
                         task.branch
                     );
-                    task.decisions.push(line.clone());
+                    task.record_decision(line.clone());
                     let pr = app.settings.read().unwrap().may_open_pr_on_done(&task.repo);
                     let next = if pr {
                         "A pull request is opened from the task branch instead."
                     } else {
                         "Land it or open a pull request from the task branch."
                     };
-                    super::pr_draft::notify_owner(
+                    crate::engine::delivery::pr::pending::notify_owner(
                         app,
                         &task.repo,
                         format!(
@@ -275,21 +293,21 @@ pub(super) async fn land_on_base(
                     );
                     return Landing::NoParent;
                 }
-                if task.status != TaskStatus::Landing {
-                    task.decisions.push(format!(
+                if first_wait {
+                    task.record_decision(format!(
                         "Land: waiting, {} has uncommitted changes; retrying every 2 minutes and on task.start",
                         checkout.display()
                     ));
                 }
                 return Landing::Waiting;
             }
-            Ok((_, git::BranchMove::Diverged)) if recarries < MAX_RECARRIES => {
+            Ok((_, crate::git::branches::BranchMove::Diverged)) if recarries < MAX_RECARRIES => {
                 recarries += 1;
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Land: {branch} moved while landing; carrying the work onto it again (try {recarries} of {MAX_RECARRIES})"
                 ));
             }
-            Ok((_, git::BranchMove::Diverged)) => {
+            Ok((_, crate::git::branches::BranchMove::Diverged)) => {
                 return Landing::Failed {
                     kind: FailureKind::Error,
                     detail: format!(
@@ -350,7 +368,7 @@ async fn run_after_land(task: &mut Task, checkout: &Path, entries: &[AfterLand])
                 AFTER_LAND_TIMEOUT.as_secs()
             ),
         };
-        task.decisions.push(line);
+        task.record_decision(line);
     }
 }
 
@@ -360,7 +378,7 @@ impl App {
     pub(super) fn retry_landings(&self) {
         for t in self.store.list_tasks().unwrap_or_default() {
             if t.status == TaskStatus::Landing && !t.archived {
-                self.spawn_task_loop(t.id, true);
+                self.spawn_task_loop(t.id.clone(), true);
             }
         }
     }

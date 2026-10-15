@@ -9,6 +9,74 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[test]
+fn red_tool_results_from_different_commands_do_not_stop_the_runner() {
+    for (harness, bin_env, stream) in [
+        (
+            "claude",
+            "ORCHD_CLAUDE_BIN",
+            include_str!("fixtures/loop_detect/claude-identical-red-results.jsonl"),
+        ),
+        (
+            "codex",
+            "ORCHD_CODEX_BIN",
+            include_str!("fixtures/loop_detect/codex-identical-red-results.jsonl"),
+        ),
+    ] {
+        let scripts = tempfile::tempdir().unwrap();
+        let stream = stream
+            .lines()
+            .filter(|line| {
+                let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                !matches!(event["type"].as_str(), Some("result" | "turn.completed"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = "```sushi-report\n{\"outcome\":\"complete\",\"summary\":\"done\",\"decisions\":[],\"question\":\"\"}\n```";
+        let result = if harness == "claude" {
+            serde_json::json!({"type": "result", "result": report})
+        } else {
+            serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": report}})
+        };
+        let completed = if harness == "codex" {
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n"
+        } else {
+            ""
+        };
+        let script = fake_harness_script(
+            scripts.path(),
+            "red-results.sh",
+            &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'synthetic 1'; exit 0; fi\ncat > /dev/null\ncat <<'STREAM'\n{stream}\n{result}\n{completed}STREAM\necho changed > CHANGED_MARKER.txt\n"),
+        );
+        let daemon = Daemon::spawn(&[(bin_env, script.to_str().unwrap())]);
+        let mut settings = daemon.request("settings.get", serde_json::json!({}));
+        settings["review"] = serde_json::json!("");
+        settings["routes"].as_array_mut().unwrap().push(
+            serde_json::json!({"id": "stream-test", "label": "Stream test", "harness": harness}),
+        );
+        settings["tiers"] = serde_json::json!({"mechanical": "stream-test", "standard": "stream-test", "hard": "stream-test"});
+        daemon.request("settings.set", serde_json::json!({"settings": settings}));
+        let repo = init_git_repo();
+        let task = daemon.request(
+            "task.create",
+            serde_json::json!({
+                "repo": repo.path(), "title": "Stream recovery", "goal": "Finish after red results",
+                "verify": ["test -f CHANGED_MARKER.txt"],
+                "variant": {"maxAttempts": 1, "loopDetect": true}, "land": false,
+            }),
+        );
+        let settled = poll_task_status(&daemon, task["id"].as_str().unwrap());
+        assert_eq!(settled["status"], "done", "{harness}: {settled}");
+        assert_eq!(
+            settled["attempts"].as_array().unwrap().len(),
+            1,
+            "{settled}"
+        );
+        daemon.shutdown_and_wait();
+        remove_dir_retrying(task["worktree"].as_str().unwrap());
+    }
+}
+
+#[test]
 fn engine_loop_passes_when_verify_succeeds() {
     let scripts_dir = tempfile::tempdir().unwrap();
     let script = fake_harness_script(
@@ -674,7 +742,8 @@ fn a_failed_check_resumes_the_session_with_its_failure_tail_and_own_spend() {
         "{settled}"
     );
     {
-        let brief = std::fs::read_to_string(
+        let brief = std::fs::read_to_string(args_log.with_file_name("args.log.brief.2")).unwrap();
+        let saved_brief = std::fs::read_to_string(
             daemon
                 .data_dir()
                 .join("tasks")
@@ -682,6 +751,7 @@ fn a_failed_check_resumes_the_session_with_its_failure_tail_and_own_spend() {
                 .join("runs/2/brief.md"),
         )
         .unwrap();
+        assert_eq!(brief, saved_brief);
         assert!(!brief.contains("## Task"), "{brief}");
         assert!(brief.contains("## Failed checks"), "{brief}");
         assert!(

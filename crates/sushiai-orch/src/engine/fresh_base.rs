@@ -6,25 +6,45 @@
 //! tip. A fetch that fails or takes too long leaves the task on the local
 //! branch with a `Warning:` in its decisions; it never fails the task.
 
-use super::*;
+#[cfg(test)]
+use serde_json::json;
+
+#[cfg(test)]
+use crate::engine::lifecycle::carry::carry_onto_newest_base;
+#[cfg(test)]
+use crate::engine::lifecycle::carry::BaseCarry;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+#[cfg(test)]
+use crate::task::TaskStatus;
+
+use crate::clock::now_ms;
+use crate::engine::protected::carry_with_planner_tests;
+use crate::engine::secrets;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::attempt_with_failure;
+#[cfg(test)]
+use crate::engine::test_support::git_in;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::git::paths::short_sha;
+use crate::prompts::clip::truncate_chars;
+use crate::task::FreshBase;
+use crate::task::Task;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use crate::policy::delivery::BaseFrom;
+
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 /// How long one base fetch may take before the task goes on without it.
 pub(super) const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Where a new task's base came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BaseFrom {
-    /// Taken as it is, with no fetch: `HEAD`, a parent's branch, the branch
-    /// a follow-up continues.
-    Plain,
-    /// `base` on `task.create`.
-    Given,
-    /// The project's default branch, for a `task.create` with no `base`.
-    Project,
-}
 
 impl App {
     pub(super) fn base_fetch_timeout(&self) -> Duration {
@@ -216,7 +236,7 @@ pub(super) fn fetch(repo: &Path, up: &Upstream, timeout: Duration) -> Result<Str
         let stderr = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
         return Err(fetch_error(&stderr));
     }
-    git::resolve_commit(repo, &up.tracking_ref()).map_err(|e| e.to_string())
+    crate::git::history::resolve_commit(repo, &up.tracking_ref()).map_err(|e| e.to_string())
 }
 
 /// What a task's work is carried onto: its local base branch, unless that
@@ -224,7 +244,9 @@ pub(super) fn fetch(repo: &Path, up: &Upstream, timeout: Duration) -> Result<Str
 /// diverged checkout left behind), then that tip.
 pub(super) fn carry_rev(repo: &Path, base_ref: &str, tip: Option<&str>) -> String {
     match tip {
-        Some(tip) if git::is_ancestor(repo, tip, base_ref) == Some(false) => tip.to_string(),
+        Some(tip) if crate::git::history::is_ancestor(repo, tip, base_ref) == Some(false) => {
+            tip.to_string()
+        }
         _ => base_ref.to_string(),
     }
 }
@@ -244,7 +266,7 @@ pub(super) struct Fresh {
 }
 
 /// Fetches local branch `branch` and lines the local branch up with it: a
-/// clean checkout that is behind is fast-forwarded (`git::move_branch`, never
+/// clean checkout that is behind is fast-forwarded (`crate::git::branches::move_branch`, never
 /// forced); one ahead or equal is kept; one dirty or diverged is left as it
 /// is and the task takes the fetched tip, with a warning. `last_tip` is the
 /// tip fetched before, kept when this fetch fails.
@@ -265,7 +287,7 @@ pub(super) fn refresh(
     let tip = match fetch(repo, &up, timeout) {
         Ok(tip) => tip,
         Err(why) => {
-            let at = git::resolve_commit(repo, &fresh.rev).unwrap_or_default();
+            let at = crate::git::history::resolve_commit(repo, &fresh.rev).unwrap_or_default();
             let from = if fresh.rev == branch {
                 format!("the local {branch}")
             } else {
@@ -281,9 +303,10 @@ pub(super) fn refresh(
     };
     fresh.rev = branch.to_string();
     fresh.tip = Some(tip.clone());
-    let local = git::resolve_commit(repo, &format!("refs/heads/{branch}")).unwrap_or_default();
+    let local = crate::git::history::resolve_commit(repo, &format!("refs/heads/{branch}"))
+        .unwrap_or_default();
     // Ahead of the remote, or level with it: the local branch is newest.
-    if local == tip || git::is_ancestor(repo, &tip, &local) == Some(true) {
+    if local == tip || crate::git::history::is_ancestor(repo, &tip, &local) == Some(true) {
         return fresh;
     }
     let mut left_as_is = |why: String| {
@@ -295,18 +318,18 @@ pub(super) fn refresh(
         ));
     };
     let diverged = format!("the local {branch} has diverged from {}", up.name());
-    if git::is_ancestor(repo, &local, &tip) != Some(true) {
+    if crate::git::history::is_ancestor(repo, &local, &tip) != Some(true) {
         left_as_is(diverged);
         return fresh;
     }
-    match git::move_branch(repo, branch, &tip) {
-        Ok(git::BranchMove::Done { .. }) => {}
-        Ok(git::BranchMove::Dirty { checkout }) => left_as_is(format!(
+    match crate::git::branches::move_branch(repo, branch, &tip) {
+        Ok(crate::git::branches::BranchMove::Done { .. }) => {}
+        Ok(crate::git::branches::BranchMove::Dirty { checkout }) => left_as_is(format!(
             "the local {branch} is behind {} but its checkout {} has uncommitted changes",
             up.name(),
             checkout.display()
         )),
-        Ok(git::BranchMove::Diverged) => left_as_is(diverged),
+        Ok(crate::git::branches::BranchMove::Diverged) => left_as_is(diverged),
         Err(e) => left_as_is(format!(
             "the local {branch} could not be fast-forwarded ({e})"
         )),
@@ -328,7 +351,7 @@ impl Prepared {
     pub(super) fn plain(repo: &Path, base: &str) -> Self {
         Prepared {
             rev: base.to_string(),
-            base_ref: git::branch_of(repo, base),
+            base_ref: crate::git::branches::branch_of(repo, base),
             fresh: None,
             warnings: vec![],
         }
@@ -349,7 +372,7 @@ pub(super) fn prepare(
     if base == "HEAD" {
         return Prepared::plain(repo, base);
     }
-    if git::branch_of(repo, base).is_some() {
+    if crate::git::branches::branch_of(repo, base).is_some() {
         let fresh = refresh(repo, base, None, timeout);
         return Prepared {
             rev: fresh.rev,
@@ -358,7 +381,7 @@ pub(super) fn prepare(
             warnings: fresh.warnings,
         };
     }
-    if git::resolve_commit(repo, base).is_ok() {
+    if crate::git::history::resolve_commit(repo, base).is_ok() {
         return Prepared::plain(repo, base);
     }
     let up = upstream_of(repo, base);
@@ -384,7 +407,7 @@ pub(super) fn prepare(
                 (Some(up), Some(Err(e))) => format!("not on {} either: {e}", up.remote),
                 _ => "and the repository has no remote".to_string(),
             };
-            let head = git::resolve_commit(repo, "HEAD").unwrap_or_default();
+            let head = crate::git::history::resolve_commit(repo, "HEAD").unwrap_or_default();
             let mut plain = Prepared::plain(repo, "HEAD");
             plain.warnings.push(format!(
                 "Warning: the project's default branch {base} does not exist locally ({why}); branching from HEAD at {}",
@@ -416,23 +439,23 @@ pub(super) async fn refresh_at_start(app: &App, task: &mut Task) {
     );
     let done = tokio::task::spawn_blocking(move || {
         let fresh = refresh(&repo, &r, fresh.tip.as_deref(), timeout);
-        let moved = git::reset_untouched_to_base(&wt, &fresh.rev, &from);
+        let moved = crate::delivery::git::carry::reset_untouched_to_base(&wt, &fresh.rev, &from);
         (fresh, moved)
     })
     .await;
     let Ok((fresh, moved)) = done else {
         return;
     };
-    task.fresh_base = Some(FreshBase { tip: fresh.tip });
-    task.decisions.extend(fresh.warnings);
+    task.record_fresh_base(FreshBase { tip: fresh.tip });
+    task.record_decisions(fresh.warnings);
     if let Ok(Some(new_sha)) = moved {
-        task.decisions.push(format!(
+        task.record_decision(format!(
             "Rebase: starting from {base_ref} at {}",
             short_sha(&new_sha)
         ));
-        task.base_sha = new_sha;
+        crate::task::transitions::move_base(task, new_sha);
     }
-    task.updated_at = now_ms();
+    task.touch(now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
 }
@@ -451,15 +474,19 @@ pub(super) async fn plan_on_newest_base(task: &mut Task) {
         tip_of(task),
     );
     let moved = tokio::task::spawn_blocking(move || {
-        git::reset_untouched_to_base(&wt, &carry_rev(&wt, &r, tip.as_deref()), &from)
+        crate::delivery::git::carry::reset_untouched_to_base(
+            &wt,
+            &carry_rev(&wt, &r, tip.as_deref()),
+            &from,
+        )
     })
     .await;
     if let Ok(Ok(Some(new_sha))) = moved {
-        task.decisions.push(format!(
+        task.record_decision(format!(
             "Rebase: planning from {base_ref} at {}",
             short_sha(&new_sha)
         ));
-        task.base_sha = new_sha;
+        crate::task::transitions::move_base(task, new_sha);
     }
 }
 
@@ -469,7 +496,7 @@ pub(super) fn carry_work(
     task: &mut Task,
     worktree: &Path,
     base_ref: &str,
-) -> Result<git::Rebase, git::GitError> {
+) -> Result<crate::delivery::git::carry::Rebase, crate::git::GitError> {
     let rev = carry_rev(worktree, base_ref, tip_of(task).as_deref());
     carry_with_planner_tests(task, worktree, &rev)
 }
@@ -743,7 +770,9 @@ mod tests {
         assert!(warnings(&task).is_empty(), "{:?}", task.decisions);
         // A task that already ran an attempt is not moved again.
         let after = fx.push("main", "after.txt");
-        task.attempts.push(attempt_with_failure(1, "s"));
+        task.fixture_data()
+            .attempts
+            .push(attempt_with_failure(1, "s"));
         refresh_at_start(&app, &mut task).await;
         assert_eq!(task.base_sha, newer);
         assert_ne!(fx.local("main"), after);
@@ -831,11 +860,13 @@ mod tests {
         let (mut task, own, tip) = left_behind(&app, &fx).await;
         let wt = PathBuf::from(&task.worktree);
         // A prior attempt's uncommitted work.
-        task.attempts.push(attempt_with_failure(1, "s"));
+        task.fixture_data()
+            .attempts
+            .push(attempt_with_failure(1, "s"));
         std::fs::write(wt.join("work.txt"), "work\n").unwrap();
         std::fs::write(wt.join("README.md"), "changed\n").unwrap();
         let carried = carry_work(&mut task, &wt, "main").unwrap();
-        assert_eq!(carried, git::Rebase::Unchanged);
+        assert_eq!(carried, crate::delivery::git::carry::Rebase::Unchanged);
         assert_eq!(worktree_head(&task), tip);
         assert!(!wt.join("own.txt").exists());
         assert_eq!(
@@ -859,7 +890,7 @@ mod tests {
         let newer = commit(&fx.clone, "fixed.txt", "fixed\n");
         let carried = carry_work(&mut task, &wt, "main").unwrap();
         assert!(
-            matches!(&carried, git::Rebase::Moved { new_sha, .. } if *new_sha == newer),
+            matches!(&carried, crate::delivery::git::carry::Rebase::Moved { new_sha, .. } if *new_sha == newer),
             "{carried:?}"
         );
         assert_eq!(worktree_head(&task), newer);

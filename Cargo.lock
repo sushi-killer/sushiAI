@@ -727,6 +727,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "proc-macro2",
+ "serde",
  "serde_json",
  "sha2",
  "sushiai-agents",
@@ -734,6 +736,7 @@ dependencies = [
  "sushiai-hold",
  "sushiai-orch",
  "sushiai-protocol",
+ "syn 2.0.119",
  "tempfile",
  "tokio",
  "toml_edit",

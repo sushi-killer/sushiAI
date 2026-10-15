@@ -2,8 +2,9 @@
 //! ran with, one row per variant, read straight from the task store.
 //! `--eval <set>` limits it to one eval set's tasks and adds a per-task table.
 
-use crate::model::{Attempt, FailureKind, Stage, Task, TaskStatus, Verdict, WorkBuckets};
+use crate::policy::settings::WorkBuckets;
 use crate::store::Store;
+use crate::task::{Attempt, FailureKind, Stage, Task, TaskStatus, Verdict};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -597,7 +598,7 @@ fn per_task_table(tasks: &[Task], eval: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Variant;
+    use crate::policy::variant::Variant;
 
     fn report(tasks: &[Task]) -> String {
         report_with(tasks, None, &|_, _| None)
@@ -610,10 +611,10 @@ mod tests {
             "status": "queued", "tier": "standard", "createdAt": 0, "updatedAt": 0
         }))
         .unwrap();
-        t.variant = Some(variant);
-        t.status = status;
-        t.cost_usd = cost;
-        t.decisions = decisions.iter().map(|d| d.to_string()).collect();
+        t.fixture_data().variant = Some(variant);
+        t.fixture_data().status = status;
+        t.fixture_data().cost_usd = cost;
+        t.fixture_data().decisions = decisions.iter().map(|d| d.to_string()).collect();
         t
     }
 
@@ -636,7 +637,7 @@ mod tests {
             task(fresh.clone(), TaskStatus::Done, 0.5, &[]),
         ];
         let mut old = task(Variant::default(), TaskStatus::Done, 9.0, &[]);
-        old.variant = None;
+        old.fixture_data().variant = None;
         let tasks = [tasks, vec![old]].concat();
         let out = report(&tasks);
         assert!(
@@ -674,7 +675,7 @@ mod tests {
         }))
         .unwrap();
         a.prefix_tokens = prefix;
-        a.usage = cached.map(|c| crate::model::Usage {
+        a.usage = cached.map(|c| crate::task::Usage {
             input: 0,
             output: 0,
             cached: c,
@@ -686,13 +687,13 @@ mod tests {
     fn report_shows_median_prefix_and_mean_cache_read_tokens_per_implement_attempt() {
         let variant = Variant::default();
         let mut a = task(variant.clone(), TaskStatus::Done, 1.0, &[]);
-        a.attempts = vec![
+        a.fixture_data().attempts = vec![
             attempt("plan", Some(90_000), Some(90_000)),
             attempt("implement", Some(20_000), Some(1_000)),
             attempt("implement", None, Some(3_000)),
         ];
         let mut b = task(variant, TaskStatus::Done, 1.0, &[]);
-        b.attempts = vec![
+        b.fixture_data().attempts = vec![
             attempt("implement", Some(30_000), Some(5_000)),
             attempt("implement", Some(22_000), None),
         ];
@@ -714,9 +715,9 @@ mod tests {
             ..Variant::default()
         };
         let mut a = task(evidence, TaskStatus::Done, 1.0, &[]);
-        a.attempts = vec![attempt("implement", Some(15_000), Some(2_000))];
+        a.fixture_data().attempts = vec![attempt("implement", Some(15_000), Some(2_000))];
         let mut b = task(Variant::default(), TaskStatus::Done, 1.0, &[]);
-        b.attempts = vec![attempt("implement", Some(30_000), Some(5_000))];
+        b.fixture_data().attempts = vec![attempt("implement", Some(30_000), Some(5_000))];
 
         let out = report(&[a, b]);
         let rows: Vec<&str> = out.lines().skip(2).filter(|l| l.starts_with('|')).collect();
@@ -731,13 +732,13 @@ mod tests {
 
     fn with_fingerprint(mut t: Task, model: &str, version: &str) -> Task {
         let mut a = attempt("implement", None, None);
-        a.fingerprint = Some(crate::model::Fingerprint {
+        a.fingerprint = Some(crate::task::Fingerprint {
             models: vec![model.to_string()],
-            harness: crate::model::Harness::Claude,
+            harness: crate::policy::routing::Harness::Claude,
             harness_version: Some(version.to_string()),
             prompt_hash: "abcd1234".into(),
         });
-        t.attempts = vec![a];
+        t.fixture_data().attempts = vec![a];
         t
     }
 
@@ -778,7 +779,7 @@ mod tests {
     #[test]
     fn tasks_without_fingerprints_report_with_a_dash_and_no_mixed_line() {
         let mut t = task(Variant::default(), TaskStatus::Done, 1.0, &[]);
-        t.attempts = vec![attempt("implement", None, None)];
+        t.fixture_data().attempts = vec![attempt("implement", None, None)];
         assert!(t.attempts[0].fingerprint.is_none());
         let out = report(&[t]);
         let row = out.lines().nth(2).unwrap();
@@ -937,9 +938,9 @@ mod tests {
         };
         let mk = |v: Variant, set: Option<&str>, name: &str, cost: f64| {
             let mut t = task(v, TaskStatus::Done, cost, &[]);
-            t.eval_set = set.map(String::from);
-            t.eval_name = Some(name.into());
-            t.attempts = vec![attempt("implement", None, None)];
+            t.fixture_data().eval_set = set.map(String::from);
+            t.fixture_data().eval_name = Some(name.into());
+            t.fixture_data().attempts = vec![attempt("implement", None, None)];
             t
         };
         let tasks = vec![
@@ -983,12 +984,12 @@ mod tests {
 
     fn graded(v: &Variant, name: &str, status: TaskStatus, check: Option<i32>, cost: f64) -> Task {
         let mut t = task(v.clone(), status, cost, &[]);
-        t.eval_set = Some("set-1".into());
-        t.eval_name = Some(name.into());
-        t.attempts = vec![attempt("implement", None, None)];
+        t.fixture_data().eval_set = Some("set-1".into());
+        t.fixture_data().eval_name = Some(name.into());
+        t.fixture_data().attempts = vec![attempt("implement", None, None)];
         if let Some(code) = check {
-            t.eval_check_cmd = Some("true".into());
-            t.eval_check = Some(crate::model::EvalCheck {
+            t.fixture_data().eval_check_cmd = Some("true".into());
+            t.fixture_data().eval_check = Some(crate::task::EvalCheck {
                 code: Some(code),
                 tail: String::new(),
             });
@@ -1060,7 +1061,7 @@ mod tests {
     fn a_done_task_whose_check_never_ran_is_not_a_success() {
         let mut t = graded(&Variant::default(), "alpha", TaskStatus::Done, None, 1.0);
         assert!(succeeded(&t));
-        t.eval_check_cmd = Some("true".into());
+        t.fixture_data().eval_check_cmd = Some("true".into());
         assert!(!succeeded(&t));
     }
 
@@ -1069,10 +1070,10 @@ mod tests {
         let v = Variant::default();
         let run = |model: &str, created: i64| {
             let mut t = graded(&v, "alpha", TaskStatus::Done, None, 1.0);
-            t.created_at = created;
-            t.attempts[0].fingerprint = Some(crate::model::Fingerprint {
+            t.fixture_data().created_at = created;
+            t.fixture_data().attempts[0].fingerprint = Some(crate::task::Fingerprint {
                 models: vec![model.into()],
-                harness: crate::model::Harness::Claude,
+                harness: crate::policy::routing::Harness::Claude,
                 harness_version: Some("2.0".into()),
                 prompt_hash: String::new(),
             });

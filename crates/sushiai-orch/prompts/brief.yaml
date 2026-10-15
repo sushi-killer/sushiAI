@@ -29,6 +29,7 @@ rules: |
   - Do not commit, push or open pull requests: the orchestrator runs the verification commands and commits after you finish. Project instructions about committing, pull requests, release notes, lesson or changelog files and review loops do not apply inside this task.
   - Run only the targeted tests for what you changed (one test file or one test name). Do not run the verification commands listed above or a whole-repo test suite: the orchestrator runs them after you finish and gives any failure back to you. If a command is denied or unavailable, continue without it and say so in your report; that is not a reason to stop.
   - Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
+  - Plan your local steps, investigate tool failures and revise your approach using the evidence. Use the harness's native context and compaction to carry the work forward within this task's permissions and budget.
   - Report `blocked` only for a decision the task and repository cannot answer; anything you can look up, decide it yourself and record it in `decisions`. Name in `risk` what a blocked question commits the owner to, from push, money, destructive, security, deploy, scope or public-api (empty when none).
 
 # The checks that fail on the base are part of the contract.
@@ -89,7 +90,22 @@ assumption_overturned: |
 resume: |
   ## Failed checks
 
-  Continue in this session and fix the failed checks on the kept worktree.
+  Continue in this session on the kept worktree. Diagnose the previous failure and meet the current plan below.
+
+resume_time_budget: |
+  ## Continue after the time budget
+
+  The previous attempt reached its time budget. Continue the work in this session from the kept worktree; a time limit does not mean a check failed.
+
+current_plan: |
+  ## Current plan
+
+  These criteria and commands replace the earlier plan in this session. Follow this plan when deciding what remains to do.
+
+previous_attempt_evidence: |
+  ## Previous attempt evidence (history)
+
+  This evidence describes the previous attempt and may refer to commands or criteria that have since changed. Only the current plan above defines the work still required.
 
 # Best-of pick (build_pick_brief).
 pick: |
@@ -159,9 +175,6 @@ conflict: |
 
   Do not satisfy one requirement at the other's expense. If the conflict cannot be resolved, end your final message with a `sushi-impossible` block (`{"criterion": <index>, "evidence": "..."}`) naming one of the conflicting criteria by its `[N]` index instead of satisfying one at the other's expense, and also mention it in your handoff and decisions.
 
-time_budget: |
-  The time budget is spent: stop working and reply with the sushi-report only.
-
 conflict_only_files: |
   ## Conflict-only attempt
 
@@ -230,6 +243,10 @@ plan_checks: |
 
 plan_tests: |
   The planner session is read-only, so put failing test files in `tests` (`path` repo-relative, `content` the whole file): orchd writes and commits them before the first attempt, and the implementer cannot change them.
+
+# Added to every plan brief: measurements run as orchd checks, never as implementer steps.
+plan_measurement: |
+  Measurement belongs to orchd's checks. A benchmark, a load test or anything that needs sockets, ports or the network is a check command that orchd runs, never a step the implementer must run, because the implementer's sandbox cannot bind unix sockets. The check produces the before/after numbers itself: it runs the same benchmark on `$ORCHD_BASE_SHA` in a temporary worktree and on the current tree, prints a before/after/delta table, and exits non-zero unless the gain holds. Result files are never committed.
 
 plan_subtasks: |
   When the request is too large for one agent session, you may split it into `subtasks`, each one agent's session of work. Split only when every part is independently verifiable (its own criteria and verify commands can pass on their own), prefer 2-5 parts, and keep dependent work serial: a part that builds on another lists that part's `key` in its `dependsOn` and starts only after it has landed. Parts that edit the same files belong in one part. List in each part's `paths` the repo-relative files or directories it edits; list in `check` the one targeted command that proves that part alone (or put it first in `verify`). Incomplete parts whose paths overlap, parts that list no paths or parts that have no targeted check are merged into one task with an ordered checklist. Complete drafts with their own criteria and targeted verification may share paths: orchd serialises them and runs compatible overlaps as a relay on one branch, landed once. Draft every part completely, as you would a task of its own: `key`, `title`, `goal`, `criteria` (strings or `{"text": "...", "visual": true}`, as above), `verify`, `finalVerify`, `paths`, `check`, `screenshot` (the repo command that captures the screenshot evidence when the part changes a screen, else empty), `tier` and `dependsOn`. A part with a title, goal, criteria and verify runs as drafted and is not planned again. Each part's `request` is what its own planner drafts from when the draft is incomplete, so keep it self-contained. With subtasks, the top-level title and goal describe the whole, and the top-level verify commands check the combined result, run once after every part has landed. The top-level verify and finalVerify carry the whole-repo checks (the full CI script): they run once on the combined result, so a part's own finalVerify lists only checks for its own part. When the request fits one session, leave `subtasks` out.

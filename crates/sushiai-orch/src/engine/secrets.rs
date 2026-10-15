@@ -1,4 +1,22 @@
-use super::*;
+#[cfg(test)]
+use crate::engine::attempts::secrets::run_secrets;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::git::paths::same_repo_path;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+use crate::store;
+#[cfg(test)]
+use crate::task::TaskStatus;
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(test)]
+use std::time::Duration;
 
 pub(super) fn project_for_repo(
     secrets: &Secrets,
@@ -119,7 +137,7 @@ pub(super) fn redact_old_run_mcp(data_dir: &Path, secrets: &Secrets) {
                         .map_err(std::io::Error::other)
                 }) {
                     redact(&mut config, values);
-                    let _ = store::write_json_private(&path, &config);
+                    let _ = store::files::write_json_private(&path, &config);
                 }
                 #[cfg(unix)]
                 {
@@ -136,7 +154,7 @@ pub(super) fn redact_old_run_mcp(data_dir: &Path, secrets: &Secrets) {
             }
         }
     }
-    let _ = store::write_text_private(&marker, "");
+    let _ = store::files::write_text_private(&marker, "");
 }
 
 #[cfg(test)]
@@ -147,8 +165,8 @@ mod tests {
     async fn stored_project_mismatch_gets_no_agent_or_mcp_values() {
         let (app, dir) = test_app();
         let mut task = task_with_status(TaskStatus::Stopped);
-        task.repo = dir.path().to_string_lossy().into_owned();
-        task.project_id = Some("old-project".into());
+        task.fixture_data().repo = dir.path().to_string_lossy().into_owned();
+        task.fixture_data().project_id = Some("old-project".into());
         app.store.save_task(&task).unwrap();
         let params = |project| {
             json!({
@@ -170,7 +188,7 @@ mod tests {
         );
         let settings = app.settings.read().unwrap().clone();
         assert_eq!(
-            permissions::task_tools(&app, &settings, &task, dir.path())
+            crate::engine::permissions::tools::task_tools(&app, &settings, &task, dir.path())
                 .env
                 .len(),
             2
@@ -181,17 +199,19 @@ mod tests {
             error.contains("old-project") && error.contains(&task.repo),
             "{error}"
         );
-        assert!(permissions::task_tools(&app, &settings, &task, dir.path())
-            .env
-            .is_empty());
+        assert!(
+            crate::engine::permissions::tools::task_tools(&app, &settings, &task, dir.path())
+                .env
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn a_run_after_a_restart_waits_for_the_app_values_instead_of_failing() {
         let (app, dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.repo = dir.path().to_string_lossy().into_owned();
-        task.project_id = Some("mine".into());
+        task.fixture_data().repo = dir.path().to_string_lossy().into_owned();
+        task.fixture_data().project_id = Some("mine".into());
         app.store.save_task(&task).unwrap();
         // A fresh daemon: nothing sent yet, so the project check would fail.
         assert!(run_secrets(&app, &task.id).is_err());
@@ -209,7 +229,8 @@ mod tests {
                 .unwrap();
         });
         let started = std::time::Instant::now();
-        attempt_run::wait_for_app_secrets(&app, &task.id, &CancelToken::new()).await;
+        crate::engine::attempts::secrets::wait_for_app_secrets(&app, &task.id, &CancelToken::new())
+            .await;
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(
             run_secrets(&app, &task.id).unwrap().env.get("KEY").unwrap(),
@@ -314,4 +335,41 @@ mod tests {
             );
         }
     }
+}
+
+/// A Claude model profile's secrets (spec `secrets.set`): env vars merged
+/// into the run's `settings.json`, and an API key written to a per-run key
+/// file the daemon points `apiKeyHelper` at (never inlined into JSON on
+/// disk).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(super) struct ProfileSecret {
+    #[serde(default)]
+    pub(super) env: HashMap<String, String>,
+    #[serde(default)]
+    pub(super) key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(super) struct AccountSecret {
+    pub(super) kind: String,
+    pub(super) value: String,
+}
+
+/// In-memory only (spec: "travel from Electron to the daemon in memory
+/// only"); `secrets.set` is a full replace, never a merge.
+#[derive(Default)]
+pub(super) struct Secrets {
+    pub(super) profiles: HashMap<String, ProfileSecret>,
+    pub(super) accounts: HashMap<String, AccountSecret>,
+    pub(super) projects: HashMap<String, HashMap<String, String>>,
+    pub(super) project_mcp: HashMap<String, HashMap<String, String>>,
+    /// Repo path -> project id, for a task made without one (the agent's own
+    /// `task.create`): its project's values still reach it.
+    pub(super) repo_projects: HashMap<String, String>,
+    /// The app has sent the values since this daemon started; until then
+    /// every map above is empty, not "no values".
+    pub(super) received: bool,
+    /// Repo path -> its project's default branch: what a task made with no
+    /// `base` branches from.
+    pub(super) project_branches: HashMap<String, String>,
 }

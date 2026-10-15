@@ -8,16 +8,16 @@ use crate::prompts::assert_engine_snapshot as snapshot;
 
 fn snapshot_task() -> Task {
     let mut task = test_support::task_with_status(TaskStatus::Running);
-    task.title = "Add a Save button".into();
-    task.goal = "Add a Save button to the settings dialog that writes the settings file.".into();
-    task.criteria = vec![
+    task.fixture_data().title = "Add a Save button".into();
+    task.fixture_data().goal = "Add a Save button to the settings dialog that writes the settings file.".into();
+    task.fixture_data().criteria = vec![
         "The settings dialog shows a Save button -- check: `npm test -- settings`".into(),
         "Clicking Save writes settings.json -- check: `npm test -- save`".into(),
     ];
-    task.verify = vec!["npm test -- settings".into(), "npm run lint".into()];
-    task.final_verify = vec!["npm run build".into()];
-    task.paths = vec!["src/settings.ts".into()];
-    task.request = Some("Add a Save button to the settings dialog.".into());
+    task.fixture_data().verify = vec!["npm test -- settings".into(), "npm run lint".into()];
+    task.fixture_data().final_verify = vec!["npm run build".into()];
+    task.fixture_data().paths = vec!["src/settings.ts".into()];
+    task.fixture_data().request = Some("Add a Save button to the settings dialog.".into());
     task
 }
 
@@ -94,7 +94,7 @@ fn prompt_snapshot_brief_check_redraft_note() {
 #[test]
 fn prompt_snapshot_plan_gate_review() {
     let task = snapshot_task();
-    let child = brief::PlanSubtask {
+    let child = crate::engine::planning::draft::PlanSubtask {
         key: "a".into(),
         title: "Save button".into(),
         goal: "Show the button".into(),
@@ -138,18 +138,18 @@ fn prompt_snapshot_healing_feasibility() {
         "ms": 10,
     }))
     .unwrap();
-    snapshot("healing_feasibility", &healing::feasibility_prompt(&task, &failed));
+    snapshot("healing_feasibility", &crate::verify::healing::reply::feasibility_prompt(&task, &failed));
 }
 
 #[test]
 fn prompt_snapshot_healing_ruling() {
     let task = snapshot_task();
-    let rep = healing::Repeated {
+    let rep = crate::verify::healing::reply::Repeated {
         criterion: 1,
         earlier: (1, "Clicking Save writes nothing yet.".into()),
         current: (2, "No test proves the write.".into()),
     };
-    snapshot("healing_ruling", &healing::ruling_prompt(&task, &rep));
+    snapshot("healing_ruling", &crate::verify::healing::reply::ruling_prompt(&task, &rep));
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn prompt_snapshot_healing_answer() {
         "Owner: use the JSON file, not the database".to_string(),
         "Policy: keep going".to_string(),
     ];
-    snapshot("healing_answer", &healing::answer_prompt(&task, &answers));
+    snapshot("healing_answer", &crate::verify::healing::reply::answer_prompt(&task, &answers));
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn prompt_snapshot_past_work() {
 fn prompt_snapshot_permissions_tools_for_the_plan() {
     snapshot(
         "permissions_tools_plan",
-        &permissions::tools_block_text(&tools_fixture().0, &tools_fixture().1, true),
+        &crate::engine::permissions::brief::tools_block_text(&tools_fixture().0, &tools_fixture().1, true),
     );
 }
 
@@ -189,11 +189,11 @@ fn prompt_snapshot_permissions_tools_for_the_plan() {
 fn prompt_snapshot_permissions_tools_for_the_implementer() {
     snapshot(
         "permissions_tools_implement",
-        &permissions::tools_block_text(&tools_fixture().0, &tools_fixture().1, false),
+        &crate::engine::permissions::brief::tools_block_text(&tools_fixture().0, &tools_fixture().1, false),
     );
     snapshot(
         "permissions_tools_none",
-        &permissions::tools_block_text(&[], &[], false),
+        &crate::engine::permissions::brief::tools_block_text(&[], &[], false),
     );
 }
 

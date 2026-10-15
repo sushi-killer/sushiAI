@@ -1,4 +1,13 @@
-use super::*;
+use crate::engine::state::App;
+use crate::engine::verification::cache::run_verify_cached;
+use crate::engine::verification::scoping::scoped_checks_for;
+use crate::policy::stop as hook;
+use crate::verify::command::hook_budget_secs;
+use crate::verify::scoping::filter_scoped;
+use serde::Deserialize;
+use serde_json::json;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 impl App {
     pub(super) async fn handle_hook_stop(
@@ -20,7 +29,7 @@ impl App {
         let base_sha = ctx.base_sha.clone();
         // What the owner let the agent stage at a protected path is in place
         // before the diff is read and verified.
-        permissions::apply_staged(&ctx);
+        crate::engine::permissions::staging::apply_staged(&ctx);
         let (wt, own) = (worktree.clone(), ctx.own.clone());
         let changed =
             tokio::task::spawn_blocking(move || own.changed_files(&wt).unwrap_or_default())

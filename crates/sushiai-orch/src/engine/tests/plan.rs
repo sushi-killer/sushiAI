@@ -1,6 +1,6 @@
 #[test]
 fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
-    let part = |key: &str, deps: &[&str]| brief::PlanSubtask {
+    let part = |key: &str, deps: &[&str]| crate::engine::planning::draft::PlanSubtask {
         key: key.into(),
         title: key.to_uppercase(),
         request: format!("do {key}"),
@@ -34,7 +34,7 @@ fn check_subtasks_accepts_a_serial_pair_and_rejects_bad_graphs() {
 #[test]
 fn a_subtask_request_carries_the_whole_and_what_was_decided() {
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.decisions = vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
+    parent.fixture_data().decisions = vec!["Owner: Which default? -> dark".into(), "Planner: x".into()];
     let text = subtask_request(&parent, "  write the toggle ");
     assert!(
         text.starts_with("write the toggle\n\nThis is one part of a larger task, \"Do thing\"")
@@ -43,8 +43,8 @@ fn a_subtask_request_carries_the_whole_and_what_was_decided() {
     assert!(!text.contains("Planner: x"));
 }
 
-fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> brief::PlanSubtask {
-    brief::PlanSubtask {
+fn pathed(key: &str, deps: &[&str], paths: &[&str]) -> crate::engine::planning::draft::PlanSubtask {
+    crate::engine::planning::draft::PlanSubtask {
         key: key.into(),
         title: key.to_uppercase(),
         request: format!("do {key}"),
@@ -178,7 +178,7 @@ fn plan_route_counts_unicode_distinct_paths_and_excludes_urls() {
     let variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
     let request = "Fix café `src/a.rs` [src/a.rs] 'README.md' https://example.test/a.txt";
-    task.request = Some(request.into());
+    task.fixture_data().request = Some(request.into());
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-sonnet");
     assert_eq!(
@@ -202,7 +202,7 @@ fn plan_route_counts_unicode_distinct_paths_and_excludes_urls() {
         .1
         .contains("2 paths > 1"));
 
-    task.request = Some("a.12345678 a.123456789 a.a-b a. a/".into());
+    task.fixture_data().request = Some("a.12345678 a.123456789 a.a-b a. a/".into());
     settings.small_plan_max_paths = 3;
     assert!(variant
         .plan_route_for(&settings, &task)
@@ -215,16 +215,16 @@ fn plan_route_uses_subtask_paths_only_when_nonempty_and_parented() {
     let settings = Settings::default();
     let variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.request = Some("Edit a.rs b.rs c.rs d.rs".into());
-    task.parent = Some("parent".into());
-    task.paths = vec!["src/a".into(), "src/a".into(), "src/b".into()];
+    task.fixture_data().request = Some("Edit a.rs b.rs c.rs d.rs".into());
+    task.fixture_data().parent = Some("parent".into());
+    task.fixture_data().paths = vec!["src/a".into(), "src/a".into(), "src/b".into()];
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-sonnet");
     assert!(line.contains("2 paths <= 3"), "{line}");
-    task.paths.clear();
+    task.fixture_data().paths.clear();
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
-    task.paths = vec!["src/a".into()];
-    task.parent = None;
+    task.fixture_data().paths = vec!["src/a".into()];
+    task.fixture_data().parent = None;
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
 }
 
@@ -238,7 +238,7 @@ fn plan_route_rejects_two_list_items_but_accepts_nonlists_and_one_item() {
         "- first\n * second",
         "+ first\n\t- second",
     ] {
-        task.request = Some(request.into());
+        task.fixture_data().request = Some(request.into());
         let (id, line) = variant.plan_route_for(&settings, &task);
         assert_eq!(id, "claude-opus", "{request}");
         assert!(line.contains("not small: 2 list items >= 2"), "{line}");
@@ -249,7 +249,7 @@ fn plan_route_rejects_two_list_items_but_accepts_nonlists_and_one_item() {
         "- \n* ",
         "a - first\nb - second",
     ] {
-        task.request = Some(request.into());
+        task.fixture_data().request = Some(request.into());
         assert_eq!(
             variant.plan_route_for(&settings, &task).0,
             "claude-sonnet",
@@ -263,7 +263,7 @@ fn plan_route_honors_off_override_and_missing_standard() {
     let mut settings = Settings::default();
     let mut variant = Variant::default();
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.request = Some("Fix a.rs".into());
+    task.fixture_data().request = Some("Fix a.rs".into());
     settings.small_plan_max_chars = 0;
     let (id, line) = variant.plan_route_for(&settings, &task);
     assert_eq!(id, "claude-opus");

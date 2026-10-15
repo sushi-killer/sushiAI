@@ -18,8 +18,8 @@ fn native_check_command_gets_electron_env_and_host_does_not() {
         known_project_folders: &[],
         known_task_worktrees: &[],
     });
-    let native = verify::build_verify_command(root, "true", Some(&policy), "base");
-    let host = verify::build_verify_command(root, "true", None, "base");
+    let native = crate::verify::command::build_verify_command(root, "true", Some(&policy), "base");
+    let host = crate::verify::command::build_verify_command(root, "true", None, "base");
     let electron_env = |command: &tokio::process::Command| {
         command
             .as_std()
@@ -68,15 +68,8 @@ async fn run_one_verify_command_kills_the_whole_process_group_on_timeout() {
     let cancel = CancelToken::new();
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
-    let outcome = run_one_verify_command(
-        CheckContext::new(&app, None),
-        tmp.path(),
-        &cmd,
-        Duration::from_millis(300),
-        None,
-        "",
-        &cancel,
-    )
+    let outcome = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, None), tmp.path(), None, "", &cancel).with_timeout(Duration::from_millis(300)),
+&cmd)
     .await;
     assert!(outcome.tail.contains("timed out"));
 
@@ -103,15 +96,8 @@ async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
     });
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
-    let outcome = run_one_verify_command(
-        CheckContext::new(&app, None),
-        tmp.path(),
-        &cmd,
-        Duration::from_secs(60),
-        None,
-        "",
-        &cancel,
-    )
+    let outcome = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, None), tmp.path(), None, "", &cancel).with_timeout(Duration::from_secs(60)),
+&cmd)
     .await;
     assert_eq!(outcome.tail, "cancelled");
 }
@@ -384,15 +370,8 @@ async fn verify_detached_process_inside_the_directory_is_stopped_on_timeout() {
     start_detached_sleeper(tmp.path(), &pidfile);
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
-    let outcome = run_one_verify_command(
-        CheckContext::new(&app, None),
-        tmp.path(),
-        "sleep 60",
-        Duration::from_millis(300),
-        None,
-        "",
-        &CancelToken::new(),
-    )
+    let outcome = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, None), tmp.path(), None, "", &CancelToken::new()).with_timeout(Duration::from_millis(300)),
+"sleep 60")
     .await;
     assert!(outcome.tail.contains("timed out"), "{}", outcome.tail);
     assert_pid_gone(&pidfile).await;
@@ -415,15 +394,8 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() 
     });
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
-    let outcome = run_one_verify_command(
-        CheckContext::new(&app, None),
-        tmp.path(),
-        &cmd,
-        Duration::from_secs(60),
-        None,
-        "",
-        &cancel,
-    )
+    let outcome = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, None), tmp.path(), None, "", &cancel).with_timeout(Duration::from_secs(60)),
+&cmd)
     .await;
     assert_eq!(outcome.tail, "cancelled");
     assert_pid_gone(&pidfile).await;
@@ -439,15 +411,8 @@ async fn verify_stops_a_process_left_in_the_group_after_a_normal_exit() {
     );
     let (app, _app_dir) = test_app();
     *app.check_load.write().unwrap() = || (0.0, 4);
-    let outcome = run_one_verify_command(
-        CheckContext::new(&app, None),
-        tmp.path(),
-        &cmd,
-        Duration::from_secs(60),
-        None,
-        "",
-        &CancelToken::new(),
-    )
+    let outcome = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, None), tmp.path(), None, "", &CancelToken::new()).with_timeout(Duration::from_secs(60)),
+&cmd)
     .await;
     assert_eq!(outcome.code, Some(0));
     assert_pid_gone(&pidfile).await;
@@ -579,15 +544,8 @@ fn check_slots_spawn(
         command.to_string(),
     );
     tokio::spawn(async move {
-        run_one_verify_command(
-            CheckContext::new(&app, Some(&id)),
-            &cwd,
-            &command,
-            timeout,
-            None,
-            "",
-            &CancelToken::new(),
-        )
+        run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, Some(&id)), &cwd, None, "", &CancelToken::new()).with_timeout(timeout),
+&command)
         .await
     })
 }
@@ -760,12 +718,12 @@ async fn check_slots_settings_set_raises_parallel_and_starts_a_waiting_task_loop
     std::fs::create_dir(&repo).unwrap();
     init_git_repo(&repo);
     let mut task = task_with_status(TaskStatus::Queued);
-    task.repo = repo.to_string_lossy().into_owned();
-    task.worktree = task.repo.clone();
-    task.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
-    task.criteria = vec!["requires a tool".into()];
-    task.brief_check.done = true;
-    task.brief_check.missing_tool = Some(MissingTool {
+    task.fixture_data().repo = repo.to_string_lossy().into_owned();
+    task.fixture_data().worktree = task.repo.clone();
+    task.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+    task.fixture_data().criteria = vec!["requires a tool".into()];
+    task.fixture_data().brief_check.done = true;
+    task.fixture_data().brief_check.missing_tool = Some(MissingTool {
         criterion: 0,
         capability: "test capability".into(),
         tool_id: Some("asana".into()),
@@ -795,7 +753,7 @@ async fn check_slots_settings_set_raises_parallel_and_starts_a_waiting_task_loop
         .unwrap()
         .get(&task.id)
         .unwrap()
-        .cancel
+        .signals.cancel
         .clone();
     ctrl.cancel();
     check_slots_wait_for(|| !app.controls.lock().unwrap().contains_key(&task.id)).await;
@@ -861,15 +819,8 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
     *app.check_load.write().unwrap() = || (8.0, 8);
     // 1 s, not 100 ms: a loaded CI runner may not reach the echo sooner.
     let command = "echo run >> count; exec sleep 5";
-    let result = run_one_verify_command(
-        CheckContext::new(&app, Some(&task.id)),
-        dir.path(),
-        command,
-        Duration::from_secs(1),
-        None,
-        "",
-        &CancelToken::new(),
-    )
+    let result = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, Some(&task.id)), dir.path(), None, "", &CancelToken::new()).with_timeout(Duration::from_secs(1)),
+command)
     .await;
     assert_eq!(
         std::fs::read_to_string(dir.path().join("count"))
@@ -891,15 +842,8 @@ async fn check_slots_high_load_timeout_retries_once_and_low_load_keeps_baseline_
     assert!(task.question.is_none());
     std::fs::remove_file(dir.path().join("count")).unwrap();
     *app.check_load.write().unwrap() = || (7.9, 8);
-    let low = run_one_verify_command(
-        CheckContext::new(&app, Some(&task.id)),
-        dir.path(),
-        command,
-        Duration::from_secs(1),
-        None,
-        "",
-        &CancelToken::new(),
-    )
+    let low = run_one_verify_command(crate::engine::verification::runner::CheckRunner::from_context(CheckContext::new(&app, Some(&task.id)), dir.path(), None, "", &CancelToken::new()).with_timeout(Duration::from_secs(1)),
+command)
     .await;
     assert_eq!(
         std::fs::read_to_string(dir.path().join("count"))
@@ -920,10 +864,10 @@ async fn check_slots_high_load_final_retry_failure_never_looks_up_or_blames_the_
     *app.check_load.write().unwrap() = || (12.0, 8);
     let mut task = task_with_status(TaskStatus::Running);
     let command = "echo run >> count; if [ -f first ]; then exit 1; fi; touch first; exec sleep 5";
-    task.final_verify = vec![command.into()];
-    task.attempts.push(attempt_with_failure(1, "old"));
-    task.attempts[0].status = AttemptStatus::Running;
-    task.attempts[0].failure = None;
+    task.fixture_data().final_verify = vec![command.into()];
+    task.fixture_data().attempts.push(attempt_with_failure(1, "old"));
+    task.fixture_data().attempts[0].status = AttemptStatus::Running;
+    task.fixture_data().attempts[0].failure = None;
     app.base_runs.lock().unwrap().insert(
         (task.base_sha.clone(), command.into()),
         VerifyOutcome {
@@ -944,7 +888,7 @@ async fn check_slots_high_load_final_retry_failure_never_looks_up_or_blames_the_
     };
     let tail = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::engine::task_loop::finish_after_review(
+        crate::engine::lifecycle::completion::finish::finish_after_review(
             &app,
             &id,
             &mut task,
@@ -965,7 +909,7 @@ async fn check_slots_high_load_final_retry_failure_never_looks_up_or_blames_the_
     change_load.await.unwrap();
     assert_eq!(task.attempts[0].verify[0].load, 0.0);
     assert!(task.attempts[0].verify[0].load_timeout);
-    assert!(matches!(tail, crate::engine::task_loop::Tail::Continue));
+    assert!(matches!(tail, crate::engine::lifecycle::completion::Tail::Continue));
     assert!(task.question.is_none());
     assert_eq!(
         std::fs::read_to_string(dir.path().join("count"))
@@ -980,14 +924,11 @@ async fn check_slots_high_load_final_retry_failure_never_looks_up_or_blames_the_
     assert!(failure
         .detail
         .contains("ms, timed out under load 12.00 on 8 cores"));
-    assert!(broken_by_the_new_base(
-        &app,
-        &task,
-        &task.attempts[0].verify[0],
-        "old",
-        dir.path(),
-        &CancelToken::new()
-    )
+    assert!(broken_by_the_new_base(&app,
+crate::engine::verification::base::jobs::BaseCheckJob::new(Some(&task.id), &task.repo, &task.base_sha, dir.path(), false),
+&task.attempts[0].verify[0],
+"old",
+&CancelToken::new())
     .await
     .is_none());
     assert!(app.base_jobs.lock().unwrap().is_empty());
@@ -1045,14 +986,11 @@ async fn check_slots_environment_retry_results_never_count_as_base_failures() {
             .await
             .is_none()
     );
-    assert!(broken_by_the_new_base(
-        &app,
-        &task,
-        &ordinary,
-        "old",
-        dir.path(),
-        &CancelToken::new()
-    )
+    assert!(broken_by_the_new_base(&app,
+crate::engine::verification::base::jobs::BaseCheckJob::new(Some(&task.id), &task.repo, &task.base_sha, dir.path(), false),
+&ordinary,
+"old",
+&CancelToken::new())
     .await
     .is_none());
     assert!(task.question.is_none());
@@ -1068,10 +1006,10 @@ async fn check_slots_low_load_final_timeout_still_retries_then_asks_about_a_know
     *app.check_load.write().unwrap() = || (0.0, 8);
     let mut task = task_with_status(TaskStatus::Running);
     let command = "echo run >> count; if [ -f first ]; then exit 1; fi; touch first; exec sleep 5";
-    task.final_verify = vec![command.into()];
-    task.attempts.push(attempt_with_failure(1, "old"));
-    task.attempts[0].status = AttemptStatus::Running;
-    task.attempts[0].failure = None;
+    task.fixture_data().final_verify = vec![command.into()];
+    task.fixture_data().attempts.push(attempt_with_failure(1, "old"));
+    task.fixture_data().attempts[0].status = AttemptStatus::Running;
+    task.fixture_data().attempts[0].failure = None;
     app.base_runs.lock().unwrap().insert(
         (task.base_sha.clone(), command.into()),
         VerifyOutcome {
@@ -1092,7 +1030,7 @@ async fn check_slots_low_load_final_timeout_still_retries_then_asks_about_a_know
         );
         tokio::spawn(async move {
             let settings = app.settings.read().unwrap().clone();
-            crate::engine::task_loop::finish_after_review(
+            crate::engine::lifecycle::completion::finish::finish_after_review(
                 &app,
                 &id,
                 &mut task,
@@ -1122,7 +1060,7 @@ async fn check_slots_low_load_final_timeout_still_retries_then_asks_about_a_know
     .await;
     let stored = app.store.load_task(&id).unwrap().unwrap();
     assert_eq!(
-        stored.question.unwrap().kind,
+        stored.question.clone().unwrap().kind,
         QuestionKind::PreexistingFailure
     );
     assert_eq!(
@@ -1143,7 +1081,7 @@ async fn check_slots_baseline_wait_decisions_do_not_reveal_the_held_out_command(
     check_slots_settings(&app, 2, Some(1)).await;
     let mut task = task_with_status(TaskStatus::Running);
     let command = "printf secret-held-out";
-    task.held_out = Some(Check {
+    task.fixture_data().held_out = Some(Check {
         criterion: 0,
         run: command.into(),
         baseline: None,

@@ -4,10 +4,10 @@
 //! prints the catalogue as a table.
 
 use crate::ab::work_breakdown;
-use crate::model::{
-    now_ms, Attempt, AttemptStatus, FailureKind, Stage, Task, TaskStatus, Verdict, WorkBuckets,
-};
+use crate::clock::now_ms;
+use crate::policy::settings::WorkBuckets;
 use crate::store::Store;
+use crate::task::{Attempt, AttemptStatus, FailureKind, Stage, Task, TaskStatus, Verdict};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;

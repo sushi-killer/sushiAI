@@ -8,8 +8,8 @@ use std::fs;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use sushiai_orch::sandbox::to_sbpl as task_sandbox_profile;
 use sushiai_orch::{
-    engine::task_sandbox_profile,
     harness::shell_quote,
     sandbox::{Inputs, TaskSandbox},
 };
@@ -73,7 +73,7 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let repo = root.join("projects/repo");
-        let worktree = sushiai_orch::git::worktree_path(
+        let worktree = sushiai_orch::git::worktree::worktree_path(
             &repo,
             &root.join("sushiai"),
             worktree_root,

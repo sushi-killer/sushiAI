@@ -2,7 +2,46 @@
 //! the report-only criteria it names, a check that named shared checks still
 //! run, one replan, and the merge of same-file subtasks into a checklist.
 
-use super::*;
+#[cfg(test)]
+use crate::engine::planning::records::store_draft;
+#[cfg(test)]
+use crate::task::AttemptStatus;
+#[cfg(test)]
+use crate::task::Check;
+#[cfg(test)]
+use crate::task::Stage;
+
+#[cfg(test)]
+use crate::task::PlannedTest;
+
+use crate::clock::now_ms;
+use crate::engine::answer_policy;
+use crate::engine::answer_policy::check_authority;
+use crate::engine::brief_check::add_task_cost;
+use crate::engine::brief_check::run_judge;
+use crate::engine::brief_check::JudgeRun;
+use crate::engine::planning::graph::overlapping_path;
+use crate::engine::state::App;
+use crate::engine::verification::context::CheckContext;
+use crate::engine::verification::runner::run_verify_commands;
+use crate::harness::cancel::CancelToken;
+use crate::harness::native::error::RunError;
+use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
+use crate::prompts::clip::truncate_chars;
+use crate::prompts::engine_text;
+use crate::task::checks::authority::Origin;
+use crate::task::graph::has_cycle;
+use crate::task::ChecklistItem;
+use crate::task::PlanFinding;
+use crate::task::Severity;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 const MAX_FINDING_CHARS: usize = 400;
@@ -40,17 +79,6 @@ pub(super) fn owner_text(request: &str) -> &str {
         .min()
         .unwrap_or(request.len());
     &request[..end]
-}
-
-/// The criterion's own text and the text after its `-- check:` marker.
-fn split_check(criterion: &str) -> (&str, Option<&str>) {
-    match criterion.to_ascii_lowercase().find("-- check:") {
-        Some(at) => (
-            criterion[..at].trim(),
-            Some(criterion[at + "-- check:".len()..].trim()),
-        ),
-        None => (criterion.trim(), None),
-    }
 }
 
 /// A backticked span of the owner's text that is a shared check.
@@ -211,9 +239,14 @@ fn split_review(
 ) -> (Vec<usize>, Vec<PlanFinding>) {
     let (removals, shared): (Vec<usize>, Vec<usize>) =
         report_only_criteria(found).into_iter().partition(|&i| {
-            let commands = answer_policy::criterion_commands(task, i);
-            answer_policy::removal_refusal(settings, task, &commands, answer_policy::Origin::Other)
-                .is_none()
+            let commands = crate::task::checks::authority::criterion_commands(task, i);
+            answer_policy::removal_refusal(
+                settings,
+                task,
+                &commands,
+                crate::task::checks::authority::Origin::Other,
+            )
+            .is_none()
         });
     let review = found
         .iter()
@@ -235,7 +268,7 @@ fn split_review(
 pub(super) fn build_review_prompt(
     task: &Task,
     request: &str,
-    subtasks: &[brief::PlanSubtask],
+    subtasks: &[crate::engine::planning::draft::PlanSubtask],
 ) -> String {
     let parts: Vec<serde_json::Value> = subtasks
         .iter()
@@ -312,35 +345,17 @@ fn review_route(app: &App, task: &Task) -> Result<(Route, String), String> {
     }
 }
 
-/// Drops the criteria at `remove` and everything that points at an index:
-/// grounded checks are removed or reindexed, visual marks go by text.
+#[cfg(test)]
 fn remove_criteria(task: &mut Task, remove: &[usize]) {
-    let shift = |i: usize| i - remove.iter().filter(|&&r| r < i).count();
-    let removed_texts: Vec<String> = remove
-        .iter()
-        .filter_map(|&i| task.criteria.get(i).cloned())
-        .collect();
-    task.checks = std::mem::take(&mut task.checks)
-        .into_iter()
-        .filter(|c| !remove.contains(&c.criterion))
-        .map(|mut c| {
-            c.criterion = shift(c.criterion);
-            c
-        })
-        .collect();
-    task.held_out = task.held_out.take().and_then(|mut c| {
-        (!remove.contains(&c.criterion)).then(|| {
-            c.criterion = shift(c.criterion);
-            c
-        })
-    });
-    task.visual_criteria.retain(|v| !removed_texts.contains(v));
-    task.criteria = std::mem::take(&mut task.criteria)
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !remove.contains(i))
-        .map(|(_, c)| c)
-        .collect();
+    let snapshot = crate::task::checks::snapshot::CheckSnapshot::capture(task);
+    crate::task::checks::criteria::remove_report_only(
+        &crate::task::checks::authority::CheckAuthority::default(),
+        task,
+        &snapshot,
+        remove,
+        Origin::Owner,
+    )
+    .unwrap();
 }
 
 fn is_critical(f: &PlanFinding) -> bool {
@@ -355,12 +370,13 @@ pub(super) async fn run(
     app: &Arc<App>,
     task_id: &str,
     attempt_n: u32,
-    draft: &brief::PlanDraft,
+    draft: &crate::engine::planning::draft::PlanDraft,
     cancel: &CancelToken,
 ) -> GateAction {
     let Ok(Some(task)) = app.store.load_task(task_id) else {
         return GateAction::Proceed;
     };
+    let input_snapshot = crate::task::checks::snapshot::CheckSnapshot::capture(&task);
     let settings = app.settings.read().unwrap().clone();
     let request = task.request.clone().unwrap_or_default();
     let first_pass = !task.plan_gate.reviewed;
@@ -427,28 +443,40 @@ pub(super) async fn run(
         review = carried;
     }
 
-    // Reload: the review's cost went to the stored task.
-    let Ok(Some(mut task)) = app.store.load_task(task_id) else {
+    // Apply the review to exactly the check plan it read, under the task lock.
+    let Ok(mut task) = app.update_task_checked(task_id, |task| {
+        if !input_snapshot.matches(task) {
+            return Err("the plan review is stale".to_string());
+        }
+        if !removals.is_empty() {
+            let authority = check_authority(&settings, task);
+            for index in &removals {
+                if let Some(criterion) = task.criteria.get(*index) {
+                    let text = criterion
+                        .split_once("-- check:")
+                        .map_or(criterion.as_str(), |(text, _)| text);
+                    lines.push(format!(
+                        "Plan gate: removed the report-only criterion \"{}\"",
+                        truncate_chars(text.trim(), 160)
+                    ));
+                }
+            }
+            crate::task::checks::criteria::remove_report_only(
+                &authority,
+                task,
+                &input_snapshot,
+                &removals,
+                Origin::Other,
+            )?;
+        }
+        task.record_decisions(lines);
+        if first_pass {
+            task.mark_plan_reviewed();
+        }
+        Ok(())
+    }) else {
         return GateAction::Proceed;
     };
-    task.decisions.extend(lines);
-    if first_pass {
-        task.plan_gate.reviewed = true;
-    }
-    if !removals.is_empty() {
-        for i in &removals {
-            if let Some(c) = task.criteria.get(*i) {
-                task.decisions.push(format!(
-                    "Plan gate: removed the report-only criterion \"{}\"",
-                    truncate_chars(split_check(c).0, 160)
-                ));
-            }
-        }
-        remove_criteria(&mut task, &removals);
-    }
-    task.updated_at = now_ms();
-    let _ = app.store.save_task(&task);
-    app.broadcast_task(&task);
 
     let replanned = task.plan_gate.replanned;
     let is_shared = |c: &str| answer_policy::is_shared_check(&settings, &task, c);
@@ -465,31 +493,31 @@ pub(super) async fn run(
             k.dedup();
             k
         };
-        task.decisions.push(format!(
+        task.record_decision(format!(
             "Plan gate: {} critical finding(s) ({}); planning again once",
             all.iter().filter(|f| is_critical(f)).count(),
             kinds.join(", ")
         ));
-        task.plan_gate.replanned = true;
-        task.plan_gate.findings = all;
+        task.mark_replanned();
+        task.record_plan_findings(all);
         // The new draft is checked again, from scratch.
-        task.brief_check.done = false;
-        task.brief_check.missing_tool = None;
-        task.status = TaskStatus::Drafting;
-        task.updated_at = now_ms();
+        task.finish_brief_check(false);
+        task.clear_missing_tool();
+        task.resume_phase(TaskStatus::Drafting, crate::clock::now_ms());
+        task.touch(now_ms());
         let _ = app.store.save_task(&task);
         app.broadcast_task(&task);
         return GateAction::Replan;
     }
 
     if !all.is_empty() {
-        task.decisions.push(format!(
+        task.record_decision(format!(
             "Plan gate: {} finding(s) left for the implementer's brief",
             all.len()
         ));
     }
-    task.plan_gate.findings = all;
-    task.updated_at = now_ms();
+    task.record_plan_findings(all);
+    task.touch(now_ms());
     let _ = app.store.save_task(&task);
     app.broadcast_task(&task);
     GateAction::Proceed
@@ -508,7 +536,7 @@ pub(super) struct MergePlan {
 /// one merged group, in planner
 /// order made stable-topological by `dependsOn`. If the group, as one node,
 /// would make the dependency graph cyclic, everything merges.
-pub(super) fn merge_parts(parts: &[brief::PlanSubtask]) -> MergePlan {
+pub(super) fn merge_parts(parts: &[crate::engine::planning::draft::PlanSubtask]) -> MergePlan {
     let keys: Vec<&str> = parts.iter().map(|p| p.key.trim()).collect();
     let stands_alone = |i: usize| {
         !parts[i].paths.is_empty()
@@ -572,7 +600,10 @@ pub(super) fn merge_parts(parts: &[brief::PlanSubtask]) -> MergePlan {
 }
 
 /// The checklist of a merged group, in group order.
-pub(super) fn checklist_of(parts: &[brief::PlanSubtask], merged: &[usize]) -> Vec<ChecklistItem> {
+pub(super) fn checklist_of(
+    parts: &[crate::engine::planning::draft::PlanSubtask],
+    merged: &[usize],
+) -> Vec<ChecklistItem> {
     merged
         .iter()
         .map(|&i| ChecklistItem {
@@ -605,13 +636,14 @@ pub(super) async fn run_checklist(
         .collect();
     let sandbox = app.task_sandbox(&task.repo, worktree, run_dir);
     let results = run_verify_commands(
-        CheckContext::new(app, Some(&task.id)),
-        worktree,
-        run_dir,
+        crate::engine::verification::runner::CheckRunner::from_context(
+            CheckContext::new(app, Some(&task.id)),
+            worktree,
+            sandbox.as_ref(),
+            &task.base_sha,
+            cancel,
+        ),
         &commands,
-        sandbox.as_ref(),
-        &task.base_sha,
-        cancel,
     )
     .await;
     if cancel.is_cancelled() {
@@ -619,7 +651,7 @@ pub(super) async fn run_checklist(
     }
     let mut failed = Vec::new();
     for (&i, result) in runnable.iter().zip(&results) {
-        task.checklist[i].passes = result.code == Some(0);
+        task.record_checklist_result(i, result.code == Some(0));
         if !task.checklist[i].passes {
             failed.push(format!(
                 "Checklist item \"{}\": `{}` exited {}.\n{}",
@@ -633,7 +665,7 @@ pub(super) async fn run_checklist(
             ));
         }
     }
-    task.updated_at = now_ms();
+    task.touch(now_ms());
     let _ = app.store.save_task(task);
     app.broadcast_task(task);
     (!failed.is_empty()).then(|| failed.join("\n\n"))
@@ -643,8 +675,13 @@ pub(super) async fn run_checklist(
 mod tests {
     use super::*;
 
-    fn part(key: &str, deps: &[&str], paths: &[&str], check: &str) -> brief::PlanSubtask {
-        brief::PlanSubtask {
+    fn part(
+        key: &str,
+        deps: &[&str],
+        paths: &[&str],
+        check: &str,
+    ) -> crate::engine::planning::draft::PlanSubtask {
+        crate::engine::planning::draft::PlanSubtask {
             key: key.into(),
             title: key.to_uppercase(),
             request: format!("do {key}"),
@@ -698,16 +735,16 @@ mod tests {
         let (app, _dir) = test_app();
         let settings = app.settings.read().unwrap().clone();
         let mut task = task_with_status(TaskStatus::Drafting);
-        task.criteria = vec![
+        task.fixture_data().criteria = vec![
             "Shared -- check: npm run ci".into(),
             "Own -- check: test -f made.txt".into(),
         ];
-        task.request = Some("Run `npm run ci`".into());
-        task.planner_tests.sources = vec![crate::model::SourcedCheck {
+        task.fixture_data().request = Some("Run `npm run ci`".into());
+        task.fixture_data().planner_tests.sources = vec![crate::task::SourcedCheck {
             command: "test -f made.txt".into(),
-            source: crate::model::CheckSource::Planner,
+            source: crate::task::CheckSource::Planner,
         }];
-        task.planner_tests.files = vec![crate::model::PlannedTest {
+        task.fixture_data().planner_tests.files = vec![crate::task::PlannedTest {
             path: "made.txt".into(),
             content: String::new(),
         }];
@@ -743,15 +780,16 @@ mod tests {
         let mut settings = app.settings.read().unwrap().clone();
         settings.review.clear();
         let mut task = task_with_status(TaskStatus::Drafting);
+        task.fixture_data().worktree = dir.path().to_string_lossy().into_owned();
         let mut attempt = attempt_with_failure(1, "drafting");
         attempt.stage = Stage::Plan;
         attempt.status = AttemptStatus::Running;
         attempt.failure = None;
-        task.attempts.push(attempt);
-        let draft = brief::parse_plan(
+        task.fixture_data().attempts.push(attempt);
+        let draft = crate::engine::planning::draft::parse_plan(
             "```sushi-plan\n{\"title\":\"Run checks\",\"verify\":[\"npm run ci\",\"cargo test -p x --lib\"],\"finalVerify\":[\"npm run ci\"]}\n```",
         ).unwrap();
-        store_draft(&app, &mut task, 0, &draft, &settings, dir.path());
+        store_draft(&mut task, 0, &draft, &settings);
         assert_eq!(task.verify, vec!["cargo test -p x --lib"]);
         assert_eq!(task.final_verify, vec!["npm run ci"]);
         assert!(task
@@ -760,11 +798,11 @@ mod tests {
             .any(|d| d.contains("npm run ci") && d.contains("moved to finalVerify")));
 
         // A sole suite also runs once as the final gate, with review off.
-        let sole = brief::parse_plan(
+        let sole = crate::engine::planning::draft::parse_plan(
             "```sushi-plan\n{\"title\":\"Run checks\",\"verify\":[\"npm run ci\"]}\n```",
         )
         .unwrap();
-        store_draft(&app, &mut task, 0, &sole, &settings, dir.path());
+        store_draft(&mut task, 0, &sole, &settings);
         assert!(task.verify.is_empty());
         assert_eq!(task.final_verify, vec!["npm run ci"]);
     }
@@ -886,9 +924,9 @@ mod tests {
     #[test]
     fn plan_gate_removes_a_criterion_and_reindexes_its_checks() {
         let mut task = crate::engine::test_support::task_with_status(TaskStatus::Drafting);
-        task.criteria = vec!["r".into(), "keep one".into(), "keep two".into()];
-        task.visual_criteria = vec!["r".into(), "keep two".into()];
-        task.checks = vec![
+        task.fixture_data().criteria = vec!["r".into(), "keep one".into(), "keep two".into()];
+        task.fixture_data().visual_criteria = vec!["r".into(), "keep two".into()];
+        task.fixture_data().checks = vec![
             Check {
                 criterion: 0,
                 run: "a".into(),

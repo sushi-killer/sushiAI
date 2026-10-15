@@ -2,10 +2,28 @@
 //! prompt that could be better. No file, git or process access; the caller
 //! hands over everything it reads.
 
+#[cfg(test)]
+use crate::task::messages::MessageKind;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::Failure;
+#[cfg(test)]
+use crate::task::Question;
+#[cfg(test)]
+use crate::task::QuestionKind;
+#[cfg(test)]
+use crate::task::ReviewResult;
+#[cfg(test)]
+use crate::task::Verdict;
+
 use super::{ExcerptRef, Signal, SignalKind};
 use crate::ab::{classify_call, top_level_calls, Bucket};
 use crate::engine::decision::normalize_signature_line;
-use crate::model::*;
+use crate::policy::settings::Settings;
+use crate::policy::settings::WorkBuckets;
+use crate::task::messages::Message;
+use crate::task::{AnsweredBy, Attempt, FailureKind, Stage, Task, TaskStatus};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -584,8 +602,8 @@ mod tests {
 
     fn task(id: &str, created: i64) -> Task {
         let mut t = task_with_status(TaskStatus::Done);
-        t.id = id.into();
-        t.created_at = created;
+        t.fixture_data().id = id.into();
+        t.fixture_data().created_at = created;
         t
     }
 
@@ -637,7 +655,7 @@ mod tests {
         let mut a = attempt_with_failure(1, "loop:x");
         a.failure = Some(failure(FailureKind::Loop, "same call", "loop:x"));
         a.cost_usd = Some(4.0);
-        t.attempts = vec![a];
+        t.fixture_data().attempts = vec![a];
         let evs = vec![read("/a"), read("/b"), read("/c"), read("/d")];
         let s = run(&t, &[], &[("t", 1, evs)]);
         let l = of_kind(&s, SignalKind::Loop);
@@ -660,7 +678,7 @@ mod tests {
         let mut t = task("t", 10);
         let mut a = attempt_with_failure(1, "loop:x");
         a.failure = Some(failure(FailureKind::Loop, "d", "loop:x"));
-        t.attempts = vec![a];
+        t.fixture_data().attempts = vec![a];
         let s = run(&t, &[], &[("t", 1, vec![read("/a")])]);
         assert_eq!(s[0].wasted_calls, 1);
         assert_eq!(s[0].wasted_usd, 0.0);
@@ -675,12 +693,12 @@ mod tests {
         let mut evs: Vec<(&str, u32, Vec<Value>)> = Vec::new();
         for id in ["e1", "e2", "e3"] {
             let mut t = task(id, 1);
-            t.attempts = vec![attempt_with_failure(1, "s")];
+            t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
             earlier.push(t);
             evs.push((id, 1, vec![read("/x"), read("/y")]));
         }
         let mut t = task("t", 10);
-        t.attempts = vec![attempt_with_failure(1, "s")];
+        t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
         let many: Vec<Value> = (0..7).map(|i| read(&format!("/f{i}"))).collect();
         evs.push(("t", 1, many));
         let s = run(&t, &earlier, &evs);
@@ -703,7 +721,7 @@ mod tests {
     #[test]
     fn evolution_throwaway_script_written_then_removed() {
         let mut t = task("t", 10);
-        t.attempts = vec![attempt_with_failure(1, "s")];
+        t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
         let evs = vec![
             call(
                 "Write",
@@ -733,9 +751,9 @@ mod tests {
     #[test]
     fn evolution_verify_signature_seen_in_earlier_task() {
         let mut old = task("old", 1);
-        old.attempts = vec![attempt_with_failure(1, "verify:boom")];
+        old.fixture_data().attempts = vec![attempt_with_failure(1, "verify:boom")];
         let mut newer = task("new", 20);
-        newer.attempts = vec![
+        newer.fixture_data().attempts = vec![
             attempt_with_failure(1, "verify:boom"),
             attempt_with_failure(2, "verify:other"),
         ];
@@ -744,26 +762,26 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].attempt, 1);
         // a later task or another repo does not count
-        old.created_at = 30;
+        old.fixture_data().created_at = 30;
         assert!(of_kind(
             &run(&newer, &[old.clone()], &[]),
             SignalKind::VerifySignature
         )
         .is_empty());
-        old.created_at = 1;
-        old.repo = "/elsewhere".into();
+        old.fixture_data().created_at = 1;
+        old.fixture_data().repo = "/elsewhere".into();
         assert!(of_kind(&run(&newer, &[old], &[]), SignalKind::VerifySignature).is_empty());
     }
 
     #[test]
     fn evolution_review_finding_matches_normalised_earlier_finding() {
         let mut old = task("old", 1);
-        old.attempts = vec![reviewed(
+        old.fixture_data().attempts = vec![reviewed(
             attempt_with_failure(1, "s"),
             &["missing test at /a/b.rs:12"],
         )];
         let mut newer = task("new", 20);
-        newer.attempts = vec![reviewed(
+        newer.fixture_data().attempts = vec![reviewed(
             attempt_with_failure(1, "t"),
             &["missing test at /c/d.rs:99", "unrelated"],
         )];
@@ -776,11 +794,11 @@ mod tests {
     #[test]
     fn evolution_owner_question_one_per_owner_decision() {
         let mut t = task("t", 10);
-        t.question_history = vec![
+        t.fixture_data().question_history = vec![
             super::super::owner_answer("which db?", "sqlite"),
             super::super::owner_answer("dependency?", "answered"),
         ];
-        t.decisions = vec!["Planner: tier hard".into()];
+        t.fixture_data().decisions = vec!["Planner: tier hard".into()];
         let s = run(&t, &[], &[]);
         let o = of_kind(&s, SignalKind::OwnerQuestion);
         assert_eq!(o.len(), 2);
@@ -802,7 +820,7 @@ mod tests {
     #[test]
     fn evolution_process_read_counts_matching_calls_of_the_repos_own_files() {
         let mut t = task("t", 10);
-        t.attempts = vec![attempt_with_failure(1, "s")];
+        t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
         let settings = process_settings(&t.repo, 2);
         let evs = vec![
             read("/wt/docs/LESSONS.md"),
@@ -823,7 +841,7 @@ mod tests {
     #[test]
     fn evolution_process_read_needs_the_threshold_and_a_per_repo_list() {
         let mut t = task("t", 10);
-        t.attempts = vec![attempt_with_failure(1, "s")];
+        t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
         let one = vec![read("/wt/docs/LESSONS.md"), read("/wt/src/a.rs")];
         let events: AttemptEvents = [(("t".to_string(), 1), one)].into();
         let go = |settings: &Settings, events: &AttemptEvents| {
@@ -852,20 +870,22 @@ mod tests {
         let mut evs: Vec<(&str, u32, Vec<Value>)> = Vec::new();
         for id in ["e1", "e2", "e3"] {
             let mut t = task(id, 1);
-            t.attempts = vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
+            t.fixture_data().attempts =
+                vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
             earlier.push(t);
             evs.push((id, 1, (0..10).map(|i| read(&format!("/x{i}"))).collect()));
             evs.push((id, 2, vec![read("/y")]));
         }
         let mut t = task("t", 10);
-        t.attempts = vec![attempt_with_failure(1, "s")];
+        t.fixture_data().attempts = vec![attempt_with_failure(1, "s")];
         evs.push(("t", 1, (0..12).map(|i| read(&format!("/f{i}"))).collect()));
         // 12 explore calls against a first-attempt median of 10: normal.
         // (Pooled with the retries the median would be 1 and this would fire.)
         assert!(of_kind(&run(&t, &earlier, &evs), SignalKind::Discovery).is_empty());
         // A retry that explores 12 is compared with retries and does fire.
         let mut t2 = task("t2", 10);
-        t2.attempts = vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
+        t2.fixture_data().attempts =
+            vec![attempt_with_failure(1, "s"), attempt_with_failure(2, "s")];
         let mut evs2: Vec<(&str, u32, Vec<Value>)> = evs.clone();
         evs2.push(("t2", 1, vec![read("/a")]));
         evs2.push(("t2", 2, (0..12).map(|i| read(&format!("/g{i}"))).collect()));
@@ -929,7 +949,7 @@ mod tests {
             let mut t = task("t", 10);
             let mut a = attempt_with_failure(1, "s");
             a.changed_files = changed.iter().map(|c| c.to_string()).collect();
-            t.attempts = vec![a];
+            t.fixture_data().attempts = vec![a];
             let s = run(&t, &[], &[("t", 1, evs)]);
             assert_eq!(
                 of_kind(&s, SignalKind::ThrowawayScript).len(),
@@ -942,12 +962,12 @@ mod tests {
     #[test]
     fn evolution_the_owners_retry_answer_is_not_a_review_finding() {
         let mut old = task("old", 1);
-        old.attempts = vec![reviewed(
+        old.fixture_data().attempts = vec![reviewed(
             attempt_with_failure(1, "s"),
             &["Another attempt was asked for: retry"],
         )];
         let mut newer = task("new", 20);
-        newer.attempts = vec![
+        newer.fixture_data().attempts = vec![
             reviewed(
                 attempt_with_failure(1, "t"),
                 &["Another attempt was asked for: retry"],
@@ -967,23 +987,24 @@ mod tests {
         let mut parent = task("p", 1);
         parent.mark_failed();
         let mut a = task("a", 2);
-        a.parent = Some("p".into());
-        a.title = "Add login".into();
+        a.fixture_data().parent = Some("p".into());
+        a.fixture_data().title = "Add login".into();
         let mut b = task("b", 3);
-        b.parent = Some("p".into());
-        b.title = "Wire billing".into();
+        b.fixture_data().parent = Some("p".into());
+        b.fixture_data().title = "Wire billing".into();
         let mut conflict = attempt_with_failure(1, "s");
         conflict.failure = Some(failure(
             FailureKind::Verify,
             "main moved. These files conflict: x.rs. Resolve",
             "s",
         ));
-        b.attempts = vec![conflict];
-        b.question = Some(Question::new(
+        b.fixture_data().attempts = vec![conflict];
+        b.fixture_data().question = Some(Question::new(
             "Should I reuse what Add login built?",
             vec![],
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         ));
         let repo = vec![parent.clone(), a.clone(), b.clone()];
         let run_for = |t: &Task, msgs: &[Message]| {
@@ -998,9 +1019,9 @@ mod tests {
         };
         // parent failed with all children done
         let mut done_a = a.clone();
-        done_a.status = TaskStatus::Done;
+        done_a.fixture_data().status = TaskStatus::Done;
         let mut done_b = b.clone();
-        done_b.status = TaskStatus::Done;
+        done_b.fixture_data().status = TaskStatus::Done;
         let s = detect(
             &parent,
             &[parent.clone(), done_a, done_b],
@@ -1015,13 +1036,13 @@ mod tests {
         assert_eq!(of_kind(&s, SignalKind::Graph).len(), 2);
         // a declared dependency is not a graph problem
         let mut declared = b.clone();
-        declared.depends_on = vec!["a".into()];
-        declared.attempts.clear();
+        declared.fixture_data().depends_on = vec!["a".into()];
+        declared.fixture_data().attempts.clear();
         assert!(of_kind(&run_for(&declared, &[]), SignalKind::Graph).is_empty());
         // a sent message naming the sibling's id counts
         let mut quiet = b.clone();
-        quiet.attempts.clear();
-        quiet.question = None;
+        quiet.fixture_data().attempts.clear();
+        quiet.fixture_data().question = None;
         let msg = Message {
             id: "m".into(),
             repo: "/repo".into(),
@@ -1049,15 +1070,15 @@ mod tests {
         );
         // conflict outside a subtask is a moved base, not a sibling conflict
         let mut solo = b.clone();
-        solo.parent = None;
-        solo.question = None;
+        solo.fixture_data().parent = None;
+        solo.fixture_data().question = None;
         assert!(of_kind(&run_for(&solo, &[]), SignalKind::Graph).is_empty());
     }
 
     #[test]
     fn evolution_repeated_review_on_consecutive_attempts() {
         let mut t = task("t", 10);
-        t.attempts = vec![
+        t.fixture_data().attempts = vec![
             reviewed(attempt_with_failure(1, "a"), &["no test for x at line 4"]),
             reviewed(attempt_with_failure(2, "b"), &["no test for x at line 9"]),
             reviewed(attempt_with_failure(3, "c"), &["different"]),
@@ -1096,7 +1117,7 @@ mod answer_caller_tests {
         let mut task = task_with_status(TaskStatus::Done);
         let mut lead = super::super::owner_answer("q", "a");
         lead.answered_by = AnsweredBy::Lead;
-        task.question_history = vec![super::super::owner_answer("A", "B"), lead];
+        task.fixture_data().question_history = vec![super::super::owner_answer("A", "B"), lead];
         let signals = detect(
             &task,
             std::slice::from_ref(&task),

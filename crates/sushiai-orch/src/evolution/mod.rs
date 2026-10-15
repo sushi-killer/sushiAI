@@ -3,8 +3,19 @@
 //! `propose` clusters them, starts the read-only proposer runs, gates and
 //! stores their proposals and measures the adopted ones.
 
-use super::*;
-use crate::model::{Task, TaskStatus};
+#[cfg(test)]
+use crate::task::VerifyOutcome;
+
+use crate::clock::now_ms;
+use crate::engine::messages;
+use crate::engine::state::App;
+use crate::harness::cancel::CancelToken;
+use crate::store::Store;
+use crate::task::Stage;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::task::{Task, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -138,18 +149,24 @@ impl App {
             let _ = std::fs::create_dir_all(&run_dir);
             let cancel = CancelToken::new();
             for cmd in failing_commands(&task) {
-                let check = verify::run_eval_check(
-                    verify::CheckContext::new(self, Some(task_id)),
+                let check = crate::engine::verification::runner::run_eval_check(
+                    crate::engine::verification::runner::CheckRunner::from_context(
+                        crate::engine::verification::context::CheckContext::new(
+                            self,
+                            Some(task_id),
+                        ),
+                        &run_dir.join("eval-check"),
+                        self.task_sandbox(&task.repo, &run_dir.join("eval-check"), &run_dir)
+                            .as_ref(),
+                        &task.base_sha,
+                        &cancel,
+                    ),
                     Path::new(&task.repo),
-                    &run_dir,
-                    &task.base_sha,
                     &cmd,
-                    self.task_sandbox(&task.repo, &run_dir.join("eval-check"), &run_dir)
-                        .as_ref(),
-                    &cancel,
                 )
                 .await;
-                if matches!(check.code, Some(c) if c != 0) && !verify::timed_out_under_load(&check)
+                if matches!(check.code, Some(c) if c != 0)
+                    && !crate::verify::load::timed_out_under_load(&check)
                 {
                     base_failures.push(cmd);
                 }
@@ -206,16 +223,16 @@ impl App {
 
 /// An answered question for tests; the owner gave `answer`.
 #[cfg(test)]
-pub(crate) fn owner_answer(question: &str, answer: &str) -> crate::model::AnsweredQuestion {
-    crate::model::AnsweredQuestion {
+pub(crate) fn owner_answer(question: &str, answer: &str) -> crate::task::AnsweredQuestion {
+    crate::task::AnsweredQuestion {
         question: question.into(),
         options: Vec::new(),
-        kind: crate::model::QuestionKind::AgentQuestion,
+        kind: crate::task::QuestionKind::AgentQuestion,
         asked_by: None,
         asked_at: None,
         answer: answer.into(),
         answered_at: 1,
-        answered_by: crate::model::AnsweredBy::Owner,
+        answered_by: crate::task::AnsweredBy::Owner,
         failure_signature: None,
         commands: Vec::new(),
     }
@@ -238,7 +255,7 @@ mod tests {
     async fn evolution_second_call_appends_nothing() {
         let (app, _dir) = test_app();
         let mut t = task_with_status(TaskStatus::Done);
-        t.question_history = vec![owner_answer("which one?", "first")];
+        t.fixture_data().question_history = vec![owner_answer("which one?", "first")];
         app.store.save_task(&t).unwrap();
         app.detect_evolution_signals(&t.id).await;
         let first = lines(&app, "signals.jsonl");
@@ -255,7 +272,7 @@ mod tests {
     async fn evolution_every_recorded_signal_carries_a_timestamp() {
         let (app, _dir) = test_app();
         let mut t = task_with_status(TaskStatus::Done);
-        t.question_history = vec![owner_answer("which one?", "first")];
+        t.fixture_data().question_history = vec![owner_answer("which one?", "first")];
         app.store.save_task(&t).unwrap();
         let before = now_ms();
         app.detect_evolution_signals(&t.id).await;
@@ -278,10 +295,10 @@ mod tests {
     async fn evolution_eval_and_unfinished_tasks_are_skipped() {
         let (app, _dir) = test_app();
         let mut eval = task_with_status(TaskStatus::Done);
-        eval.eval_set = Some("set".into());
-        eval.question_history = vec![owner_answer("q", "a")];
+        eval.fixture_data().eval_set = Some("set".into());
+        eval.fixture_data().question_history = vec![owner_answer("q", "a")];
         let mut running = task_with_status(TaskStatus::Running);
-        running.question_history = vec![owner_answer("q", "a")];
+        running.fixture_data().question_history = vec![owner_answer("q", "a")];
         app.store.save_task(&eval).unwrap();
         app.store.save_task(&running).unwrap();
         app.detect_evolution_signals(&eval.id).await;
@@ -308,9 +325,11 @@ mod tests {
         ];
         let mut b = a.clone();
         b.n = 2;
-        t.attempts = vec![a, b];
-        t.decisions = vec!["reworded".into()];
-        t.loop_state.final_check_failures = vec!["npm run ci".into()];
+        t.fixture_data().attempts = vec![a, b];
+        t.fixture_data().decisions = vec!["reworded".into()];
+        t.fixture_data().loop_state.final_check_failures = vec!["npm run ci".into()];
         assert_eq!(failing_commands(&t), vec!["npm test", "npm run ci"]);
     }
 }
+
+pub mod proposal;

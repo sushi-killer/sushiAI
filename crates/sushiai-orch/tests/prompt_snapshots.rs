@@ -1,21 +1,22 @@
-//! Every brief `sushiai_orch::brief` builds, rendered on fixed fixtures and
+//! Every task-agent brief, rendered through its canonical owner on fixed fixtures and
 //! compared byte for byte with its golden in
 //! `tests/fixtures/prompt-snapshots/briefs/<kind>.txt`. A missing golden
 //! fails; `UPDATE_PROMPT_SNAPSHOTS=1` writes the goldens instead.
 //!
-//! Uses only public builders and model types, so the same file also runs on
-//! older checkouts to prove a change kept every brief byte-identical. The
-//! fixtures hold no clock and no temp path.
+//! Uses public builders and model types. The fixtures hold no clock and no temp path.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
-use sushiai_orch::brief::{
-    self, Lenses, NarrowReview, PickCandidate, ProposalBriefInput, ProposalExcerpt,
-};
-use sushiai_orch::model::{
-    Decline, DeclineReason, Message, ScopedCheck, Task, TaskStatus, Variant, VerifyOutcome,
-};
+use sushiai_orch::engine::attempts::pick::PickCandidate;
+use sushiai_orch::engine::evolution::proposal::ProposalBriefInput;
+use sushiai_orch::engine::evolution::proposal::ProposalExcerpt;
+use sushiai_orch::policy::settings::ScopedCheck;
+use sushiai_orch::policy::variant::Variant;
+use sushiai_orch::task::messages::Message;
+use sushiai_orch::task::{Decline, DeclineReason, Task, TaskStatus, VerifyOutcome};
+use sushiai_orch::verify::review::brief::NarrowReview;
+use sushiai_orch::verify::review::routing::Lenses;
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-snapshots/briefs")
@@ -272,14 +273,14 @@ fn review_verify() -> Vec<VerifyOutcome> {
 
 /// A review of the latest attempt: the one before it reported findings.
 fn review_task() -> Task {
-    let mut t = full_task();
-    let mut a = serde_json::to_value(&t.attempts[3]).unwrap();
+    let mut t = serde_json::to_value(full_task()).unwrap();
+    let mut a = t["attempts"][3].clone();
     a["n"] = json!(5);
     a["status"] = json!("running");
     a["review"] = Value::Null;
     a["failure"] = Value::Null;
-    t.attempts.push(serde_json::from_value(a).unwrap());
-    t
+    t["attempts"].as_array_mut().unwrap().push(a);
+    serde_json::from_value(t).unwrap()
 }
 
 fn where_to_look() -> String {
@@ -303,7 +304,7 @@ fn where_to_look() -> String {
         "/etc/passwd",
     ]
     .map(String::from);
-    brief::where_to_look_block(dir.path(), &paths)
+    sushiai_orch::engine::attempts::context::where_to_look_block(dir.path(), &paths)
 }
 
 fn renders() -> Vec<(&'static str, String)> {
@@ -318,14 +319,17 @@ fn renders() -> Vec<(&'static str, String)> {
     pick_a.truncate(1);
     let pick_b = review_verify();
 
-    let mut with_deps = full.clone();
-    with_deps.depends_on = vec!["t-dep-a".into(), "t-missing".into(), "t-dep-b".into()];
-    let mut not_done = dependency("t-dep-b");
-    not_done.status = TaskStatus::Running;
+    let mut with_deps = serde_json::to_value(&full).unwrap();
+    with_deps["dependsOn"] = json!(["t-dep-a", "t-missing", "t-dep-b"]);
+    let with_deps: Task = serde_json::from_value(with_deps).unwrap();
+    let mut not_done = serde_json::to_value(dependency("t-dep-b")).unwrap();
+    not_done["status"] = json!(TaskStatus::Running);
+    let not_done: Task = serde_json::from_value(not_done).unwrap();
     let all = vec![dependency("t-dep-a"), not_done];
 
-    let mut relayed = full.clone();
-    relayed.queue.relay_of = Some("t-dep-a".into());
+    let mut relayed = serde_json::to_value(&full).unwrap();
+    relayed["relayOf"] = json!("t-dep-a");
+    let relayed: Task = serde_json::from_value(relayed).unwrap();
 
     let scoped: Vec<ScopedCheck> = vec![
         serde_json::from_value(json!({
@@ -421,7 +425,7 @@ fn renders() -> Vec<(&'static str, String)> {
         docs: false,
     };
     let changed = vec!["src/settings.ts".to_string(), "src/dialog.tsx".to_string()];
-    let mut passed = full.clone();
+    let passed = full.clone();
     let mut last = serde_json::to_value(&passed.attempts[2]).unwrap();
     last["n"] = json!(5);
     last["status"] = json!("passed");
@@ -430,15 +434,27 @@ fn renders() -> Vec<(&'static str, String)> {
         verify("npm test -- settings", Some(0), "ok"),
         verify("npm run lint", None, "killed")
     ]);
-    passed.attempts.push(serde_json::from_value(last).unwrap());
+    let mut passed_json = serde_json::to_value(&passed).unwrap();
+    passed_json["attempts"].as_array_mut().unwrap().push(last);
+    let passed: Task = serde_json::from_value(passed_json).unwrap();
+    let mut timed_out = full.attempts[2].clone();
+    timed_out.failure.as_mut().unwrap().kind = sushiai_orch::task::FailureKind::TimeBudget;
+    timed_out.failure.as_mut().unwrap().detail = "Attempt reached its time budget".into();
+    timed_out.verify.clear();
     let pr_body = "## Summary\n\nAdds a Save button and tests for it.";
 
     vec![
-        ("build_brief_bare", brief::build_brief(&bare, "", "")),
-        ("build_brief_full", brief::build_brief(&full, status, stat)),
+        (
+            "build_brief_bare",
+            sushiai_orch::engine::attempts::brief::build_brief(&bare, "", ""),
+        ),
+        (
+            "build_brief_full",
+            sushiai_orch::engine::attempts::brief::build_brief(&full, status, stat),
+        ),
         (
             "build_resume_brief",
-            brief::build_resume_brief(
+            sushiai_orch::engine::attempts::resume::build_resume_brief(
                 &full,
                 &full.attempts[2],
                 "## Messages\n\nA peer says hello.",
@@ -446,8 +462,12 @@ fn renders() -> Vec<(&'static str, String)> {
             ),
         ),
         (
+            "build_resume_brief_time_budget",
+            sushiai_orch::engine::attempts::resume::build_resume_brief(&full, &timed_out, "", None),
+        ),
+        (
             "build_pick_brief",
-            brief::build_pick_brief(
+            sushiai_orch::engine::attempts::pick::build_pick_brief(
                 &full,
                 &PickCandidate {
                     verify: &pick_a,
@@ -461,28 +481,38 @@ fn renders() -> Vec<(&'static str, String)> {
         ),
         (
             "build_advisor_brief",
-            brief::build_advisor_brief(&full, diff, "`npm run lint` exited 1."),
+            sushiai_orch::engine::attempts::advisor::build_advisor_brief(
+                &full,
+                diff,
+                "`npm run lint` exited 1.",
+            ),
         ),
-        ("advisor_block", brief::advisor_block(advice)),
+        (
+            "advisor_block",
+            sushiai_orch::engine::attempts::advisor::advisor_block(advice),
+        ),
         (
             "build_pr_draft_brief",
-            brief::build_pr_draft_brief(&full, diff),
+            sushiai_orch::delivery::brief::build_pr_draft_brief(&full, diff),
         ),
         (
             "build_pr_truth_brief",
-            brief::build_pr_truth_brief(&passed, pr_body, diff),
+            sushiai_orch::delivery::brief::build_pr_truth_brief(&passed, pr_body, diff),
         ),
         (
             "build_pr_truth_brief_no_results",
-            brief::build_pr_truth_brief(&bare, pr_body, diff),
+            sushiai_orch::delivery::brief::build_pr_truth_brief(&bare, pr_body, diff),
         ),
         (
             "discarded_block",
-            brief::discarded_block(&["tests/a.test.ts".to_string(), "tests/b.test.ts".to_string()]),
+            sushiai_orch::engine::attempts::context::discarded_block(&[
+                "tests/a.test.ts".to_string(),
+                "tests/b.test.ts".to_string(),
+            ]),
         ),
         (
             "coordination_block",
-            brief::coordination_block(
+            sushiai_orch::engine::attempts::context::coordination_block(
                 "t-fixture",
                 &[
                     (
@@ -499,58 +529,89 @@ fn renders() -> Vec<(&'static str, String)> {
         ),
         (
             "landed_dependencies_block",
-            brief::landed_dependencies_block(&with_deps, &all, None),
+            sushiai_orch::engine::attempts::dependencies::landed_dependencies_block(
+                &with_deps, &all, None,
+            ),
         ),
         (
             "conflict_block",
-            brief::conflict_block("criterion [0] wants it hidden, criterion [1] clicked"),
+            sushiai_orch::engine::attempts::context::conflict_block(
+                "criterion [0] wants it hidden, criterion [1] clicked",
+            ),
         ),
         (
             "conflict_only_block_files",
-            brief::conflict_only_block(&["src/a.ts".to_string(), "src/b.ts".to_string()]),
+            sushiai_orch::engine::attempts::context::conflict_only_block(&[
+                "src/a.ts".to_string(),
+                "src/b.ts".to_string(),
+            ]),
         ),
-        ("conflict_only_block_bare", brief::conflict_only_block(&[])),
+        (
+            "conflict_only_block_bare",
+            sushiai_orch::engine::attempts::context::conflict_only_block(&[]),
+        ),
         (
             "parent_failure_block",
-            brief::parent_failure_block("`npm run ci` exited 1."),
+            sushiai_orch::engine::attempts::context::parent_failure_block("`npm run ci` exited 1."),
         ),
         (
             "review_conflict_block",
-            brief::review_conflict_block("criterion [0] wants it hidden, criterion [1] clicked"),
+            sushiai_orch::verify::review::brief::review_conflict_block(
+                "criterion [0] wants it hidden, criterion [1] clicked",
+            ),
         ),
         ("where_to_look_block", where_to_look()),
-        ("relay_block", brief::relay_block(&relayed, &all)),
         (
-            "time_budget_report_prompt",
-            brief::time_budget_report_prompt(),
+            "relay_block",
+            sushiai_orch::engine::attempts::dependencies::relay_block(&relayed, &all),
         ),
         (
             "build_plan_brief",
-            brief::build_plan_brief(REQUEST, &Variant::default(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_plan_brief(
+                REQUEST,
+                &Variant::default(),
+                PAST_WORK,
+            ),
         ),
         (
             "build_plan_brief_batch",
-            brief::build_plan_brief(REQUEST, &batch(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_plan_brief(REQUEST, &batch(), PAST_WORK),
         ),
         (
             "build_plan_brief_no_past_work",
-            brief::build_plan_brief(REQUEST, &Variant::default(), ""),
+            sushiai_orch::engine::planning::prompt::build_plan_brief(
+                REQUEST,
+                &Variant::default(),
+                "",
+            ),
         ),
         (
             "build_subtask_plan_brief",
-            brief::build_subtask_plan_brief(REQUEST, &Variant::default(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_subtask_plan_brief(
+                REQUEST,
+                &Variant::default(),
+                PAST_WORK,
+            ),
         ),
         (
             "build_subtask_plan_brief_batch",
-            brief::build_subtask_plan_brief(REQUEST, &batch(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_subtask_plan_brief(
+                REQUEST,
+                &batch(),
+                PAST_WORK,
+            ),
         ),
         (
             "build_plan_correction_brief",
-            brief::build_plan_correction_brief(" criteria 0 and 1 clash \n", &batch(), true),
+            sushiai_orch::engine::planning::prompt::build_plan_correction_brief(
+                " criteria 0 and 1 clash \n",
+                &batch(),
+                true,
+            ),
         ),
         (
             "build_plan_correction_brief_subtask",
-            brief::build_plan_correction_brief(
+            sushiai_orch::engine::planning::prompt::build_plan_correction_brief(
                 "criteria 0 and 1 clash",
                 &Variant::default(),
                 false,
@@ -558,107 +619,132 @@ fn renders() -> Vec<(&'static str, String)> {
         ),
         (
             "build_plan_continue_brief",
-            brief::build_plan_continue_brief(&batch(), true),
+            sushiai_orch::engine::planning::prompt::build_plan_continue_brief(&batch(), true),
         ),
         (
             "build_plan_continue_brief_subtask",
-            brief::build_plan_continue_brief(&Variant::default(), false),
+            sushiai_orch::engine::planning::prompt::build_plan_continue_brief(
+                &Variant::default(),
+                false,
+            ),
         ),
         (
             "build_plan_retry_brief",
-            brief::build_plan_retry_brief(REQUEST, &batch(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_plan_retry_brief(
+                REQUEST,
+                &batch(),
+                PAST_WORK,
+            ),
         ),
         (
             "build_subtask_plan_retry_brief",
-            brief::build_subtask_plan_retry_brief(REQUEST, &Variant::default(), PAST_WORK),
+            sushiai_orch::engine::planning::prompt::build_subtask_plan_retry_brief(
+                REQUEST,
+                &Variant::default(),
+                PAST_WORK,
+            ),
         ),
         (
             "scoped_checks_block",
-            brief::scoped_checks_block(&scoped, "/repo"),
+            sushiai_orch::engine::planning::prompt::scoped_checks_block(&scoped, "/repo"),
         ),
-        ("build_audit_brief", brief::build_audit_brief()),
+        (
+            "build_audit_brief",
+            sushiai_orch::engine::audit::brief::build_audit_brief(),
+        ),
         (
             "build_proposal_brief",
-            brief::build_proposal_brief(&proposal),
+            sushiai_orch::engine::evolution::proposal::build_proposal_brief(&proposal),
         ),
         (
             "build_proposal_brief_no_excerpts",
-            brief::build_proposal_brief(&proposal_empty),
+            sushiai_orch::engine::evolution::proposal::build_proposal_brief(&proposal_empty),
         ),
         (
             "build_review_brief",
-            brief::build_review_brief(
+            sushiai_orch::verify::review::brief::build_review_brief(
                 &review,
-                note,
-                &agent_decisions,
-                &review_verify(),
-                &screenshots,
-                Some(3),
+                &sushiai_orch::verify::review::brief::ReviewEvidence {
+                    implementer_note: note,
+                    agent_decisions: &agent_decisions,
+                    verify_results: &review_verify(),
+                    screenshots: &screenshots,
+                    evidence_from: Some(3),
+                    declines: &declines,
+                },
                 diff,
-                &declines,
                 &some_lenses,
             ),
         ),
         (
             "build_review_brief_first",
-            brief::build_review_brief(
+            sushiai_orch::verify::review::brief::build_review_brief(
                 &first_review,
-                note,
-                &[],
-                &[],
-                &[],
-                None,
+                &sushiai_orch::verify::review::brief::ReviewEvidence {
+                    implementer_note: note,
+                    agent_decisions: &[],
+                    verify_results: &[],
+                    screenshots: &[],
+                    evidence_from: None,
+                    declines: &[],
+                },
                 diff,
-                &[],
                 &Lenses::ALL,
             ),
         ),
         (
             "build_narrow_review_brief",
-            brief::build_narrow_review_brief(
+            sushiai_orch::verify::review::brief::build_narrow_review_brief(
                 &review,
-                note,
-                &agent_decisions,
-                &review_verify(),
-                &screenshots,
-                None,
+                &sushiai_orch::verify::review::brief::ReviewEvidence {
+                    implementer_note: note,
+                    agent_decisions: &agent_decisions,
+                    verify_results: &review_verify(),
+                    screenshots: &screenshots,
+                    evidence_from: None,
+                    declines: &declines,
+                },
                 &narrow,
-                &declines,
             ),
         ),
         (
             "build_narrow_review_brief_settled",
-            brief::build_narrow_review_brief(
+            sushiai_orch::verify::review::brief::build_narrow_review_brief(
                 &first_review,
-                note,
-                &[],
-                &[],
-                &[],
-                None,
+                &sushiai_orch::verify::review::brief::ReviewEvidence {
+                    implementer_note: note,
+                    agent_decisions: &[],
+                    verify_results: &[],
+                    screenshots: &[],
+                    evidence_from: None,
+                    declines: &[],
+                },
                 &narrow_settled,
-                &[],
             ),
         ),
-        ("review_retry_note", brief::review_retry_note()),
+        (
+            "review_retry_note",
+            sushiai_orch::verify::review::brief::review_retry_note(),
+        ),
         (
             "review_lens_block_all",
-            brief::review_lens_block(&Lenses::ALL),
+            sushiai_orch::verify::review::routing::review_lens_block(&Lenses::ALL),
         ),
         (
             "review_lens_block_some",
-            brief::review_lens_block(&some_lenses),
+            sushiai_orch::verify::review::routing::review_lens_block(&some_lenses),
         ),
         (
             "review_lens_block_none",
-            brief::review_lens_block(&no_lenses),
+            sushiai_orch::verify::review::routing::review_lens_block(&no_lenses),
         ),
         (
             "build_route_brief",
-            brief::build_route_brief(&full, &changed),
+            sushiai_orch::verify::review::routing::build_route_brief(&full, &changed),
         ),
         (
             "build_route_brief_bare",
-            brief::build_route_brief(&bare, &[]),
+            sushiai_orch::verify::review::routing::build_route_brief(&bare, &[]),
         ),
     ]
 }

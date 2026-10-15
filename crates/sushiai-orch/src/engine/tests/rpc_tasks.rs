@@ -130,7 +130,7 @@ async fn task_archive_refuses_a_queued_task_with_a_live_loop() {
 async fn task_start_refuses_an_archived_task() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Stopped);
-    task.archived = true;
+    task.fixture_data().archived = true;
     app.store.save_task(&task).unwrap();
 
     let err = app
@@ -141,6 +141,28 @@ async fn task_start_refuses_an_archived_task() {
         err.contains("archived") && err.contains("unarchive"),
         "unexpected error: {err}"
     );
+    assert!(!app.controls.lock().unwrap().contains_key(&task.id));
+}
+
+#[tokio::test]
+async fn task_amend_on_a_failed_task_is_saved_for_the_next_start() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Failed);
+    task.fixture_data().criteria = vec!["old".into()];
+    app.store.save_task(&task).unwrap();
+    let reply = app
+        .dispatch(
+            "task.amend",
+            json!({"id": task.id, "criteria": ["new"], "verify": ["true"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply["pending"], json!(false));
+    let stored = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(stored.criteria, vec!["new"]);
+    assert_eq!(stored.verify, vec!["true"]);
+    assert!(stored.decisions.iter().any(|d| d.starts_with("Amended:")));
+    assert_eq!(stored.status, TaskStatus::Failed);
     assert!(!app.controls.lock().unwrap().contains_key(&task.id));
 }
 
@@ -156,17 +178,15 @@ async fn task_amend_rejects_what_it_cannot_amend() {
         .unwrap_err();
     assert!(unknown.contains("not found"), "{unknown}");
 
-    for status in [TaskStatus::Done, TaskStatus::Failed] {
-        let task = task_with_status(status);
-        app.store.save_task(&task).unwrap();
-        let err = app
-            .dispatch("task.amend", json!({"id": task.id, "criteria": ["a"]}))
-            .await
-            .unwrap_err();
-        assert!(err.contains("can be amended"), "{status:?}: {err}");
-    }
+    let done = task_with_status(TaskStatus::Done);
+    app.store.save_task(&done).unwrap();
+    let err = app
+        .dispatch("task.amend", json!({"id": done.id, "criteria": ["a"]}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("can be amended"), "{err}");
     let mut archived = task_with_status(TaskStatus::Stopped);
-    archived.archived = true;
+    archived.fixture_data().archived = true;
     app.store.save_task(&archived).unwrap();
     let err = app
         .dispatch("task.amend", json!({"id": archived.id, "criteria": ["a"]}))
@@ -175,7 +195,7 @@ async fn task_amend_rejects_what_it_cannot_amend() {
     assert!(err.contains("archived"), "{err}");
 
     let mut task = task_with_status(TaskStatus::Stopped);
-    task.criteria = vec!["one".into(), "two".into()];
+    task.fixture_data().criteria = vec!["one".into(), "two".into()];
     app.store.save_task(&task).unwrap();
     let cases = [
         (json!({"id": task.id}), "at least one"),
@@ -205,7 +225,7 @@ async fn task_amend_rejects_what_it_cannot_amend() {
         // Shrinking the criteria under an existing check.
         (json!({"id": task.id, "criteria": ["only"]}), "out of range"),
     ];
-    task.checks = vec![Check {
+    task.fixture_data().checks = vec![Check {
         criterion: 1,
         run: "x".into(),
         baseline: None,
@@ -233,7 +253,7 @@ async fn task_amend_saves_directly_without_a_loop_and_names_only_fields() {
         TaskStatus::Waiting,
     ] {
         let mut task = task_with_status(status);
-        task.criteria = vec!["one".into()];
+        task.fixture_data().criteria = vec!["one".into()];
         app.store.save_task(&task).unwrap();
         let result = app
             .dispatch(
@@ -271,7 +291,7 @@ async fn task_amend_saves_directly_without_a_loop_and_names_only_fields() {
 async fn task_amend_keeps_grounded_baselines_when_saved_under_the_task_lock() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Stopped);
-    task.criteria = vec!["a".into(), "b".into()];
+    task.fixture_data().criteria = vec!["a".into(), "b".into()];
     app.store.save_task(&task).unwrap();
     for (command, code) in [
         ("test -f NOPE.txt", 1),
@@ -328,11 +348,11 @@ async fn task_amend_depends_on_refuses_cycles_and_invalid_dependencies_without_c
     let (app, _dir) = test_app();
     let mut a = task_with_status(TaskStatus::Stopped);
     let b = task_with_status(TaskStatus::Stopped);
-    a.depends_on = vec![b.id.clone()];
+    a.fixture_data().depends_on = vec![b.id.clone()];
     let mut child = task_with_status(TaskStatus::Stopped);
-    child.parent = Some(b.id.clone());
+    child.fixture_data().parent = Some(b.id.clone());
     let mut other_repo = task_with_status(TaskStatus::Stopped);
-    other_repo.repo = "/other-repo".into();
+    other_repo.fixture_data().repo = "/other-repo".into();
     for task in [&a, &b, &child, &other_repo] {
         app.store.save_task(task).unwrap();
     }
@@ -367,12 +387,7 @@ async fn task_amend_depends_on_refuses_cycles_and_invalid_dependencies_without_c
 fn live_control(app: &App, id: &str) {
     app.controls.lock().unwrap().insert(
         id.to_string(),
-        TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
-            handle: tokio::spawn(async {}),
-        },
+        TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: Arc::new(StdMutex::new(None)) }, handle: tokio::spawn(async {}) },
     );
 }
 
@@ -381,10 +396,10 @@ async fn task_amend_depends_on_accepts_tasks_that_already_ran_attempts() {
     let (app, _dir) = test_app();
     for status in [TaskStatus::Stopped, TaskStatus::Queued] {
         let mut task = task_with_status(status);
-        task.attempts.push(attempt_with_failure(1, "old"));
+        task.fixture_data().attempts.push(attempt_with_failure(1, "old"));
         // A queued backlog task stays parked, so no loop starts.
         if status == TaskStatus::Queued {
-            task.queue.backlog = Some(Backlog {
+            task.fixture_data().queue.backlog = Some(Backlog {
                 bucket: BacklogBucket::Later,
                 order: 0,
             });
@@ -406,7 +421,7 @@ async fn task_amend_depends_on_accepts_tasks_that_already_ran_attempts() {
 async fn task_amend_depends_on_refuses_a_task_or_child_that_is_implementing() {
     let (app, _dir) = test_app();
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.attempts.push(attempt_with_failure(1, "old"));
+    parent.fixture_data().attempts.push(attempt_with_failure(1, "old"));
     app.store.save_task(&parent).unwrap();
     live_control(&app, &parent.id);
     let err = app
@@ -417,7 +432,7 @@ async fn task_amend_depends_on_refuses_a_task_or_child_that_is_implementing() {
     let saved = app.store.load_task(&parent.id).unwrap().unwrap();
     assert!(saved.decisions.is_empty());
     assert!(app.controls.lock().unwrap()[&parent.id]
-        .pending_amend
+        .signals.pending_amend
         .lock()
         .unwrap()
         .is_none());
@@ -425,7 +440,7 @@ async fn task_amend_depends_on_refuses_a_task_or_child_that_is_implementing() {
     let parent = task_with_status(TaskStatus::Stopped);
     app.store.save_task(&parent).unwrap();
     let mut child = task_with_status(TaskStatus::Running);
-    child.parent = Some(parent.id.clone());
+    child.fixture_data().parent = Some(parent.id.clone());
     app.store.save_task(&child).unwrap();
     live_control(&app, &child.id);
     let err = app
@@ -446,9 +461,9 @@ async fn task_amend_depends_on_refuses_a_task_or_child_that_is_implementing() {
 async fn task_amend_depends_on_failed_task_still_refuses_cycles() {
     let (app, _dir) = test_app();
     let mut failed = task_with_status(TaskStatus::Failed);
-    failed.attempts.push(attempt_with_failure(1, "old"));
+    failed.fixture_data().attempts.push(attempt_with_failure(1, "old"));
     let mut other = task_with_status(TaskStatus::Stopped);
-    other.depends_on = vec![failed.id.clone()];
+    other.fixture_data().depends_on = vec![failed.id.clone()];
     app.store.save_task(&failed).unwrap();
     app.store.save_task(&other).unwrap();
     let err = app
@@ -466,7 +481,7 @@ async fn task_amend_depends_on_failed_task_still_refuses_cycles() {
 async fn task_amend_depends_on_empty_list_does_not_requeue_a_failed_task() {
     let (app, _dir) = test_app();
     let mut failed = task_with_status(TaskStatus::Failed);
-    failed.attempts.push(attempt_with_failure(1, "old"));
+    failed.fixture_data().attempts.push(attempt_with_failure(1, "old"));
     app.store.save_task(&failed).unwrap();
     app.dispatch("task.amend", json!({"id": failed.id, "dependsOn": []}))
         .await
@@ -479,7 +494,7 @@ async fn task_amend_depends_on_empty_list_does_not_requeue_a_failed_task() {
 async fn task_amend_depends_on_requeues_a_failed_task_behind_its_dependency() {
     let (app, _dir) = test_app();
     let mut failed = task_with_status(TaskStatus::Failed);
-    failed.attempts.push(attempt_with_failure(1, "old"));
+    failed.fixture_data().attempts.push(attempt_with_failure(1, "old"));
     let dependency = task_with_status(TaskStatus::Running);
     app.store.save_task(&failed).unwrap();
     app.store.save_task(&dependency).unwrap();
@@ -498,9 +513,9 @@ async fn task_amend_depends_on_requeues_a_failed_task_behind_its_dependency() {
 async fn task_amend_depends_on_replaces_and_deduplicates_on_unstarted_tasks() {
     let (app, _dir) = test_app();
     let mut first = task_with_status(TaskStatus::Running);
-    first.title = "First dependency".into();
+    first.fixture_data().title = "First dependency".into();
     let mut second = task_with_status(TaskStatus::Running);
-    second.title = "Second dependency".into();
+    second.fixture_data().title = "Second dependency".into();
     for dependency in [&first, &second] {
         app.store.save_task(dependency).unwrap();
     }
@@ -511,17 +526,17 @@ async fn task_amend_depends_on_replaces_and_deduplicates_on_unstarted_tasks() {
         TaskStatus::Queued,
     ] {
         let mut task = task_with_status(status);
-        task.depends_on = vec![first.id.clone()];
+        task.fixture_data().depends_on = vec![first.id.clone()];
         // A queued backlog task must stay parked after the replacement.
         if status == TaskStatus::Queued {
-            task.queue.backlog = Some(Backlog {
+            task.fixture_data().queue.backlog = Some(Backlog {
                 bucket: BacklogBucket::Later,
                 order: 0,
             });
         }
         let mut plan = attempt_with_failure(1, "plan");
         plan.stage = Stage::Plan;
-        task.attempts.push(plan);
+        task.fixture_data().attempts.push(plan);
         app.store.save_task(&task).unwrap();
         let result = app
             .dispatch(
@@ -557,12 +572,7 @@ async fn task_amend_depends_on_merges_pending_replacements_with_their_titles() {
     let pending = Arc::new(StdMutex::new(None));
     app.controls.lock().unwrap().insert(
         task.id.clone(),
-        TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: pending.clone(),
-            handle: tokio::spawn(async {}),
-        },
+        TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: pending.clone() }, handle: tokio::spawn(async {}) },
     );
     app.dispatch(
         "task.amend",
@@ -605,12 +615,7 @@ async fn task_amend_depends_on_refuses_a_cycle_through_another_pending_amendment
         app.store.save_task(task).unwrap();
         app.controls.lock().unwrap().insert(
             task.id.clone(),
-            TaskControl {
-                cancel: CancelToken::new(),
-                pending_answer: Arc::new(StdMutex::new(None)),
-                pending_amend: Arc::new(StdMutex::new(None)),
-                handle: tokio::spawn(async {}),
-            },
+            TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: Arc::new(StdMutex::new(None)) }, handle: tokio::spawn(async {}) },
         );
     }
     let amended = app
@@ -636,7 +641,7 @@ async fn task_amend_depends_on_refuses_a_cycle_through_another_pending_amendment
         .unwrap()
         .get(&b.id)
         .unwrap()
-        .pending_amend
+        .signals.pending_amend
         .lock()
         .unwrap()
         .is_none());
@@ -650,15 +655,15 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
     std::fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     let mut parent = task_with_status(TaskStatus::Running);
-    parent.repo = repo.to_string_lossy().into();
-    parent.worktree = parent.repo.clone();
-    parent.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
-    parent.verify = vec!["false".into()];
+    parent.fixture_data().repo = repo.to_string_lossy().into();
+    parent.fixture_data().worktree = parent.repo.clone();
+    parent.fixture_data().base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+    parent.fixture_data().verify = vec!["false".into()];
     let mut child = task_with_status(TaskStatus::Queued);
-    child.repo = parent.repo.clone();
-    child.parent = Some(parent.id.clone());
+    child.fixture_data().repo = parent.repo.clone();
+    child.fixture_data().parent = Some(parent.id.clone());
     let mut dependency = task_with_status(TaskStatus::Running);
-    dependency.repo = parent.repo.clone();
+    dependency.fixture_data().repo = parent.repo.clone();
     for task in [&parent, &child, &dependency] {
         app.store.save_task(task).unwrap();
     }
@@ -668,11 +673,11 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
         loop {
             let tx = answers.lock().unwrap().take();
             if let Some(tx) = tx {
-                *pending.lock().unwrap() = Some(Amendment {
+                *pending.lock().unwrap() = Some(PendingAmendment::capture(&parent, Amendment {
                     depends_on: Some(vec![dependency.id.clone()]),
                     dependency_titles: vec![dependency.title.clone()],
                     ..Default::default()
-                });
+                }, Origin::Owner));
                 tx.send(Reply {
                     text: KEEP_ALL.into(),
                     default_evidence: None,
@@ -685,9 +690,10 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
         }
     };
     let cancel = CancelToken::new();
+    let signals = crate::engine::run_control::TaskSignals { cancel: cancel.clone(), pending_answer: answers.clone(), pending_amend: pending.clone() };
     let (end, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(
-            run_parent(&app, &parent.id, &answers, &pending, &cancel),
+            run_parent(&app, &parent.id, &signals),
             deliver
         )
     })
@@ -696,7 +702,7 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
     assert!(matches!(end, ParentEnd::Finished));
     let saved = app.store.load_task(&parent.id).unwrap().unwrap();
     assert_eq!(saved.status, TaskStatus::Queued);
-    assert_eq!(saved.depends_on, [dependency.id]);
+    assert_eq!(saved.depends_on, [dependency.id.clone()]);
     assert!(!app.controls.lock().unwrap().contains_key(&child.id));
     assert!(app
         .store
@@ -711,17 +717,12 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
 async fn task_amend_hands_a_live_loops_task_to_the_loop_instead_of_saving() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Running);
-    task.criteria = vec!["old".into()];
+    task.fixture_data().criteria = vec!["old".into()];
     app.store.save_task(&task).unwrap();
     let pending = Arc::new(StdMutex::new(None));
     app.controls.lock().unwrap().insert(
         task.id.clone(),
-        TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: pending.clone(),
-            handle: tokio::spawn(async {}),
-        },
+        TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: pending.clone() }, handle: tokio::spawn(async {}) },
     );
     for criteria in [json!(["first"]), json!(["second"])] {
         let result = app
@@ -762,10 +763,10 @@ async fn helpers_folder_task_log_and_timeline_read_helpers_without_a_legacy_fall
             .unwrap();
     };
     let mut task = task_with_status(TaskStatus::Done);
-    task.attempts = vec![attempt_with_failure(1, "failure")];
-    task.attempts[0].ended_at = Some(10_000);
-    task.attempts[0].review_cost_usd = Some(0.5);
-    task.attempts[0].advisor_cost_usd = Some(0.25);
+    task.fixture_data().attempts = vec![attempt_with_failure(1, "failure")];
+    task.fixture_data().attempts[0].ended_at = Some(10_000);
+    task.fixture_data().attempts[0].review_cost_usd = Some(0.5);
+    task.fixture_data().attempts[0].advisor_cost_usd = Some(0.25);
     app.store.save_task(&task).unwrap();
     for stage in ["review", "advisor"] {
         let legacy = app.store.run_dir(&task.id, 1).join(stage);
@@ -875,12 +876,7 @@ async fn task_delete_via_mcp_refuses_a_task_with_a_live_loop_but_the_owner_may_d
     app.store.save_task(&task).unwrap();
     app.controls.lock().unwrap().insert(
         task.id.clone(),
-        TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
-            handle: tokio::spawn(async {}),
-        },
+        TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: Arc::new(StdMutex::new(None)) }, handle: tokio::spawn(async {}) },
     );
     let err = app
         .dispatch("task.delete", json!({"id": task.id, "source": "lead"}))
@@ -916,12 +912,7 @@ async fn task_archive_error_names_task_stop() {
     app.store.save_task(&queued).unwrap();
     app.controls.lock().unwrap().insert(
         queued.id.clone(),
-        TaskControl {
-            cancel: CancelToken::new(),
-            pending_answer: Arc::new(StdMutex::new(None)),
-            pending_amend: Arc::new(StdMutex::new(None)),
-            handle: tokio::spawn(async {}),
-        },
+        TaskControl { signals: crate::engine::run_control::TaskSignals { cancel: CancelToken::new(), pending_answer: Arc::new(StdMutex::new(None)), pending_amend: Arc::new(StdMutex::new(None)) }, handle: tokio::spawn(async {}) },
     );
     let err = app
         .dispatch("task.archive", json!({"id": queued.id}))

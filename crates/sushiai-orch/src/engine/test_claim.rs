@@ -4,7 +4,57 @@
 //! the implementer) rewrites the test and orchd commits it into the planner
 //! tests. Rejected: the agent carries on. Unclear: one owner question.
 
-use super::*;
+#[cfg(test)]
+use crate::task::Check;
+
+use crate::clock::now_ms;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::protected::clean_test_path;
+use crate::engine::protected::protected_hashes;
+use crate::engine::protected::write_files;
+use crate::engine::protected::MAX_TEST_BYTES;
+use crate::engine::questions::parking::wait_for_answer;
+use crate::engine::questions::reply::Reply;
+use crate::engine::review::head_chars;
+use crate::engine::review::review_request;
+use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::slots::SlotPermit;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::init_git_repo;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+#[cfg(test)]
+use crate::engine::test_support::test_app_fitting_sandbox;
+use crate::engine::verification::baseline::gated_checks;
+use crate::engine::verification::context::CheckContext;
+use crate::engine::verification::runner::run_one_verify_command;
+use crate::engine::worktrees;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::policy::routing::Harness;
+use crate::prompts::clip::truncate_chars;
+use crate::prompts::engine_text;
+use crate::task::AskedBy;
+use crate::task::Baseline;
+use crate::task::PlannedTest;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::verify::output::classify_baseline;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
+use tokio::sync::oneshot;
 
 const MAX_WHY_CHARS: usize = 300;
 
@@ -20,8 +70,11 @@ pub(super) enum Verdict {
 
 /// The judge's reply: verdict and a one-line reason.
 pub(super) fn parse_ruling(text: &str) -> Option<(Verdict, String)> {
-    let v: serde_json::Value =
-        serde_json::from_str(&brief::tagged_json(text, "sushi-test-ruling")?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&crate::prompts::reply::tagged_json(
+        text,
+        "sushi-test-ruling",
+    )?)
+    .ok()?;
     let verdict = match v
         .get("verdict")?
         .as_str()?
@@ -47,7 +100,7 @@ pub(super) fn parse_ruling(text: &str) -> Option<(Verdict, String)> {
 /// The planner's rewritten file; `None` when empty or over the size cap.
 pub(super) fn parse_rewrite(text: &str) -> Option<String> {
     let v: serde_json::Value =
-        serde_json::from_str(&brief::tagged_json(text, "sushi-test")?).ok()?;
+        serde_json::from_str(&crate::prompts::reply::tagged_json(text, "sushi-test")?).ok()?;
     let content = v.get("content")?.as_str()?.to_string();
     (!content.trim().is_empty() && content.len() <= MAX_TEST_BYTES).then_some(content)
 }
@@ -61,10 +114,10 @@ fn context(task: &Task, path: &str, content: &str, reason: &str) -> String {
         .join("\n");
     format!(
         "{}\n{}\n{}\n{}\n",
-        brief::untrusted_block("The task goal", &task.goal),
-        brief::untrusted_block("The acceptance criteria", &criteria),
-        brief::untrusted_block(&format!("The test {path}"), content),
-        brief::untrusted_block("The implementer's claim", reason),
+        crate::prompts::text::untrusted_block("The task goal", &task.goal),
+        crate::prompts::text::untrusted_block("The acceptance criteria", &criteria),
+        crate::prompts::text::untrusted_block(&format!("The test {path}"), content),
+        crate::prompts::text::untrusted_block("The implementer's claim", reason),
     )
 }
 
@@ -149,7 +202,7 @@ async fn planner_run(
     .await;
     let _ = std::fs::remove_file(&key_path);
     let outcome = result.map_err(|_| "the run was stopped or did not start".to_string())?;
-    task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    task.charge(outcome.cost_usd.unwrap_or(0.0));
     if outcome.timed_out {
         return Err(helper_timeout_message(kind, limit));
     }
@@ -183,10 +236,10 @@ async fn still_fails_on_base(
     let path = scratch_path(task, "claim-base");
     let (r, p, sha) = (repo.clone(), path.clone(), task.base_sha.clone());
     let made = tokio::task::spawn_blocking(move || {
-        git::remove_worktree(&r, &p);
-        git::add_detached_worktree(&r, &p, &sha)?;
-        let _ = git::bootstrap_worktree(&r, &p);
-        Ok::<(), git::GitError>(())
+        crate::git::worktree::remove_worktree(&r, &p);
+        crate::git::worktree::add_detached_worktree(&r, &p, &sha)?;
+        let _ = crate::git::bootstrap::bootstrap_worktree(&r, &p);
+        Ok::<(), crate::git::GitError>(())
     })
     .await;
     if !matches!(made, Ok(Ok(()))) {
@@ -205,13 +258,15 @@ async fn still_fails_on_base(
         let timeout = Duration::from_secs(app.settings.read().unwrap().verify_timeout_secs);
         for check in &gated {
             let out = run_one_verify_command(
-                CheckContext::new(app, Some(&task.id)),
-                &path,
+                crate::engine::verification::runner::CheckRunner::from_context(
+                    CheckContext::new(app, Some(&task.id)),
+                    &path,
+                    sandbox.as_ref(),
+                    &task.base_sha,
+                    cancel,
+                )
+                .with_timeout(timeout),
                 &check.run,
-                timeout,
-                sandbox.as_ref(),
-                &task.base_sha,
-                cancel,
             )
             .await;
             if classify_baseline(&out) != Some(Baseline::Fail) {
@@ -225,7 +280,8 @@ async fn still_fails_on_base(
     }
     .await;
     let (r, p) = (repo, path);
-    let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
+    let _ =
+        tokio::task::spawn_blocking(move || crate::git::worktree::remove_worktree(&r, &p)).await;
     result
 }
 
@@ -287,9 +343,9 @@ async fn rewrite_test(
     tokio::task::spawn_blocking(move || write_files(&wt, &written))
         .await
         .unwrap_or_else(|e| Err(e.to_string()))?;
-    task.planner_tests.files = files;
-    task.planner_tests.protected = Some(protected_hashes(worktree, &task.base_sha, task));
-    task.decisions.push(format!(
+    crate::task::checks::edits::replace_planner_files(task, files);
+    task.record_protected_tests(protected_hashes(worktree, &task.base_sha, task));
+    task.record_decision(format!(
         "Orchestrator: the planner rewrote protected test {path} ({} -> {} lines) after the agent's claim ({}); judge: {why}",
         old.lines().count(),
         new.lines().count(),
@@ -304,14 +360,14 @@ pub(super) async fn rule_on_claims(
     app: &Arc<App>,
     task: &mut Task,
     idx: usize,
-    claims: &[brief::TestClaim],
+    claims: &[crate::engine::attempts::report::TestClaim],
     worktree: &Path,
     pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
     cancel: &CancelToken,
     permit: &mut Option<SlotPermit>,
 ) {
     let attempt_n = task.attempts[idx].n;
-    let task_id = task.id.clone();
+    let _task_id = task.id.clone();
     // The judge and the planner read a checkout of the base with the planner tests, never
     // the agent's worktree: what the agent wrote there is not an instruction.
     let scratch = scratch_path(task, "claim-tests");
@@ -327,7 +383,7 @@ pub(super) async fn rule_on_claims(
             .find(|t| t.path == path)
             .map(|t| t.content.clone())
         else {
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Orchestrator: the claim that {path} is wrong was not ruled on: it is not one of the planner's tests"
             ));
             continue;
@@ -335,8 +391,8 @@ pub(super) async fn rule_on_claims(
         if task.planner_tests.ruled.contains(&path) {
             continue;
         }
-        task.planner_tests.ruled.push(path.clone());
-        task.updated_at = now_ms();
+        task.record_ruled_test(path.clone());
+        task.touch(now_ms());
         app.save_task_logged(task);
         if !scratch_made {
             let (r, p, sha, files) = (
@@ -346,13 +402,14 @@ pub(super) async fn rule_on_claims(
                 task.planner_tests.files.clone(),
             );
             let made = tokio::task::spawn_blocking(move || {
-                git::remove_worktree(&r, &p);
-                git::add_detached_worktree(&r, &p, &sha).map_err(|e| e.to_string())?;
+                crate::git::worktree::remove_worktree(&r, &p);
+                crate::git::worktree::add_detached_worktree(&r, &p, &sha)
+                    .map_err(|e| e.to_string())?;
                 write_files(&p, &files).map(|_| ())
             })
             .await;
             if !matches!(made, Ok(Ok(()))) {
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Orchestrator: the claim that {path} is wrong was not ruled on (no clean checkout of the tests); the test stays"
                 ));
                 continue;
@@ -374,7 +431,7 @@ pub(super) async fn rule_on_claims(
         let (verdict, why) = match ruling {
             Ok(r) => r,
             Err(e) => {
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Orchestrator: the claim that {path} is wrong was not ruled on ({e}); the test stays"
                 ));
                 continue;
@@ -383,25 +440,28 @@ pub(super) async fn rule_on_claims(
         let rewrite = match verdict {
             Verdict::Confirmed => true,
             Verdict::Rejected => {
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Orchestrator: the claim that {path} is wrong was rejected: {why}"
                 ));
                 false
             }
             Verdict::Unclear => {
-                task.question = Some(Question::new(
-                    format!(
+                task.ask(
+                    Question::new(
+                        format!(
                         "The agent says {path} is wrong: {}\nThe judge could not settle it: {why}",
                         truncate_chars(&claim.reason, 400)
                     ),
-                    vec![REWRITE_TEST.to_string(), KEEP_TEST.to_string()],
-                    QuestionKind::AgentQuestion,
-                    AskedBy::Implement,
-                ));
-                task.status = TaskStatus::Waiting;
-                task.updated_at = now_ms();
-                let answer =
-                    wait_for_answer(app, &task_id, task, pending_answer, cancel, permit).await;
+                        vec![REWRITE_TEST.to_string(), KEEP_TEST.to_string()],
+                        QuestionKind::AgentQuestion,
+                        AskedBy::Implement,
+                        crate::clock::now_ms(),
+                    ),
+                    now_ms(),
+                );
+                task.resume_phase(TaskStatus::Waiting, crate::clock::now_ms());
+                task.touch(now_ms());
+                let answer = wait_for_answer(app, task, pending_answer, cancel, permit).await;
                 answer.is_some_and(|a| a.trim().eq_ignore_ascii_case(REWRITE_TEST))
             }
         };
@@ -419,18 +479,19 @@ pub(super) async fn rule_on_claims(
             )
             .await
             {
-                task.decisions.push(format!(
+                task.record_decision(format!(
                     "Orchestrator: rewriting {path} failed ({e}); the test stays"
                 ));
             }
         }
-        task.updated_at = now_ms();
+        task.touch(now_ms());
         app.save_task_logged(task);
         app.broadcast_task(task);
     }
     if scratch_made {
         let (r, p) = (PathBuf::from(&task.repo), scratch);
-        let _ = tokio::task::spawn_blocking(move || git::remove_worktree(&r, &p)).await;
+        let _ = tokio::task::spawn_blocking(move || crate::git::worktree::remove_worktree(&r, &p))
+            .await;
     }
 }
 
@@ -443,9 +504,10 @@ mod tests {
         let (app, _dir) = test_app();
         let repo = app.home.join("some-repo");
         let mut task = task_with_status(TaskStatus::Running);
-        task.worktree = git::worktree_path(&repo, &app.home, "", "task/x")
-            .to_string_lossy()
-            .to_string();
+        task.fixture_data().worktree =
+            crate::git::worktree::worktree_path(&repo, &app.home, "", "task/x")
+                .to_string_lossy()
+                .to_string();
         let deny_read = PathBuf::from(&app.data_dir);
         for name in ["claim-tests", "claim-base"] {
             assert!(!scratch_path(&task, name).starts_with(&deny_read));
@@ -469,16 +531,16 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         init_git_repo(&repo);
         let mut task = task_with_status(TaskStatus::Running);
-        task.repo = repo.to_string_lossy().to_string();
-        task.worktree = dir.path().join("task").to_string_lossy().to_string();
-        task.base_sha = git::head_sha(&repo).unwrap();
-        task.criteria = vec!["the answer is written".into()];
-        task.checks = vec![Check {
+        task.fixture_data().repo = repo.to_string_lossy().to_string();
+        task.fixture_data().worktree = dir.path().join("task").to_string_lossy().to_string();
+        task.fixture_data().base_sha = crate::git::history::head_sha(&repo).unwrap();
+        task.fixture_data().criteria = vec!["the answer is written".into()];
+        task.fixture_data().checks = vec![Check {
             criterion: 0,
             run: "sh t/a.test".into(),
             baseline: Some(Baseline::Fail),
         }];
-        task.planner_tests.files = vec![PlannedTest {
+        task.fixture_data().planner_tests.files = vec![PlannedTest {
             path: "t/a.test".into(),
             content: old.into(),
         }];

@@ -4,7 +4,29 @@
 //! evidence means the failure is the task's, and a verdict that lowers
 //! caution holds only when the test names it gives appear in the base output.
 
-use super::*;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::review;
+use crate::engine::review::review_request;
+use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::state::App;
+use crate::git::paths::short_sha;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::policy::routing::Harness;
+use crate::prompts::text::tail_chars;
+use crate::task::Blame;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::VerifyOutcome;
+use serde::Deserialize;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::engine::finding_judge::resolve_judge_route;
 use std::hash::{Hash, Hasher};
 
@@ -38,10 +60,10 @@ pub(super) type AttributionKey = (String, String, String, String, String, String
 fn diff_hash(task: &Task) -> String {
     let worktree = Path::new(&task.worktree);
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    git::diff_full(worktree, &task.base_sha, usize::MAX)
+    crate::git::changes::diff_full(worktree, &task.base_sha, usize::MAX)
         .unwrap_or_default()
         .hash(&mut h);
-    git::changed_files(worktree, &task.base_sha)
+    crate::git::changes::changed_files(worktree, &task.base_sha)
         .unwrap_or_default()
         .hash(&mut h);
     format!("{:016x}", h.finish())
@@ -49,7 +71,11 @@ fn diff_hash(task: &Task) -> String {
 
 /// The reply's last `sushi-attribution` block, else its outermost `{...}`.
 pub(super) fn parse_attribution(text: &str) -> Option<Attribution> {
-    serde_json::from_str(&brief::tagged_json(text, "sushi-attribution")?).ok()
+    serde_json::from_str(&crate::prompts::reply::tagged_json(
+        text,
+        "sushi-attribution",
+    )?)
+    .ok()
 }
 
 /// Whether `name` is a whole line of `tail`, or the end of one after
@@ -138,10 +164,10 @@ fn head_tail(text: &str) -> String {
 
 fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) -> String {
     let worktree = Path::new(&task.worktree);
-    let changed = git::changed_files(worktree, &task.base_sha)
+    let changed = crate::git::changes::changed_files(worktree, &task.base_sha)
         .unwrap_or_default()
         .join("\n");
-    let stat = git::diff_stat(worktree, &task.base_sha).unwrap_or_default();
+    let stat = crate::git::changes::diff_stat(worktree, &task.base_sha).unwrap_or_default();
     let ask = task
         .request
         .iter()
@@ -158,13 +184,16 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
     let mut out = format!(
         "{}\n\n{}{}{}{}{}{}{}{}",
         crate::prompts::get("attribution"),
-        brief::untrusted_block("The task's request and goal", &ask),
-        brief::untrusted_block("The acceptance criteria", &criteria),
-        brief::untrusted_block("Changed files", &changed),
-        brief::untrusted_block("Diffstat", &stat),
-        brief::untrusted_block("The check command", &failed.command),
-        brief::untrusted_block("The task's run (head and tail)", &head_tail(&failed.tail)),
-        brief::untrusted_block(
+        crate::prompts::text::untrusted_block("The task's request and goal", &ask),
+        crate::prompts::text::untrusted_block("The acceptance criteria", &criteria),
+        crate::prompts::text::untrusted_block("Changed files", &changed),
+        crate::prompts::text::untrusted_block("Diffstat", &stat),
+        crate::prompts::text::untrusted_block("The check command", &failed.command),
+        crate::prompts::text::untrusted_block(
+            "The task's run (head and tail)",
+            &head_tail(&failed.tail)
+        ),
+        crate::prompts::text::untrusted_block(
             &format!("The base run at {}", short_sha(&task.base_sha)),
             &head_tail(&base.tail)
         ),
@@ -174,7 +203,7 @@ fn attribution_brief(task: &Task, failed: &VerifyOutcome, base: &VerifyOutcome) 
             .filter(|a| a.stage == Stage::Implement)
             .nth(1)
             .and_then(|a| a.failure.as_ref())
-            .map(|f| brief::untrusted_block(
+            .map(|f| crate::prompts::text::untrusted_block(
                 "The previous attempt's failure",
                 &tail_chars(&f.detail, RUN_TAIL_CHARS)
             ))
@@ -302,10 +331,9 @@ async fn run_turn(
     let _ = std::fs::remove_file(&key_path);
     let outcome = result.ok()?;
     if outcome.timed_out {
-        task.decisions
-            .push(helper_timeout_message("attribution", limit));
+        task.record_decision(helper_timeout_message("attribution", limit));
     }
-    task.cost_usd += outcome.cost_usd.unwrap_or(0.0);
+    task.charge(outcome.cost_usd.unwrap_or(0.0));
     if outcome.timed_out || outcome.error.is_some() {
         return None;
     }

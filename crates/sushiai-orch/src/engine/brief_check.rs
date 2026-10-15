@@ -1,4 +1,43 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::answer_policy::check_authority;
+use crate::engine::answer_policy::shared_check_amend_refusal;
+use crate::engine::attempts::ledger::CostTag;
+use crate::engine::attempts::run::run_harness;
+use crate::engine::attempts::tracking::RunTrack;
+use crate::engine::availability::cheapest_available;
+use crate::engine::cost::replay_run_cost;
+use crate::engine::decision::completed_implement_attempts;
+use crate::engine::planning::graph::overlapping_path;
+use crate::engine::review::review_request;
+use crate::engine::review::write_readonly_claude_settings_with_profile;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::assert_helper_timeout;
+#[cfg(test)]
+use crate::engine::test_support::slow_helper_task;
+use crate::harness;
+use crate::harness::cancel::CancelToken;
+use crate::harness::guard::helper_timeout_message;
+use crate::harness::guard::Guard;
+use crate::harness::native::error::RunError;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::variant::Variant;
+use crate::prompts::clip::truncate_chars;
+use crate::prompts::engine_text;
+use crate::prompts::fill;
+use crate::task::amendment::Amendment;
+use crate::task::checks::authority::Origin;
+use crate::task::checks::commands::check_targets;
+use crate::task::AttemptStatus;
+use crate::task::MissingTool;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 const MAX_CONFLICT_CHARS: usize = 400;
 
@@ -96,7 +135,12 @@ async fn run_check(
     cancel: &CancelToken,
 ) -> Result<(Verdict, Option<MissingTool>, Option<String>), RunError> {
     let settings = app.settings.read().unwrap().clone();
-    let tools = permissions::task_tools(app, &settings, task, Path::new(&task.worktree));
+    let tools = crate::engine::permissions::tools::task_tools(
+        app,
+        &settings,
+        task,
+        Path::new(&task.worktree),
+    );
     let brief_text = build_check_brief(&task.goal, &task.criteria, &tools.capabilities());
     let JudgeRun {
         reply,
@@ -235,7 +279,7 @@ pub(super) fn add_task_cost(app: &Arc<App>, task_id: &str, cost: f64) {
     if cost <= 0.0 {
         return;
     }
-    if let Err(e) = app.update_task(task_id, |task| task.cost_usd += cost) {
+    if let Err(e) = app.update_task(task_id, |task| task.charge(cost)) {
         eprintln!("orch: updating task {task_id} cost failed: {e}");
     }
 }
@@ -334,29 +378,26 @@ pub(super) async fn check_brief(
     let Ok(Some(mut task)) = app.store.load_task(task_id) else {
         return BriefAction::Proceed;
     };
-    task.decisions.extend(timeout_note);
+    task.record_decisions(timeout_note);
     let mut action = BriefAction::Proceed;
     if let Some(note) = fallback {
-        task.decisions.push(format!("Brief check: {note}"));
+        task.record_decision(format!("Brief check: {note}"));
     }
     match verdict {
-        Verdict::Clear => task
-            .decisions
-            .push("Brief check: no contradiction found".to_string()),
-        Verdict::Unusable(why) => task.decisions.push(format!(
+        Verdict::Clear => task.record_decision("Brief check: no contradiction found".to_string()),
+        Verdict::Unusable(why) => task.record_decision(format!(
             "Brief check: no usable answer ({}); continuing",
             truncate_chars(&why, 200)
         )),
         Verdict::Conflict(conflict) => {
             if can_redraft && !task.plan_gate.replanned {
-                task.decisions
-                    .push(format!("Brief check: {conflict} (drafting again)"));
-                task.plan_gate.replanned = true;
-                task.status = TaskStatus::Drafting;
+                task.record_decision(format!("Brief check: {conflict} (drafting again)"));
+                task.mark_replanned();
+                task.resume_phase(TaskStatus::Drafting, crate::clock::now_ms());
                 action = BriefAction::Redraft(conflict);
             } else {
-                task.decisions.push(format!("Brief check: {conflict}"));
-                task.brief_check.conflict = Some(conflict);
+                task.record_decision(format!("Brief check: {conflict}"));
+                task.record_brief_conflict(conflict);
             }
         }
     }
@@ -364,15 +405,15 @@ pub(super) async fn check_brief(
     // the task lacks is asked about before the first attempt, once.
     if !matches!(action, BriefAction::Redraft(_)) && !task.brief_check.missing_tool_asked {
         if let Some(missing) = missing {
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Brief check: criterion {} needs {}, which the task will not have",
                 missing.criterion, missing.capability
             ));
-            task.brief_check.missing_tool = Some(missing);
+            task.record_missing_tool(missing);
         }
     }
-    task.brief_check.done = !matches!(action, BriefAction::Redraft(_));
-    task.updated_at = now_ms();
+    task.finish_brief_check(!matches!(action, BriefAction::Redraft(_)));
+    task.touch(now_ms());
     app.save_task_logged(&task);
     app.broadcast_task(&task);
     action
@@ -391,9 +432,11 @@ async fn landed_files(app: &App, task: &Task) -> Vec<String> {
     for dep in deps {
         let (from, to) = super::reports::task_range(&dep);
         let repo = PathBuf::from(&dep.repo);
-        let from_git = tokio::task::spawn_blocking(move || git::numstat(&repo, &from, &to).ok())
-            .await
-            .unwrap_or(None);
+        let from_git = tokio::task::spawn_blocking(move || {
+            crate::git::changes::numstat(&repo, &from, &to).ok()
+        })
+        .await
+        .unwrap_or(None);
         let paths: Vec<String> = match from_git {
             Some(entries) => entries.into_iter().map(|e| e.0).collect(),
             None => dep
@@ -446,29 +489,31 @@ pub(super) async fn refresh_after_dependencies(
     {
         return false;
     }
+    let input_snapshot = crate::task::checks::snapshot::CheckSnapshot::capture(&task);
     let changed = landed_files(app, &task).await;
     let commands: Vec<&String> = task.verify.iter().chain(&task.final_verify).collect();
     let targets: Vec<String> = commands.iter().flat_map(|c| check_targets(c)).collect();
     let touched = overlapping_path(&task.paths, &changed).is_some()
         || changed.iter().any(|f| targets.iter().any(|t| t == f));
-    let settle = |decision: Option<String>, edit: &dyn Fn(&mut Task)| {
-        if let Ok(Some(mut t)) = app.store.load_task(task_id) {
-            edit(&mut t);
-            t.brief_check.refreshed = true;
-            t.decisions.extend(decision);
-            t.updated_at = now_ms();
-            app.save_task_logged(&t);
-            app.broadcast_task(&t);
-        }
+    let settle = |decision: Option<String>, edit: &dyn Fn(&mut Task) -> Result<(), String>| {
+        let _ = app.update_task_checked(task_id, |task| {
+            if !input_snapshot.matches(task) {
+                return Err("the dependency refresh is stale".to_string());
+            }
+            edit(task)?;
+            task.mark_dependency_refresh();
+            task.record_decisions(decision);
+            Ok(())
+        });
     };
     if !touched {
-        settle(None, &|_| {});
+        settle(None, &|_| Ok(()));
         return false;
     }
     let Some((route_id, route, fallback)) = check_route_for(app, &task.variant()) else {
         settle(
             Some("Refresh: skipped, the brief-check route is empty".to_string()),
-            &|_| {},
+            &|_| Ok(()),
         );
         return false;
     };
@@ -477,7 +522,7 @@ pub(super) async fn refresh_after_dependencies(
             Some(format!(
                 "Refresh: skipped, no route on an installed agent CLI for {route_id}"
             )),
-            &|_| {},
+            &|_| Ok(()),
         );
         return false;
     };
@@ -499,7 +544,7 @@ pub(super) async fn refresh_after_dependencies(
         Err(RunError::Io(msg) | RunError::NotFound(msg)) => (Err(msg), None),
     };
     if let Some(line) = timeout_note {
-        settle(Some(line), &|_| {});
+        settle(Some(line), &|_| Ok(()));
     }
     let note = fallback.map(|n| format!("Refresh: {n}"));
     let parsed = reply.and_then(|text| {
@@ -517,7 +562,7 @@ pub(super) async fn refresh_after_dependencies(
                 "Refresh: no usable answer ({}); kept as drafted",
                 truncate_chars(&why, 200)
             ));
-            settle(Some(lines.join("\n")), &|_| {});
+            settle(Some(lines.join("\n")), &|_| Ok(()));
             return false;
         }
     };
@@ -568,16 +613,18 @@ pub(super) async fn refresh_after_dependencies(
         app.verify_cache.lock().unwrap().remove(task_id);
     }
     let lines: Vec<String> = note.into_iter().chain([decision]).collect();
-    settle(Some(lines.join("\n")), &|t| {
-        if let Some(v) = verify.clone() {
-            t.verify = v;
+    settle(Some(lines.join("\n")), &|task| {
+        let amendment = Amendment {
+            verify: verify.clone(),
+            final_verify: final_verify.clone(),
+            ..Default::default()
+        };
+        let authority = check_authority(&app.settings.read().unwrap(), task);
+        amendment.apply_authorized(task, Origin::Other, &authority, now_ms())?;
+        if let Some(paths) = paths.clone() {
+            task.record_paths(paths);
         }
-        if let Some(v) = final_verify.clone() {
-            t.final_verify = v;
-        }
-        if let Some(p) = paths.clone() {
-            t.paths = p;
-        }
+        Ok(())
     });
     false
 }
@@ -664,16 +711,16 @@ mod tests {
         let landed = git_in(&repo, &["rev-parse", "HEAD"]);
         // A split parent: no implement attempt of its own, only a landing.
         let mut dep = task_with_status(TaskStatus::Done);
-        dep.repo = repo.display().to_string();
-        dep.landed_sha = Some(landed);
+        dep.fixture_data().repo = repo.display().to_string();
+        dep.fixture_data().landed_sha = Some(landed);
         app.store.save_task(&dep).unwrap();
 
         let child_with = |paths: &[&str]| {
             let mut t = task_with_status(TaskStatus::Queued);
-            t.repo = repo.display().to_string();
-            t.planned_by_parent = true;
-            t.depends_on = vec![dep.id.clone()];
-            t.paths = paths.iter().map(|p| p.to_string()).collect();
+            t.fixture_data().repo = repo.display().to_string();
+            t.fixture_data().planned_by_parent = true;
+            t.record_dependencies(vec![dep.id.clone()]);
+            t.record_paths(paths.iter().map(|p| p.to_string()).collect());
             app.store.save_task(&t).unwrap();
             t
         };
@@ -729,7 +776,7 @@ mod timeout_tests {
             .iter()
             .any(|d| d.starts_with("Brief check: no usable answer") && d.ends_with("continuing")));
         assert_helper_timeout(&task, "brief-check");
-        let cost = crate::costs::read_all(&app.data_dir);
+        let cost = crate::store::costs::read_all(&app.data_dir);
         assert_eq!(cost.len(), 1);
         assert!(cost[0].attempt.is_none());
     }

@@ -5,7 +5,66 @@
 //! `precedents.*` RPCs. The RPCs are not MCP tools: the owner uses them in the
 //! Orchestrator panel.
 
-use super::*;
+#[cfg(test)]
+use crate::clock::now_ms;
+#[cfg(test)]
+use crate::engine::answer_policy::record_policy_answer;
+#[cfg(test)]
+use crate::engine::lines::LIKE_PREFIX;
+#[cfg(test)]
+use crate::engine::questions::answers::record_answer_for;
+#[cfg(test)]
+use crate::engine::questions::parking::park_for_answer;
+#[cfg(test)]
+use crate::engine::run_control::TaskControl;
+#[cfg(test)]
+use crate::harness::cancel::CancelToken;
+#[cfg(test)]
+use crate::task::AnsweredBy;
+#[cfg(test)]
+use crate::task::AnsweredQuestion;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::TaskStatus;
+#[cfg(test)]
+use crate::task::VerifyOutcome;
+#[cfg(test)]
+use crate::task::PRE_EXISTING_RETRY;
+#[cfg(test)]
+use std::path::Path;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use std::time::Duration;
+
+#[cfg(test)]
+use crate::engine::decision::EXHAUSTED_ANSWER_PREFIX;
+
+use crate::engine::answer_policy::owner_only;
+use crate::engine::digest;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::attempt_with_failure;
+#[cfg(test)]
+use crate::engine::test_support::init_git_repo;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::engine::verification::base::answers::PRE_EXISTING_DROP;
+use crate::overseer;
+use crate::prompts::engine_text;
+use crate::task::is_option;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Risk;
+use crate::task::Task;
+use serde::Deserialize;
+use serde_json::json;
+
 use crate::precedents;
 
 /// What the overseer may never decide, whatever the precedent: the question
@@ -437,6 +496,7 @@ mod tests {
             vec![RETRY.into(), PRE_EXISTING_DROP.into(), "stop".into()],
             QuestionKind::PreexistingFailure,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         q.commands = vec!["cargo test".into()];
         q
@@ -448,6 +508,7 @@ mod tests {
             options.iter().map(|o| o.to_string()).collect(),
             QuestionKind::AgentQuestion,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         )
     }
 
@@ -471,21 +532,31 @@ mod tests {
             vec!["continue".into(), "stop".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         )
     }
 
     /// A task of `repo` that was asked `q` and answered it.
     fn answered_task(repo: &str, q: &Question, answer: &str, by: AnsweredBy) -> Task {
         let mut task = task_with_status(TaskStatus::Queued);
-        task.repo = repo.to_string();
-        record_answer_for(&mut task, Some(q), answer, by, None, None);
+        task.fixture_data().repo = repo.to_string();
+        record_answer_for(
+            &mut task,
+            Some(q),
+            &crate::engine::questions::reply::Reply {
+                text: (answer).to_string(),
+                default_evidence: (None).map(str::to_string),
+                like: (None).map(str::to_string),
+            },
+            by,
+        );
         task
     }
 
     fn waiting_task(repo: &str, q: Question) -> Task {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo.to_string();
-        task.question = Some(q);
+        task.fixture_data().repo = repo.to_string();
+        task.fixture_data().question = Some(q);
         task
     }
 
@@ -513,9 +584,11 @@ mod tests {
         app.controls.lock().unwrap().insert(
             id.clone(),
             TaskControl {
-                cancel: cancel.clone(),
-                pending_answer: pending.clone(),
-                pending_amend: Arc::new(StdMutex::new(None)),
+                signals: crate::engine::run_control::TaskSignals {
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: Arc::new(StdMutex::new(None)),
+                },
                 handle: tokio::spawn(async {}),
             },
         );
@@ -523,8 +596,7 @@ mod tests {
             let (app, pending, cancel) = (app.clone(), pending.clone(), cancel.clone());
             async move {
                 let mut task = task;
-                let answer =
-                    park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+                let answer = park_for_answer(&app, &mut task, &pending, &cancel, &mut None).await;
                 (answer, task)
             }
         });
@@ -545,7 +617,7 @@ mod tests {
     }
 
     fn overseer_app() -> (Arc<App>, tempfile::TempDir) {
-        let _ = chat::fake_overseer_harness();
+        let _ = crate::engine::chat::test_support::fake_overseer_harness();
         let (app, dir) = test_app();
         app.settings.write().unwrap().auto_answer = true;
         (app, dir)
@@ -570,18 +642,20 @@ mod tests {
         }
         // A waiting-SLA default and a rule are policy; a judge is its own source.
         let mut policy = task_with_status(TaskStatus::Queued);
-        policy.repo = "/r1".into();
+        policy.fixture_data().repo = "/r1".into();
         record_answer_for(
             &mut policy,
             Some(&q),
-            "B",
+            &crate::engine::questions::reply::Reply {
+                text: ("B").to_string(),
+                default_evidence: Some(str::to_string("nobody answered")),
+                like: (None).map(str::to_string),
+            },
             AnsweredBy::Owner,
-            Some("nobody answered"),
-            None,
         );
         app.store.save_task(&policy).unwrap();
         let mut judge = task_with_status(TaskStatus::Queued);
-        judge.repo = "/r1".into();
+        judge.fixture_data().repo = "/r1".into();
         record_policy_answer(&mut judge, &q, "B", "judge", "verified the evidence", 1);
         app.store.save_task(&judge).unwrap();
         let (list, _) = precedents::list(&app.data_dir, "/r1");
@@ -606,7 +680,7 @@ mod tests {
         let mut q = base_q();
         q.text = "cargo test fails on base deadbee: token sk-live-SECRET99 leaked".into();
         let mut task = task_with_status(TaskStatus::Queued);
-        task.repo = "/r1".into();
+        task.fixture_data().repo = "/r1".into();
         let mut attempt = attempt_with_failure(1, "verify:x");
         attempt.changed_files = vec!["src/a.rs".into()];
         attempt.verify = vec![VerifyOutcome {
@@ -621,8 +695,17 @@ mod tests {
             setup_failed: true,
             ..Default::default()
         }];
-        task.attempts.push(attempt);
-        record_answer_for(&mut task, Some(&q), RETRY, AnsweredBy::Owner, None, None);
+        task.fixture_data().attempts.push(attempt);
+        record_answer_for(
+            &mut task,
+            Some(&q),
+            &crate::engine::questions::reply::Reply {
+                text: (RETRY).to_string(),
+                default_evidence: (None).map(str::to_string),
+                like: (None).map(str::to_string),
+            },
+            AnsweredBy::Owner,
+        );
         app.store.save_task(&task).unwrap();
         let text = std::fs::read_to_string(precedents::path(&app.data_dir)).unwrap();
         assert!(!text.contains("SECRET99"), "{text}");
@@ -660,32 +743,33 @@ mod tests {
             a.verify[0].tree = Some(tree.into());
             a
         };
-        task.attempts = vec![
+        task.fixture_data().attempts = vec![
             on_tree(1, "not ok 1 - alpha", "tree-a"),
             on_tree(2, "not ok 2 - beta", "tree-a"),
         ];
         assert_eq!(precedents::signals_of(&task), ["flaky"]);
-        task.attempts = vec![
+        task.fixture_data().attempts = vec![
             on_tree(1, "not ok 1 - alpha", "tree-a"),
             on_tree(2, "not ok 2 - beta", "tree-b"),
         ];
         assert!(precedents::signals_of(&task).is_empty());
-        task.attempts = vec![attempt(1, outcome(None, "killed after 600s"))];
+        task.fixture_data().attempts = vec![attempt(1, outcome(None, "killed after 600s"))];
         assert_eq!(precedents::signals_of(&task), ["timeout"]);
         // The install signal comes from a failed setup, never from a check's own words.
         let mut setup = outcome(Some(1), "npm ERR! failed to install");
         setup.setup_failed = true;
-        task.attempts = vec![attempt(1, setup)];
+        task.fixture_data().attempts = vec![attempt(1, setup)];
         assert_eq!(precedents::signals_of(&task), ["install"]);
-        task.attempts = vec![attempt(1, outcome(Some(1), "npm ERR! failed to install"))];
+        task.fixture_data().attempts =
+            vec![attempt(1, outcome(Some(1), "npm ERR! failed to install"))];
         assert!(precedents::signals_of(&task).is_empty());
         let mut other = attempt(1, outcome(Some(1), "FAIL tests/other.test.js"));
         other.changed_files = vec!["src/mine.js".into()];
-        task.attempts = vec![other];
+        task.fixture_data().attempts = vec![other];
         assert_eq!(precedents::signals_of(&task), ["outside_diff"]);
         let mut mine = attempt(1, outcome(Some(1), "FAIL tests/mine.test.js"));
         mine.changed_files = vec!["tests/mine.test.js".into()];
-        task.attempts = vec![mine];
+        task.fixture_data().attempts = vec![mine];
         assert!(precedents::signals_of(&task).is_empty());
     }
 
@@ -713,10 +797,10 @@ mod tests {
         assert_eq!(precedents::list(&app.data_dir, "/r2").0[0].count, 1);
 
         let mut task = task_with_status(TaskStatus::Queued);
-        task.repo = "/r3".into();
+        task.fixture_data().repo = "/r3".into();
         let base = now_ms();
         for i in 0..(precedents::MAX_PER_REPO + 5) {
-            task.question_history.push(AnsweredQuestion {
+            task.fixture_data().question_history.push(AnsweredQuestion {
                 question: "q".into(),
                 options: vec![],
                 kind: QuestionKind::PreexistingFailure,
@@ -762,8 +846,11 @@ mod tests {
         let kinds = log_kinds(&app);
         assert!(kinds.contains(&"answered".to_string()), "{kinds:?}");
         assert!(!kinds.contains(&"asked_owner".to_string()), "{kinds:?}");
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 0);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            0
+        );
     }
 
     #[tokio::test]
@@ -780,8 +867,12 @@ mod tests {
             remember(&app, &repo, &base_q(), RETRY, by);
             let (answer, _) = park(&app, waiting_task(&repo, base_q())).await;
             assert_eq!(answer, None, "{by:?}");
-            chat::wait_idle(&app, &repo).await;
-            assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1, "{by:?}");
+            crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+            assert_eq!(
+                crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+                1,
+                "{by:?}"
+            );
         }
         let (app, dir) = overseer_app();
         let repo = repo_root(&app, dir.path()).await;
@@ -790,8 +881,11 @@ mod tests {
         remember(&app, &repo, &base_q(), "stop", AnsweredBy::Owner);
         let (answer, _) = park(&app, waiting_task(&repo, base_q())).await;
         assert_eq!(answer, None);
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            1
+        );
     }
 
     #[tokio::test]
@@ -838,6 +932,7 @@ mod tests {
             vec!["Allow once".into(), "Deny".into()],
             QuestionKind::Permission,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         let cases: Vec<(HardLimit, Question, &str)> = vec![
             (HardLimit::OwnerOnlyKind, permission, "Allow once"),
@@ -901,8 +996,11 @@ mod tests {
         let push = free_q("Push the branch to origin?", &["push", "hold"]);
         let (answer, _) = park(&app, waiting_task(&repo, push)).await;
         assert_eq!(answer, None);
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            1
+        );
     }
 
     #[tokio::test]
@@ -913,9 +1011,10 @@ mod tests {
         remember(&app, &repo, &exhausted_q(), "continue", AnsweredBy::Owner);
         // One continue left: the precedent answers and its line counts.
         let mut task = waiting_task(&repo, exhausted_q());
-        task.decisions
+        task.fixture_data()
+            .decisions
             .push(format!("{EXHAUSTED_ANSWER_PREFIX} -> continue (r)"));
-        task.loop_state.non_owner_continues = 1;
+        task.fixture_data().loop_state.non_owner_continues = 1;
         let (answer, task) = park(&app, task).await;
         assert_eq!(answer.as_deref(), Some("continue"));
         assert_eq!(task.loop_state.non_owner_continues, 2);
@@ -925,7 +1024,7 @@ mod tests {
         remember(&app, &repo, &base_q(), RETRY, AnsweredBy::Owner);
         let mut retried = waiting_task(&repo, base_q());
         let base_sha = retried.base_sha.clone();
-        crate::engine::base_check::record_base_answer(
+        crate::engine::verification::base::answers::record_base_answer(
             &mut retried,
             &["cargo test".to_string()],
             &base_sha,
@@ -934,8 +1033,11 @@ mod tests {
         );
         let (answer, _) = park(&app, retried).await;
         assert_eq!(answer, None);
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1134,7 +1236,7 @@ mod tests {
     /// An owner answer to `q` given `ago` ms before now, on its own task.
     fn remember_at(app: &App, repo: &str, q: &Question, answer: &str, ago: i64) {
         let mut task = answered_task(repo, q, answer, AnsweredBy::Owner);
-        task.question_history[0].answered_at = crate::model::now_ms() - ago;
+        task.fixture_data().question_history[0].answered_at = crate::clock::now_ms() - ago;
         app.store.save_task(&task).unwrap();
     }
 
@@ -1165,13 +1267,13 @@ mod tests {
     async fn decision_memory_a_resave_after_eviction_counts_nothing_twice() {
         let dir = tempfile::tempdir().unwrap();
         let q = free_q("Which naming style?", &["snake", "camel"]);
-        let now = crate::model::now_ms();
+        let now = crate::clock::now_ms();
         let mut first = answered_task("/r1", &q, "snake", AnsweredBy::Owner);
-        first.question_history[0].answered_at = now - 30_000;
+        first.fixture_data().question_history[0].answered_at = now - 30_000;
         precedents::sync(dir.path(), &first);
         for i in 0..520 {
             let mut other = answered_task("/r2", &q, "camel", AnsweredBy::Owner);
-            other.question_history[0].answered_at = now - 20_000 + i;
+            other.fixture_data().question_history[0].answered_at = now - 20_000 + i;
             precedents::sync(dir.path(), &other);
         }
         precedents::forget_synced();

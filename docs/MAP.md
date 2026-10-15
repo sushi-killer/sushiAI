@@ -40,14 +40,19 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `crates/sushiai-core`, `crates/sushiai-daemon` and `crates/sushiai-protocol` are the daemon core.
 - `crates/sushiai-agents` runs agents.
 - `crates/sushiai-hold` holds shared state for the daemon.
-- `crates/sushiai-orch` is the orchestrator. `crates/sushiai-orch/src/lib.rs` has `Orch::call`.
+- `crates/sushiai-orch` is the orchestrator. `crates/sushiai-orch/src/lib.rs` exposes the host facade; `crates/sushiai-orch/src/engine/runtime.rs` owns `Orch::call` and runtime startup/shutdown.
 - `crates/sushiai-orch/src/engine` is the task engine. Start at `crates/sushiai-orch/src/engine/mod.rs`.
-- `crates/sushiai-orch/src/engine/task_loop.rs` runs a task. `crates/sushiai-orch/src/engine/plan.rs` plans.
-- `crates/sushiai-orch/src/engine/verify.rs` verifies. `crates/sushiai-orch/src/engine/review.rs` reviews.
-- `crates/sushiai-orch/src/engine/land.rs` lands. `crates/sushiai-orch/src/engine/rpc_tasks.rs` serves task RPC.
-- `crates/sushiai-orch/src/brief.rs` builds the brief. `crates/sushiai-orch/src/model.rs` has `Settings`.
-- `crates/sushiai-orch/src/prompts.rs` loads `crates/sushiai-orch/prompts/orchestrator.yaml`.
+- `crates/sushiai-orch/src/engine/lifecycle/run.rs` runs a task through lifecycle operations. `crates/sushiai-orch/src/engine/planning` plans.
+- `crates/sushiai-orch/src/engine/verification` coordinates checks; `crates/sushiai-orch/src/verify` executes and classifies repository evidence. `crates/sushiai-orch/src/engine/review.rs` reviews.
+- `crates/sushiai-orch/src/engine/land.rs` lands. `crates/sushiai-orch/src/engine/rpc` validates and dispatches task RPC.
+- `crates/sushiai-orch/src/engine/attempts/brief.rs` builds the executor brief; `crates/sushiai-orch/src/engine/planning/prompt.rs` builds planning prompts. `crates/sushiai-orch/src/policy/settings.rs` has `Settings`.
+- `crates/sushiai-orch/src/prompts/loader.rs` loads `crates/sushiai-orch/prompts/orchestrator.yaml`.
+- `crates/sushiai-orch/src/task` owns pure task state and transitions; `crates/sushiai-orch/src/task/checks` owns criteria, commands, provenance, captured edits and baseline snapshots.
+- `crates/sushiai-orch/src/harness` owns native provider argv and stream/session parsing; `crates/sushiai-orch/src/api` owns scoped MCP and event wire shapes.
+- `crates/sushiai-orch/src/git` provides shared repository IO; `crates/sushiai-orch/src/delivery/git` owns commit, carry and saved-work recovery transactions.
+- `crates/sushiai-orch/rust-standards.json` sets this crate's limits and dependency boundaries; the generic workspace check is `crates/sushiai/tests/rust_standards.rs`.
 - Orchestrator settings are documented in `docs/orchestrator-settings.md`.
+- The incomplete architecture checkpoint and all twelve follow-ups are in `docs/orchd-simplify-status.md`; measured ownership and remaining limits are in `docs/orchd-simplify-inventory.md`.
 
 ## Tests
 
@@ -80,8 +85,8 @@ Skills live in `.agents/skills`. `.claude/skills` links to them. Roles live in `
 
 ## Where is ...
 
-- A setting: orchestrator settings are the `Settings` struct in `crates/sushiai-orch/src/model.rs`, documented in `docs/orchestrator-settings.md`. App settings UI is `src/app/SettingsDialog.tsx`, with state in `electron/app-db.cjs`.
+- A setting: orchestrator settings are the `Settings` struct in `crates/sushiai-orch/src/policy/settings.rs`, documented in `docs/orchestrator-settings.md`. App settings UI is `src/app/SettingsDialog.tsx`, with state in `electron/app-db.cjs`.
 - An IPC call handled: it starts in `electron/preload.cjs` and ends in a handler in `electron/ipc`.
-- The orchd brief built: `crates/sushiai-orch/src/brief.rs`. The planner prompt is `crates/sushiai-orch/prompts/orchestrator.yaml`.
+- The orchd brief built: `crates/sushiai-orch/src/engine/attempts/brief.rs`. The planner prompt is `crates/sushiai-orch/prompts/orchestrator.yaml`.
 - A CI rule: `scripts/check-conventions.mjs` and `scripts/check-crate-deps.mjs`, run by the `ci` script in `package.json`.
 - One test: `node --test tests/<name>.test.cjs` for Node, `cargo test -p <crate> <filter>` for Rust.

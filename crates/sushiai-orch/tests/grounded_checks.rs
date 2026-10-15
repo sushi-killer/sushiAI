@@ -145,7 +145,7 @@ emit "$REPORT""#,
                 // Creates a file and edits a tracked one, then fails on base.
                 {"criterion": 0, "run": "echo junk > side.txt; echo more >> READ*.md; grep -q ok impl.txt"},
                 {"criterion": 1, "run": "true"},
-                {"criterion": 2, "run": "no-such-tool-anywhere --version"},
+                {"criterion": 2, "run": "./no-such-tool-anywhere --version"},
                 {"criterion": 9, "run": "dropped: out of range"},
                 {"criterion": 0, "run": "   "},
             ],
@@ -173,7 +173,7 @@ emit "$REPORT""#,
         &"Orchestrator: check for criterion 1 already passes on base, not grounded: true"
     ));
     assert!(decisions.contains(
-        &"Orchestrator: check for criterion 2 could not run on base (exit 127), left out: no-such-tool-anywhere --version"
+        &"Orchestrator: check for criterion 2 could not run on base (exit 127), left out: ./no-such-tool-anywhere --version"
     ));
 
     // The gate: attempt 1 fails with kind verify until the check passes.

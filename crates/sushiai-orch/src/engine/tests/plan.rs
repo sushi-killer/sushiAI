@@ -297,3 +297,92 @@ fn plan_route_honors_off_override_and_missing_standard() {
     variant.planner_route = Some("claude-opus".into());
     assert_eq!(variant.plan_route_for(&settings, &task).0, "claude-opus");
 }
+
+fn prose_and_real_checks() -> serde_json::Value {
+    json!([
+        {"criterion": 0, "run": "cargo test -p x foo"},
+        {"criterion": 1, "run": "Amendment{criteria: Some(vec![...])}.apply(&mut task)"},
+    ])
+}
+
+#[test]
+fn store_draft_keeps_no_prose_check() {
+    let (app, dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Drafting);
+    task.attempts = vec![attempt_with_failure(1, "failure")];
+    let draft: brief::PlanDraft = serde_json::from_value(json!({
+        "title": "T",
+        "goal": "G",
+        "criteria": ["one", "two"],
+        "checks": prose_and_real_checks(),
+        "heldOut": {"criterion": 1, "run": "the parser keeps the last row"},
+    }))
+    .unwrap();
+    let settings = app.settings.read().unwrap().clone();
+    store_draft(&app, &mut task, 0, &draft, &settings, dir.path());
+    assert_eq!(task.criteria.len(), 2);
+    assert_eq!(task.checks.len(), 1);
+    assert_eq!(task.checks[0].run, "cargo test -p x foo");
+    assert!(task.held_out.is_none());
+    let lines = task
+        .decisions
+        .iter()
+        .filter(|d| d.contains("has no check"))
+        .count();
+    assert_eq!(lines, 2, "{:?}", task.decisions);
+}
+
+#[tokio::test]
+async fn a_drafted_subtask_part_keeps_no_prose_check() {
+    let (app, dir) = test_app();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let mut parent = task_with_status(TaskStatus::Running);
+    parent.repo = repo.to_string_lossy().into();
+    parent.worktree = parent.repo.clone();
+    parent.base_sha = git_in(&repo, &["rev-parse", "HEAD"]);
+    parent.base_ref = git::branch_of(&repo, "HEAD");
+    parent.branch = parent.base_ref.clone().unwrap_or_default();
+    app.store.save_task(&parent).unwrap();
+    let part = |key: &str, deps: &[&str]| -> brief::PlanSubtask {
+        serde_json::from_value(json!({
+            "key": key,
+            "title": key,
+            "request": format!("do {key}"),
+            "goal": "g",
+            "criteria": ["one", "two"],
+            "verify": ["npm test"],
+            "check": "npm test",
+            "dependsOn": deps,
+            "paths": [format!("src/{key}.rs")],
+            "checks": prose_and_real_checks(),
+            "heldOut": {"criterion": 1, "run": "the parser keeps the last row"},
+        }))
+        .unwrap()
+    };
+    let plan = prepare_subtasks(&[part("a", &[]), part("b", &["a"])]);
+    split_into_subtasks(&app, &parent.id, &plan, false)
+        .await
+        .unwrap();
+    let children: Vec<Task> = app
+        .store
+        .list_tasks()
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.parent.as_deref() == Some(parent.id.as_str()))
+        .collect();
+    assert_eq!(children.len(), 2);
+    for child in &children {
+        assert!(child.criteria.len() >= 2);
+        assert_eq!(child.checks.len(), 1, "{:?}", child.checks);
+        assert_eq!(child.checks[0].run, "cargo test -p x foo");
+        assert!(child.held_out.is_none());
+        let lines = child
+            .decisions
+            .iter()
+            .filter(|d| d.contains("has no check"))
+            .count();
+        assert_eq!(lines, 2, "{:?}", child.decisions);
+    }
+}

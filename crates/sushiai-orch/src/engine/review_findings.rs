@@ -218,6 +218,13 @@ pub(super) async fn handle_repeated_findings(
             ));
             continue;
         };
+        if let Some(why) = command_refusal(worktree, &run) {
+            // Never run: sh would fail on it, which proves nothing.
+            task.criteria.push(format!("Review finding {id} is fixed"));
+            task.decisions
+                .push(no_check_line(task.criteria.len() - 1, &run, &why));
+            continue;
+        }
         let dir = app
             .store
             .run_dir(&task.id, attempt_n)

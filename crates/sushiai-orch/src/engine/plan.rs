@@ -545,8 +545,18 @@ pub(super) fn store_draft(
     );
     task.verify = verify;
     // Stored before any split, so a splitting parent keeps them.
-    task.checks = valid_checks(draft.checks.clone(), draft.criteria.len());
-    task.held_out = valid_check(draft.held_out.clone(), draft.criteria.len());
+    let mut refused = Vec::new();
+    task.checks = gate_checks(
+        worktree,
+        valid_checks(draft.checks.clone(), draft.criteria.len()),
+        &mut refused,
+    );
+    task.held_out = gate_held_out(
+        worktree,
+        valid_check(draft.held_out.clone(), draft.criteria.len()),
+        &mut refused,
+    );
+    task.decisions.extend(refused);
     let (tests, dropped) = keep_planned_tests(&draft.tests);
     task.planner_tests.files = tests;
     for line in dropped {
@@ -1457,6 +1467,8 @@ struct Draft<'a> {
     held_out: Option<Check>,
     complete: bool,
     part: Option<&'a brief::PlanSubtask>,
+    /// Decision lines for the checks the gate refused.
+    refused: Vec<String>,
 }
 
 /// One child of a split: the planner's parts that stand alone, and the one
@@ -1473,7 +1485,7 @@ struct Unit {
 /// verify) runs as drafted; an incomplete one, and the merged group, is
 /// drafted by its own planner from its request. The parent is left `running` (its loop then
 /// starts the children) or `stopped` for the owner to review first.
-async fn split_into_subtasks(
+pub(super) async fn split_into_subtasks(
     app: &Arc<App>,
     parent_id: &str,
     plan: &SubtaskPlan,
@@ -1590,8 +1602,16 @@ async fn split_into_subtasks(
             let mut criteria = non_empty(&part.criteria);
             // Indices count the part's own criteria, before the review entries.
             let own_criteria = criteria.len();
-            drafted.checks = valid_checks(part.checks.clone(), own_criteria);
-            drafted.held_out = valid_check(part.held_out.clone(), own_criteria);
+            drafted.checks = gate_checks(
+                &parent_worktree,
+                valid_checks(part.checks.clone(), own_criteria),
+                &mut drafted.refused,
+            );
+            drafted.held_out = gate_held_out(
+                &parent_worktree,
+                valid_check(part.held_out.clone(), own_criteria),
+                &mut drafted.refused,
+            );
             criteria.extend(
                 judged
                     .into_iter()
@@ -1657,6 +1677,7 @@ async fn split_into_subtasks(
                 child.planner_tests.files = tests;
                 child.decisions.extend(dropped);
             }
+            child.decisions.extend(std::mem::take(&mut drafted.refused));
             child.planned_tier = part.tier;
             child.visual_criteria = part.visual_criteria.clone();
             child.brief_check.screenshot = part

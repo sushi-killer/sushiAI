@@ -472,7 +472,8 @@ flowchart TD
   heldout -->|fails, kind heldout| fail
   evidence -->|no image, kind evidence| fail
   impl -.- impossible
-  impossible -->|"drop criterion / retry / stop"| ownerQ
+  impossible -->|"a repo or owner check: drop criterion / retry / stop"| ownerQ
+  impossible -->|"only planner checks: the answer judge drops, rewrites or retries,<br/>else orchd drops it as an assumption"| impl
   ownerQ -->|drop criterion or retry| impl
   ownerQ -->|"drop all"| commit
   basecheck -.->|"result is cached for the lookup after the final checks"| baserun

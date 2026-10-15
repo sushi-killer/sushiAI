@@ -16,19 +16,19 @@ pub(super) fn judge_route(app: &App, variant: &Variant) -> Option<Route> {
 }
 
 /// The outermost JSON object of a judge's reply, whatever surrounds it.
-fn judge_json(text: &str) -> Option<serde_json::Value> {
+pub(super) fn judge_json(text: &str) -> Option<serde_json::Value> {
     let (start, end) = (text.find('{')?, text.rfind('}')?);
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-fn str_field(v: &serde_json::Value, key: &str) -> String {
+pub(super) fn str_field(v: &serde_json::Value, key: &str) -> String {
     v.get(key)
         .and_then(|x| x.as_str())
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
 }
 
-fn reason_of(v: &serde_json::Value) -> String {
+pub(super) fn reason_of(v: &serde_json::Value) -> String {
     let r = str_field(v, "reason");
     if r.is_empty() {
         "no reason given".to_string()
@@ -54,7 +54,7 @@ fn overturnable(task: &mut Task, question: String, answer: String, evidence: Str
 /// Replaces criterion `i` with `text`, keeping its visual mark. A judge may
 /// not take a shared check out of the criterion's `-- check:` part
 /// (`removal_refusal`): then nothing changes and the reason comes back.
-fn amend_criterion(
+pub(super) fn amend_criterion(
     settings: &Settings,
     task: &mut Task,
     i: usize,

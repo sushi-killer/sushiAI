@@ -1513,7 +1513,10 @@ pub(super) async fn run_task_loop(
         }
 
         if let Some(claim) = brief::parse_impossible(&final_text, task.criteria.len()) {
-            // Straight to the owner: no retry.
+            // Straight to a question, no retry. A claim on a criterion whose
+            // checks are all the planner's never reaches the owner: the
+            // answer judge drops, rewrites or retries it, else orchd drops it
+            // (`try_policy_answer`). A rewrite answers like a retry here.
             let question = impossible_question(&task, &claim);
             record_failure(&mut task, idx, FailureKind::Blocked, question.text.clone());
             task.attempts[idx].status = AttemptStatus::Blocked;

@@ -1297,21 +1297,17 @@ impl App {
         if task.archived {
             return Err("task is archived".to_string());
         }
-        // A failed task can only be amended to wait for a fixing task.
-        let failed_with_dependencies =
-            task.status == TaskStatus::Failed && amendment.depends_on.is_some();
-        if !failed_with_dependencies
-            && !matches!(
-                task.status,
-                TaskStatus::Drafting
-                    | TaskStatus::Running
-                    | TaskStatus::Waiting
-                    | TaskStatus::Queued
-                    | TaskStatus::Stopped
-            )
-        {
+        if !matches!(
+            task.status,
+            TaskStatus::Drafting
+                | TaskStatus::Running
+                | TaskStatus::Waiting
+                | TaskStatus::Queued
+                | TaskStatus::Stopped
+                | TaskStatus::Failed
+        ) {
             return Err(format!(
-                "task is {:?}: only drafting, running, waiting, queued or stopped tasks can be amended",
+                "task is {:?}: only drafting, running, waiting, queued, stopped or failed tasks can be amended",
                 task.status
             )
             .to_lowercase());

@@ -12,7 +12,7 @@ use crate::prompts::{brief_text, fill};
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 14;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 15;
 
 const MAX_FAILURE_DETAIL: usize = 1500;
 /// The latest failure is the one the next attempt has to fix, so it gets the whole
@@ -1312,6 +1312,8 @@ fn plan_brief(request: &str, variant: &Variant, past_work: &str, split: bool) ->
     paragraph("plan_checks");
     extra.push(' ');
     extra.push_str(brief_text("plan_tests"));
+    extra.push_str("\n\n");
+    extra.push_str(brief_text("plan_measurement"));
     if split {
         extra.push_str("\n\n");
         extra.push_str(brief_text("plan_subtasks"));
@@ -2425,6 +2427,31 @@ mod tests {
             assert!(build_brief(&task, "", "").contains(&task.decisions[0]));
             assert_eq!(agent_decision_lines(&["Lead: a".into()]), ["Agent: a"]);
         }
+    }
+
+    #[test]
+    fn every_plan_brief_says_measurement_is_an_orchd_check() {
+        let v = Variant::default();
+        let briefs = [
+            build_plan_brief("r", &v, ""),
+            build_subtask_plan_brief("r", &v, ""),
+            build_plan_retry_brief("r", &v, ""),
+            build_subtask_plan_retry_brief("r", &v, ""),
+        ];
+        for b in &briefs {
+            for needle in [
+                "unix sockets",
+                "$ORCHD_BASE_SHA",
+                "temporary worktree",
+                "same benchmark",
+                "before/after/delta",
+                "exits non-zero unless the gain holds",
+                "never committed",
+            ] {
+                assert!(b.contains(needle), "missing {needle}");
+            }
+        }
+        assert_eq!(BRIEF_TEMPLATE_VERSION, 15);
     }
 
     #[test]

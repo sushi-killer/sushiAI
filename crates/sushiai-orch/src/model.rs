@@ -2847,18 +2847,48 @@ pub fn is_command_check(text: &str) -> bool {
     if mentions_image(&check) {
         return false;
     }
-    const TOOLS: &[&str] = &[
-        "cargo", "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "pytest", "tox", "uv",
-        "make", "cmake", "ctest", "jest", "vitest", "gradle", "gradlew", "mvn", "mvnw", "dotnet",
-        "rspec", "rake", "phpunit",
-    ];
     let has_word = check
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| TOOLS.contains(&w));
+        .any(|w| COMMAND_TOOLS.contains(&w));
     has_word
         || ["go test", "playwright test", "test runner"]
             .iter()
             .any(|p| check.contains(p))
+}
+
+/// Test and build tools whose name in a `-- check:` makes it a command check.
+const COMMAND_TOOLS: &[&str] = &[
+    "cargo", "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "pytest", "tox", "uv", "make",
+    "cmake", "ctest", "jest", "vitest", "gradle", "gradlew", "mvn", "mvnw", "dotnet", "rspec",
+    "rake", "phpunit",
+];
+
+/// Whether `command` runs as it is: its first word is a test or build tool.
+fn starts_with_tool(command: &str) -> bool {
+    let lower = command.trim().to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    COMMAND_TOOLS.contains(&first)
+        || ["go test", "playwright test"]
+            .iter()
+            .any(|p| lower.starts_with(p))
+}
+
+/// The command a criterion's `-- check:` part names: the first backtick span
+/// that starts with a test or build tool, else the whole part when it does.
+/// A part led by prose (`run cargo test`) names none.
+pub fn check_part_command(text: &str) -> Option<String> {
+    let (_, part) = text.split_once("-- check:")?;
+    let part = part.trim();
+    if part.contains('`') {
+        return part
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::trim)
+            .find(|s| starts_with_tool(s))
+            .map(str::to_string);
+    }
+    starts_with_tool(part).then(|| part.to_string())
 }
 
 impl Task {

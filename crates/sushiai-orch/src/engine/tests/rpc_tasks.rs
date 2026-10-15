@@ -145,6 +145,28 @@ async fn task_start_refuses_an_archived_task() {
 }
 
 #[tokio::test]
+async fn task_amend_on_a_failed_task_is_saved_for_the_next_start() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Failed);
+    task.criteria = vec!["old".into()];
+    app.store.save_task(&task).unwrap();
+    let reply = app
+        .dispatch(
+            "task.amend",
+            json!({"id": task.id, "criteria": ["new"], "verify": ["true"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply["pending"], json!(false));
+    let stored = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(stored.criteria, vec!["new"]);
+    assert_eq!(stored.verify, vec!["true"]);
+    assert!(stored.decisions.iter().any(|d| d.starts_with("Amended:")));
+    assert_eq!(stored.status, TaskStatus::Failed);
+    assert!(!app.controls.lock().unwrap().contains_key(&task.id));
+}
+
+#[tokio::test]
 async fn task_amend_rejects_what_it_cannot_amend() {
     let (app, _dir) = test_app();
     let unknown = app
@@ -156,15 +178,13 @@ async fn task_amend_rejects_what_it_cannot_amend() {
         .unwrap_err();
     assert!(unknown.contains("not found"), "{unknown}");
 
-    for status in [TaskStatus::Done, TaskStatus::Failed] {
-        let task = task_with_status(status);
-        app.store.save_task(&task).unwrap();
-        let err = app
-            .dispatch("task.amend", json!({"id": task.id, "criteria": ["a"]}))
-            .await
-            .unwrap_err();
-        assert!(err.contains("can be amended"), "{status:?}: {err}");
-    }
+    let done = task_with_status(TaskStatus::Done);
+    app.store.save_task(&done).unwrap();
+    let err = app
+        .dispatch("task.amend", json!({"id": done.id, "criteria": ["a"]}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("can be amended"), "{err}");
     let mut archived = task_with_status(TaskStatus::Stopped);
     archived.archived = true;
     app.store.save_task(&archived).unwrap();

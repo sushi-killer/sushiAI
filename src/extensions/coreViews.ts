@@ -1,11 +1,19 @@
 import type { ComponentType } from "react";
 import type { ArgsPatch } from "./args.ts";
-import { FileText, KeyRound, ListTodo, type LucideIcon } from "lucide-react";
+import {
+  FileText,
+  KeyRound,
+  ListTodo,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
 import { PreviewView } from "./preview/PreviewView.tsx";
 import { useChangedWhileHidden } from "./preview/useChangedWhileHidden.ts";
 import { OrchestrationView } from "../orchestrator/OrchestrationView.tsx";
 import { OrchestratorSettingsView } from "../orchestrator/OrchestratorSettingsView.tsx";
 import { VaultSettingsView } from "../vault/VaultSettingsView.tsx";
+import { RoutinesView } from "../routines/RoutinesView.tsx";
+import { RoutinesSettings } from "../routines/RoutinesSettings.tsx";
 
 export type LaunchAgentRequest = {
   agent: "claude" | "codex";
@@ -39,8 +47,14 @@ export type CoreViewProps = {
    * the app's own session launch. Resolves false when the launch failed (the
    * app has already told the owner why). */
   launchAgent?(request: LaunchAgentRequest): Promise<boolean>;
+  /** Shows a daemon session of a host ("local" or a connection id) as a pane
+   * of the workspace. Absent where the view cannot open panes. */
+  openSession?(host: string, sessionId: string, title?: string): void;
   /** The companion's header row, where the view draws its own controls. */
   headerSlot?: HTMLElement | null;
+  /** A page view asks the host to draw it without the page header (eyebrow,
+   * title, description). The host restores the header when it is false. */
+  onBare?(bare: boolean): void;
   /** Merges into the pane's args; an undefined value deletes the key. */
   onArgs(patch: ArgsPatch): void;
 };
@@ -73,4 +87,6 @@ export const coreViews: Record<string, CoreViewEntry> = {
     icon: ListTodo,
   },
   "vault.settings": { View: VaultSettingsView, icon: KeyRound },
+  "routines.page": { View: RoutinesView, icon: Workflow },
+  "routines.settings": { View: RoutinesSettings, icon: Workflow },
 };

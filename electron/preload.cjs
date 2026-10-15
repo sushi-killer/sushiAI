@@ -208,6 +208,11 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   projectSecretClear: invoke("projects:secret:clear"),
   projectHostWithhold: invoke("projects:host:withhold"),
   moduleInvoke: invoke("module:invoke"),
+  onModuleEvent: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on("module-event", listener);
+    return () => ipcRenderer.removeListener("module-event", listener);
+  },
   projectHostReady: invoke("projects:host:ready"),
   projectHostOverrides: invoke("projects:host:overrides"),
   projectOrchSet: invoke("projects:orch:set"),

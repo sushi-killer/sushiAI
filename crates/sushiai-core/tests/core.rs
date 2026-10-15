@@ -14,6 +14,7 @@ fn info(id: &str) -> SessionInfo {
         rows: 24,
         project: None,
         group: None,
+        background: false,
         agent: Default::default(),
     }
 }

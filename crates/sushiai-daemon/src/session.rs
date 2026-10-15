@@ -47,6 +47,9 @@ const ENDING_GRACE: Duration = Duration::from_secs(3);
 const SCREEN_THROTTLE: Duration = Duration::from_millis(500);
 /// Open permission asks per session; more are left to the agent's own terminal prompt.
 const MAX_ASKS: usize = 20;
+
+/// The `tool` of an `Ask` that is an owner question, not a permission request.
+pub const OWNER_ASK_TOOL: &str = "owner.ask";
 /// How often the foreground process of a shell session is looked at.
 const FOREGROUND_POLL: Duration = Duration::from_secs(2);
 /// Formatted history bytes one attach may carry; the oldest lines go first.
@@ -103,6 +106,7 @@ enum Cmd {
     Read(usize, oneshot::Sender<Text>),
     Snapshot(oneshot::Sender<Snap>),
     Hook(Vec<u8>, oneshot::Sender<HookReply>),
+    OwnerAsk(OwnerQuestion, oneshot::Sender<HookReply>),
     Respond(AskRespond, Reply),
     Wake(Box<Prepared>, Reply),
     Hibernate(Reply),
@@ -123,6 +127,13 @@ enum Cmd {
 
 /// Result of a hook event. For a permission ask: the receiver of the answer. The sender is
 /// dropped when the ask times out or is cancelled, which means "no decision".
+/// A question for the owner from a process in the session (`hook.ask`).
+pub struct OwnerQuestion {
+    pub text: String,
+    pub options: Vec<sushiai_protocol::AskOption>,
+    pub ttl: Option<std::time::Duration>,
+}
+
 type HookReply = Result<Option<oneshot::Receiver<Value>>, Fail>;
 
 #[derive(Clone)]
@@ -167,6 +178,19 @@ impl Handle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Cmd::Hook(payload, tx))
+            .await
+            .map_err(|_| not_running())?;
+        match timeout(ANSWER_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(not_running()),
+            Err(_) => Err((code::INTERNAL, "session did not answer".into())),
+        }
+    }
+
+    pub async fn owner_ask(&self, question: OwnerQuestion) -> HookReply {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::OwnerAsk(question, tx))
             .await
             .map_err(|_| not_running())?;
         match timeout(ANSWER_TIMEOUT, rx).await {
@@ -242,6 +266,8 @@ enum Pending {
 
 struct OpenAsk {
     ask: Ask,
+    /// An owner question: answered with the owner's own words, not a permission decision.
+    owner: bool,
     tx: oneshot::Sender<Value>,
     deadline: Instant,
 }
@@ -616,6 +642,9 @@ impl Actor {
             Cmd::Hook(payload, reply) => {
                 let _ = reply.send(self.hook(&payload));
             }
+            Cmd::OwnerAsk(question, reply) => {
+                let _ = reply.send(self.owner_ask(question));
+            }
             Cmd::Respond(answer, reply) => {
                 let _ = reply.send(self.respond(answer));
             }
@@ -731,7 +760,7 @@ impl Actor {
             agent.ending_at = Some(Instant::now() + ENDING_GRACE);
         }
         let answer = match ask {
-            Some((tool, input)) => self.open_ask(tool, input)?,
+            Some((tool, input)) => self.open_ask(tool, input, None)?,
             None => None,
         };
         self.publish();
@@ -742,10 +771,27 @@ impl Actor {
         Ok(answer)
     }
 
+    /// `hook.ask`: the question joins the open asks. It changes no agent status.
+    fn owner_ask(&mut self, question: OwnerQuestion) -> HookReply {
+        if self.agent.is_none() {
+            return Err((
+                code::INVALID_PARAMS,
+                "session has no agent hooks".to_string(),
+            ));
+        }
+        let input = serde_json::json!({ "text": question.text, "options": question.options });
+        let ttl = question.ttl.unwrap_or_else(agent::ask_timeout);
+        let rx = self.open_ask(Some(OWNER_ASK_TOOL.to_string()), input, Some(ttl))?;
+        self.publish();
+        Ok(rx)
+    }
+
+    /// `owner`: the wait of an owner question; `None` for a permission ask.
     fn open_ask(
         &mut self,
         tool: Option<String>,
         input: Value,
+        owner: Option<std::time::Duration>,
     ) -> Result<Option<oneshot::Receiver<Value>>, Fail> {
         if self
             .agent
@@ -768,7 +814,8 @@ impl Actor {
             agent.asks.push(OpenAsk {
                 ask: ask.clone(),
                 tx,
-                deadline: Instant::now() + agent::ask_timeout(),
+                owner: owner.is_some(),
+                deadline: Instant::now() + owner.unwrap_or_else(agent::ask_timeout),
             });
         }
         self.info.agent.asks.push(ask.clone());
@@ -789,10 +836,12 @@ impl Actor {
             .position(|a| a.ask.ask_id == answer.ask_id)
             .ok_or_else(not_found)?;
         let open = agent.asks.remove(at);
-        let _ = open.tx.send(agent::permission_answer(
-            answer.decision,
-            answer.message.as_deref(),
-        ));
+        let value = if open.owner {
+            agent::owner_answer(answer.decision, answer.message, answer.choice)
+        } else {
+            agent::permission_answer(answer.decision, answer.message.as_deref())
+        };
+        let _ = open.tx.send(value);
         self.asks_closed(&[open.ask.ask_id], true);
         Ok(())
     }

@@ -25,6 +25,7 @@ fn params<'a>(
         prompt: None,
         permission_wait_secs: 600,
         claude_settings: None,
+        headless: false,
     }
 }
 

@@ -1,13 +1,10 @@
+import { useState } from "react";
 import {
   ArrowUpRight,
   Blocks,
   FolderOpen,
-  Play,
-  Plus,
   Sparkles,
   TerminalSquare,
-  Trash2,
-  Workflow,
   X,
 } from "lucide-react";
 import { ExtensionsView } from "../extensions/ExtensionsView.tsx";
@@ -23,8 +20,7 @@ import { activePage } from "../extensions/routes.ts";
 import type { SectionRef } from "./navigation.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
 import { LocalSkillsView } from "../LocalSkillsView.tsx";
-import { Empty, LayersIcon } from "./Empty.tsx";
-import type { Routine } from "../workspaceState.ts";
+import { LayersIcon } from "./Empty.tsx";
 import type { ExtensionSnapshot } from "../extensions/types.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 import type { SkillCatalogItem, SkillManagementAction } from "../types";
@@ -42,16 +38,12 @@ export function SectionPage({
   section,
   runExtensionCommand,
   workspaces,
-  routines,
-  setRoutines,
-  runRoutine,
   skills,
   extensionSnapshot,
   home,
   switchWorkspace,
   setExtensionEnabled,
   refreshExtensions,
-  openRoutineDialog,
   totalPanels,
   registry,
   openExtensionTarget,
@@ -65,9 +57,6 @@ export function SectionPage({
   section: SectionRef;
   runExtensionCommand(extensionId: string, commandId: string): void;
   workspaces: Workspace[];
-  routines: Routine[];
-  setRoutines(update: (items: Routine[]) => Routine[]): void;
-  runRoutine(routine: Routine): void;
   skills: {
     catalog: SkillCatalogItem[];
     loading: boolean;
@@ -88,7 +77,6 @@ export function SectionPage({
   addExtensionPanel(extensionId: string, contributionId: string): void;
   setExtensionEnabled(extensionId: string, enabled: boolean): void;
   refreshExtensions(): void;
-  openRoutineDialog(): void;
   totalPanels: number;
   registry: ExtensionRegistry;
   openExtensionTarget(extensionId: string, targetSurfaceId: string): void;
@@ -107,6 +95,7 @@ export function SectionPage({
     daemonSessions: SessionsByHost;
   };
 }) {
+  const [bare, setBare] = useState(false);
   const surface =
     section.kind === "extension" ? activePage(registry, section) : undefined;
   if (section.kind === "extension")
@@ -115,6 +104,7 @@ export function SectionPage({
         eyebrow="YOUR WORKSPACE"
         title={surface?.title || "Extension"}
         description={surface?.description}
+        bare={bare}
         actions={
           surface && (
             <ExtensionPageActions
@@ -132,6 +122,8 @@ export function SectionPage({
             connection={connection}
             workspaces={workspaces}
             frame="page"
+            onBare={setBare}
+            openSession={ws.openSession}
           />
         ) : null}
       </PageFrame>
@@ -167,13 +159,11 @@ export function SectionPage({
       description={
         name === "Dashboard"
           ? "A little space for everything you\u2019re building."
-          : name === "Routines"
-            ? "Your everyday commands, one click away."
-            : name === "Extensions"
-              ? "App-wide packages that can add pages, panels and actions."
-              : name === "Skills"
-                ? "Skills found on this Mac, grouped by harness and ready for cleanup review."
-                : undefined
+          : name === "Extensions"
+            ? "App-wide packages that can add pages, panels and actions."
+            : name === "Skills"
+              ? "Skills found on this Mac, grouped by harness and ready for cleanup review."
+              : undefined
       }
       actions={
         <>
@@ -193,11 +183,6 @@ export function SectionPage({
               className="secondary extension-nav"
               onOpen={openExtensionTarget}
             />
-          )}
-          {name === "Routines" && (
-            <button className="primary" onClick={() => openRoutineDialog()}>
-              <Plus size={14} /> New routine
-            </button>
           )}
         </>
       }
@@ -322,41 +307,6 @@ export function SectionPage({
             ))}
           </div>
         </>
-      ) : name === "Routines" ? (
-        routines.length ? (
-          <div className="routine-list">
-            {routines.map((r) => (
-              <div key={r.id}>
-                <Workflow size={17} />
-                <div>
-                  <strong>{r.name}</strong>
-                  <code>{r.command}</code>
-                </div>
-                <button title="Run routine" onClick={() => runRoutine(r)}>
-                  <Play size={15} />
-                </button>
-                <button
-                  title="Delete routine"
-                  onClick={() =>
-                    setRoutines((items) =>
-                      items.filter((item) => item.id !== r.id),
-                    )
-                  }
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <Empty
-            icon={<Workflow size={28} />}
-            title="Make room for your rituals."
-            text="Save build, test, and development commands for this workspace."
-            action="Create a routine"
-            onAction={() => openRoutineDialog()}
-          />
-        )
       ) : name === "Skills" ? (
         <>
           <ExtensionSectionSlot

@@ -14,6 +14,7 @@ fn project(id: &str, rev: u64, at: u64, folders: &[(&str, &str)]) -> Project {
                 path: (*p).into(),
             })
             .collect(),
+        purpose: None,
         rev,
         updated_at: at,
         deleted: false,
@@ -241,4 +242,19 @@ fn section_round_trip_and_version_gate() {
         Catalog::from_bytes(b"not json"),
         Err(CatalogError::Invalid(_))
     ));
+}
+
+#[test]
+fn a_project_purpose_survives_a_sync_and_is_optional() {
+    let mut p = project("p1", 1, 1, &[("local", "/w/p1")]);
+    p.purpose = Some("Mobile game client".into());
+    let json = serde_json::to_value(&p).unwrap();
+    assert_eq!(json["purpose"], "Mobile game client");
+    let back: Project = serde_json::from_value(json).unwrap();
+    assert_eq!(back.purpose.as_deref(), Some("Mobile game client"));
+    // A client that never sends it, and a record without one, omit the key.
+    let plain = serde_json::to_value(project("p2", 1, 1, &[])).unwrap();
+    assert!(plain.get("purpose").is_none());
+    let old: Project = serde_json::from_value(plain).unwrap();
+    assert_eq!(old.purpose, None);
 }

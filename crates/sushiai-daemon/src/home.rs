@@ -56,6 +56,11 @@ impl Home {
         self.dir.join("sessions")
     }
 
+    /// The schedule entries (`schedule.set`).
+    pub fn schedules(&self) -> PathBuf {
+        self.dir.join("schedules.json")
+    }
+
     /// The daemon's settings (`daemon.configure`).
     pub fn settings(&self) -> PathBuf {
         self.dir.join("settings.json")

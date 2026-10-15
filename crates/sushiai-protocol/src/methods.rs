@@ -11,6 +11,8 @@ pub const CAPABILITIES: &[&str] = &[
     "catalog",
     "catalogRead",
     "hibernate",
+    "schedules",
+    "ownerAsk",
 ];
 
 pub mod method {
@@ -85,6 +87,22 @@ pub mod method {
     pub const SESSION_FOCUS: &str = "session.focus";
     /// Request: change the daemon's settings (`hibernateAfterSecs`).
     pub const DAEMON_CONFIGURE: &str = "daemon.configure";
+
+    // Schedules and owner asks (additive).
+    /// Request: create or replace a schedule entry (`ScheduleSet`).
+    pub const SCHEDULE_SET: &str = "schedule.set";
+    /// Request: delete a schedule entry (`ScheduleId`).
+    pub const SCHEDULE_REMOVE: &str = "schedule.remove";
+    /// Request: list the entries with their state. Params: none. Result: `ScheduleInfo[]`.
+    pub const SCHEDULE_LIST: &str = "schedule.list";
+    /// Request: run an entry now (`ScheduleId`). Result: `ScheduleFired`.
+    pub const SCHEDULE_FIRE: &str = "schedule.fire";
+    /// Notification: an entry fired, was skipped, caught up, timed out or its run ended.
+    /// Params: `ScheduleEvent`.
+    pub const SCHEDULE_EVENT: &str = "schedule.event";
+    /// Request from an agent's `sushiai ask` process (token required): ask the owner a
+    /// question and wait for `ask.respond`. Params: `HookAsk`. Result: `HookResult`.
+    pub const HOOK_ASK: &str = "hook.ask";
 }
 
 pub mod code {
@@ -112,6 +130,8 @@ pub mod code {
     /// The key that opens the session's stored launch is not available (a locked or denied
     /// keychain): the session stays asleep and a later wake can work.
     pub const LAUNCH_KEY_UNAVAILABLE: i64 = 1013;
+    /// No schedule entry has that id.
+    pub const SCHEDULE_NOT_FOUND: i64 = 1014;
     /// A hosted module is still starting; the request waited and gave up.
     pub const MODULE_STARTING: i64 = 1100;
 }
@@ -195,6 +215,15 @@ pub struct SessionCreate {
     /// A key that matches an existing session record returns that session.
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// A session started on behalf of a job, not typed by the owner: clients keep it out of
+    /// the session tree. Everything else treats it as any other session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
+    /// Claude or Codex run one turn without a terminal UI and exit: no folder trust dialog,
+    /// no input. Claude gets `-p`; Codex runs `codex exec` and prints its events as JSON
+    /// lines. A caller reads the answer from the session output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headless: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +345,9 @@ pub struct SessionInfo {
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Copied from `SessionCreate.background`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
     #[serde(flatten)]
     pub agent: AgentInfo,
 }
@@ -525,6 +557,142 @@ pub struct AskRespond {
     pub decision: Decision,
     #[serde(default)]
     pub message: Option<String>,
+    /// The option id picked for an owner ask (`hook.ask`); ignored for a permission ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+}
+
+/// Params of `hook.ask`: a question for the owner from a process inside a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookAsk {
+    pub session: String,
+    pub token: String,
+    /// The agent that owns the session (`claude`, `codex`).
+    pub agent: String,
+    pub text: String,
+    /// Offered answers; the owner picks one id (`AskRespond.choice`). Free text goes in
+    /// `AskRespond.message`.
+    #[serde(default)]
+    pub options: Vec<AskOption>,
+    /// Seconds until the ask expires without an answer; default: the permission wait.
+    #[serde(default)]
+    pub ttl_sec: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskOption {
+    pub id: String,
+    pub label: String,
+}
+
+/// What to do when a schedule fires while its previous session still runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Overlap {
+    /// Do not start; emit a `skipped` event.
+    #[default]
+    Skip,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+/// Params of `schedule.set`: one entry; the same `id` replaces it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleSet {
+    pub id: String,
+    /// Five fields: minute hour day-of-month month day-of-week.
+    pub cron: String,
+    /// IANA zone the cron is read in, for example `Europe/Berlin`.
+    pub tz: String,
+    /// Upper bound of a fixed per-entry delay, derived from the id. Default 0.
+    #[serde(default)]
+    pub jitter_sec: Option<u64>,
+    /// A fired session that runs longer is closed. Waiting on an owner ask does not count.
+    #[serde(default)]
+    pub timeout_sec: Option<u64>,
+    #[serde(default)]
+    pub overlap: Overlap,
+    /// How old a missed slot may be and still run once at daemon start. Default 7 days.
+    #[serde(default)]
+    pub catchup_window_sec: Option<u64>,
+    /// What the daemon passes to `session.create` at each fire.
+    pub create: SessionCreate,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+/// Params of `schedule.remove` and `schedule.fire`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleId {
+    pub id: String,
+}
+
+/// The run an entry waits on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRun {
+    pub session: String,
+    /// Unix milliseconds.
+    pub started_at: u64,
+    pub scheduled_for: u64,
+}
+
+/// One entry of `schedule.list`. `create.env` and `create.claudeSettings` are left out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleInfo {
+    #[serde(flatten)]
+    pub set: ScheduleSet,
+    /// Unix milliseconds of the last start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired_at: Option<u64>,
+    /// Unix milliseconds of the next slot (without jitter); none when disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<ScheduleRun>,
+}
+
+/// Result of `schedule.fire`: the started session, or why nothing started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleFired {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleEventKind {
+    Fired,
+    Skipped,
+    CaughtUp,
+    Timeout,
+    Ended,
+}
+
+/// Params of the `schedule.event` notification. Times are unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEvent {
+    pub id: String,
+    pub kind: ScheduleEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The cron slot this belongs to (the time of the request for `schedule.fire`).
+    pub scheduled_for: u64,
+    /// When the run started; for `skipped`, when it was skipped.
+    pub started_at: u64,
+    /// For `ended` and `timeout`: when the run ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
 }
 
 /// Params of `session.status`.

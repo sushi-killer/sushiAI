@@ -10,10 +10,10 @@ use sushiai_core::Screen;
 use sushiai_protocol::catalog::{ProjectsSync, SessionUpdate};
 use sushiai_protocol::{
     code, encode, method, AskRespond, AttachResult, DaemonConfigure, Frame, Hello, HelloResult,
-    HookEvent, HookOpen, HookOpenResult, HookResult, Message, Notification, ReadResult, Request,
-    Response, SessionAttach, SessionClose, SessionCreate, SessionFocus, SessionId, SessionInfo,
-    SessionInput, SessionOpen, SessionRead, SessionResize, SessionSnapshot, SessionStatus,
-    SessionWake, CAPABILITIES, PROTOCOL_VERSION,
+    HookAsk, HookEvent, HookOpen, HookOpenResult, HookResult, Message, Notification, ReadResult,
+    Request, Response, ScheduleId, ScheduleSet, SessionAttach, SessionClose, SessionCreate,
+    SessionFocus, SessionId, SessionInfo, SessionInput, SessionOpen, SessionRead, SessionResize,
+    SessionSnapshot, SessionStatus, SessionWake, CAPABILITIES, PROTOCOL_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -27,6 +27,7 @@ use crate::framed::FrameReader;
 use crate::holder::{self, HolderConn};
 use crate::launch_store::Launch;
 use crate::registry::{Registry, RemoveError};
+use crate::scheduler::SetError;
 use crate::session::{self, Chunk, Handle, Snap};
 use crate::wake;
 
@@ -66,6 +67,9 @@ const CHANGES: &[&str] = &[
     method::SESSION_WAKE,
     method::SESSION_HIBERNATE,
     method::DAEMON_CONFIGURE,
+    method::SCHEDULE_SET,
+    method::SCHEDULE_REMOVE,
+    method::SCHEDULE_FIRE,
     method::PROJECTS_SYNC,
     method::GROUPS_SYNC,
 ];
@@ -117,24 +121,25 @@ async fn connection(stream: UnixStream, registry: Arc<Registry>, id: u64) {
         let Frame::Json(text) = frame else { continue };
         match Message::parse(&text) {
             Ok(Message::Request(request)) => {
-                let response = if request.method == method::HOOK_EVENT {
-                    // A hook may wait for the owner's answer. If its process goes away
-                    // meanwhile, stop waiting: the actor then closes the ask.
-                    let handling = conn.handle(&request);
-                    tokio::pin!(handling);
-                    loop {
-                        tokio::select! {
-                            response = &mut handling => break Some(response),
-                            frame = reader.next() => {
-                                if !matches!(frame, Ok(Some(_))) {
-                                    break None;
+                let response =
+                    if request.method == method::HOOK_EVENT || request.method == method::HOOK_ASK {
+                        // A hook may wait for the owner's answer. If its process goes away
+                        // meanwhile, stop waiting: the actor then closes the ask.
+                        let handling = conn.handle(&request);
+                        tokio::pin!(handling);
+                        loop {
+                            tokio::select! {
+                                response = &mut handling => break Some(response),
+                                frame = reader.next() => {
+                                    if !matches!(frame, Ok(Some(_))) {
+                                        break None;
+                                    }
                                 }
                             }
                         }
-                    }
-                } else {
-                    Some(conn.handle(&request).await)
-                };
+                    } else {
+                        Some(conn.handle(&request).await)
+                    };
                 let Some(response) = response else { break };
                 if conn.out.send(encode(&response.frame())).await.is_err() {
                     break;
@@ -276,6 +281,32 @@ impl Conn {
         match request.method.as_str() {
             method::HOOK_EVENT => self.hook(params(request)?).await,
             method::HOOK_OPEN => self.open(params(request)?).await,
+            method::HOOK_ASK => self.owner_ask(params(request)?).await,
+            method::SCHEDULE_SET => {
+                let p: ScheduleSet = params(request)?;
+                match self.registry.scheduler.set(p) {
+                    Ok(()) => Ok(json!({})),
+                    Err(SetError::Invalid(m)) => Err((code::INVALID_PARAMS, m)),
+                    Err(SetError::Storage(m)) => Err((code::INTERNAL, m)),
+                }
+            }
+            method::SCHEDULE_REMOVE => {
+                let p: ScheduleId = params(request)?;
+                if self.registry.scheduler.remove(&p.id) {
+                    Ok(json!({}))
+                } else {
+                    Err((code::SCHEDULE_NOT_FOUND, format!("no schedule {}", p.id)))
+                }
+            }
+            method::SCHEDULE_LIST => Ok(json!(self.registry.scheduler.list())),
+            method::SCHEDULE_FIRE => {
+                let p: ScheduleId = params(request)?;
+                let host = crate::scheduler::RegistryHost(self.registry.clone());
+                match self.registry.scheduler.fire(&host, &p.id).await {
+                    Some(fired) => Ok(json!(fired)),
+                    None => Err((code::SCHEDULE_NOT_FOUND, format!("no schedule {}", p.id))),
+                }
+            }
             method::SESSION_READ => {
                 let p: SessionRead = params(request)?;
                 let text = self
@@ -501,6 +532,50 @@ impl Conn {
         Ok(json!(HookResult { answer }))
     }
 
+    /// `hook.ask`: a process in the session asks the owner and waits for `ask.respond`. The
+    /// answer is null when the ask expired or its session went away.
+    async fn owner_ask(&self, p: HookAsk) -> Result<Value, Fail> {
+        if !self.hook_only {
+            return Err((
+                code::UNAUTHORIZED,
+                "hook.ask needs a connection that said hello with role hook".into(),
+            ));
+        }
+        if !self.registry.token_matches(&p.session, &p.token) {
+            return Err((code::UNAUTHORIZED, "invalid session token".into()));
+        }
+        if self.registry.agent_of(&p.session).as_deref() != Some(p.agent.as_str()) {
+            return Err((code::UNAUTHORIZED, "ask is from another agent".into()));
+        }
+        let bad = |m: &str| Err((code::INVALID_PARAMS, m.to_string()));
+        if p.text.trim().is_empty() || p.text.len() > 4096 {
+            return bad("text must be 1 to 4096 bytes");
+        }
+        if p.options.len() > 8
+            || p.options.iter().any(|o| {
+                o.id.is_empty() || o.id.len() > 64 || o.label.is_empty() || o.label.len() > 256
+            })
+        {
+            return bad("at most 8 options, each with an id (64 bytes) and a label (256 bytes)");
+        }
+        let ttl = p
+            .ttl_sec
+            .map(|s| Duration::from_secs(s.clamp(1, 7 * 24 * 3600)));
+        let handle = self.session(&p.session).await?;
+        let waiting = handle
+            .owner_ask(session::OwnerQuestion {
+                text: p.text,
+                options: p.options,
+                ttl,
+            })
+            .await?;
+        let answer = match waiting {
+            Some(rx) => rx.await.ok(),
+            None => None,
+        };
+        Ok(json!(HookResult { answer }))
+    }
+
     /// `hook.open`: an agent's `sushiai open` asks the desktop to open `arg` with `target`.
     async fn open(&self, p: HookOpen) -> Result<Value, Fail> {
         if !self.hook_only {
@@ -674,7 +749,7 @@ async fn stream_output(
     }
 }
 
-async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fail> {
+pub(crate) async fn create(registry: &Arc<Registry>, p: SessionCreate) -> Result<Value, Fail> {
     let Some(key) = p.idempotency_key.clone() else {
         return create_new(registry, p, None).await;
     };
@@ -706,7 +781,7 @@ async fn keyed_create(
 
 /// A terminal grid is `cols x rows` cells of memory in the daemon and the holder, so both
 /// sides are bounded.
-fn check_size(cols: u16, rows: u16) -> Result<(), Fail> {
+pub(crate) fn check_size(cols: u16, rows: u16) -> Result<(), Fail> {
     if (1..=1000).contains(&cols) && (1..=500).contains(&rows) {
         return Ok(());
     }
@@ -755,6 +830,7 @@ async fn create_new(
         rows: p.rows,
         project: binding.project,
         group: binding.group,
+        background: p.background,
         agent: prepared.agent,
     };
     // Known before the child runs: its first hook may arrive before the actor does.
@@ -875,6 +951,7 @@ mod tests {
             rows: 24,
             project: None,
             group: None,
+            background: false,
             agent: Default::default(),
         };
         session::start(

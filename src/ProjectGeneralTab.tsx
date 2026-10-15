@@ -123,6 +123,21 @@ export function ProjectGeneralTab({
           </span>
         )}
       </Field>
+      <Field
+        label="Purpose"
+        hint="One line on what this project is for. Agents read it to pick a project."
+      >
+        <input
+          className="pd-input"
+          aria-label="Project purpose"
+          value={project.purpose ?? ""}
+          maxLength={300}
+          onChange={(event) =>
+            setProject({ ...project, purpose: event.target.value })
+          }
+          onBlur={commit}
+        />
+      </Field>
       <h3 className="pd-group">Repository</h3>
       <Field
         label="Git remote"

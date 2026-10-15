@@ -9,14 +9,18 @@ export function PageFrame({
   title,
   description,
   actions,
+  bare = false,
   children,
 }: {
   eyebrow: string;
   title: string;
   description?: string;
   actions?: ReactNode;
+  /** Draws only the children, centred: a start screen with no page header. */
+  bare?: boolean;
   children: ReactNode;
 }) {
+  if (bare) return <div className="section-page bare">{children}</div>;
   return (
     <div className="section-page">
       <div className="page-eyebrow">{eyebrow}</div>

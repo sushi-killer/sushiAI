@@ -9,13 +9,15 @@ mod open;
 mod orch_cli;
 mod orch_module;
 mod proc;
+mod routines_cli;
+mod routines_module;
 
 use anyhow::{bail, Context, Result};
 use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only | --routines] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | projects [show ID] | hosts | routines [show ID|help] | routine save|validate|dry-run | ask TEXT | propose pr|commit|branch | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -44,7 +46,8 @@ fn main() -> Result<()> {
         Some("daemon") => {
             leave_background_priority();
             let home = sushiai_daemon::Home::from_env();
-            let modules = orch_module::slots(&home);
+            let mut modules = orch_module::slots(&home);
+            modules.extend(routines_module::slots(&home));
             sushiai_daemon::run_blocking(home, modules)?;
         }
         Some("status") => println!(
@@ -61,6 +64,9 @@ fn main() -> Result<()> {
                 serde_json::json!({"closeSessions": true}),
             )
             .map_err(|e| anyhow::Error::msg(e.message()))?;
+        }
+        Some(command @ ("projects" | "hosts" | "routines" | "routine" | "ask" | "propose")) => {
+            std::process::exit(routines_cli::run(command, args))
         }
         Some("mcp") => std::process::exit(mcp::run(args)),
         Some("orch") => std::process::exit(orch_cli::run(args)),

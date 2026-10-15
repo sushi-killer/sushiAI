@@ -742,7 +742,9 @@ try {
     `the ${itemLabel} was stored under its state slice and version`,
   );
   // A contributed entry with no order of its own sorts after every built-in
-  // section rather than claiming the top of the host's own navigation.
+  // section rather than claiming the top of the host's own navigation. One
+  // that asks for a negative order (the Routines extension) sits right under
+  // Inbox, above Dashboard.
   assert.deepEqual(
     (await page.locator(".primary-nav > *").allTextContents()).map((label) =>
       label.replace(/\d+$/, ""),
@@ -758,7 +760,7 @@ try {
         .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
         .map((item) => item.label),
     ],
-    "a section of the app always comes first; contributed entries follow in the order the registry gives every placement",
+    "a section of the app comes first, a negative-order entry sits under Inbox, the rest follow in the order the registry gives every placement",
   );
   await page
     .locator(".primary-nav")
@@ -829,54 +831,6 @@ try {
   await settings.getByRole("tab", { name: "Updates", exact: true }).click();
   await settings.locator(".update-settings").waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Close dialog" }).click();
-  await page.getByRole("button", { name: "Routines", exact: true }).click();
-  await page.getByRole("button", { name: "New routine", exact: true }).click();
-  await page
-    .getByRole("textbox", { name: "Name", exact: true })
-    .fill("Smoke routine");
-  await page
-    .getByRole("textbox", { name: "Command", exact: true })
-    .fill("printf 'ROUTINE_OK\\n'");
-  await page.getByRole("button", { name: "Save routine" }).click();
-  await page.getByRole("button", { name: "Run routine", exact: true }).click();
-  // runRoutine opens the terminal and writes the command before it adds the
-  // panel, so once the panel is on screen its history only has to catch up.
-  const routinePanel = page.locator(".workspace-canvas .panel", {
-    has: page.getByRole("button", { name: "Close Smoke routine" }),
-  });
-  await routinePanel.waitFor();
-  const routineSession = await until(
-    () =>
-      page.evaluate(
-        async () =>
-          (await window.bridge.sessionsList("local")).find((session) =>
-            session.title?.includes("Smoke routine"),
-          )?.id,
-      ),
-    Boolean,
-  );
-  assert.ok(routineSession, "the routine runs in its own daemon session");
-  const routineOutput = await until(
-    () => screen(routineSession),
-    (text) => /^ROUTINE_OK$/m.test(text),
-  );
-  assert.match(routineOutput, /^ROUTINE_OK$/m);
-  await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Close Smoke routine" }).click();
-  await page
-    .getByRole("button", { name: "Close session", exact: true })
-    .click();
-  // The panel must be gone first: a snapshot written before the routine panel
-  // existed would satisfy the check below without the close ever happening.
-  await routinePanel.waitFor({ state: "detached" });
-  // The reload must find the close already persisted, not race its write.
-  await until(async () => {
-    const saved = JSON.parse(readSnapshot(profile) ?? "null");
-    const active = saved?.workspaces.find((w) => w.id === saved.activeId);
-    return Boolean(
-      active && !active.panels.some((p) => p.title === "Smoke routine"),
-    );
-  }, Boolean);
   await page.reload();
   await page.waitForSelector(".panel-agent");
   assert.equal(await page.locator(".workspace-canvas .panel").count(), 4);
@@ -904,7 +858,6 @@ try {
           "extension state saves the edit and then stops writing",
           "a contributed page opens like Skills: sidebar, toolbar and Code stay",
           "settings connection",
-          "routine execution",
           "layout persistence",
           "no renderer errors",
         ],

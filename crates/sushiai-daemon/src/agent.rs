@@ -190,6 +190,7 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         prompt: p.prompt.as_deref(),
         permission_wait_secs: ASK_WAIT_SECS,
         claude_settings: p.claude_settings.as_ref(),
+        headless: p.headless,
     })
     .map_err(|e| invalid(&e.to_string()))?;
     env.extend(spec.vars);
@@ -282,6 +283,24 @@ pub fn clip_input(input: Value) -> Value {
     Value::String(text[..end].to_string())
 }
 
+/// What `hook.ask` returns to a waiting process: the owner's decision (`allow` = answered,
+/// `deny` = declined), the picked option and free text.
+pub fn owner_answer(decision: Decision, message: Option<String>, choice: Option<String>) -> Value {
+    let mut v = json!({
+        "decision": match decision {
+            Decision::Allow => "allow",
+            Decision::Deny => "deny",
+        }
+    });
+    if let Some(m) = message {
+        v["message"] = json!(m);
+    }
+    if let Some(c) = choice {
+        v["choice"] = json!(c);
+    }
+    v
+}
+
 /// The JSON a `PermissionRequest` hook prints. Claude and Codex share the shape.
 pub fn permission_answer(decision: Decision, message: Option<&str>) -> Value {
     let mut d = match decision {
@@ -308,6 +327,17 @@ mod tests {
         assert!(allow["hookSpecificOutput"]["decision"]
             .get("message")
             .is_none());
+    }
+
+    #[test]
+    fn an_owner_answer_carries_choice_and_words_for_either_decision() {
+        let picked = owner_answer(Decision::Allow, Some("later".into()), Some("b".into()));
+        assert_eq!(
+            picked,
+            json!({"decision": "allow", "message": "later", "choice": "b"})
+        );
+        let declined = owner_answer(Decision::Deny, None, None);
+        assert_eq!(declined, json!({"decision": "deny"}));
     }
 
     #[test]

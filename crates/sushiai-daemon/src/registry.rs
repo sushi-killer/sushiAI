@@ -156,7 +156,11 @@ fn write_loop(writer: Arc<Writer>, path: PathBuf, catalog_path: PathBuf) {
 
 /// Temp file, fsync, rename, fsync of the directory: a crash leaves the old or the new
 /// file, never a partial one. An error never writes an empty file.
-fn write_atomic(path: &std::path::Path, bytes: &[u8], tmp_ext: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(
+    path: &std::path::Path,
+    bytes: &[u8],
+    tmp_ext: &str,
+) -> std::io::Result<()> {
     let tmp = path.with_extension(tmp_ext);
     // The file holds commands and directories: owner only.
     let mut file = fs::OpenOptions::new()
@@ -241,6 +245,8 @@ pub struct Registry {
     hibernate_secs: std::sync::atomic::AtomicU64,
     /// `SUSHIAI_HIBERNATE_AFTER_MS` (tests): wins over the settings.
     hibernate_override_ms: Option<u64>,
+    /// Cron entries that start sessions (`schedule.*`).
+    pub scheduler: crate::scheduler::Scheduler,
 }
 
 impl Registry {
@@ -265,6 +271,10 @@ impl Registry {
             keyed_create: tokio::sync::Mutex::new(()),
             wake_lock: tokio::sync::Mutex::new(()),
             modules: std::sync::OnceLock::new(),
+            scheduler: crate::scheduler::Scheduler::new(
+                home.schedules(),
+                Arc::new(crate::scheduler::SystemClock),
+            ),
             launches: LaunchStore::new(&home),
             focus: Mutex::new(HashMap::new()),
             hibernate_secs: std::sync::atomic::AtomicU64::new(DEFAULT_HIBERNATE_SECS),
@@ -757,6 +767,7 @@ mod tests {
             rows: 24,
             project: None,
             group: None,
+            background: false,
             agent: Default::default(),
         }
     }
@@ -863,6 +874,7 @@ mod tests {
                 host: host.into(),
                 path: path.into(),
             }],
+            purpose: None,
             rev: 1,
             updated_at: 1,
             deleted: false,

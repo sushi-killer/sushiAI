@@ -128,6 +128,22 @@ Control heights: `--control-h` is 32px; in practice inputs 31px
 32px), chips and host buttons 29px, account chip 24px, branch pill 23px,
 `kbd`/tag/count 16px, toggle 32x18.
 
+### In-between tokens
+
+The scale above has gaps that the Figma frames fill. They are tokens, so no
+stylesheet types the number: `--radius-row` 6px (list row, menu item, segmented
+button), `--radius-control` 7px (input, button, chip), `--radius-xl` 12px (the
+large input pill), `--text-micro` 10px (eyebrow, tag, count), `--text-note`
+11.5px, `--text-input` 12.5px, `--text-read` 13.5px (reading body),
+`--text-lead` 15px, `--text-title` 16px, `--text-page` 20px.
+
+### Figma variable names
+
+`TOKEN_MAP` in `scripts/figma-export.mjs` pairs a variable of "sushiAI tokens"
+with a token. `bg/shell` is `--bg-dialog` and `text/icon` is `--text-nav`;
+`accent/claude` has no token (agent marks are images). A layer named
+`viewport` (a web page drawn inside a mock-up) is not reported as unbound.
+
 ## Borders, elevation, motion
 
 - Borders are 1px solid; dashed only for "add or drop here" (`.pd-drop`,

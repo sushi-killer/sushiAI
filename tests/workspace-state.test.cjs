@@ -140,7 +140,6 @@ test("saveWorkspaceState writes the serialized snapshot through the store and pr
     workspaces: [],
     activeId: "active",
     socket: "local",
-    routines: [],
     fontScale: 1,
   };
   const writes = [];
@@ -462,4 +461,25 @@ test("an old snapshot that named This Mac by its socket path or by nothing is re
   const again = restore({ read: () => JSON.stringify(saved) });
   assert.deepEqual(again.workspaces, saved.workspaces);
   assert.deepEqual(again.closedProjects, saved.closedProjects);
+});
+
+test("restore drops the retired saved routines field", async () => {
+  const { restore } = await library;
+  const blob = {
+    workspaces: [
+      {
+        id: "w1",
+        name: "p",
+        cwd: "/tmp/p",
+        panels: [],
+        layout: null,
+      },
+    ],
+    activeId: "w1",
+    routines: [{ id: "r1", name: "Test", command: "npm test" }],
+  };
+  const saved = restore({ read: () => JSON.stringify(blob) });
+  assert.ok(saved);
+  assert.equal("routines" in saved, false);
+  assert.equal(JSON.stringify(saved).includes("routines"), false);
 });

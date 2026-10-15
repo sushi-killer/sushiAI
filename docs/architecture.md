@@ -133,6 +133,21 @@ flowchart TB
     mcp -->|socket| proto
   end
 
+  subgraph routines["routines module (crates/sushiai-routines) - hosted by the sushiai daemon, loaded only when the Routines extension is on; desktop calls routines.* and receives routines.event; a routine is a schedule entry plus background agent sessions, the module holds no scheduler"]
+    direction LR
+    rtApi["service.rs<br/>routines.list, show, save, validate,<br/>set_enabled, run_now, dry_run, runs, result, delete"]
+    rtArgv["argv.rs<br/>agent to claude / codex argv,<br/>dry-run deny list, extraArgs allowlist"]
+    rtResult["result.rs + result.schema.json v1<br/>validate, one retry, 64 KB cap"]
+    rtStore[("~/.sushiai/routines/&lt;id&gt;/<br/>routine.json, brief.md,<br/>runs/&lt;n&gt;/result.json, proposals/")]
+    rtCli["sushiai projects, hosts, routines,<br/>routine save|validate|dry-run,<br/>ask, propose"]
+    rtGlue["crates/sushiai routines_module.rs<br/>daemon connector, session capture, git"]
+    rtApi --> rtArgv & rtResult & rtStore
+    rtCli -->|socket| rtApi
+    rtGlue -->|"schedule.set / remove, session.create"| rtApi
+  end
+  rtGlue -->|"schedule.event: fired, ended, timeout"| rtApi
+  rtCli -->|"hook.ask (owner card)"| macos
+
   subgraph agents["Agent sessions - disposable, one per attempt"]
     direction LR
     taskAgent["Task agent<br/>in its own worktree"]

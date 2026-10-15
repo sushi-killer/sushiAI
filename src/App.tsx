@@ -23,7 +23,6 @@ import { resolveDialog, type Dialog } from "./dialogs/dialog-state";
 import { UpdateSettings } from "./dialogs/lazy-settings";
 import { NotificationsDialog } from "./app/NotificationsDialog";
 import { CompanionExecPrompt } from "./extensions/CompanionExecPrompt";
-import { RoutineDialog } from "./app/RoutineDialog";
 import { useOpenSignals } from "./extensions/useOpenSignals.ts";
 import { SettingsDialog, useSettingsTab } from "./app/SettingsDialog";
 import { SectionPage } from "./app/SectionPage";
@@ -49,12 +48,7 @@ import {
 } from "./extensions/routes";
 import type { ExtensionRouteState } from "./app/navigation";
 import { useAppNavigation } from "./app/useAppNavigation";
-import {
-  codePanels,
-  initialWorkspace,
-  restore,
-  type Routine,
-} from "./workspaceState";
+import { codePanels, initialWorkspace, restore } from "./workspaceState";
 
 const saved = restore();
 
@@ -138,7 +132,6 @@ export function App() {
     sendChat,
     newThread,
     deleteThread,
-    runRoutine,
     endSessions,
     endWorkspace,
   } = ws;
@@ -163,7 +156,6 @@ export function App() {
   const target = resolveDialog(dialog, workspaces);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [compact, canvasRef] = useCompact();
-  const [routines, setRoutines] = useState<Routine[]>(saved?.routines || []);
   const [fontScale, setFontScale] = useState(saved?.fontScale || 1);
   // Held here, not in SettingsDialog: the blocker runs whenever the app is open.
   const [keepAwake, setKeepAwake] = useKeepAwake();
@@ -210,7 +202,6 @@ export function App() {
     {
       workspaces,
       activeId: active.id,
-      routines,
       fontScale,
       mode,
       tabMode,
@@ -416,9 +407,6 @@ export function App() {
               section={section}
               runExtensionCommand={runExtensionCommand}
               workspaces={workspaces}
-              routines={routines}
-              setRoutines={setRoutines}
-              runRoutine={runRoutine}
               skills={skills}
               extensionSnapshot={extensionSnapshot}
               notify={notify}
@@ -431,7 +419,6 @@ export function App() {
                 void setExtensionEnabled(extensionId, enabled)
               }
               refreshExtensions={() => void refreshExtensions()}
-              openRoutineDialog={() => setDialog({ kind: "routine" })}
               totalPanels={totalPanels}
               ws={ws}
               projectGit={projectGit}
@@ -550,11 +537,6 @@ export function App() {
               onCreate={(...args) => ws.createWorkspace(...args)}
               onStart={() => (closeDialog(), openPanelPicker())}
               onClose={closeDialog}
-            />
-          ) : dialog.kind === "routine" ? (
-            <RoutineDialog
-              setRoutines={setRoutines}
-              close={() => closeDialog()}
             />
           ) : (
             <NotificationsDialog

@@ -46,6 +46,7 @@ Rule: run the full suite on the integration tip after each merge; a new turn shi
 - 2026-10-13 Planner tests that failed the repo formatter stalled tasks → a repo `format` command runs before they are committed. `protected.rs`.
 - 2026-10-13 Node 22 host: unref'd awaited timer failed `npm run ci` on main → `node-floor` CI job.
 - 2026-10-12 A 2 s background `git status` took index.lock and broke the task commit → read-only git polls pass `--no-optional-locks`.
+- 2026-10-16 Codex strict output rejected a loose result schema and fakes hid it → live harness smoke per harness; strict schema + `from_codex`. `a_codex_answer_is_normalised_to_v1`.
 - 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-11 Electron 44 has no postinstall; a fresh `npm ci` raced parallel tests into EEXIST → `install-electron` in our postinstall.
 - 2026-10-10 An agent answer counted as the owner's → authority from the source. `an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap`.
@@ -57,4 +58,3 @@ Rule: run the full suite on the integration tip after each merge; a new turn shi
 - 2026-10-06 Codex TUI hooks ran in a shared server → `--no-daemon` (launch_spec).
 - 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.
-- 2026-10-02 Mid-session dead-row removal raced close flows → sweep at restore.

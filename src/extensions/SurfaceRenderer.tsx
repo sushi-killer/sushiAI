@@ -22,7 +22,7 @@ import {
 import { projectScope } from "./routes.ts";
 import { mergeArgs, type ArgsPatch } from "./args.ts";
 import { CompanionView } from "./CompanionView.tsx";
-import { coreViews } from "./coreViews.ts";
+import { coreViews, type CoreViewProps } from "./coreViews.ts";
 import type { ExtensionPanel, Workspace } from "../types.ts";
 import type {
   DeclarativeDocument,
@@ -84,6 +84,8 @@ export function ExtensionSurfaceView({
   frame = "section",
   args,
   onArgs,
+  onBare,
+  openSession,
 }: {
   surface: SurfaceContribution;
   cwd: string;
@@ -95,6 +97,10 @@ export function ExtensionSurfaceView({
   /** What a core view reads; the pane keeps them on its panel. */
   args?: Record<string, string>;
   onArgs?(patch: ArgsPatch): void;
+  /** A core view on a page can ask for the page without its header. */
+  onBare?(bare: boolean): void;
+  /** What a core view uses to show a daemon session as a pane. */
+  openSession?: CoreViewProps["openSession"];
 }) {
   if (surface.view.kind === "companion")
     return (
@@ -113,6 +119,8 @@ export function ExtensionSurfaceView({
         connection={connection}
         args={args}
         onArgs={onArgs}
+        onBare={onBare}
+        openSession={openSession}
       />
     );
   if (surface.view.kind !== "declarative")
@@ -160,6 +168,8 @@ function CoreSurface({
   connection,
   args,
   onArgs,
+  onBare,
+  openSession,
 }: {
   viewId: string;
   extensionId: string;
@@ -167,6 +177,8 @@ function CoreSurface({
   connection?: string;
   args?: Record<string, string>;
   onArgs?(patch: ArgsPatch): void;
+  onBare?(bare: boolean): void;
+  openSession?: CoreViewProps["openSession"];
 }) {
   const [local, setLocal] = useState<Record<string, string>>({});
   const entry = coreViews[viewId];
@@ -179,6 +191,8 @@ function CoreSurface({
         onArgs={onArgs ?? ((patch) => setLocal((cur) => mergeArgs(cur, patch)))}
         cwd={cwd}
         connection={connection}
+        onBare={onBare}
+        openSession={openSession}
       />
     </Suspense>
   );

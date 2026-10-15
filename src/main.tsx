@@ -11,4 +11,5 @@ import "./styles/components/picker.css";
 import "./styles/components/new-project.css";
 import "./styles/components/terminal-sleep.css";
 import "./styles/components/settings-agents.css";
+import "./styles/components/routines.css";
 createRoot(document.getElementById("root")!).render(<App />);

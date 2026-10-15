@@ -2,6 +2,7 @@
 //! No IO and no async runtime.
 
 pub mod catalog;
+pub mod cron;
 pub mod hibernate;
 mod screen;
 mod session;

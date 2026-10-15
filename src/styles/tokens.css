@@ -69,6 +69,12 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 10px;
+  /* In-between radii the Figma frames use: a list row, menu item or
+   * segmented button (row), an input, button or chip (control), the large
+   * input pill (xl). */
+  --radius-row: 6px;
+  --radius-control: 7px;
+  --radius-xl: 12px;
   --control-h: 32px;
   --gap-xs: 4px;
   --gap-sm: 7px;
@@ -83,4 +89,15 @@
   --text-lg: 18px;
   --text-xl: 22px;
   --text-2xl: 32px;
+  /* In-between sizes of the type scale (references/tokens.md): eyebrow, tag
+   * and count (micro), hint and note (note), input and menu title (input),
+   * reading body (read), lead line (lead), card or rail title (title), page
+   * title in a two-pane page (page). */
+  --text-micro: 10px;
+  --text-note: 11.5px;
+  --text-input: 12.5px;
+  --text-read: 13.5px;
+  --text-lead: 15px;
+  --text-title: 16px;
+  --text-page: 20px;
 }

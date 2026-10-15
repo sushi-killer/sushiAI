@@ -11,3 +11,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 vt100.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true

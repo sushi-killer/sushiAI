@@ -18,6 +18,7 @@ The React renderer lives in `src`. Its rules are in the renderer sections of `AG
 - `src/styles` holds the style sheets.
 - `src/ui` holds shared UI components. The skill is `.agents/skills/sushiai-ui`.
 - `src/vault` holds the vault UI.
+- `src/routines` holds the Routines UI: start, list, detail, builder and its Settings tab. Its module side is `electron/routines.cjs`.
 - `src/workspace` holds workspace panels and layout.
 
 ## Electron
@@ -30,6 +31,7 @@ The main process lives in `electron`. Its rules are in `AGENTS.md` and `docs/arc
 - `electron/agents` runs the in-app agents.
 - `electron/daemon` talks to the Rust daemon.
 - `electron/test-fixtures` holds fixtures for the Electron tests.
+- `electron/harness.cjs` is the one registry of agent CLIs (Claude, Codex): chat args and events, headless builder args, MCP flags, login and turn parsing. A new harness is one object there.
 - `electron/app-db.cjs` holds app state. `electron/orchestrator.cjs` talks to orchd.
 
 ## Rust
@@ -48,6 +50,10 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `crates/sushiai-orch/src/brief.rs` builds the brief. `crates/sushiai-orch/src/model.rs` has `Settings`.
 - `crates/sushiai-orch/src/prompts.rs` loads `crates/sushiai-orch/prompts/orchestrator.yaml`.
 - Orchestrator settings are documented in `docs/orchestrator-settings.md`.
+- `crates/sushiai-routines` is the routines module. `crates/sushiai-routines/src/service.rs` has `Routines::call` and the run lifecycle.
+- `crates/sushiai-routines/src/argv.rs` maps an agent to harness flags. `crates/sushiai-routines/src/result.rs` checks a run result against `crates/sushiai-routines/result.schema.json`.
+- `crates/sushiai-routines/src/validate.rs` validates a routine. `crates/sushiai-routines/src/help.rs` is the `sushiai routines help` text.
+- `crates/sushiai/src/routines_module.rs` hosts the module in the daemon. `crates/sushiai/src/routines_cli.rs` has `projects`, `hosts`, `routines`, `routine`, `ask` and `propose`.
 
 ## Tests
 
@@ -61,6 +67,7 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `scripts/release.mjs` cuts a release. Its notes helper is `scripts/lib/release-notes.mjs`. The skill is `.agents/skills/cut-release`.
 - `scripts/hooks` holds the agent hooks: `scripts/hooks/guard-bash.mjs`, `scripts/hooks/check-touched.mjs`, `scripts/hooks/lesson-reminder.mjs`. They are wired in `.claude/settings.json`.
 - `scripts/test-desktop.mjs` runs the desktop tests.
+- `scripts/figma-export.mjs` turns a Figma node dump into a snapshot, `scripts/figma-codegen.mjs` emits token-only CSS from it and `scripts/figma-parity.mjs` compares it with a measurement of the app. The test is `tests/figma-export.test.cjs`. The skill is `.agents/skills/figma-to-code`.
 - `.github/workflows/ci.yml` runs `npm run ci` in CI.
 
 ## Skills
@@ -72,11 +79,12 @@ Skills live in `.agents/skills`. `.claude/skills` links to them. Roles live in `
 - `.agents/skills/cut-release` cuts a release.
 - `.agents/skills/deslop` cleans a diff.
 - `.agents/skills/extension-manifest-change` changes the manifest contract.
+- `.agents/skills/figma-to-code` exports a Figma frame to metrics and checks the built screen against it.
 - `.agents/skills/ship-pr` opens a pull request.
 - `.agents/skills/sushiai-task` is the task loop.
 - `.agents/skills/sushiai-testing` picks proof.
 - `.agents/skills/sushiai-ui` guides UI work.
-- `.agents/skills/ui-evidence` measures and photographs the UI.
+- `.agents/skills/ui-evidence` measures and photographs the UI. `.agents/skills/ui-evidence/scripts/measure.mjs` writes the measurement the Figma parity check reads.
 
 ## Where is ...
 
@@ -85,3 +93,4 @@ Skills live in `.agents/skills`. `.claude/skills` links to them. Roles live in `
 - The orchd brief built: `crates/sushiai-orch/src/brief.rs`. The planner prompt is `crates/sushiai-orch/prompts/orchestrator.yaml`.
 - A CI rule: `scripts/check-conventions.mjs` and `scripts/check-crate-deps.mjs`, run by the `ci` script in `package.json`.
 - One test: `node --test tests/<name>.test.cjs` for Node, `cargo test -p <crate> <filter>` for Rust.
+- A screen checked against Figma: `$figma-to-code` runs `scripts/figma-export.mjs`, `scripts/figma-codegen.mjs` and `scripts/figma-parity.mjs`. The page measurement is `.agents/skills/ui-evidence/scripts/measure.mjs`.

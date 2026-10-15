@@ -3,11 +3,14 @@ import type { ReactNode } from "react";
 /** Control/Chip: one pickable option, e.g. an answer to a question. */
 export function Chip({
   selected = false,
+  radio = false,
   disabled,
   onClick,
   children,
 }: {
   selected?: boolean;
+  /** One of a radio group: announced as checked, not as pressed. */
+  radio?: boolean;
   disabled?: boolean;
   onClick?: () => void;
   children: ReactNode;
@@ -16,7 +19,9 @@ export function Chip({
     <button
       type="button"
       className={`ui-chip${selected ? " selected" : ""}`}
-      aria-pressed={selected}
+      {...(radio
+        ? { role: "radio", "aria-checked": selected }
+        : { "aria-pressed": selected })}
       disabled={disabled}
       title={typeof children === "string" ? children : undefined}
       onClick={onClick}

@@ -1,0 +1,21 @@
+[package]
+name = "sushiai-routines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "sushiAI routines: store, result contract, harness argv and run lifecycle"
+
+[lib]
+name = "sushiai_routines"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile.workspace = true

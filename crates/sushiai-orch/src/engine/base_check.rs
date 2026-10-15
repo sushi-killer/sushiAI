@@ -1311,9 +1311,29 @@ impl Amendment {
         }
     }
 
+    /// The criteria whose check this amendment rebuilds from their new
+    /// `-- check:` command, with that command: changed or new criteria whose
+    /// text names a runnable command, when `checks` is not set. A criterion
+    /// whose one check already runs that command keeps it, baseline and all.
+    pub(super) fn rebuilds(&self, task: &Task) -> Vec<(usize, String)> {
+        let (Some(new), None) = (&self.criteria, &self.checks) else {
+            return Vec::new();
+        };
+        new.iter()
+            .enumerate()
+            .filter(|(i, text)| task.criteria.get(*i) != Some(*text))
+            .filter_map(|(i, text)| check_part_command(text).map(|command| (i, command)))
+            .filter(|(i, command)| {
+                let mut own = task.checks.iter().filter(|c| c.criterion == *i);
+                !matches!((own.next(), own.next()), (Some(c), None) if &c.run == command)
+            })
+            .collect()
+    }
+
     /// Replaces the fields and records their names, plus dependency titles.
     pub fn apply(self, task: &mut Task) {
         let line = format!("Amended: {}", self.fields().join(", "));
+        let rebuilds = self.rebuilds(task);
         if let Some(v) = self.criteria {
             task.criteria = v;
             task.visual_criteria = self.visual_criteria;
@@ -1336,6 +1356,28 @@ impl Amendment {
             task.held_out = valid_check(h, len);
         }
         task.decisions.push(line);
+        if !rebuilds.is_empty() {
+            for (i, command) in &rebuilds {
+                // A check that already runs the command keeps its baseline.
+                let kept = task
+                    .checks
+                    .iter()
+                    .find(|c| c.criterion == *i && &c.run == command)
+                    .cloned();
+                task.checks.retain(|c| c.criterion != *i);
+                task.checks.push(kept.unwrap_or(Check {
+                    criterion: *i,
+                    run: command.clone(),
+                    baseline: None,
+                }));
+            }
+            task.checks.sort_by_key(|c| c.criterion);
+            let names: Vec<String> = rebuilds.iter().map(|(i, _)| i.to_string()).collect();
+            task.decisions.push(format!(
+                "Orchestrator: rebuilt the check of criterion {} from its `-- check:`",
+                names.join(", ")
+            ));
+        }
         if let Some(deps) = self.depends_on {
             task.depends_on = deps;
             let waits = if self.dependency_titles.is_empty() {
@@ -2002,5 +2044,92 @@ mod answer_caller_tests {
         assert!(non_owner_base_retry(&task, "check on target", None));
         assert!(!non_owner_base_retry(&task, "check", None));
         assert!(!non_owner_base_retry(&task, "check", Some(&task.base_sha)));
+    }
+
+    #[test]
+    fn amending_a_criterion_rebuilds_its_check_from_its_check_part() {
+        let ck = |criterion: usize, run: &str| Check {
+            criterion,
+            run: run.into(),
+            baseline: Some(Baseline::Fail),
+        };
+        let mut task = crate::engine::test_support::task_with_status(TaskStatus::Stopped);
+        task.criteria = vec![
+            "zero -- check: cargo test a".into(),
+            "one -- check: cargo test b".into(),
+        ];
+        task.checks = vec![ck(0, "cargo test a"), ck(1, "cargo test b")];
+        let amend = |criteria: Vec<&str>, checks: Option<Vec<Check>>| Amendment {
+            criteria: Some(criteria.into_iter().map(String::from).collect()),
+            checks,
+            ..Default::default()
+        };
+        let mut t = task.clone();
+        amend(
+            vec!["zero -- check: cargo test a", "one -- check: cargo test c"],
+            None,
+        )
+        .apply(&mut t);
+        assert_eq!(
+            t.checks,
+            vec![
+                ck(0, "cargo test a"),
+                Check {
+                    criterion: 1,
+                    run: "cargo test c".into(),
+                    baseline: None
+                }
+            ]
+        );
+        assert!(t
+            .decisions
+            .iter()
+            .any(|d| d.contains("rebuilt the check of criterion 1")));
+
+        let mut t = task.clone();
+        amend(
+            vec![
+                "zero -- check: cargo test a",
+                "one -- check: it passes with `cargo test d` run",
+            ],
+            None,
+        )
+        .apply(&mut t);
+        assert_eq!(t.checks[1].run, "cargo test d");
+
+        // Prose before the command names no runnable command: the check stays.
+        let mut t = task.clone();
+        amend(
+            vec![
+                "zero -- check: cargo test a",
+                "x -- check: run cargo test foo",
+            ],
+            None,
+        )
+        .apply(&mut t);
+        assert_eq!(t.checks, task.checks);
+        assert!(!t.decisions.iter().any(|d| d.contains("rebuilt")));
+
+        // A reworded criterion with the same command keeps its check's baseline.
+        let mut t = task.clone();
+        amend(
+            vec![
+                "zero -- check: cargo test a",
+                "one, reworded -- check: cargo test b",
+            ],
+            None,
+        )
+        .apply(&mut t);
+        assert_eq!(t.checks, task.checks);
+        assert!(!t.decisions.iter().any(|d| d.contains("rebuilt")));
+
+        let mut t = task.clone();
+        amend(
+            vec!["zero -- check: cargo test a", "one -- check: cargo test c"],
+            Some(vec![ck(1, "explicit")]),
+        )
+        .apply(&mut t);
+        assert_eq!(t.checks.len(), 1);
+        assert_eq!(t.checks[0].run, "explicit");
     }
 }

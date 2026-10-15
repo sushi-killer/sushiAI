@@ -469,6 +469,15 @@ pub(super) fn shared_check_amend_refusal(
             removed.push(old.run.clone());
         }
     }
+    // A check run that a rebuild from a new `-- check:` replaces.
+    for (i, command) in amendment.rebuilds(task) {
+        removed.extend(
+            task.checks
+                .iter()
+                .filter(|c| c.criterion == i && c.run != command)
+                .map(|c| c.run.clone()),
+        );
+    }
     // A criterion whose `-- check:` command is no longer named by any new
     // criterion, and every criterion that falls off the end.
     if let Some(new) = &amendment.criteria {

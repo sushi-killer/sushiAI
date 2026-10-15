@@ -188,6 +188,21 @@ fn auto_touch_note(task: &Task) -> Option<String> {
     ))
 }
 
+/// Puts the mark and what `write_report` set on `from` (a copy loaded with
+/// `decisions_before` decisions) onto `t`, the task as stored now.
+fn keep_report(t: &mut Task, from: &Task, decisions_before: usize) {
+    t.lead_touch = from.lead_touch.clone();
+    t.unlanded = from.unlanded.clone();
+    t.deliverables = from.deliverables.clone();
+    t.report = from.report.clone();
+    t.report_at = from.report_at;
+    for line in from.decisions.iter().skip(decisions_before) {
+        if !t.decisions.contains(line) {
+            t.decisions.push(line.clone());
+        }
+    }
+}
+
 impl App {
     /// Marks a landed task touched (by auto) when git says so. Never
     /// overrides the owner's mark or an existing touched mark. `true` when
@@ -313,12 +328,14 @@ impl App {
             at: now_ms(),
             by: "owner".to_string(),
         });
+        let decisions = task.decisions.len();
         if task.report.is_some() {
             self.write_report(&mut task).await;
         }
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
+        // Put onto the task as stored now, under its lock: a finishing loop
+        // writes its metrics in the same moments, and a save between its
+        // load and its write would lose the mark.
+        let mut task = self.update_task(&p.id, |t| keep_report(t, &task, decisions))?;
         // Only the owner's own mark counts: clearing it lets the report
         // re-apply an automatic one, which never creates a follow-up.
         if p.touched == Some(true) && !owner_note.is_empty() {
@@ -336,7 +353,7 @@ impl App {
     /// original as saved.
     async fn create_follow_up(&self, id: &str, note: &str) -> Result<Task, String> {
         let _guard = FOLLOW_UP_LOCK.lock().await;
-        let mut task = self
+        let task = self
             .store
             .load_task(id)
             .map_err(|e| e.to_string())?
@@ -353,7 +370,7 @@ impl App {
         if exists {
             return Ok(task);
         }
-        match self.spawn_follow_up(&task, note).await {
+        let (follow_up, line) = match self.spawn_follow_up(&task, note).await {
             Ok(new) => {
                 let mut new = new;
                 new.decisions.push(format!(
@@ -363,21 +380,24 @@ impl App {
                 new.follow_up_of = Some(task.id.clone());
                 self.store.save_task(&new).map_err(|e| e.to_string())?;
                 self.broadcast_task(&new);
-                task.follow_ups.push(new.id.clone());
-                task.decisions.push(format!(
+                self.spawn_task_loop(new.id.clone(), true);
+                let line = format!(
                     "Created follow-up task {} from the owner's note: {note}",
                     new.id
-                ));
-                self.spawn_task_loop(new.id.clone(), true);
+                );
+                (Some(new.id), line)
             }
-            Err(e) => task.decisions.push(format!(
-                "No follow-up task was created for the owner's note: {e}"
-            )),
-        }
-        task.updated_at = now_ms();
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
-        self.broadcast_task(&task);
-        Ok(task)
+            Err(e) => (
+                None,
+                format!("No follow-up task was created for the owner's note: {e}"),
+            ),
+        };
+        // The copy loaded above is stale after the slow creation: only the
+        // link and the decision go onto the task as stored now.
+        self.update_task(id, |t| {
+            t.follow_ups.extend(follow_up);
+            t.decisions.push(line);
+        })
     }
 
     async fn spawn_follow_up(&self, task: &Task, note: &str) -> Result<Task, String> {
@@ -543,6 +563,42 @@ mod tests {
         let mark = stored.lead_touch.expect("the owner's mark survives");
         assert!(mark.touched && mark.by == "owner");
         assert!(stored.metrics.is_some());
+        drop(home);
+    }
+
+    /// A write under the task lock (the finishing loop's metrics) loaded its
+    /// copy before the owner's mark: the mark waits for it and is put onto
+    /// what it saved.
+    #[tokio::test]
+    async fn an_owner_mark_waits_for_a_locked_write_and_is_kept() {
+        let (app, home) = test_app();
+        let task = task_with_status(TaskStatus::Done);
+        let id = task.id.clone();
+        app.store.save_task(&task).unwrap();
+        let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+        let writer = {
+            let (app, id) = (app.clone(), id.clone());
+            std::thread::spawn(move || {
+                let lock = app.task_lock(&id);
+                let _guard = lock.lock().unwrap();
+                let mut stale = app.store.load_task(&id).unwrap().unwrap();
+                loaded_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                stale.decisions.push("written under the lock".into());
+                app.store.save_task(&stale).unwrap();
+            })
+        };
+        loaded_rx.recv().unwrap();
+        app.handle_task_lead_touch(json!({"id": id, "touched": true}))
+            .await
+            .unwrap();
+        writer.join().unwrap();
+        let stored = app.store.load_task(&id).unwrap().unwrap();
+        let mark = stored.lead_touch.expect("the owner's mark survives");
+        assert!(mark.touched && mark.by == "owner");
+        assert!(stored
+            .decisions
+            .contains(&"written under the lock".to_string()));
         drop(home);
     }
 }

@@ -414,6 +414,15 @@ pub(super) fn drop_criterion(
             .push(format!("Orchestrator: criterion {n} stays: {why}"));
         return Err(why);
     }
+    let commands: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for c in criterion_commands(task, n) {
+            if !c.is_empty() && !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+        seen
+    };
     let text = task.criteria.remove(n);
     task.checks.retain(|c| c.criterion != n);
     if task.held_out.as_ref().is_some_and(|h| h.criterion == n) {
@@ -446,6 +455,39 @@ pub(super) fn drop_criterion(
     task.decisions.push(format!(
         "Orchestrator: dropped criterion {n} ({text}) as {by} answered"
     ));
+    // The same command elsewhere belongs to the dropped criterion too.
+    let mut also: Vec<String> = Vec::new();
+    for command in commands {
+        if removal_refusal(settings, task, std::slice::from_ref(&command), origin).is_some() {
+            continue;
+        }
+        let mut places: Vec<&str> = Vec::new();
+        if task.verify.contains(&command) {
+            task.verify.retain(|c| c != &command);
+            places.push("verify");
+        }
+        if task.final_verify.contains(&command) {
+            task.final_verify.retain(|c| c != &command);
+            places.push("finalVerify");
+        }
+        if task.checks.iter().any(|c| c.run == command) {
+            task.checks.retain(|c| c.run != command);
+            places.push("checks");
+        }
+        if task.held_out.as_ref().is_some_and(|h| h.run == command) {
+            task.held_out = None;
+            places.push("heldOut");
+        }
+        if !places.is_empty() {
+            also.push(format!("`{command}` from {}", places.join(", ")));
+        }
+    }
+    if !also.is_empty() {
+        task.decisions.push(format!(
+            "Orchestrator: dropping criterion {n} also removed {}",
+            also.join("; ")
+        ));
+    }
     Ok(())
 }
 
@@ -545,6 +587,42 @@ mod grounded_checks_tests {
         let results = criteria_results(&task, &task.attempts[0]);
         assert_eq!(results[0].status, CriterionStatus::Met);
         assert_eq!(results[1].status, CriterionStatus::Failing);
+    }
+
+    #[test]
+    fn dropping_a_criterion_removes_its_command_from_every_place() {
+        let cmd = "node scripts/x.mjs";
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec![format!("zero -- check: {cmd}"), "one".into()];
+        task.checks = vec![check(0, cmd), check(1, cmd), check(1, "keep")];
+        task.held_out = Some(check(1, cmd));
+        task.verify = vec![cmd.into(), "node scripts/x.mjs --more".into()];
+        task.final_verify = vec![cmd.into()];
+        drop_criterion(&Settings::default(), &mut task, 0, Origin::Owner).unwrap();
+        assert_eq!(task.verify, vec!["node scripts/x.mjs --more"]);
+        assert!(task.final_verify.is_empty());
+        assert_eq!(task.checks, vec![check(0, "keep")]);
+        assert_eq!(task.held_out, None);
+        assert_eq!(
+            task.decisions.last().unwrap(),
+            &format!(
+                "Orchestrator: dropping criterion 0 also removed `{cmd}` from verify, finalVerify, checks, heldOut"
+            )
+        );
+        assert_eq!(task.decisions.len(), 2);
+    }
+
+    #[test]
+    fn a_non_owner_drop_keeps_a_repo_sourced_verify_duplicate() {
+        let mut task = task_with_status(TaskStatus::Waiting);
+        task.criteria = vec!["zero -- check: npm run ci".into(), "one".into()];
+        task.checks = vec![check(0, "npm run ci")];
+        task.verify = vec!["npm run ci".into()];
+        let r = drop_criterion(&Settings::default(), &mut task, 0, Origin::Other);
+        assert!(r.is_err());
+        assert_eq!(task.criteria.len(), 2);
+        assert_eq!(task.verify, vec!["npm run ci"]);
+        assert_eq!(task.checks.len(), 1);
     }
 
     #[test]

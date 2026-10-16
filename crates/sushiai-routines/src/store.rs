@@ -320,8 +320,11 @@ impl Store {
     }
 
     /// Allocates the next run number, creates its folder and removes the runs beyond
-    /// [`KEEP_RUNS`]. The folder is created exclusively, so two callers never share a number.
+    /// [`KEEP_RUNS`]. The gate serializes allocation with pruning: without it a caller that read
+    /// an old maximum could recreate a number another caller already got and pruning removed.
+    // ponytail: in-process gate; the daemon is the only allocator. A file lock if that changes.
     pub fn new_run(&self, id: &str) -> io::Result<u64> {
+        let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         fs::create_dir_all(self.runs_dir(id))?;
         let mut n = self.run_numbers(id).first().map_or(1, |n| n + 1);
         loop {

@@ -1,6 +1,0 @@
-## Orchestrator
-
-- An agent session that has the `sushiai-orchestrator` MCP server attached, on This Mac or on a saved ssh host, can now reach the orchestrator of any saved host. `task_list`, `task_get`, `task_create`, `task_backlog`, `task_start`, `task_report`, `task_pr`, `task_lead_touch`, `task_answer`, `task_amend`, `task_archive`, `task_unarchive` and `inbox_read` take an optional `host`: `local` for This Mac or `ssh:<id>` for a saved host. Without `host` a tool works on the session's own machine, as before.
-- New `hosts_list` tool: the hosts you can name, This Mac and every saved ssh host, each with its name and state. It never shows an address, port or key file.
-- `task_list` and `inbox_read` also take `host: "all"`: every host's tasks or messages at once, each labelled with its host, plus the hosts that could not be reached.
-- The request goes through the sushiAI desktop app's existing connections to your hosts. It opens no new connection and uses no new credentials, and it only works while the app is running. Only task and inbox requests go through: settings, secrets, deleting tasks and chats stay on each machine. A task created on another host gets the MCP servers of its project on that host.

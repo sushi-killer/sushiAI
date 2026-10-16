@@ -69,6 +69,30 @@ for (const dir of ["src", "electron", "tests", "scripts"])
       );
   }
 
+// Rust integration tests wait on a real signal through the shared helpers, on
+// the shared deadline: a bare sleep before an assert was the flaky-test class
+// (a check made before the event, or a deadline of the test's own). Sleeps
+// live in the helper files of each crate's tests/common; anywhere else a line
+// needs `// wait-allow: <reason>` (time itself is what the test measures).
+const SLEEP_CALL =
+  /\b(?:thread::sleep|tokio::time::sleep)\s*\(|(?<![.\w])sleep\s*\(/;
+const WAIT_HELPERS =
+  /^crates\/[^/]+\/tests\/common\/(polling|mod|process|rig)\.rs$/;
+const waitRoot = process.env.WAIT_RULE_ROOT_OVERRIDE || root;
+for await (const file of walk("crates", waitRoot)) {
+  const posix = file.split(path.sep).join("/");
+  if (!/^crates\/[^/]+\/tests\/.*\.rs$/.test(posix) || WAIT_HELPERS.test(posix))
+    continue;
+  const lines = (await readFile(path.join(waitRoot, file), "utf8")).split("\n");
+  lines.forEach((line, i) => {
+    const code = line.replace(/\/\/.*$/, "");
+    if (SLEEP_CALL.test(code) && !/\/\/\s*wait-allow:\s*\S/.test(line))
+      problems.push(
+        `${posix}:${i + 1} sleeps in a test; wait on the signal with wait_until/holds_for (tests/common) or mark the line \`// wait-allow: <reason>\``,
+      );
+  });
+}
+
 // The retired session backend is gone: its name appears nowhere in shipped
 // code, scripts, tests or agent files (release notes under docs/ keep history).
 // Allowed: this file (it holds the pattern) and the one test that proves a

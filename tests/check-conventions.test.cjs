@@ -134,6 +134,58 @@ test("a private network address in source fails, a documentation example does no
   fs.rmSync(clean, { recursive: true, force: true });
 });
 
+test("a bare sleep in a Rust integration test fails; helpers and wait-allow pass", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "wait-rule-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  try {
+    write(
+      "crates/x/tests/common/polling.rs",
+      "fn poll() { std::thread::sleep(Duration::from_millis(50)); }\n",
+    );
+    write(
+      "crates/x/tests/a.rs",
+      [
+        'fn harness() -> &\'static str { "import time; time.sleep(30)" }',
+        "fn grace() { std::thread::sleep(GRACE); } // wait-allow: the test measures the TERM grace",
+        'fn shell() -> &\'static str { "sleep 30; true" }',
+        "",
+      ].join("\n"),
+    );
+    write("crates/x/src/lib.rs", "fn f() { std::thread::sleep(D); }\n");
+    const clean = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+    assert.equal(clean.status, 0, clean.stderr);
+
+    for (const [file, line] of [
+      [
+        "crates/x/tests/b.rs",
+        "    std::thread::sleep(Duration::from_millis(500));",
+      ],
+      ["crates/x/tests/c/d.rs", "    sleep(Duration::from_secs(2));"],
+      [
+        "crates/x/tests/e.rs",
+        "    tokio::time::sleep(D).await; // wait-allow:",
+      ],
+    ]) {
+      write(file, `fn t() {\n${line}\n}\n`);
+      const failed = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+      assert.equal(failed.status, 1, file);
+      assert.match(
+        failed.stderr,
+        new RegExp(`${file.replace(/\./g, "\\.")}:2 sleeps in a test`),
+      );
+      fs.rmSync(path.join(tree, file));
+    }
+  } finally {
+    fs.rmSync(tree, { recursive: true, force: true });
+  }
+});
+
 test("skills and subagents with a broken shape fail, a clean setup passes", () => {
   const fs = require("node:fs");
   const os = require("node:os");

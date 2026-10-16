@@ -1,10 +1,11 @@
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "./lib/browser.mjs";
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 
 const profile = await fs.mkdtemp("/tmp/sushiai-agent-ui-");
 const app = await electron.launch({
-  args: ["."],
+  args: ELECTRON_ARGS,
   env: {
     ...process.env,
     SUSHIAI_TEST_WINDOW: "hidden",

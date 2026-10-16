@@ -11,8 +11,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # `npm run ci` is `ci:web` and `test:daemon`; the two halves run side by side.
+  # What a pull request touches: docs alone skip the builds and tests, and the
+  # Rust jobs run only when Rust can be affected (scripts/ci-changes.mjs).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+      rust: ${{ steps.diff.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        run: node scripts/ci-changes.mjs >> "$GITHUB_OUTPUT"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+
+  # `npm run ci` runs the same checks as these jobs, in parallel lanes.
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: ./node_modules/.bin/prettier --check src electron scripts tests *.json *.ts *.html README.md
+      - run: git diff --check
+      - run: node --test tests/docs-map.test.cjs
+
   web:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -26,9 +61,32 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
-      - run: npm run ci:web
+      - run: npm run build
+      - run: node scripts/build-once.mjs --stamp
+      - run: cargo build -p sushiai
+      - run: npm test
+
+  # fmt, clippy and the crate rule do not depend on the OS, so they run once.
+  rust-lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # The same commands as `npm run lint:rust`, the local runner's rust lint lane.
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: node scripts/check-crate-deps.mjs
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -46,19 +104,25 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: npm run test:daemon
+      - run: node scripts/test-rust.mjs
 
-  # The required check: green only when both halves of `npm run ci` are.
+  # The required check: green only when every split job passed or was not
+  # needed for this change.
   deterministic:
-    needs: [web, rust]
+    needs: [changes, static, web, rust-lint, rust]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: test "${{ needs.web.result }}" = success && test "${{ needs.rust.result }}" = success
+      - run: |
+          jq -e '.changes.result == "success" and all(.[]; .result == "success" or .result == "skipped")' <<'JSON'
+          ${{ toJSON(needs) }}
+          JSON
 
   # Hosts run the engines floor, not .nvmrc: on Node 22 an awaited promise
   # held only by an unref'd timer stopped the suite there and nowhere else.
   node-floor:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -97,6 +161,8 @@ jobs:
   # The desktop smoke drives a real Electron window, so it needs macOS. It
   # starts a `sushiai` daemon of its own and builds the binary when missing.
   desktop:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -105,6 +171,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:desktop

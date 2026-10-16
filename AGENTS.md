@@ -6,8 +6,8 @@ the rules.
 
 ## Enforcement principle
 
-CI (`npm run ci`, which chains the build, the full test suite,
-`scripts/check-conventions.mjs`, lint and format checks) is the only
+CI (`npm run ci`, which runs the build, the full test suite,
+`scripts/check-conventions.mjs`, lint and format checks in parallel lanes) is the only
 enforcement layer every agent and every human shares. `scripts/hooks` (wired in `.claude/settings.json`) and
 `.claude/skills` (and their Codex equivalents under `.agents/skills`) are
 convenience — they may duplicate a CI check for speed, but a rule's real home
@@ -274,6 +274,13 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   `src/agents/AgentsView.tsx` deliberately skips this because it filters on
   `dataTransfer.types` instead and never tracks visual drag state — also
   valid, just a different strategy.
+- Tests prove logic, never prose: no test reads README, AGENTS.md or
+  `docs/**/*.md` to assert its wording (`scripts/check-conventions.mjs`;
+  the one exception is `tests/docs-map.test.cjs`, which keeps `docs/MAP.md`
+  a complete and valid map of the repository).
+- A change to documents alone skips the builds and tests, and the Rust tests
+  and lint run only when Rust can be affected, in CI and in `npm run ci`
+  alike (`scripts/ci-changes.mjs`; `CI_ALL=1 npm run ci` runs everything).
 - Tests are `node --test` `.cjs` files importing `.ts` sources directly via
   Node's type-stripping (Node ≥22.18) — no type-checking happens at test
   time, so test assertions have to catch real behavior, not just satisfy the

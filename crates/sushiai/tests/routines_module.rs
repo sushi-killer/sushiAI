@@ -255,9 +255,13 @@ fn a_scheduled_slot_found_by_the_daemon_clock_runs_the_routine_without_run_now()
         .to_string()
     };
     // The fake harness reports the ask lifetime the scheduler put in its environment. It
-    // waits first, like a real harness: output printed before the module's attach is lost.
+    // waits for `go`, which the test creates once the run record names the session: the
+    // module attaches before it writes that record, and output printed before an attach is
+    // lost to a session that has already ended.
+    let go = std::env::temp_dir().join(format!("sushiai-go-{}-{id}", std::process::id()));
     let script = format!(
-        "S=\"$SUSHIAI_SCHEDULE_NEXT_IN_SEC\"\nsleep 2\ncat <<JSON\n{}\nJSON",
+        "S=\"$SUSHIAI_SCHEDULE_NEXT_IN_SEC\"\ni=0; while [ ! -e '{}' ]; do i=$((i+1)); [ $i -gt 600 ] && exit 1; sleep 0.1; done\ncat <<JSON\n{}\nJSON",
+        go.display(),
         envelope("next in $S")
     );
     let sandbox = daemon_with_env(
@@ -276,7 +280,14 @@ fn a_scheduled_slot_found_by_the_daemon_clock_runs_the_routine_without_run_now()
         json!({"id": id, "enabled": true, "catalog": catalog()}),
     );
     // No run_now: nothing runs until the clock reaches the slot.
+    wait_until("the run to name its session", || {
+        client
+            .try_call("routines.result", json!({"id": id}))
+            .is_ok_and(|v| v["run"]["session"].is_string())
+    });
+    std::fs::write(&go, b"").unwrap();
     let got = wait_result(&mut client, &id);
+    let _ = std::fs::remove_file(&go);
     assert_eq!(got["run"]["status"], "done", "{got}");
     assert_eq!(got["run"]["kind"], "scheduled");
     assert_eq!(got["run"]["scheduledFor"], slot * 1000);

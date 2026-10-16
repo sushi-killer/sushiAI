@@ -77,23 +77,32 @@ pub(super) fn command_words(command: &str) -> Vec<String> {
 /// Commands that only look at a file's content.
 const PROBES: [&str; 6] = ["grep", "egrep", "fgrep", "rg", "test", "["];
 
-/// The path-like words of each simple command of `command`, with whether that
-/// command is a pure content probe.
+/// The path-like words of each simple command of `command`, with whether the
+/// task must change that file: a document a probe reads, or a file a probe
+/// asserts an absence in (`! grep`, `test ! -e`), which the base fails until
+/// the file changes. A positive probe of any other file guards a fixture. The
+/// pattern of a grep is not a file.
 fn check_words(command: &str) -> Vec<(String, bool)> {
     // A substitution can feed a file's content anywhere: nothing is a probe.
     let substituted = command.contains("$(") || command.contains('`') || command.contains("<(");
     let mut out = Vec::new();
     for segment in command.split([';', '|', '&', '\n']) {
-        let words = command_words(segment);
-        let probe = !substituted && PROBES.contains(&probe_head(segment).as_str());
+        let head = probe_head(segment);
+        let probe = !substituted && PROBES.contains(&head.as_str());
+        let pattern = probe.then(|| grep_pattern(&head, segment)).flatten();
+        let words: Vec<String> = command_words(segment)
+            .into_iter()
+            .filter(|w| pattern.as_ref() != Some(w))
+            .collect();
+        let negated = segment.split_whitespace().any(|t| t == "!");
         let patterns = if probe {
             pattern_files(segment)
         } else {
             Vec::new()
         };
         out.extend(words.into_iter().map(|w| {
-            let probe = probe && !patterns.contains(&w);
-            (w, probe)
+            let writable = probe && !patterns.contains(&w) && (negated || is_document(&w));
+            (w, writable)
         }));
     }
     out
@@ -123,6 +132,29 @@ fn probe_head(segment: &str) -> String {
         return name.to_string();
     }
     String::new()
+}
+
+/// The pattern word of a grep or rg that takes it positionally (no `-e`, `-f`
+/// or `--regexp`): the first word after the command that is not an option.
+fn grep_pattern(head: &str, segment: &str) -> Option<String> {
+    if !matches!(head, "grep" | "egrep" | "fgrep" | "rg") {
+        return None;
+    }
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    if tokens.iter().any(|t| {
+        t.starts_with("--regexp") || t.starts_with("--file") || {
+            t.starts_with('-') && !t.starts_with("--") && (t.contains('e') || t.contains('f'))
+        }
+    }) {
+        return None;
+    }
+    let start = tokens
+        .iter()
+        .position(|t| t.trim_matches(|c| c == '"' || c == '\'').rsplit('/').next() == Some(head))?;
+    tokens[start + 1..]
+        .iter()
+        .find(|t| !t.starts_with('-'))
+        .and_then(|t| clean_test_path(t.trim_matches(|c| c == '"' || c == '\'')).ok())
 }
 
 /// The files a grep-like command reads its patterns from (`-f FILE`,
@@ -204,24 +236,24 @@ pub(in crate::engine) fn protected_paths(task: &Task) -> Vec<String> {
         .iter()
         .map(|t| t.path.clone())
         .collect();
-    // A document a check only probes (grep, test -s ...) is not protected: the
-    // task is asked to write it. A document a check compares against (a
-    // golden file) is the expected result and stays protected.
+    // A file the task must change ([`check_words`]) is not protected: a document
+    // a check probes, a file a check wants a match gone from or deleted. A file
+    // a check compares against (a golden file), a fixture a check greps for a
+    // match, and every test file stay protected.
     let planned = paths.clone();
     let mut named: BTreeMap<String, bool> = BTreeMap::new();
     for check in &task.checks {
-        for (word, probe) in check_words(&check.run) {
-            let only_probed = named.entry(word).or_insert(true);
-            *only_probed &= probe;
+        for (word, writable) in check_words(&check.run) {
+            let only_writable = named.entry(word).or_insert(true);
+            *only_writable &= writable;
         }
     }
     let prose = task_prose(task);
     paths.extend(
         named
             .into_iter()
-            .filter(|(p, probe)| {
-                planned.contains(p)
-                    || !((*probe && is_document(p)) || (!is_test_path(p) && names_path(&prose, p)))
+            .filter(|(p, writable)| {
+                planned.contains(p) || is_test_path(p) || !(*writable || names_path(&prose, p))
             })
             .map(|(p, _)| p),
     );

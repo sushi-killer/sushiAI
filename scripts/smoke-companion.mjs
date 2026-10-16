@@ -5,6 +5,7 @@
 // its process ends when the extension is disabled. Everything lives in a temp
 // profile; the owner's ~/.sushiai is never read or written.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "./lib/browser.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -65,7 +66,7 @@ await fs.writeFile(
 );
 
 const desktop = await electron.launch({
-  args: ["."],
+  args: ELECTRON_ARGS,
   cwd: root,
   env: {
     ...process.env,

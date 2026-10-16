@@ -9,6 +9,7 @@
 // w<width>-<id>-<name>.png). Every state asserts that the document does not
 // scroll sideways; the run exits 1 when one does.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
@@ -18,7 +19,7 @@ await fs.mkdir(outDir, { recursive: true });
 const shot = (name) => `${outDir}/${name}.png`;
 const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const app = await electron.launch({
-  args: ["."],
+  args: ELECTRON_ARGS,
   cwd: root,
   env: {
     ...process.env,

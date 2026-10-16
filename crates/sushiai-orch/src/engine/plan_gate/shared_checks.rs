@@ -1,5 +1,5 @@
 use super::MAX_FINDING_CHARS;
-use crate::prompts::clip::truncate_chars;
+use crate::clip::truncate_chars;
 use crate::task::{PlanFinding, Severity};
 
 /// Sections orchd appends to a subtask's request; they are not the owner's

@@ -1,5 +1,5 @@
+use crate::clip::truncate_chars;
 use crate::engine::planning::graph::overlapping_path;
-use crate::prompts::clip::truncate_chars;
 use crate::task::graph::has_cycle;
 use crate::task::ChecklistItem;
 use std::collections::HashMap;

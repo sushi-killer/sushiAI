@@ -1,13 +1,13 @@
 use super::brief::judge_brief;
 use super::checkout::scratch_path;
 use super::reply::{parse_ruling, Verdict};
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::attempts::report::TestClaim;
 use crate::engine::protected::paths::clean_test_path;
 use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
-use crate::prompts::clip::truncate_chars;
 use crate::task::{AskedBy, Question, QuestionKind, Task, TaskStatus};
 use std::path::PathBuf;
 use std::sync::Arc;

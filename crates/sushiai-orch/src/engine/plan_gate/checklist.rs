@@ -1,9 +1,9 @@
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::engine::verification::context::CheckContext;
 use crate::engine::verification::runner::run_verify_commands;
 use crate::harness::cancel::CancelToken;
-use crate::prompts::clip::truncate_chars;
 use crate::task::Task;
 use std::path::Path;
 use std::sync::Arc;

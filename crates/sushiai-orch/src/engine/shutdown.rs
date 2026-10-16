@@ -1,5 +1,5 @@
+use crate::clip::truncate_chars;
 use crate::engine::state::App;
-use crate::prompts::clip::truncate_chars;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use std::sync::atomic::Ordering;

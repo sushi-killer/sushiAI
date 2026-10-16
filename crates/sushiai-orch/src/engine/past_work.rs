@@ -3,6 +3,7 @@
 //! that, talk about the same things). Built from orchd's own records, with no
 //! model call.
 
+use crate::clip::ellipsize_chars;
 use crate::engine::planning::graph::overlapping_path;
 use crate::prompts::engine_text;
 use crate::prompts::text::untrusted_block;
@@ -154,14 +155,6 @@ fn note_entry(note: &RepoNote) -> String {
     untrusted_block(&format!("Repo note ({})", note.source), &note.text)
 }
 
-fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}\u{2026}", s.chars().take(max).collect::<String>())
-    }
-}
-
 fn task_entry(task: &Task) -> String {
     let attempts: Vec<&Attempt> = implement_attempts(task).collect();
     let mut kinds: Vec<&str> = Vec::new();
@@ -190,7 +183,7 @@ fn task_entry(task: &Task) -> String {
     );
     out.push_str(&untrusted_block(
         "Title",
-        &clip(&task.title, MAX_TITLE_CHARS),
+        &ellipsize_chars(&task.title, MAX_TITLE_CHARS),
     ));
 
     // Held-out results are stored beside the ordinary ones; they are never
@@ -223,7 +216,7 @@ fn task_entry(task: &Task) -> String {
     {
         out.push_str(&untrusted_block(
             "Follow-ups (last handoff)",
-            &clip(handoff.trim(), MAX_HANDOFF_CHARS),
+            &ellipsize_chars(handoff.trim(), MAX_HANDOFF_CHARS),
         ));
     }
     out

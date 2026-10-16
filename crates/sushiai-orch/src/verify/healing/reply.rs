@@ -1,6 +1,6 @@
-use crate::prompts::clip::truncate_chars;
+use crate::clip::tail_chars;
+use crate::clip::truncate_chars;
 use crate::prompts::engine_text;
-use crate::prompts::text::tail_chars;
 use crate::task::attempt::Stage;
 use crate::task::attempt::VerifyOutcome;
 use crate::task::review::CriterionRuling;

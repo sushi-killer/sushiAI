@@ -18,6 +18,7 @@ use crate::harness::cancel::CancelToken;
 #[cfg(test)]
 use crate::task::TaskStatus;
 
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::protected::carry::carry_with_planner_tests;
 use crate::engine::secrets;
@@ -28,8 +29,8 @@ use crate::engine::test_support::attempt_with_failure;
 use crate::engine::test_support::git_in;
 #[cfg(test)]
 use crate::engine::test_support::test_app;
+use crate::git::command::{run_bounded_with, Bounded, BoundedError};
 use crate::git::paths::short_sha;
-use crate::prompts::clip::truncate_chars;
 use crate::task::FreshBase;
 use crate::task::Task;
 use std::path::Path;
@@ -39,8 +40,9 @@ use std::time::Duration;
 
 use crate::policy::delivery::BaseFrom;
 
+#[cfg(test)]
 use std::io::Read;
-use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::time::Instant;
 
 /// How long one base fetch may take before the task goes on without it.
@@ -72,15 +74,9 @@ pub(super) fn prepare_new(repo: &Path, base: &str, from: BaseFrom, timeout: Dura
 }
 
 fn git_out(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    crate::git::command::run(repo, args)
+        .ok()
+        .map(|out| out.trim().to_string())
 }
 
 /// Where a base branch is fetched from.
@@ -157,25 +153,28 @@ fn fetch_error(stderr: &str) -> String {
     truncate_chars(line, 300)
 }
 
-/// Stops the fetch and everything it started (a remote helper, ssh).
-fn kill_fetch(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    // SAFETY: a signal to the process group this fetch was started in.
-    unsafe {
-        libc::killpg(child.id() as i32, libc::SIGKILL);
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// `git fetch --no-tags` of one branch into its remote-tracking ref, with
 /// nothing that could wait for a person: no terminal prompt, no askpass, ssh
 /// in batch mode (unless the owner set their own ssh command). Killed after
 /// `timeout`. Returns the fetched tip.
 pub(super) fn fetch(repo: &Path, up: &Upstream, timeout: Duration) -> Result<String, String> {
     let refspec = format!("+refs/heads/{}:{}", up.branch, up.tracking_ref());
-    let mut cmd = Command::new("git");
-    cmd.args([
+    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || git_out(repo, &["config", "--get", "core.sshCommand"]).is_some();
+    let mut env = vec![
+        ("SSH_ASKPASS_REQUIRE", "never"),
+        ("GCM_INTERACTIVE", "never"),
+    ];
+    if !own_ssh {
+        env.push(("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"));
+    }
+    let opts = Bounded {
+        env: &env,
+        env_remove: &["GIT_ASKPASS", "SSH_ASKPASS"],
+        clean_index_lock: false,
+    };
+    let args = [
         "-c",
         "core.askPass=",
         "fetch",
@@ -186,56 +185,12 @@ pub(super) fn fetch(repo: &Path, up: &Upstream, timeout: Duration) -> Result<Str
         "--",
         &up.remote,
         &refspec,
-    ])
-    .current_dir(repo)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env_remove("GIT_ASKPASS")
-    .env_remove("SSH_ASKPASS")
-    .env("SSH_ASKPASS_REQUIRE", "never")
-    .env("GCM_INTERACTIVE", "never");
-    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
-        || std::env::var_os("GIT_SSH").is_some()
-        || git_out(repo, &["config", "--get", "core.sshCommand"]).is_some();
-    if !own_ssh {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("git fetch: {e}"))?;
-    let stderr = child.stderr.take();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_string(&mut text);
-        }
-        let _ = tx.send(text);
-    });
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                kill_fetch(&mut child);
-                return Err(format!("no answer within {timeout:?}"));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => {
-                kill_fetch(&mut child);
-                return Err(format!("git fetch: {e}"));
-            }
-        }
-    };
-    if !status.success() {
-        let stderr = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-        return Err(fetch_error(&stderr));
-    }
+    ];
+    run_bounded_with(repo, &args, timeout, Duration::from_secs(1), &opts).map_err(|e| match e {
+        BoundedError::Io(e) => format!("git fetch: {e}"),
+        BoundedError::TimedOut => format!("no answer within {timeout:?}"),
+        BoundedError::Failed(stderr) => fetch_error(&stderr),
+    })?;
     crate::git::history::resolve_commit(repo, &up.tracking_ref()).map_err(|e| e.to_string())
 }
 

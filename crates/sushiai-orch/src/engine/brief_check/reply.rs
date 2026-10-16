@@ -1,4 +1,4 @@
-use crate::prompts::clip::truncate_chars;
+use crate::clip::truncate_chars;
 use crate::prompts::engine_text;
 use crate::prompts::fill;
 use crate::task::MissingTool;

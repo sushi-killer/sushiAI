@@ -1,4 +1,5 @@
-use crate::prompts::text::{truncate_chars, untrusted_block};
+use crate::clip::truncate_bytes;
+use crate::prompts::text::untrusted_block;
 use crate::prompts::{brief_text, fill};
 use crate::task::attempt::{AttemptStatus, Stage};
 use crate::task::state::{Task, TaskStatus};
@@ -52,11 +53,11 @@ fn landed_entry(dep: &Task) -> String {
     }
     let heading = format!("### {}\n", dep.id);
     let overhead = heading.len() + untrusted_block(LANDED_LABEL, "").len();
-    // The cap is measured in bytes; `truncate_chars` cuts at a char boundary and
+    // The cap is measured in bytes; `truncate_bytes` cuts at a char boundary and
     // appends a 3-byte ellipsis, so a byte budget also bounds the character count.
     let room = LANDED_ENTRY_MAX.saturating_sub(overhead);
     let text = if text.len() > room {
-        truncate_chars(&text, room.saturating_sub(3))
+        truncate_bytes(&text, room.saturating_sub(3))
     } else {
         text
     };

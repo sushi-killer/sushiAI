@@ -1,11 +1,11 @@
 use super::shared_checks::shared_check_findings;
 use super::{is_critical, GateAction, PlanReview};
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::answer_policy::authority::{check_authority, is_shared_check};
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
 use crate::task::checks::authority::Origin;
 use crate::task::checks::snapshot::CheckSnapshot;
 use crate::task::planning::PlanGate;

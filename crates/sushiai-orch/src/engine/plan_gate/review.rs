@@ -2,13 +2,13 @@ use super::prompt::build_review_prompt;
 use super::review_reply::{parse_review, split_review};
 use super::shared_checks::owner_text;
 use super::{is_critical, PlanReview};
+use crate::clip::truncate_chars;
 use crate::engine::brief_check::judge::{Judge, JudgePurpose, JudgeRun};
 use crate::engine::planning::draft::PlanDraft;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
 use crate::policy::routing::Route;
-use crate::prompts::clip::truncate_chars;
 use crate::task::Task;
 use std::sync::Arc;
 

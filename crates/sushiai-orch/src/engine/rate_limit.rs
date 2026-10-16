@@ -3,6 +3,7 @@ use crate::task::AttemptStatus;
 #[cfg(test)]
 use crate::task::FailureKind;
 
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 #[cfg(test)]
 use crate::engine::decision::completed_implement_attempts;
@@ -21,7 +22,6 @@ use crate::engine::test_support::test_app;
 use crate::harness;
 #[cfg(test)]
 use crate::harness::cancel::CancelToken;
-use crate::prompts::clip::truncate_chars;
 use crate::task::Task;
 use crate::task::TaskStatus;
 use std::sync::atomic::Ordering;

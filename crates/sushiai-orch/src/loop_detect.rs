@@ -2,6 +2,7 @@
 //! stuck detector, run over a Claude or Codex implement run's stream. The stall
 //! watchdog only catches silence; an agent repeating itself looks busy.
 
+use crate::clip::ellipsize_chars;
 use std::collections::BTreeMap;
 
 /// The same tool call (name + identical input) this many times in a row.
@@ -97,7 +98,7 @@ impl LoopDetector {
                 detail: format!(
                     "Loop detected (repeated_call): `{name}` was called {} times in a row with the identical input {}.",
                     self.call_run,
-                    clip(&call.1, 300)
+                    ellipsize_chars(call.1.trim(), 300)
                 ),
             });
         }
@@ -122,15 +123,6 @@ impl LoopDetector {
                 "Loop detected (repeated_edit): `{file}` was edited {n} times with no command run in between."
             ),
         })
-    }
-}
-
-fn clip(text: &str, max: usize) -> String {
-    let line = text.trim();
-    if line.chars().count() > max {
-        format!("{}…", line.chars().take(max).collect::<String>())
-    } else {
-        line.to_string()
     }
 }
 

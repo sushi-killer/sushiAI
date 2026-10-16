@@ -1,19 +1,13 @@
-use crate::git::command::run;
+use crate::git::command::{exit_code, non_empty_lines, run, run_bytes, succeeds};
 use crate::git::GitError;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Reads a committed file; absence is distinct from an unreadable revision.
 pub fn show_file(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>, GitError> {
     let tree = run(cwd, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])?;
     let object = format!("{}:{path}", tree.trim());
-    let exists = Command::new("git")
-        .args(["cat-file", "-e", &object])
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| GitError(format!("git cat-file: {e}")))?;
-    if !exists.status.success() {
+    if !succeeds(cwd, &["cat-file", "-e", &object]) {
         return Ok(None);
     }
     run(cwd, &["show", &object]).map(Some)
@@ -75,21 +69,12 @@ pub fn head_sha(worktree: &Path) -> Result<String, GitError> {
 /// --name-only`).
 pub fn tree_files(repo_root: &Path, sha: &str) -> Result<Vec<String>, GitError> {
     let out = run(repo_root, &["ls-tree", "-r", "--name-only", sha])?;
-    Ok(out
-        .lines()
-        .map(|l| l.to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
+    Ok(non_empty_lines(&out))
 }
 
 /// The content of `path` at `rev` when it is a file there.
 pub fn blob_at(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
-    let out = Command::new("git")
-        .args(["cat-file", "blob", &format!("{rev}:{path}")])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    out.status.success().then_some(out.stdout)
+    run_bytes(cwd, &["cat-file", "blob", &format!("{rev}:{path}")]).ok()
 }
 
 /// `<short sha> <subject>` of each commit in `from..to`, newest first.
@@ -102,12 +87,7 @@ pub fn log_subjects(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, Gi
 /// Whether `sha` is reachable from `rev`; `None` when git cannot tell (the
 /// branch or the commit is gone).
 pub fn is_ancestor(repo: &Path, sha: &str, rev: &str) -> Option<bool> {
-    let out = Command::new("git")
-        .args(["merge-base", "--is-ancestor", sha, rev])
-        .current_dir(repo)
-        .output()
-        .ok()?;
-    match out.status.code() {
+    match exit_code(repo, &["merge-base", "--is-ancestor", sha, rev]) {
         Some(0) => Some(true),
         Some(1) => Some(false),
         _ => None,

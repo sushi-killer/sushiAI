@@ -1,8 +1,7 @@
-use crate::git::command::{run, run_bytes};
+use crate::git::command::{non_empty_lines, run, run_bytes, TempIndex};
 use crate::git::history::blob_at;
 use crate::git::GitError;
 use std::path::Path;
-use std::process::Command;
 
 /// `git status --porcelain -z --untracked-files=all`, one path per returned
 /// entry. `-z` (NUL-terminated, no quoting/escaping) is safer to parse than
@@ -87,18 +86,7 @@ pub fn stage_all(cwd: &Path) -> Result<(), GitError> {
 /// The whole change since `base` as a binary-safe patch.
 pub fn patch_since(cwd: &Path, base: &str) -> Result<Vec<u8>, GitError> {
     stage_all(cwd)?;
-    let out = Command::new("git")
-        .args(["diff", "--binary", base])
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| GitError(format!("git diff: {e}")))?;
-    if !out.status.success() {
-        return Err(GitError(format!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(out.stdout)
+    run_bytes(cwd, &["diff", "--binary", base])
 }
 
 /// Makes the worktree hold exactly `patch` on top of `base_sha`: its own
@@ -139,71 +127,24 @@ pub fn replace_work_with_patch(
 /// untracked non-ignored files. Built through a temporary index, so the real
 /// index and `git status` are left as they were.
 pub fn worktree_tree(worktree: &Path) -> Result<String, GitError> {
-    static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "orchd-index-{}-{}-{}",
-        std::process::id(),
-        INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    let result = (|| {
-        use std::io::Write;
-        use std::process::Stdio;
-
-        let tmp_str = tmp.to_string_lossy().to_string();
-        let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
-            let mut child = Command::new("git")
-                .args(args)
-                .current_dir(worktree)
-                .env("GIT_INDEX_FILE", &tmp_str)
-                .stdin(if input.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                })
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
-            let written = if let Some(input) = input {
-                child.stdin.take().expect("piped stdin").write_all(input)
-            } else {
-                Ok(())
-            };
-            let out = child
-                .wait_with_output()
-                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
-            written.map_err(|e| GitError(format!("git {} stdin: {e}", args.join(" "))))?;
-            if !out.status.success() {
-                return Err(GitError(format!(
-                    "git {} failed: {}",
-                    args.join(" "),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        };
-        // Keep tracked paths (including staged ignored files), but rehash
-        // their content without trusting the real index's cached file stats.
-        let entries = run_bytes(worktree, &["ls-files", "--stage", "-z"])?;
-        git(&["update-index", "-z", "--index-info"], Some(&entries))?;
-        git(&["add", "-A"], None)?;
-        git(&["write-tree"], None)
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    result
+    let index = TempIndex::new("orchd-index");
+    // Keep tracked paths (including staged ignored files), but rehash
+    // their content without trusting the real index's cached file stats.
+    let entries = run_bytes(worktree, &["ls-files", "--stage", "-z"])?;
+    index.git(
+        worktree,
+        &["update-index", "-z", "--index-info"],
+        Some(&entries),
+        &[],
+    )?;
+    index.git(worktree, &["add", "-A"], None, &[])?;
+    index.git(worktree, &["write-tree"], None, &[])
 }
 
 /// `git diff --name-only <old> <new>` between two tree ids.
 pub fn diff_trees_name_only(cwd: &Path, old: &str, new: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["diff", "--name-only", old, new])?;
-    Ok(out
-        .lines()
-        .map(|l| l.to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
+    Ok(non_empty_lines(&out))
 }
 
 /// Files that differ between two worktree trees because the *task* changed
@@ -230,11 +171,7 @@ pub fn own_changes_between(
 /// `git diff --name-only <base>`.
 pub fn diff_name_only(cwd: &Path, base: &str) -> Result<Vec<String>, GitError> {
     let out = run(cwd, &["--no-optional-locks", "diff", "--name-only", base])?;
-    Ok(out
-        .lines()
-        .map(|l| l.to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
+    Ok(non_empty_lines(&out))
 }
 
 pub fn diff_stat(cwd: &Path, base: &str) -> Result<String, GitError> {

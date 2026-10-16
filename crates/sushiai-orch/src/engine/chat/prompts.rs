@@ -1,5 +1,5 @@
 use super::types::ChatMessage;
-use crate::prompts::clip::truncate_chars;
+use crate::clip::truncate_chars;
 use crate::prompts::engine_text;
 
 /// The owner's `text` followed by the questions tasks asked while it was typed.

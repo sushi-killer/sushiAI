@@ -1,10 +1,10 @@
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::backlog::BacklogIn;
 use crate::engine::routing::resolve_variant;
 use crate::engine::secrets;
 use crate::engine::state::App;
 use crate::policy::delivery::BaseFrom;
-use crate::prompts::clip::truncate_chars;
 use crate::store;
 use crate::task::creation::NewTask;
 use crate::task::valid_check;

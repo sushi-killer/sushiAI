@@ -32,9 +32,15 @@ fn the_first_failure_queues_one_step_and_same_cause_after_that_step_waits_for_ow
     let mut before = task_with_status(TaskStatus::Done);
     let failed = observed("named_test_7");
     app.store.save_task(&before).unwrap();
-    let (queued, repair) = record_request(&app, &before, &failed, None, "new-base".into())
-        .unwrap()
-        .unwrap();
+    let (queued, repair) = record_request(
+        &app,
+        &before,
+        &failed,
+        &Origin::Carry(None),
+        "new-base".into(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(repair);
     assert_eq!(queued.status, TaskStatus::Queued);
     assert!(queued.pr_pending);
@@ -46,9 +52,15 @@ fn the_first_failure_queues_one_step_and_same_cause_after_that_step_waits_for_ow
     before.fixture_data().attempts.push(attempt);
     before.resume_phase(TaskStatus::Done, now_ms());
     app.store.save_task(&before).unwrap();
-    let (waiting, repair) = record_request(&app, &before, &failed, None, "new-base".into())
-        .unwrap()
-        .unwrap();
+    let (waiting, repair) = record_request(
+        &app,
+        &before,
+        &failed,
+        &Origin::Carry(None),
+        "new-base".into(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(!repair);
     assert_eq!(waiting.status, TaskStatus::Waiting);
     assert!(waiting.pr_pending);
@@ -66,11 +78,15 @@ fn a_changed_contract_does_not_publish_an_old_repair_or_question() {
     let mut newer = before.clone();
     newer.fixture_data().criteria.push("new contract".into());
     app.store.save_task(&newer).unwrap();
-    assert!(
-        record_request(&app, &before, &observed("test"), None, "base".into())
-            .unwrap()
-            .is_none()
-    );
+    assert!(record_request(
+        &app,
+        &before,
+        &observed("test"),
+        &Origin::Carry(None),
+        "base".into()
+    )
+    .unwrap()
+    .is_none());
     let saved = app.store.load_task(&before.id).unwrap().unwrap();
     assert_eq!(saved.criteria, ["new contract"]);
     assert!(saved.queue.pr_check_repair.is_none() && saved.question.is_none());
@@ -97,7 +113,14 @@ async fn an_owner_overturn_before_repair_admission_defers_the_old_failure() {
     let (release, blocked) = tokio::sync::oneshot::channel();
     let worker = tokio::spawn(async move {
         blocked.await.unwrap();
-        record_request(&worker_app, &before, &observed("case"), None, "base".into()).unwrap()
+        record_request(
+            &worker_app,
+            &before,
+            &observed("case"),
+            &Origin::Carry(None),
+            "base".into(),
+        )
+        .unwrap()
     });
     app.dispatch(
         "task.overturn",
@@ -127,9 +150,15 @@ async fn an_owner_overturn_during_repair_setup_keeps_a_live_task_loop() {
     let id = before.id.clone();
     let worker_app = app.clone();
     let worker = tokio::spawn(async move {
-        resolve_checks(&worker_app, &before, "main", &observed("case"), None)
-            .await
-            .unwrap()
+        resolve_checks(
+            &worker_app,
+            &before,
+            "main",
+            &observed("case"),
+            Origin::Carry(None),
+        )
+        .await
+        .unwrap()
     });
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while !dir.path().join("setup-started").exists() {
@@ -199,4 +228,47 @@ fn repair_setup_fixture(root: &std::path::Path) -> Task {
         owner_answer: None,
     });
     task
+}
+
+#[test]
+fn a_red_ci_check_of_an_open_pull_request_queues_one_step_with_its_job_log_and_keeps_the_pr() {
+    let (app, _dir) = test_app();
+    let url = "https://github.example/acme/app/pull/7";
+    let mut before = task_with_status(TaskStatus::Done);
+    before.record_pr_opened(url.into(), "task/do-thing".into());
+    app.store.save_task(&before).unwrap();
+    let failed = VerifyOutcome {
+        tail: "unit\tRun tests\t2026-10-16T10:00:00Z test x::own ... FAILED".into(),
+        ..observed("x::own")
+    };
+    // Measured on another pull request: not this task's to repair.
+    let other = Origin::PullRequest("https://github.example/acme/app/pull/8".into());
+    assert!(record_request(&app, &before, &failed, &other, "tip".into())
+        .unwrap()
+        .is_none());
+    assert!(
+        record_request(&app, &before, &failed, &Origin::Carry(None), "tip".into())
+            .unwrap()
+            .is_none()
+    );
+    let origin = Origin::PullRequest(url.into());
+    let (queued, repair) = record_request(&app, &before, &failed, &origin, "tip".into())
+        .unwrap()
+        .unwrap();
+    assert!(repair);
+    assert_eq!(queued.status, TaskStatus::Queued);
+    assert_eq!(queued.pr_url.as_deref(), Some(url));
+    assert!(queued.pr_pending && queued.pr_push_owed());
+    let detail = &queued
+        .queue
+        .pr_check_repair
+        .as_ref()
+        .unwrap()
+        .failure
+        .detail;
+    assert!(detail.contains(url) && detail.contains("unit\tRun tests\t2026-10-16T10:00:00Z"));
+    let brief = crate::engine::attempts::context::pr_check_repair_block(
+        queued.queue.pr_check_repair.as_ref().unwrap(),
+    );
+    assert!(brief.contains("## PR check repair") && brief.contains("test x::own ... FAILED"));
 }

@@ -42,27 +42,60 @@ fn cause(failed: &VerifyOutcome) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// Where a persistent check failure was measured.
+pub(in crate::engine) enum Origin {
+    /// The carry's own run of the task's checks, before the pull request
+    /// opens; the plan it will open with, if one is chosen.
+    Carry(Option<PrPlan>),
+    /// The CI of the pull request already open at this URL: the repair keeps
+    /// it and pushes to its branch.
+    PullRequest(String),
+}
+
+impl Origin {
+    fn pr_url(&self) -> Option<&str> {
+        match self {
+            Self::Carry(_) => None,
+            Self::PullRequest(url) => Some(url),
+        }
+    }
+}
+
 fn detail(failed: &VerifyOutcome) -> String {
+    detail_from(failed, &Origin::Carry(None))
+}
+
+fn detail_from(failed: &VerifyOutcome, origin: &Origin) -> String {
     let tests = if failed.failing.is_empty() {
         "the check output below".into()
     } else {
         failed.failing.join(", ")
     };
-    format!(
-        "Post-carry check `{}` exited {}. Failing tests: {tests}\n{}",
-        failed.command,
-        failed
-            .code
-            .map_or_else(|| "null".into(), |code| code.to_string()),
-        failed.tail
-    )
+    let check = match origin {
+        Origin::Carry(_) => format!(
+            "Post-carry check `{}` exited {}.",
+            failed.command,
+            failed
+                .code
+                .map_or_else(|| "null".into(), |code| code.to_string())
+        ),
+        Origin::PullRequest(url) => format!(
+            "The CI check `{}` of the pull request {url} failed, and again on a rerun of its failed jobs; below is the failed job log.",
+            failed.command
+        ),
+    };
+    format!("{check} Failing tests: {tests}\n{}", failed.tail)
 }
 
 fn question(failed: &VerifyOutcome, reason: &str) -> Question {
+    question_from(failed, reason, &Origin::Carry(None))
+}
+
+fn question_from(failed: &VerifyOutcome, reason: &str, origin: &Origin) -> Question {
     let mut question = Question::new(
         format!(
             "The pull request is waiting: {reason}.\n\n{}",
-            detail(failed)
+            detail_from(failed, origin)
         ),
         vec!["retry".into(), "stop".into()],
         QuestionKind::PrCheck,
@@ -80,7 +113,7 @@ fn record_request(
     app: &App,
     before: &Task,
     failed: &VerifyOutcome,
-    plan: Option<PrPlan>,
+    origin: &Origin,
     tip: String,
 ) -> Result<Option<(Task, bool)>, String> {
     let lock = app.task_lock(&before.id);
@@ -94,28 +127,40 @@ fn record_request(
         || fresh.archived
         || fresh.queue.park.is_some()
         || fresh.pending_amendment.is_some()
-        || fresh.pr_url.is_some()
+        || fresh.pr_url.as_deref() != origin.pr_url()
         || fresh.landed_sha.is_some()
         || !CheckAdmission::capture(before).matches(&fresh)
     {
         return Ok(None);
     }
-    let repair =
-        fresh.schedule_pr_check_repair(cause(failed), failure(FailureKind::Verify, detail(failed)));
+    let repair = fresh.schedule_pr_check_repair(
+        cause(failed),
+        failure(FailureKind::Verify, detail_from(failed, origin)),
+    );
     fresh.record_pr_pending(true);
-    if let Some(plan) = plan {
-        fresh.record_pr_plan(plan);
+    if let Origin::Carry(Some(plan)) = origin {
+        fresh.record_pr_plan(plan.clone());
     }
     if repair {
         fresh.record_fresh_base(FreshBase { tip: Some(tip) });
         fresh.resume_phase(TaskStatus::Queued, now_ms());
-        fresh.record_decision(format!(
-            "PR: persistent post-carry check {} goes to the task's own agent for one repair step",
-            failed.command
-        ));
+        fresh.record_decision(match origin {
+            Origin::Carry(_) => format!(
+                "PR: persistent post-carry check {} goes to the task's own agent for one repair step",
+                failed.command
+            ),
+            Origin::PullRequest(url) => format!(
+                "PR: CI check {} of {url} still failed after a rerun; it goes to the task's own agent for one repair step, and the fix is pushed to the same pull request",
+                failed.command
+            ),
+        });
     } else {
         fresh.ask(
-            question(failed, "the same check failure survived its repair step"),
+            question_from(
+                failed,
+                "the same check failure survived its repair step",
+                origin,
+            ),
             now_ms(),
         );
     }
@@ -132,7 +177,7 @@ pub(super) async fn resolve_checks(
     before: &Task,
     base: &str,
     failed: &VerifyOutcome,
-    plan: Option<PrPlan>,
+    origin: Origin,
 ) -> Result<PrCarry, String> {
     if !loop_gone(app, &before.id).await {
         return Ok(PrCarry::Deferred);
@@ -144,7 +189,7 @@ pub(super) async fn resolve_checks(
         crate::delivery::pr::command::GIT_TIMEOUT,
     )
     .await?;
-    let Some((mut task, repair)) = record_request(app, before, failed, plan, tip)? else {
+    let Some((mut task, repair)) = record_request(app, before, failed, &origin, tip)? else {
         return Ok(PrCarry::Deferred);
     };
     if !repair {
@@ -157,6 +202,7 @@ pub(super) async fn resolve_checks(
             &task,
             failed,
             "the task's original base differs from the PR base",
+            &origin,
         );
     }
     let resolution = ResolutionReceipt::capture(&task)?;
@@ -176,7 +222,7 @@ pub(super) async fn resolve_checks(
         Ok(BaseCarry::Stale) => resume_resolution(app, &resolution),
         Ok(BaseCarry::Stopped) => Ok(PrCarry::Deferred),
         Ok(BaseCarry::Failed(reason) | BaseCarry::Skipped(reason)) | Err(reason) => {
-            wait_on_setup(app, &task, failed, &reason)
+            wait_on_setup(app, &task, failed, &reason, &origin)
         }
     }
 }
@@ -205,6 +251,7 @@ fn wait_on_setup(
     before: &Task,
     failed: &VerifyOutcome,
     reason: &str,
+    origin: &Origin,
 ) -> Result<PrCarry, String> {
     let expected = CheckAdmission::capture(before);
     let mut changed = false;
@@ -219,9 +266,10 @@ fn wait_on_setup(
             return;
         }
         fresh.ask(
-            question(
+            question_from(
                 failed,
                 &format!("the repair checkout could not be prepared: {reason}"),
+                origin,
             ),
             now_ms(),
         );

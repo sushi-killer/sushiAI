@@ -32,7 +32,7 @@ pub(super) fn publish(
         && !fresh.archived
         && fresh.queue.park.is_none()
         && fresh.pending_amendment.is_none()
-        && fresh.pr_url.is_none()
+        && fresh.pr_push_owed()
         && fresh.landed_sha.is_none();
     let pending = app
         .controls

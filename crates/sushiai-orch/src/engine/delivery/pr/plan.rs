@@ -60,6 +60,18 @@ pub(super) async fn draft_plan(app: &Arc<App>, task: &Task) -> Option<PrPlan> {
     if let Some(plan) = task.pr_plan.clone().filter(PrPlan::is_reusable) {
         return Some(plan);
     }
+    // A check repair of an open pull request is pushed to it as it is.
+    if task.pr_url.is_some() {
+        return Some(PrPlan {
+            branch: task
+                .pr_branch
+                .clone()
+                .unwrap_or_else(|| task.branch.clone()),
+            title: String::new(),
+            body: String::new(),
+            branch_from: BranchFrom::Task,
+        });
+    }
     let DraftedPr {
         draft,
         branch,

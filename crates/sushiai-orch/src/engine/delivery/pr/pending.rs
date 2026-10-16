@@ -21,10 +21,11 @@ pub(in crate::engine) fn notify_owner(app: &Arc<App>, repo: &str, text: String) 
 
 /// Marks a task that is about to be saved `done` as owing a pull request:
 /// a top-level task whose work did not land on its base, unless the setting
-/// is off for its repo. Saved with `done`, so a restart can resume the flow.
+/// is off for its repo, or whose open pull request waits for its check
+/// repair to be pushed. Saved with `done`, so a restart can resume the flow.
 pub(in crate::engine) fn mark_pr_pending(app: &App, task: &mut Task) {
     let pending = task.parent.is_none()
-        && task.pr_url.is_none()
+        && task.pr_push_owed()
         && task.landed_sha.is_none()
         && !task.archived
         && (task.queue.pr_conflict_tried
@@ -41,7 +42,7 @@ pub(in crate::engine) fn spawn_pr_on_done(app: &App, task: &Task) {
         return;
     }
     let id = task.id.clone();
-    if task.pr_url.is_some()
+    if !task.pr_push_owed()
         || task.archived
         || !(task.queue.pr_conflict_tried
             || task.queue.pr_check_repair.is_some()
@@ -75,14 +76,15 @@ pub(super) fn record(app: &App, id: &str, lines: Vec<String>, cost: f64, ends: b
 }
 
 /// The task, while it still owes the automatic pull request: done, pending,
-/// not landed, none open, not archived. Landing, a pull request opened by
-/// someone else or an archive ends the flow without a word.
+/// not landed, none open (or the open one waits for its check repair), not
+/// archived. Landing, a pull request opened by someone else or an archive
+/// ends the flow without a word.
 pub(super) fn owed(app: &App, id: &str) -> Option<Task> {
     let task = app.store.load_task(id).ok().flatten()?;
     (task.status == TaskStatus::Done
         && task.pr_pending
         && task.landed_sha.is_none()
-        && task.pr_url.is_none()
+        && task.pr_push_owed()
         && !task.archived)
         .then_some(task)
 }

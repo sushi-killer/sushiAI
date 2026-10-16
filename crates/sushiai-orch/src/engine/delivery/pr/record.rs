@@ -27,10 +27,12 @@ pub(super) fn record_publication(
     let short = local_sha.get(..7).unwrap_or(&local_sha);
     task.record_pr_opened(url.clone(), branch.clone());
     task.record_decision(format!("PR: {verb} {url} (head {short})"));
+    task.begin_pr_ci_watch(&url, &local_sha, now_ms());
     task.touch(now_ms());
     app.store.save_task(&task).map_err(|e| e.to_string())?;
     app.broadcast_task(&task);
     drop(guard);
+    super::ci_watch::resume(app, &task);
     if p.source.as_deref() == Some("overseer") {
         app.record_overseer(
             crate::task::notes::overseer::Entry::new(

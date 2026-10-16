@@ -1,4 +1,5 @@
 pub(crate) mod carry;
+pub(in crate::engine) mod ci_watch;
 pub(crate) mod conflict;
 pub(crate) mod draft;
 pub(crate) mod helper;

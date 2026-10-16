@@ -3,6 +3,8 @@
 //! contract in their own `tests/common`: one deadline, positive waits on a
 //! real signal, absence checks over a named window.
 
+#![allow(dead_code)] // each test crate uses a subset
+
 use std::time::{Duration, Instant};
 
 /// The one wall-clock budget of a positive wait: 180 s, or

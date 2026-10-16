@@ -5,11 +5,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use sushiai_routines::argv::{harness_argv, skill_call, RunSpec};
 use sushiai_routines::{Agent, Config, Connector, Git, Routines};
+
+#[path = "../../test_wait.rs"]
+mod test_wait;
 
 #[derive(Default)]
 struct State {
@@ -375,16 +378,12 @@ fn latest(f: &Fixture, id: &str) -> Value {
 }
 
 fn wait_for_run(f: &Fixture, id: &str) -> Value {
-    let end = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(v) = f.svc.call("result", json!({"id": id})) {
-            if v["run"]["status"] != "running" {
-                return v;
-            }
-        }
-        assert!(Instant::now() < end, "the run did not finish");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    test_wait::wait_until("the run to finish", || {
+        f.svc
+            .call("result", json!({"id": id}))
+            .ok()
+            .filter(|v| v["run"]["status"] != "running")
+    })
 }
 
 #[test]
@@ -1811,11 +1810,9 @@ fn a_new_slot_beside_a_retrying_run_is_skipped_and_its_session_closed() {
             "id": "routine.r1", "kind": "ended", "session": s1,
             "scheduledFor": 1, "startedAt": 1}));
     });
-    let end = Instant::now() + Duration::from_secs(5);
-    while f.daemon.created().len() < 2 {
-        assert!(Instant::now() < end, "the retry did not start");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    test_wait::wait_until("the retry session", || {
+        (f.daemon.created().len() >= 2).then_some(())
+    });
     // The next slot fires while the retry lives.
     f.svc.on_schedule_event(&json!({
         "id": "routine.r1", "kind": "fired", "session": "s9",
@@ -2905,11 +2902,7 @@ fn write_req(f: &Fixture, id: &str, name: &str, req: Value) -> PathBuf {
 }
 
 fn wait_until(what: &str, check: impl Fn() -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
-    while !check() {
-        assert!(Instant::now() < end, "{what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    test_wait::wait_until(what, || check().then_some(()));
 }
 
 fn read_json(path: &Path) -> Value {
@@ -3056,15 +3049,10 @@ fn a_dry_run_that_was_denied_a_tool_names_it_and_says_what_a_dry_run_may_use() {
     // Without denials and without such words the agent's own title stays the reason.
     f.daemon.answer(&envelope(&failed.to_string()));
     f.svc.call("dry_run", json!({"id": "r1"})).unwrap();
-    let end = Instant::now() + Duration::from_secs(5);
-    let v = loop {
+    let v = test_wait::wait_until("the second run to finish", || {
         let v = f.svc.call("result", json!({"id": "r1"})).unwrap();
-        if v["run"]["n"] == 2 && v["run"]["status"] != "running" {
-            break v;
-        }
-        assert!(Instant::now() < end);
-        std::thread::sleep(Duration::from_millis(10));
-    };
+        (v["run"]["n"] == 2 && v["run"]["status"] != "running").then_some(v)
+    });
     assert_eq!(v["run"]["reason"], "Not a git repository");
 }
 

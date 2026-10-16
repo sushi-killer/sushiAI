@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::argv::{check_access_tool, check_extra_args, harness_argv, RunSpec};
-use crate::model::{valid_id, Routine, MAX_PROJECTS};
+use crate::model::{valid_id, valid_skill, Routine, MAX_PROJECTS, MAX_SKILLS};
 use crate::{cron, store::Store};
 
 /// What the caller knows about hosts and projects. The desktop sends the full picture; a
@@ -271,6 +271,7 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
             granted: &[],
             read_only: &[],
             read_dirs: &[],
+            skills: &routine.skills,
         };
         if let Err(m) = harness_argv(&routine.agent, &probe) {
             err("agent.effort", m);
@@ -333,13 +334,26 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
                 .into(),
         });
     }
+    if routine.skills.len() > MAX_SKILLS {
+        err("skills", format!("at most {MAX_SKILLS} skills"));
+    }
+    for (i, skill) in routine.skills.iter().enumerate() {
+        if !valid_skill(skill) {
+            err(
+                &format!("skills[{i}]"),
+                format!("{skill} is not a skill name (letters, digits, `:_.-`, at most 64)"),
+            );
+        } else if routine.skills[..i].contains(skill) {
+            err(&format!("skills[{i}]"), format!("{skill} is listed twice"));
+        }
+    }
     if routine.access.len() > MAX_ACCESS {
         err("access", format!("at most {MAX_ACCESS} entries"));
     }
     let mut seen: Vec<&str> = Vec::new();
     for (i, a) in routine.access.iter().enumerate() {
         let field = format!("access[{i}]");
-        if let Err(m) = check_access_tool(&a.tool) {
+        if let Err(m) = check_access_tool(&a.tool, &routine.skills) {
             err(&format!("{field}.tool"), m);
         } else if harness == "codex" && a.tool.starts_with("mcp__") {
             err(

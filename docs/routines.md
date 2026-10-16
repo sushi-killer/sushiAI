@@ -176,6 +176,38 @@ never turns a reviewed routine back into a draft. `routines.show` returns
 `howItRuns.accepted` (the most accepted asks of a kind that still asks),
 `acceptedByKind` and `onItsOwn` (the kinds that no longer ask).
 
+## Skills
+
+`routine.json` may list `skills`: zero to ten names (letters, digits and
+`:_.-`, at most 64, no duplicates; a plugin skill is `plugin:skill`). The brief
+can then stay short and point to the skill. `sushiai skills [--project DIR]`
+(MCP: `routines_skills`) lists what the machine offers: name, harness folder
+(`~/.claude`, `~/.codex`, `~/.agents` and the project's own), path, scripts and
+the first line of the description. It never prints more of a file. Plugin skills
+are not listed; name one by hand.
+
+- The run prompt tells the agent to use each listed skill first: `/name` on
+  Claude, `$name` on Codex. A brief may also start with its own `/name args`
+  line; it is left as written. The names come from one function, `skill_call`
+  in `argv.rs`.
+- Claude cannot limit a run to a list of skills; it can only deny. A routine
+  with `skills` leaves the `Skill` tool on, so the agent can call any installed
+  skill. A routine without `skills` gets `--disallowedTools Skill` (merged with
+  its own `--disallowedTools`). A Claude dry run has a fixed tool set; `Skill` is
+  added to it only when `skills` is not empty.
+- Codex finds skills in `CODEX_HOME/skills` even though the run ignores the
+  user config.
+- A skill script runs through Bash, which is allowlist-gated, so it needs an
+  `access` entry the owner grants. Besides a plain path
+  (`Bash(/abs/skills/<name>/scripts/run.sh:*)`), `Bash(<interp> <path>:*)`
+  is accepted when `<interp>` is `python3`, `python`, `node`, `bash` or `sh`,
+  there is exactly one absolute path, it has no `..` or shell character, and
+  it contains `skills/<name>/<file>` with `<name>` in `skills`. Every other use
+  of an interpreter (`python3 -c`, `python3:*`, a path outside a skills folder
+  or of a skill the routine does not list) stays refused. A run that needs a
+  script without a grant ends `needs_you`.
+- `skills` is part of the saved hash, like the rest of `routine.json`.
+
 ## Login problems
 
 A run that failed because the harness is not logged in records `loginHost` and

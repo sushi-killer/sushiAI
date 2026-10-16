@@ -378,7 +378,7 @@ fn the_mcp_door_builds_a_routine_with_the_cli_rules() {
     let init = rpc(1, "initialize", json!({}));
     assert_eq!(init["result"]["serverInfo"]["name"], "sushiai-routines");
     let listed = rpc(2, "tools/list", json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 8);
 
     let report = rpc(
         3,

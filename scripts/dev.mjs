@@ -49,7 +49,8 @@ function devEnv() {
   const real = homedir();
   vars.HOME = vars.HOME || real;
   vars.CODEX_HOME = vars.CODEX_HOME || join(real, ".codex");
-  if (!vars.SUSHIAI_HOME) {
+  // A shell started by the app exports the default home: that is not a choice.
+  if (!vars.SUSHIAI_HOME || vars.SUSHIAI_HOME === join(real, ".sushiai")) {
     vars.SUSHIAI_HOME = join(real, ".sushiai-dev");
     mkdirSync(vars.SUSHIAI_HOME, { recursive: true, mode: 0o700 });
     // First run only: the catalog and settings; never sessions or state.

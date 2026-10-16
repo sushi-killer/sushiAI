@@ -18,8 +18,22 @@ pub struct Routine {
     /// The tools and connectors the routine's runs may use, each granted by the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub access: Vec<Access>,
+    /// Agent skills the run uses first (zero to [`MAX_SKILLS`]); absent means none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Most skills one routine may name.
+pub const MAX_SKILLS: usize = 10;
+
+/// A skill name: `^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$` (`plugin:skill` is a name too).
+pub fn valid_skill(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || ":_.-".contains(c))
 }
 
 impl Routine {

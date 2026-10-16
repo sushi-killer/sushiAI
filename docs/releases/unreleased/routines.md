@@ -11,3 +11,4 @@
 - A run that failed on a login records the host and harness, so the app can open a terminal that runs the login there.
 - A routine can work on many projects (zero to 20). With one project it keeps its own git worktree; with two or more it reads each project's folder and is read-only for now (Claude only; `sushiai propose` is refused). A routine saved with one `project` loads as a list of one.
 - A dry run now uses the access you granted when it is read-only, so a routine that reads through connector tools can be dry-run. Write tools and ungranted ones stay unavailable and the result names them.
+- A routine can list agent skills (`skills` in `routine.json`) and use them with a short brief. A Claude routine without skills cannot call the Skill tool. A skill's scripts need an access grant in a narrow form (`Bash(python3 /path/skills/<name>/...:*)`). The builder finds skills with `sushiai skills`.

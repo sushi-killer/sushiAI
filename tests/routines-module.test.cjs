@@ -223,6 +223,7 @@ test("a save reaches the host's daemon with the catalog and the routine named fo
 const APPROVALS = [
   "routines_projects",
   "routines_hosts",
+  "routines_skills",
   "routines_list",
   "routines_show",
   "routines_validate",

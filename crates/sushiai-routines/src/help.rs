@@ -7,6 +7,7 @@ pub const COMMANDS: &[&str] = &[
     "sushiai projects",
     "sushiai projects show",
     "sushiai hosts",
+    "sushiai skills",
     "sushiai routines",
     "sushiai routines show",
     "sushiai routine save",
@@ -29,6 +30,8 @@ Read commands
   sushiai projects                     projects: id, name, hosts, purpose
   sushiai projects show ID             one project: folders per host, remote, purpose
   sushiai hosts                        hosts this daemon knows, with their projects
+  sushiai skills [--project DIR]       agent skills on this machine: name, harness, path,
+                                       scripts (absolute paths), first description line
   sushiai routines help                this reference
   sushiai routines                     existing routines: id, name, when, enabled, last run
   sushiai routines show ID             one routine: routine.json, brief.md, last runs
@@ -47,6 +50,7 @@ Build commands
 
 Same tools over MCP
   sushiai mcp --routines               MCP server with routines_projects, routines_hosts,
+                                       routines_skills,
                                        routines_list, routines_show, routines_validate,
                                        routines_save (dir, host) and routines_dry_run (id).
                                        Same checks and host rules as the commands above.
@@ -79,6 +83,7 @@ DIR layout
                   "agent":{"harness":"claude|codex","model","effort":"low|medium|high",
                            "account","extraArgs":[]},
                   "howItRuns":{"mode":"ask-every-time|ask-first|on-its-own","promoteAfter":5},
+                  "skills":["name"],
                   "access":[{"tool":"Bash(gh issue list:*)","label":"List issues",
                              "detail":"read only","kind":"read|write"}],
                   "limits":{"timeoutMin":30}}
@@ -102,6 +107,12 @@ Rules
     outside this session; "granted" is theirs, you cannot set it (there is no grant
     command), and a save resets it for a new or changed entry. A run may use only the granted tools; a routine with ungranted access ends
     needs_you. extraArgs --allowedTools is ignored.
+  - skills is zero to 10 names from `sushiai skills` (letters, digits, `:_.-`). A run is told
+    to use each first: Claude `/name`, Codex `$name`. A Claude run without skills has the
+    Skill tool denied; with skills it can call any installed skill (Claude cannot restrict
+    to a list). A skill's script needs an access entry: `Bash(/abs/path/skills/<name>/...:*)`
+    or `Bash(<python3|python|node|bash|sh> /abs/path/skills/<name>/...:*)`, one path, no `..`,
+    the name listed in skills. Every other interpreter use is refused.
   - howItRuns.mode: ask-every-time asks before every write and applies a proposal only after
     a yes; ask-first asks until promoteAfter (default 5) yes answers of one kind, then that
     kind no longer asks; on-its-own never asks.

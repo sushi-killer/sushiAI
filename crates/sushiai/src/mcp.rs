@@ -37,6 +37,12 @@ fn tools() -> Value {
             json!([]),
         ),
         tool(
+            "routines_skills",
+            "Agent skills on this machine: name, harness, path, scripts (absolute paths) and the first line of the description. With `project`, that folder's own skills too. Read only.",
+            json!({"project": string("absolute path of a project folder")}),
+            json!([]),
+        ),
+        tool(
             "routines_list",
             "Existing routines: routine.json, access, needsAccess, last run.",
             json!({}),
@@ -89,6 +95,14 @@ fn run_tool(call: Call, name: &str, args: &Value) -> Result<Value, String> {
         "routines_hosts" => {
             let snapshot = call("catalog.get", json!({}))?;
             Ok(json!(cli::hosts_data(&snapshot)))
+        }
+        "routines_skills" => {
+            let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+            let project = args["project"].as_str().filter(|p| !p.is_empty());
+            Ok(json!(cli::skills_data(
+                std::path::Path::new(&home),
+                project.map(std::path::Path::new)
+            )))
         }
         "routines_list" => call("routines.list", json!({})),
         "routines_show" => call("routines.show", json!({"id": arg(args, "id")?})),
@@ -236,6 +250,7 @@ mod tests {
             [
                 "routines_projects",
                 "routines_hosts",
+                "routines_skills",
                 "routines_list",
                 "routines_show",
                 "routines_validate",

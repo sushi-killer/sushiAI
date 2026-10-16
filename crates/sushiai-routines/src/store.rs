@@ -186,7 +186,8 @@ impl Store {
             ));
         }
         for a in &routine.access {
-            check_access_tool(&a.tool).map_err(|m| format!("routine {id}: {m}"))?;
+            check_access_tool(&a.tool, &routine.skills)
+                .map_err(|m| format!("routine {id}: {m}"))?;
         }
         check_extra_args(&routine.agent.extra_args, &self.dir(id))
             .map_err(|m| format!("routine {id}: {m}"))?;

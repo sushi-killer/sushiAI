@@ -69,6 +69,7 @@ const MCP_ARGS = ["mcp", "--routines"];
 const MCP_TOOLS = [
   "routines_projects",
   "routines_hosts",
+  "routines_skills",
   "routines_list",
   "routines_show",
   "routines_validate",

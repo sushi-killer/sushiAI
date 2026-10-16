@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::argv::{harness_argv, RunSpec};
+use crate::argv::{harness_argv, skill_call, RunSpec};
 use crate::model::{routine_of_schedule, schedule_id, Routine, MULTI_PROJECT_PROPOSE};
 use crate::result;
 use crate::store::Store;
@@ -1044,6 +1044,7 @@ impl Routines {
                 granted: &granted,
                 read_only: &read_only,
                 read_dirs: &read_dirs,
+                skills: &routine.skills,
             },
         )?;
         let cwd = self.cwd(routine, catalog);
@@ -1132,6 +1133,7 @@ impl Routines {
                 granted: &granted,
                 read_only: &read_only,
                 read_dirs: &read_dirs,
+                skills: &routine.skills,
             },
         )
         .unwrap_or_default();
@@ -2548,6 +2550,12 @@ fn wrap_brief(
             "Access still waiting for the owner, which you must not use: {}. When the work \
              needs it, end with status needs_you and name it in missing.\n",
             waiting.join(", ")
+        ));
+    }
+    for skill in &routine.skills {
+        p.push_str(&format!(
+            "Use the skill {} first, then follow the BRIEF.\n",
+            skill_call(&routine.agent.harness, skill)
         ));
     }
     if dry_run {

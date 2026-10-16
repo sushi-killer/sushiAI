@@ -139,7 +139,7 @@ test("the skill names the same modes and MCP tools as the code", () => {
   const tools = [...mcp.matchAll(/"(routines_[a-z_]+)",\n\s+"/g)].map(
     (m) => m[1],
   );
-  assert.equal(tools.length, 7);
+  assert.equal(tools.length, 8);
   for (const tool of tools) assert.ok(text.includes(tool), tool);
   // The in-run commands are never MCP tools.
   assert.doesNotMatch(mcp, /"routines_(ask|propose)/);

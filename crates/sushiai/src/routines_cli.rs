@@ -1,6 +1,7 @@
 //! `sushiai projects | hosts | routines | routine | ask | propose`: the commands a routine
 //! builder and a routine run use. Everything that needs a routine goes to the daemon's
-//! `routines.*` methods; reading projects and hosts uses the daemon's catalog.
+//! `routines.*` methods; reading projects and hosts uses the daemon's catalog. `skills` reads
+//! this machine's skill folders and needs no daemon.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -25,6 +26,7 @@ pub fn run(command: &str, args: impl Iterator<Item = String>) -> i32 {
     let result = match command {
         "projects" => projects(&rest),
         "hosts" => hosts(&rest),
+        "skills" => skills(&rest),
         "routines" => routines(&rest),
         "routine" => routine(&rest),
         "ask" => ask(&rest),
@@ -185,6 +187,128 @@ fn excerpt(project: &Value) -> String {
 fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+}
+
+// ----- skills -----
+
+/// The first line of the `description:` in a SKILL.md frontmatter (a folded `>-` or `|` block
+/// gives its first text line). Nothing else of the file is read out.
+fn skill_description(text: &str) -> String {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return String::new();
+    }
+    let mut found = false;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let value = match line.strip_prefix("description:") {
+            Some(v) => {
+                found = true;
+                v.trim()
+            }
+            None if found && line.starts_with([' ', '\t']) => line.trim(),
+            None if found => break,
+            None => continue,
+        };
+        if value.is_empty() || value.chars().all(|c| ">|-+".contains(c)) {
+            continue;
+        }
+        let value = value.trim_matches(['"', '\'']);
+        return value.chars().take(160).collect();
+    }
+    String::new()
+}
+
+/// Files under `dir` (at most three levels), absolute, sorted, at most 20.
+fn script_files(dir: &Path, depth: u32, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        if out.len() >= 20 {
+            return;
+        }
+        if p.is_dir() {
+            if depth < 3 {
+                script_files(&p, depth + 1, out);
+            }
+        } else if p.is_file() {
+            out.push(p.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// The skills found under `home` (`.claude`, `.codex` and `.agents` skill folders) and, with a
+/// project folder, under its `.claude/skills` and `.agents/skills`. Plugin skills
+/// (`plugin:skill`) are not listed: their folders have no fixed place.
+pub fn skills_data(home: &Path, project: Option<&Path>) -> Vec<Value> {
+    let mut roots: Vec<(&str, &str, PathBuf)> = vec![
+        ("claude", "user", home.join(".claude/skills")),
+        ("codex", "user", home.join(".codex/skills")),
+        ("agents", "user", home.join(".agents/skills")),
+    ];
+    if let Some(p) = project {
+        roots.push(("claude", "project", p.join(".claude/skills")));
+        roots.push(("agents", "project", p.join(".agents/skills")));
+    }
+    let mut out = Vec::new();
+    for (harness, scope, root) in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+                continue;
+            };
+            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+            let mut scripts = Vec::new();
+            script_files(&dir.join("scripts"), 1, &mut scripts);
+            out.push(json!({
+                "name": name,
+                "harness": harness,
+                "scope": scope,
+                "path": dir.to_string_lossy(),
+                "scripts": scripts,
+                "description": skill_description(&text),
+            }));
+        }
+    }
+    out
+}
+
+/// `sushiai skills [--project DIR] [--json]`: what the owner's machine offers a routine.
+fn skills(args: &[String]) -> Result<i32, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
+    let rows = skills_data(&home, value_of(args, "--project").map(Path::new));
+    if flag(args, "--json") {
+        print_json(&json!(rows));
+    } else {
+        for r in &rows {
+            println!(
+                "{}\t{}\t{}\t{}\tscripts: {}",
+                r["name"].as_str().unwrap_or_default(),
+                r["harness"].as_str().unwrap_or_default(),
+                r["path"].as_str().unwrap_or_default(),
+                r["description"].as_str().unwrap_or_default(),
+                r["scripts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+    }
+    Ok(0)
 }
 
 /// The hosts this daemon knows, as `sushiai hosts --json` prints them.
@@ -732,6 +856,53 @@ fn propose(args: &[String]) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skills_lists_names_scripts_and_only_the_description_line() {
+        let home = tmp("skills-home");
+        let skill = home.join(".claude/skills/make-digest");
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: make-digest\ndescription: >-\n  Builds a weekly digest.\n  More text.\n---\nSECRET BODY\n",
+        )
+        .unwrap();
+        std::fs::write(skill.join("scripts/run.py"), "print(1)").unwrap();
+        let other = home.join(".codex/skills/brand");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("SKILL.md"),
+            "---\ndescription: \"Brand rules\"\n---\n",
+        )
+        .unwrap();
+        // A folder without SKILL.md is not a skill.
+        std::fs::create_dir_all(home.join(".claude/skills/empty")).unwrap();
+        let rows = skills_data(&home, None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "make-digest");
+        assert_eq!(rows[0]["harness"], "claude");
+        assert_eq!(rows[0]["description"], "Builds a weekly digest.");
+        assert_eq!(
+            rows[0]["scripts"][0],
+            skill.join("scripts/run.py").to_string_lossy().as_ref()
+        );
+        assert_eq!(rows[1]["name"], "brand");
+        assert_eq!(rows[1]["harness"], "codex");
+        assert_eq!(rows[1]["description"], "Brand rules");
+        assert!(!json!(rows).to_string().contains("SECRET BODY"));
+        // A project folder adds its own skills.
+        let project = home.join("my-app");
+        std::fs::create_dir_all(project.join(".agents/skills/local")).unwrap();
+        std::fs::write(
+            project.join(".agents/skills/local/SKILL.md"),
+            "no frontmatter",
+        )
+        .unwrap();
+        let rows = skills_data(&home, Some(&project));
+        assert_eq!(rows.last().unwrap()["scope"], "project");
+        assert_eq!(rows.last().unwrap()["description"], "");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

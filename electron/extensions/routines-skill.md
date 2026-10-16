@@ -98,7 +98,7 @@ Which plan should the digest follow?
 2. Read what exists: `sushiai projects`, `sushiai hosts`, `sushiai routines`.
    For the project you pick, run `sushiai projects show ID` and read the files
    the routine will touch. When the owner connected the `sushiai` MCP server,
-   the tools `routines_projects`, `routines_hosts`, `routines_list`,
+   the tools `routines_projects`, `routines_hosts`, `routines_skills`, `routines_list`,
    `routines_show`, `routines_validate`, `routines_save` and
    `routines_dry_run` do the same as these commands.
 3. Pick the host. `where.projects` is a list of zero to 20 project ids; pick
@@ -158,6 +158,27 @@ tools and `Bash(sushiai ask:*) Bash(sushiai propose:*)`; do not list those.
   tool is skipped and listed as an action with `applied` false.
 - Changing `access` of a saved routine resets the grant of a new or changed
   entry.
+
+## Skills
+
+When the owner names a procedure or a skill, run `sushiai skills` (or the
+`routines_skills` tool; `--project DIR` adds a project's own skills). It lists
+each skill with its harness, path, scripts and a description line.
+
+- Write `"skills": ["name"]` in `routine.json` (up to 10 names; a plugin skill is
+  `plugin:skill`). Keep the brief short and point to the skill; do not copy it.
+  A run is told to use each listed skill first (Claude `/name`, Codex `$name`).
+- A skill may run its scripts. For each script the routine should run, add an
+  `access` entry in one of two forms only, with the absolute path from
+  `sushiai skills`: `Bash(/abs/path/skills/<name>/scripts/run.sh:*)` or
+  `Bash(python3 /abs/path/skills/<name>/scripts/run.py:*)` (the interpreter is
+  `python3`, `python`, `node`, `bash` or `sh`, then exactly one path). Set `kind`
+  `read` or `write` as the script does. Any other interpreter use is refused.
+- A script without a grant ends the run `needs_you` and names it. Say which
+  grants the owner must give.
+- Claude cannot limit a run to a list of skills: a routine with `skills` can
+  call any installed skill, so keep the brief explicit. A routine without
+  `skills` has the Skill tool denied.
 
 ## Run modes
 

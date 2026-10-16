@@ -50,6 +50,19 @@ pub const DRY_RUN_DENY: &[&str] = &["Edit", "Write", "NotebookEdit"];
 /// The built-in tools a Claude dry run has at all (`--tools`).
 const DRY_RUN_TOOLS: &str = "Read,Grep,Glob,Bash";
 
+/// The Claude tool that runs a skill. Claude cannot restrict a run to a list of skills, only
+/// deny the tool or one skill, so a routine without declared skills has the tool denied.
+const SKILL_TOOL: &str = "Skill";
+
+/// How a prompt calls a skill on a harness: Claude `-p` expands a `/name`, Codex a `$name`.
+/// The one place that knows the syntax.
+pub fn skill_call(harness: &str, name: &str) -> String {
+    match harness {
+        "codex" => format!("${name}"),
+        _ => format!("/{name}"),
+    }
+}
+
 /// What the mapping needs besides the agent.
 pub struct RunSpec<'a> {
     /// Compact JSON of the result schema (Claude takes it inline).
@@ -67,6 +80,9 @@ pub struct RunSpec<'a> {
     /// Project checkouts a Claude run may read besides its own folder (`--add-dir`), one per
     /// project of a multi-project routine.
     pub read_dirs: &'a [String],
+    /// The skills the routine declares. A Claude dry run gets the `Skill` tool only when this
+    /// is not empty; a real Claude run has it denied when this is empty.
+    pub skills: &'a [String],
 }
 
 /// The argument list placed after the harness name, before the prompt.
@@ -111,7 +127,11 @@ pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String
             if spec.dry_run {
                 argv.extend([
                     "--tools".into(),
-                    DRY_RUN_TOOLS.into(),
+                    if spec.skills.is_empty() {
+                        DRY_RUN_TOOLS.into()
+                    } else {
+                        format!("{DRY_RUN_TOOLS},{SKILL_TOOL}")
+                    },
                     "--allowedTools".into(),
                     dry_run_allow(spec.read_only).join(","),
                     "--disallowedTools".into(),
@@ -177,7 +197,12 @@ pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String
         argv.extend(dry_run_extra_args(&agent.extra_args));
     } else {
         // The owner's grants are the allowlist: a routine's own `--allowedTools` is dropped.
-        argv.extend(without_allowed_tools(&agent.extra_args));
+        let args = without_allowed_tools(&agent.extra_args);
+        if agent.harness == "claude" && spec.skills.is_empty() {
+            argv.extend(deny_tool(&args, SKILL_TOOL));
+        } else {
+            argv.extend(args);
+        }
     }
     Ok(argv)
 }
@@ -206,6 +231,39 @@ fn dry_run_extra_args(args: &[String]) -> Vec<String> {
             }
         }
     }
+    out
+}
+
+/// `args` with `tool` added to the one `--disallowedTools` list (the routine's own entries
+/// are merged into it, never repeated as a second flag).
+fn deny_tool(args: &[String], tool: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut denied: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let (name, attached) = match a.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (a.as_str(), None),
+        };
+        i += 1;
+        if name == "--disallowedTools" || name == "--disallowed-tools" {
+            if let Some(v) = attached {
+                denied.extend(split_tools(v));
+            } else {
+                while i < args.len() && !args[i].starts_with('-') {
+                    denied.extend(split_tools(&args[i]));
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(a.clone());
+        }
+    }
+    if !denied.iter().any(|d| d == tool) {
+        denied.push(tool.to_string());
+    }
+    out.extend(["--disallowedTools".into(), denied.join(",")]);
     out
 }
 
@@ -386,13 +444,55 @@ fn check_allowed_tool(tool: &str) -> Result<(), String> {
 /// Why `tool` may not be an access entry of a routine: an exact tool name, a
 /// `Bash(<command prefix>:*)` allowance or one exact `mcp__<server>__<tool>`. Every other
 /// wildcard is refused, and so is a whole MCP server.
-pub fn check_access_tool(tool: &str) -> Result<(), String> {
+///
+/// A routine that lists a skill in `skills` may also run that skill's own scripts: one of
+/// [`SKILL_INTERPRETERS`] followed by exactly one absolute path under `.../skills/<name>/`
+/// (a bare path `Bash(/abs/path:*)` already passes the basename rule). Any other use of an
+/// interpreter stays refused.
+pub fn check_access_tool(tool: &str, skills: &[String]) -> Result<(), String> {
+    if is_skill_script(tool, skills) {
+        return Ok(());
+    }
     if let Some(rest) = tool.strip_prefix("mcp__") {
         if rest.split("__").count() != 2 {
             return Err(format!("{tool}: name one tool as mcp__<server>__<tool>"));
         }
     }
     check_allowed_tool(tool)
+}
+
+/// Interpreters a skill script may be run with. Only ever followed by one skill path.
+const SKILL_INTERPRETERS: &[&str] = &["python3", "python", "node", "bash", "sh"];
+
+/// Whether `tool` is `Bash(<interpreter> <path>:*)` with one absolute path with no `..`, no
+/// shell metacharacter and a `skills/<name>/<file>` run of components where `<name>` is
+/// declared in `skills` (a `plugin:skill` name matches its `skill` folder).
+fn is_skill_script(tool: &str, skills: &[String]) -> bool {
+    let Some(prefix) = tool
+        .strip_prefix("Bash(")
+        .and_then(|r| r.strip_suffix(":*)"))
+    else {
+        return false;
+    };
+    let path = match prefix.split(' ').collect::<Vec<_>>().as_slice() {
+        [interp, path] if SKILL_INTERPRETERS.contains(interp) => *path,
+        _ => return false,
+    };
+    let parts: Vec<&str> = path.split('/').collect();
+    let clean = path.starts_with('/')
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
+        && parts[1..]
+            .iter()
+            .all(|p| !p.is_empty() && *p != ".." && *p != ".");
+    clean
+        && parts.windows(3).any(|w| {
+            w[0] == "skills"
+                && skills
+                    .iter()
+                    .any(|s| s == w[1] || s.rsplit(':').next() == Some(w[1]))
+        })
 }
 
 /// Splits one `--allowedTools` argument on commas and spaces outside parentheses.

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use sushiai_routines::argv::{harness_argv, RunSpec};
+use sushiai_routines::argv::{harness_argv, skill_call, RunSpec};
 use sushiai_routines::{Agent, Config, Connector, Git, Routines};
 
 #[derive(Default)]
@@ -397,6 +397,7 @@ fn argv_for_claude_and_codex_is_exact() {
         granted: &[],
         read_only: &[],
         read_dirs: &[],
+        skills: &[],
     };
     let claude = Agent {
         harness: "claude".into(),
@@ -422,7 +423,10 @@ fn argv_for_claude_and_codex_is_exact() {
             // The run's allowlist is the base set plus the owner's grants: the routine's own
             // `--allowedTools` ("Read" above) is not passed through.
             "--allowedTools",
-            "Read,Grep,Glob,Bash(sushiai ask:*),Bash(sushiai propose:*)"
+            "Read,Grep,Glob,Bash(sushiai ask:*),Bash(sushiai propose:*)",
+            // No declared skill: the Skill tool is denied.
+            "--disallowedTools",
+            "Skill"
         ]
     );
     let granted = vec![
@@ -439,6 +443,7 @@ fn argv_for_claude_and_codex_is_exact() {
             granted: &[],
             read_only: &[],
             read_dirs: &[],
+            skills: &[],
         }
     };
     let argv = harness_argv(&claude, &with_grants).unwrap();
@@ -464,6 +469,7 @@ fn argv_for_claude_and_codex_is_exact() {
             granted: &[],
             read_only: &[],
             read_dirs: &[],
+            skills: &[],
         }
     };
     let argv = harness_argv(&claude, &dry_with_grants).unwrap();
@@ -595,6 +601,228 @@ fn argv_for_claude_and_codex_is_exact() {
     let real = harness_argv(&codex, &spec).unwrap().join(" ");
     assert!(!real.contains("network_access"), "{real}");
     assert!(!argv.contains(&"--ephemeral".to_string()));
+}
+
+fn spec_with<'a>(dry_run: bool, skills: &'a [String]) -> RunSpec<'a> {
+    RunSpec {
+        schema_json: "{}",
+        schema_file: Path::new("s"),
+        last_message: Path::new("l"),
+        dry_run,
+        granted: &[],
+        read_only: &[],
+        read_dirs: &[],
+        skills,
+    }
+}
+
+fn flag_value(argv: &[String], flag: &str) -> Option<String> {
+    let i = argv.iter().position(|a| a == flag)?;
+    Some(argv[i + 1].clone())
+}
+
+#[test]
+fn skills_decide_the_claude_skill_tool_in_every_run_shape() {
+    let agent = |harness: &str, extra: &[&str]| Agent {
+        harness: harness.into(),
+        model: None,
+        effort: None,
+        account: None,
+        extra_args: extra.iter().map(|s| s.to_string()).collect(),
+    };
+    let none: Vec<String> = vec![];
+    let some = vec!["brand".to_string()];
+    let claude = agent("claude", &[]);
+    // Real run, no skills: denied. With skills: no deny flag at all.
+    let argv = harness_argv(&claude, &spec_with(false, &none)).unwrap();
+    assert_eq!(flag_value(&argv, "--disallowedTools").unwrap(), "Skill");
+    let argv = harness_argv(&claude, &spec_with(false, &some)).unwrap();
+    assert_eq!(flag_value(&argv, "--disallowedTools"), None);
+    // The routine's own deny list is merged into the one flag, in both spellings.
+    for extra in [
+        vec!["--disallowedTools", "Write", "WebFetch"],
+        vec!["--disallowedTools=Write,WebFetch"],
+    ] {
+        let c = agent("claude", &extra);
+        let argv = harness_argv(&c, &spec_with(false, &none)).unwrap();
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.starts_with("--disallowed"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            flag_value(&argv, "--disallowedTools").unwrap(),
+            "Write,WebFetch,Skill"
+        );
+        assert!(!argv.join("|").contains("--disallowedTools=Write"));
+    }
+    // The routine's own deny list is kept as is when skills are declared.
+    let c = agent("claude", &["--disallowedTools", "Write"]);
+    let argv = harness_argv(&c, &spec_with(false, &some)).unwrap();
+    assert_eq!(flag_value(&argv, "--disallowedTools").unwrap(), "Write");
+    // Dry run: Skill joins the fixed tool set only with skills, and nothing else changes.
+    let argv = harness_argv(&claude, &spec_with(true, &none)).unwrap();
+    assert_eq!(flag_value(&argv, "--tools").unwrap(), "Read,Grep,Glob,Bash");
+    let argv = harness_argv(&claude, &spec_with(true, &some)).unwrap();
+    assert_eq!(
+        flag_value(&argv, "--tools").unwrap(),
+        "Read,Grep,Glob,Bash,Skill"
+    );
+    assert_eq!(
+        flag_value(&argv, "--disallowedTools").unwrap(),
+        "Edit,Write,NotebookEdit"
+    );
+    assert!(!flag_value(&argv, "--allowedTools")
+        .unwrap()
+        .contains("Skill"));
+    // Codex argv does not depend on skills.
+    let codex = agent("codex", &[]);
+    for dry in [false, true] {
+        assert_eq!(
+            harness_argv(&codex, &spec_with(dry, &none)).unwrap(),
+            harness_argv(&codex, &spec_with(dry, &some)).unwrap()
+        );
+        assert!(!harness_argv(&codex, &spec_with(dry, &some))
+            .unwrap()
+            .join(" ")
+            .contains("Skill"));
+    }
+    assert_eq!(skill_call("claude", "brand"), "/brand");
+    assert_eq!(skill_call("codex", "brand"), "$brand");
+}
+
+#[test]
+fn skills_are_validated_hashed_and_named_in_the_prompt() {
+    let f = fixture();
+    let check = |skills: Value| {
+        let mut r = routine_json("r1");
+        r["skills"] = skills;
+        f.svc
+            .call("validate", json!({"routine": r, "brief": "b"}))
+            .unwrap()
+    };
+    assert_eq!(
+        check(json!(["brand", "ponytail:ponytail-help", "a.b_c-1"]))["ok"],
+        true
+    );
+    for bad in [
+        json!(["-x"]),
+        json!([""]),
+        json!(["has space"]),
+        json!(["../x"]),
+        json!(["a/b"]),
+        json!(["x".repeat(65)]),
+        json!(["a", "a"]),
+        json!((0..11).map(|i| format!("s{i}")).collect::<Vec<_>>()),
+    ] {
+        let v = check(bad.clone());
+        assert_eq!(v["ok"], false, "{bad} was accepted");
+        assert!(v["errors"][0]["field"]
+            .as_str()
+            .unwrap()
+            .starts_with("skills"));
+    }
+    // Absent skills leave the hash as it was; present ones change it.
+    let none = check(json!([]))["hash"].clone();
+    let mut plain = routine_json("r1");
+    let absent = f
+        .svc
+        .call("validate", json!({"routine": plain.clone(), "brief": "b"}))
+        .unwrap()["hash"]
+        .clone();
+    assert_eq!(none, absent);
+    plain["skills"] = json!(["brand"]);
+    let with = f
+        .svc
+        .call("validate", json!({"routine": plain, "brief": "b"}))
+        .unwrap()["hash"]
+        .clone();
+    assert_ne!(with, absent);
+    // The prompt points at each skill, in the harness's own syntax; the brief stays intact.
+    for (harness, call) in [("claude", "/brand"), ("codex", "$brand")] {
+        install_with(&f, "r2", true, &|r| {
+            r["agent"]["harness"] = json!(harness);
+            r["skills"] = json!(["brand"]);
+        });
+        let create = entry(&f, "r2")["create"].clone();
+        let prompt = create["prompt"].as_str().unwrap();
+        assert!(
+            prompt.contains(&format!("Use the skill {call} first")),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with("Summarise."));
+        let shown = f.svc.call("show", json!({"id": "r2"})).unwrap();
+        assert_eq!(shown["routine"]["skills"], json!(["brand"]));
+    }
+    // No skills: no skill line.
+    install_with(&f, "r3", true, &|_| {});
+    let create = entry(&f, "r3")["create"].clone();
+    assert!(!create["prompt"].as_str().unwrap().contains("Use the skill"));
+}
+
+#[test]
+fn skill_scripts_are_accepted_only_in_the_two_narrow_forms() {
+    let f = fixture();
+    let check = |tool: &str, skills: Value| {
+        let mut r = routine_json("r1");
+        r["skills"] = skills;
+        r["access"] = json!([access(tool, "Run it", "read")]);
+        f.svc
+            .call("validate", json!({"routine": r, "brief": "b"}))
+            .unwrap()
+    };
+    let brand = json!(["brand"]);
+    for tool in [
+        "Bash(/home/me/.claude/skills/brand/scripts/run.sh:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/scripts/run.py:*)",
+        "Bash(python /home/me/.codex/skills/brand/scripts/run.py:*)",
+        "Bash(node /home/me/.agents/skills/brand/scripts/run.mjs:*)",
+        "Bash(bash /home/me/.claude/skills/brand/run.sh:*)",
+        "Bash(sh /my-app/.claude/skills/brand/scripts/a/b.sh:*)",
+    ] {
+        let v = check(tool, brand.clone());
+        assert_eq!(v["ok"], true, "{tool}: {v}");
+    }
+    // A plugin skill matches its own folder name.
+    assert_eq!(
+        check(
+            "Bash(node /p/skills/ponytail-help/scripts/x.js:*)",
+            json!(["ponytail:ponytail-help"])
+        )["ok"],
+        true
+    );
+    for tool in [
+        "Bash(python3 -c print(1):*)",
+        "Bash(python3:*)",
+        "Bash(node:*)",
+        "Bash(python3 /home/me/.claude/skills/other/scripts/run.py:*)",
+        "Bash(python3 /home/me/scripts/run.py:*)",
+        "Bash(python3 /home/me/.claude/skills/brand:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/../x/run.py:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/scripts/../../run.py:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/a.py /etc/passwd:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/a.py;rm:*)",
+        "Bash(python3 /home/me/.claude/skills/brand/$(x).py:*)",
+        "Bash(python3 skills/brand/run.py:*)",
+        "Bash(python3 -m http.server /home/me/.claude/skills/brand/a:*)",
+        "Bash(zsh /home/me/.claude/skills/brand/scripts/run.sh:*)",
+        "Bash(env /home/me/.claude/skills/brand/scripts/run.sh:*)",
+        "Bash(/home/me/.claude/skills/brand/node:*)",
+    ] {
+        let v = check(tool, brand.clone());
+        assert_eq!(v["ok"], false, "{tool} was accepted");
+    }
+    // A skill the routine does not list grants nothing.
+    for skills in [json!([]), json!(["other"])] {
+        let v = check(
+            "Bash(python3 /home/me/.claude/skills/brand/scripts/run.py:*)",
+            skills,
+        );
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["errors"][0]["field"], "access[0].tool");
+    }
 }
 
 #[test]

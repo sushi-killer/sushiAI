@@ -234,6 +234,11 @@ export function Scheme({
               )}
             </Popover>
           </KeyValueRow>
+          {routine.skills && routine.skills.length > 0 && (
+            <KeyValueRow label="Skills">
+              {routine.skills.join(", ")}
+            </KeyValueRow>
+          )}
           {rows.read && <KeyValueRow label="Read">{rows.read}</KeyValueRow>}
           {rows.doing && <KeyValueRow label="Do">{rows.doing}</KeyValueRow>}
           {rows.result && (

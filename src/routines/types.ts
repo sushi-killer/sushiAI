@@ -27,6 +27,8 @@ export type Routine = {
   /** The tools the owner granted this routine, and those it still waits for.
    * Absent on a daemon that does not know grants. */
   access?: AccessEntry[];
+  /** Agent skills a run uses first; shown, not edited here. */
+  skills?: string[];
   enabled: boolean;
 };
 

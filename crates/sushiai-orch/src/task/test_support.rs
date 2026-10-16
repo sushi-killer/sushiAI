@@ -38,6 +38,7 @@ pub(crate) fn sample_task(id: &str, status: TaskStatus, attempt_status: AttemptS
             base_ref: None,
             fresh_base: None,
             depends_on: vec![],
+            addenda: vec![],
             paths: vec![],
             parent: None,
             status,

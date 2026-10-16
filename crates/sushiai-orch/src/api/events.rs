@@ -81,6 +81,7 @@ mod tests {
             base_ref: None,
             fresh_base: None,
             depends_on: vec![],
+            addenda: vec![],
             paths: vec![],
             parent: None,
             status: crate::task::TaskStatus::Running,

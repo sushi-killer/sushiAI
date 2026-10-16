@@ -70,6 +70,22 @@ fn task_amend_schema_offers_full_dependency_replacement_before_implementing() {
 }
 
 #[test]
+fn task_amend_schema_offers_an_addendum_string() {
+    let result = dispatch(&orchestrator(), "tools/list", &json!({})).unwrap();
+    let amend = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "task_amend")
+        .unwrap();
+    assert_eq!(
+        amend["inputSchema"]["properties"]["addendum"]["type"],
+        "string"
+    );
+    assert!(amend["description"].as_str().unwrap().contains("addendum"));
+}
+
+#[test]
 fn task_pr_never_forwards_a_branch() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
     let sink = seen.clone();

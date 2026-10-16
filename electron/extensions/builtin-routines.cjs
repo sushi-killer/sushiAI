@@ -8,6 +8,7 @@ const ROUTINES_MANIFEST = {
   apiVersion: 1,
   source: { kind: "builtin" },
   scope: "app",
+  icon: "workflow",
   description:
     "Scheduled background agent runs, built from one sentence and run by the daemon of a host.",
   contributions: {

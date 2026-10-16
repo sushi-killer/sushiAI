@@ -1,9 +1,17 @@
 import {
+  Bot,
+  Clock,
+  Database,
+  FileText,
   Folder,
+  Globe,
+  KeyRound,
   LayoutGrid,
   ListChecks,
   ListTodo,
   Plug,
+  Server,
+  ShieldCheck,
   Sparkles,
   TerminalSquare,
   Workflow,
@@ -30,26 +38,42 @@ const ICONS = {
   workflow: Workflow,
   terminal: TerminalSquare,
   folder: Folder,
+  "key-round": KeyRound,
+  "file-text": FileText,
+  clock: Clock,
+  database: Database,
+  "shield-check": ShieldCheck,
+  bot: Bot,
+  globe: Globe,
+  server: Server,
 } as const;
+
+/** One stroke width and one default size for every icon, bundled or shipped,
+ * drawn in a fixed square box so rows line up. */
+const ICON_STROKE = 1.8;
+const ICON_SIZE = 14;
 
 /** Named icons come from the bundled set; an extension that needs its own
  * ships path data and the host builds the element around it. */
 export function ExtensionIcon({
   icon,
-  size = 14,
+  size = ICON_SIZE,
 }: {
   icon?: ExtensionIconValue;
   size?: number;
 }) {
+  const box = { width: size, height: size, flex: "none" } as const;
   if (icon?.kind === "svg")
     return (
       <svg
+        className="extension-icon"
+        style={box}
         width={size}
         height={size}
         viewBox={icon.viewBox}
         fill="none"
         stroke="currentColor"
-        strokeWidth={1.8}
+        strokeWidth={ICON_STROKE}
         strokeLinecap="round"
         strokeLinejoin="round"
         aria-hidden="true"
@@ -66,7 +90,15 @@ export function ExtensionIcon({
     );
   const Glyph =
     (icon?.kind === "named" && ICONS[icon.name as keyof typeof ICONS]) || Plug;
-  return <Glyph size={size} />;
+  return (
+    <Glyph
+      className="extension-icon"
+      style={box}
+      size={size}
+      strokeWidth={ICON_STROKE}
+      aria-hidden="true"
+    />
+  );
 }
 
 /** Navigation entries an extension contributed to one placement. Renders

@@ -245,6 +245,7 @@ export type ExtensionManifest = {
   source: ExtensionSource;
   scope: "app";
   description?: string;
+  icon?: ExtensionIcon;
   companion?: CompanionBlock;
   contributions: {
     surfaces: SurfaceContribution[];

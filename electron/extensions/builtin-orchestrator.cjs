@@ -29,6 +29,7 @@ const ORCHESTRATOR_MANIFEST = {
   apiVersion: 1,
   source: { kind: "builtin" },
   scope: "app",
+  icon: "list-todo",
   description: "Carries tasks to a verified, committed done.",
   contributions: {
     surfaces: [pane, settings],

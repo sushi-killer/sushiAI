@@ -64,7 +64,7 @@ impl Screen {
         self.parser.process(&data);
     }
 
-    /// vt100 0.15 resizes only the live rows: a shorter screen drops its bottom rows, which
+    /// vt100 resizes only the live rows: a shorter screen drops its bottom rows, which
     /// hold the newest output when the cursor is low. A terminal keeps the cursor's line
     /// instead and moves the rows above it into scrollback. That is done here first: the rows
     /// that would fall off are scrolled up into scrollback (SU) and the cursor follows its
@@ -82,7 +82,7 @@ impl Screen {
                     .process(format!("\x1b[{lift}S\x1b[{lift}A").as_bytes());
             }
         }
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_size(rows, cols);
     }
 
     /// `(rows, cols)`.
@@ -92,7 +92,8 @@ impl Screen {
 
     /// Escape sequences that redraw the current screen from a blank terminal, followed by the
     /// bytes `feed` still holds back: a client that continues from the stream offset of this
-    /// snapshot then sees the rest of that unfinished sequence complete it.
+    /// snapshot then sees the rest of that unfinished sequence complete it. Faint text (SGR 2,
+    /// e.g. an agent's suggested reply drawn as ghost text) stays faint; vt100 0.15 dropped it.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out = self.parser.screen().contents_formatted();
         out.extend_from_slice(&self.held);
@@ -131,16 +132,16 @@ impl Screen {
         text
     }
 
-    /// vt100 0.15 panics when the scrollback offset exceeds the screen height, so only the
-    /// newest screenful is reachable as it is. The screen is therefore grown (blank rows are
+    /// vt100 shows the scrollback one screenful at a time (0.15 panicked when the offset
+    /// exceeded the screen height), so `count` lines are not readable at once. The screen is therefore grown (blank rows are
     /// appended at the bottom), the history is read, and the screen is shrunk again. Resizing
     /// clamps a pending-wrap cursor (written in the last column, not yet wrapped) into the
     /// last column; that state is put back by redrawing its row.
     fn history<T>(&mut self, n: usize, rows_of: impl Fn(&vt100::Screen, u16) -> Vec<T>) -> Vec<T> {
         // Clamped to the lines that exist; the view is put back before anything reads it.
-        self.parser.set_scrollback(usize::MAX);
+        self.parser.screen_mut().set_scrollback(usize::MAX);
         let count = n.min(self.parser.screen().scrollback());
-        self.parser.set_scrollback(0);
+        self.parser.screen_mut().set_scrollback(0);
         if count == 0 {
             return Vec::new();
         }
@@ -149,14 +150,14 @@ impl Screen {
         let pen = self.parser.screen().attributes_formatted();
         let grown = u16::try_from(usize::from(rows) + count).unwrap_or(u16::MAX);
         let count = usize::from(grown - rows);
-        self.parser.set_size(grown, cols);
-        self.parser.set_scrollback(count);
+        self.parser.screen_mut().set_size(grown, cols);
+        self.parser.screen_mut().set_scrollback(count);
         let lines = rows_of(self.parser.screen(), cols)
             .into_iter()
             .take(count)
             .collect();
-        self.parser.set_scrollback(0);
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_scrollback(0);
+        self.parser.screen_mut().set_size(rows, cols);
         if cursor_col >= cols {
             // The cursor is now in the last column of its row. Draw that cell again in place
             // (a wide character from its first half): the cursor ends up waiting to wrap.

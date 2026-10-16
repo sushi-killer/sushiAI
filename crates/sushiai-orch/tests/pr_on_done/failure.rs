@@ -38,7 +38,9 @@ fn a_transient_failure_that_never_clears_stops_after_the_bound_with_one_notice()
     let task = wait_decision(&s, &id, "PR: not opened after 5 tries");
     assert_eq!(task["status"], "done", "{task}");
     wait_notice(&s, &id);
-    settle();
+    stays("five pr list calls and one notice", || {
+        s.gh_log().matches("pr list").count() == 5 && notices(&s, &id) == 1
+    });
     assert_eq!(s.gh_log().matches("pr list").count(), 5, "{}", s.gh_log());
     assert_eq!(notices(&s, &id), 1);
     s.daemon.shutdown_and_wait();
@@ -63,7 +65,9 @@ fn an_auth_failure_sends_one_notice_does_not_loop_and_task_pr_opens_it_later() {
         "{task}"
     );
     wait_notice(&s, &id);
-    settle();
+    stays("one pr list call and one notice", || {
+        s.gh_log().matches("pr list").count() == 1 && notices(&s, &id) == 1
+    });
     assert_eq!(s.gh_log().matches("pr list").count(), 1, "{}", s.gh_log());
     assert_eq!(notices(&s, &id), 1);
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
@@ -73,6 +77,19 @@ fn an_auth_failure_sends_one_notice_does_not_loop_and_task_pr_opens_it_later() {
     let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
     assert_eq!(opened["prUrl"], URL, "{opened}");
     s.daemon.shutdown_and_wait();
+}
+
+/// Retries a landing task until the dirty bound has passed and the retry gives up.
+fn gave_up(s: &Setup, id: &str) {
+    wait_until("the dirty bound to pass and the retry to give up", || {
+        s.daemon
+            .request("task.start", serde_json::json!({"id": id}));
+        let t = s.daemon.request("task.get", serde_json::json!({"id": id}));
+        t["decisions"]
+            .to_string()
+            .contains("Land: gave up")
+            .then_some(())
+    });
 }
 
 #[test]
@@ -94,16 +111,23 @@ fn a_base_checkout_that_stays_dirty_leaves_the_work_on_its_branch_and_opens_the_
     // wait for its decision to be the only state we can see.
     s.daemon
         .request("task.start", serde_json::json!({"id": id}));
-    std::thread::sleep(Duration::from_millis(1000));
+    holds_for(
+        "the task staying in landing before the bound",
+        ABSENCE_WINDOW,
+        || {
+            let t = s.daemon.request("task.get", serde_json::json!({"id": id}));
+            t["status"] == "landing" && !t["decisions"].to_string().contains("Land: gave up")
+        },
+    );
     let early = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(early["status"], "landing", "{early}");
     assert!(
         !early["decisions"].to_string().contains("Land: gave up"),
         "{early}"
     );
-    std::thread::sleep(Duration::from_millis(3500));
-    s.daemon
-        .request("task.start", serde_json::json!({"id": id}));
+    // The give-up is decided by a retry after the 4000 ms dirty bound; an earlier
+    // retry changes nothing, so retry until the bound has passed.
+    gave_up(&s, &id);
     let task = done(&s, &id);
     assert!(task.get("landedSha").is_none(), "{task}");
     assert!(
@@ -131,9 +155,7 @@ fn a_dirty_give_up_does_not_promise_a_pull_request_when_they_are_off() {
     std::fs::write(s.repo.path().join("README.md"), "hello\nmy edit\n").unwrap();
     let id = s.create(serde_json::json!({}));
     poll_until(&s.daemon, &id, |st| st == "landing");
-    std::thread::sleep(Duration::from_millis(600));
-    s.daemon
-        .request("task.start", serde_json::json!({"id": id}));
+    gave_up(&s, &id);
     done(&s, &id);
     wait_notice(&s, &id);
     let texts = note_texts(&s, &id);
@@ -150,7 +172,11 @@ fn a_repo_without_an_origin_is_noted_once_with_no_draft_and_no_notice() {
     done(&s, &id);
     let task = wait_decision(&s, &id, "no origin remote");
     assert_eq!(task["status"], "done", "{task}");
-    settle();
+    stays("no draft, gh call or notice without an origin", || {
+        !s.tools.path().join("drafts.log").exists()
+            && s.gh_log().is_empty()
+            && notices(&s, &id) == 0
+    });
     assert!(
         !s.tools.path().join("drafts.log").exists(),
         "a draft ran without an origin"
@@ -173,7 +199,9 @@ fn a_remote_that_is_no_github_host_gets_no_draft_and_no_push() {
     let second = s.create(serde_json::json!({"title": "Second"}));
     done(&s, &second);
     wait_decision(&s, &second, "known GitHub host");
-    settle();
+    stays("no draft or gh call for a non-GitHub remote", || {
+        !s.tools.path().join("drafts.log").exists() && s.gh_log().matches("pr list").count() == 0
+    });
     assert!(
         !s.tools.path().join("drafts.log").exists(),
         "a draft ran for a non-GitHub remote"
@@ -237,7 +265,9 @@ fn a_workflow_scope_rejection_is_permanent_with_one_try_and_one_note() {
         "{task}"
     );
     wait_notice(&s, &id);
-    settle();
+    stays("one gh call and one notice", || {
+        std::fs::read_to_string(&log).unwrap().lines().count() == 1 && notices(&s, &id) == 1
+    });
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
     assert_eq!(notices(&s, &id), 1);
     assert!(

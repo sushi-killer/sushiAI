@@ -90,7 +90,9 @@ fn no_pull_request_is_opened_while_the_setting_is_off() {
     let s = setup("{}", false);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
-    settle();
+    stays("no gh call while the setting is off", || {
+        s.gh_log().is_empty()
+    });
     assert!(s.gh_log().is_empty(), "{}", s.gh_log());
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert!(task.get("prUrl").is_none(), "{task}");
@@ -106,7 +108,9 @@ fn a_subtask_never_opens_a_pull_request_only_its_top_level_parent_does() {
     done(&s, &child);
     // The parent finishes once its only child landed and opens its own pull request.
     assert_eq!(s.pr_url(&parent).as_deref(), Some(URL), "{}", s.gh_log());
-    settle();
+    stays("the subtask opening no pull request", || {
+        s.gh_log().matches("pr create").count() == 1
+    });
     let child_task = s
         .daemon
         .request("task.get", serde_json::json!({"id": child}));
@@ -160,7 +164,9 @@ fn a_task_that_lands_opens_no_pull_request() {
     let id = s.create(serde_json::json!({}));
     let task = done(&s, &id);
     assert!(task["landedSha"].is_string(), "{task}");
-    settle();
+    stays("a landed task opening no pull request", || {
+        s.gh_log().is_empty()
+    });
     assert!(s.gh_log().is_empty(), "{}", s.gh_log());
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert!(
@@ -222,7 +228,9 @@ fn a_pull_request_whose_head_is_not_the_pushed_commit_is_not_recorded_as_opened(
         "{task}"
     );
     wait_notice(&s, &id);
-    settle();
+    stays("five pr view calls and one notice", || {
+        s.gh_log().matches("pr view").count() == 5 && notices(&s, &id) == 1
+    });
     assert_eq!(s.gh_log().matches("pr view").count(), 5, "{}", s.gh_log());
     assert_eq!(notices(&s, &id), 1);
     s.daemon.shutdown_and_wait();

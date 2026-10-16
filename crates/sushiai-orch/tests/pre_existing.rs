@@ -7,7 +7,9 @@ mod common;
 
 use common::harness::fake_harness_script;
 use common::native_sandbox::fit_sandbox;
-use common::polling::{deadline, poll_until, remove_dir_retrying, wait_until};
+use common::polling::{
+    deadline, holds_for, poll_until, remove_dir_retrying, wait_until, ABSENCE_WINDOW,
+};
 use common::process::{socket_of, spawn_daemon, wait_for_exit, Daemon};
 use common::protocol::{request_on, stop_daemon, wait_for_socket};
 use common::repository::{git_out, init_git_repo};
@@ -406,7 +408,10 @@ fn an_owner_retry_waits_for_the_base_to_move_keeps_the_check_and_runs_a_second_a
 
     // Nothing moved on the base: no attempt starts until it does.
     daemon.request("task.answer", json!({"id": id, "answer": RETRY}));
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    holds_for("no attempt before the base moves", ABSENCE_WINDOW, || {
+        let t = daemon.request("task.get", json!({"id": id}));
+        t["attempts"].as_array().unwrap().len() == 1
+    });
     let idle = daemon.request("task.get", json!({"id": id}));
     assert_eq!(idle["attempts"].as_array().unwrap().len(), 1, "{idle}");
     assert_eq!(idle["finalVerify"][0], check.as_str(), "{idle}");

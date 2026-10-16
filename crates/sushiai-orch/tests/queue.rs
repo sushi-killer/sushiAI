@@ -9,12 +9,11 @@ mod common;
 
 use common::attempts::run_file;
 use common::harness::{cheap_route_on_claude, fake_harness_script};
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
 use std::path::Path;
-use std::time::Duration;
 
 /// Writes for the task whose goal names `FILE_<name>`: `a` makes `shared.txt`,
 /// `b` appends to it, `early` writes `early.txt` before it holds (a file a
@@ -607,7 +606,10 @@ fn a_subtask_is_planned_after_its_dependencies_landed_and_stopping_the_parent_sp
     let b = children.iter().find(|c| c["title"] == "Part B").unwrap();
     // B waits for A: it has not been planned, so nothing was spent on it.
     // Absence check: this window gives a forbidden start time to happen.
-    std::thread::sleep(Duration::from_millis(800));
+    holds_for("a waiting part staying unplanned", ABSENCE_WINDOW, || {
+        let b = get(&daemon, b["id"].as_str().unwrap());
+        b["attempts"].as_array().unwrap().is_empty() && b["costUsd"].as_f64().unwrap_or(0.0) == 0.0
+    });
     let b = get(&daemon, b["id"].as_str().unwrap());
     assert!(b["attempts"].as_array().unwrap().is_empty(), "{b}");
     assert_eq!(b["costUsd"].as_f64().unwrap_or(0.0), 0.0, "{b}");

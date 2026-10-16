@@ -102,7 +102,10 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     // A retry with the checkout still dirty changes nothing.
     daemon.request("task.start", serde_json::json!({"id": id}));
     // Absence check: this window gives a forbidden landing time to happen.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for("a dirty landing staying put", ABSENCE_WINDOW, || {
+        let t = daemon.request("task.get", serde_json::json!({"id": id}));
+        t["status"] == "landing" && t["dirtySince"] == dirty_since
+    });
     let still = daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(still["status"], "landing", "{still}");
     assert_eq!(still["dirtySince"], dirty_since, "{still}");

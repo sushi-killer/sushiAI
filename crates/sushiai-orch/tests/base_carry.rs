@@ -7,14 +7,13 @@ use common::process::Daemon;
 
 use common::harness::fake_harness_script;
 use common::native_sandbox::fit_sandbox;
-use common::polling::{remove_dir_retrying, wait_until};
+use common::polling::{holds_for, remove_dir_retrying, wait_until, ABSENCE_WINDOW};
 use common::process::{socket_of, spawn_daemon, wait_for_exit};
 use common::protocol::{request_on, stop_daemon, wait_for_socket};
 use common::repository::{git_out, init_git_repo};
 
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 const RETRY: &str = "retry after the base is fixed";
 const CHECK: &str = "grep -q fixed status.txt";
@@ -525,7 +524,10 @@ fn retry_survives_restart(
             >= expected_waits)
             .then_some(task)
     });
-    std::thread::sleep(Duration::from_secs(2));
+    holds_for("no attempt on the old base", ABSENCE_WINDOW, || {
+        let task = get(&socket, &id);
+        task["baseSha"] == old_base && attempts(&task).len() == before && task["question"].is_null()
+    });
     let resumed = get(&socket, &id);
     assert_eq!(resumed["baseSha"], old_base, "{resumed}");
     assert_eq!(
@@ -583,7 +585,14 @@ fn two_red_tasks_asking_about_one_base_do_not_make_the_policy_wait_for_each_othe
     preexisting_question(&daemon.socket, &first);
     let second = create(&daemon.socket, repo.path(), false);
     let waiting = preexisting_question(&daemon.socket, &second);
-    std::thread::sleep(Duration::from_secs(2));
+    holds_for("both tasks keeping their question", ABSENCE_WINDOW, || {
+        [&first, &second].into_iter().all(|id| {
+            let task = get(&daemon.socket, id);
+            task["status"] == "waiting"
+                && task["question"].is_object()
+                && decisions(&task).iter().all(|d| !d.contains("to move past"))
+        })
+    });
     for id in [&first, &second] {
         let task = get(&daemon.socket, id);
         assert_eq!(task["status"], "waiting", "{task}");

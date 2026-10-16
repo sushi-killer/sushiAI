@@ -4,12 +4,11 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
 use std::path::Path;
-use std::time::Duration;
 
 /// Writes FILE_<name>.txt for the task whose goal names `FILE_<name>`; a
 /// conflicted `shared.txt` is resolved by keeping both sides.

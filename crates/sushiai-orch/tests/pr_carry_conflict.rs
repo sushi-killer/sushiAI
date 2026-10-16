@@ -6,13 +6,12 @@
 mod common;
 
 use common::harness::{cheap_route_on_claude, fake_harness_script};
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 const URL: &str = "https://github.example/acme/app/pull/7";
 
@@ -146,15 +145,18 @@ impl Setup {
     }
 
     fn wait_task(&self, id: &str, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(90);
-        loop {
+        wait_until(what, || {
             let task = self.task(id);
-            if pred(&task) {
-                return task;
-            }
-            assert!(Instant::now() < deadline, "{what}: {task}");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+            pred(&task).then_some(task)
+        })
+    }
+
+    /// How many "failed" notices the chat holds for the `Add pr file` task.
+    fn failed_notices(&self) -> usize {
+        self.chat()
+            .into_iter()
+            .filter(|t| t.contains("Add pr file") && t.contains("failed"))
+            .count()
     }
 
     fn chat(&self) -> Vec<String> {
@@ -256,13 +258,12 @@ fn a_resolution_that_fails_ends_the_task_failed_with_one_notice_and_no_pull_requ
     let task = s.wait_task(&id, "the task never failed", |t| t["status"] == "failed");
     assert!(task["prUrl"].is_null(), "{task}");
     assert!(!s.gh_log().contains("pr create"), "{}", s.gh_log());
-    std::thread::sleep(Duration::from_secs(2));
-    let notices = s
-        .chat()
-        .into_iter()
-        .filter(|t| t.contains("Add pr file") && t.contains("failed"))
-        .count();
-    assert_eq!(notices, 1, "{:?}", s.chat());
+    wait_until("the failed notice", || {
+        (s.failed_notices() >= 1).then_some(())
+    });
+    holds_for("exactly one failed notice", ABSENCE_WINDOW, || {
+        s.failed_notices() == 1
+    });
     assert_eq!(task["prConflictTried"], true, "{task}");
     let again = s.daemon.request("task.start", json!({"id": id}));
     assert!(again["prConflictTried"].is_null(), "{again}");
@@ -288,7 +289,15 @@ fn a_base_that_already_holds_the_work_opens_no_pull_request_and_leaves_one_decis
         .filter(|d| d.as_str().unwrap().contains("already contains this work"))
         .count();
     assert_eq!(contains, 1, "{task}");
-    std::thread::sleep(Duration::from_secs(2));
+    holds_for(
+        "no pull request and no chat notice for a base that holds the work",
+        ABSENCE_WINDOW,
+        || {
+            s.task(&id)["prUrl"].is_null()
+                && !s.gh_log().contains("pr create")
+                && s.chat().is_empty()
+        },
+    );
     assert!(s.task(&id)["prUrl"].is_null(), "{task}");
     assert!(!s.gh_log().contains("pr create"), "{}", s.gh_log());
     assert!(s.chat().is_empty(), "{:?}", s.chat());
@@ -419,14 +428,14 @@ fn a_second_conflict_after_the_resolution_ends_the_task_failed_with_one_notice()
             .contains("still conflicts with origin/main after its resolution attempt"),
         "{task}"
     );
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(!s.gh_log().contains("pr create"), "{}", s.gh_log());
-    let notices = s
-        .chat()
-        .into_iter()
-        .filter(|t| t.contains("Add pr file") && t.contains("failed"))
-        .count();
-    assert_eq!(notices, 1, "{:?}", s.chat());
+    wait_until("the failed notice", || {
+        (s.failed_notices() >= 1).then_some(())
+    });
+    holds_for(
+        "exactly one failed notice and no pull request",
+        ABSENCE_WINDOW,
+        || s.failed_notices() == 1 && !s.gh_log().contains("pr create"),
+    );
     s.daemon.shutdown_and_wait();
 }
 

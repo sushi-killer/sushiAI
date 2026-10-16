@@ -1,7 +1,7 @@
 //! Running graph controls exercised through the daemon and a gated harness.
 mod common;
 
-use common::polling::settle;
+use common::polling::{holds_for, settle, ABSENCE_WINDOW};
 
 use common::attempts::run_file;
 use common::harness::fake_harness_script;
@@ -12,7 +12,6 @@ use common::repository::{git_out, init_git_repo};
 
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 const FAKE: &str = r###"#!/usr/bin/env python3
 import json, os, pathlib, re, subprocess, sys, time
@@ -400,7 +399,10 @@ fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("GATES", gates.path().to_str().unwrap()),
     ]);
-    std::thread::sleep(Duration::from_millis(300));
+    holds_for("a parked task staying parked", ABSENCE_WINDOW, || {
+        get(&daemon, &part)["park"].is_object()
+            && std::fs::read_to_string(gates.path().join("count_part")).unwrap() == "1"
+    });
     assert!(get(&daemon, &part)["park"].is_object());
     assert_eq!(
         std::fs::read_to_string(gates.path().join("count_part")).unwrap(),
@@ -544,7 +546,11 @@ fn stopped_part_stays_stopped_while_its_parent_runs() {
         json!({"id": parent, "answer": "retry the dependency", "source": "lead"}),
     );
     assert!(error.contains("explicitly stopped"), "{error}");
-    std::thread::sleep(Duration::from_millis(300));
+    holds_for(
+        "a refused answer not restarting the part",
+        ABSENCE_WINDOW,
+        || std::fs::read_to_string(gates.path().join("count_part")).unwrap() == "1",
+    );
     assert_eq!(
         std::fs::read_to_string(gates.path().join("count_part")).unwrap(),
         "1"
@@ -674,8 +680,9 @@ fn stop_clears_the_question() {
     let stopped = daemon.request("task.stop", json!({"id": idle}));
     assert_eq!(stopped["status"], "stopped");
     assert!(stopped["question"].is_null());
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(get(&daemon, &live)["question"].is_null());
+    holds_for("the live task keeping no question", ABSENCE_WINDOW, || {
+        get(&daemon, &live)["question"].is_null()
+    });
 }
 
 #[test]

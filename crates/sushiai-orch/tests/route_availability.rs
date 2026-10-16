@@ -6,13 +6,12 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::poll_until;
+use common::polling::{holds_for, poll_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::init_git_repo;
 
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
 
 const MISSING: &str = "/nonexistent/orchd-test/harness";
 
@@ -221,7 +220,13 @@ fn with_no_harness_the_task_waits_with_an_install_question_and_spends_no_attempt
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "retry"}));
     // Absence check: this window gives a forbidden attempt time to start.
-    std::thread::sleep(Duration::from_millis(500));
+    holds_for("no attempt after the retry answer", ABSENCE_WINDOW, || {
+        let t = s.daemon.request("task.get", json!({"id": id}));
+        t["status"] == "waiting"
+            && t["question"]["kind"] == "harness_missing"
+            && t["attempts"].as_array().unwrap().is_empty()
+            && calls(&s.log).is_empty()
+    });
     let again = s.daemon.request("task.get", json!({"id": id}));
     assert_eq!(again["status"], "waiting", "{again}");
     assert_eq!(again["question"]["kind"], "harness_missing");

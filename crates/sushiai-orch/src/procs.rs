@@ -184,6 +184,31 @@ pub(crate) mod testing {
         }
     }
 
+    /// Polls `ok` until it holds; panics naming `what` at the shared deadline.
+    pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+        let end = std::time::Instant::now() + deadline();
+        while !ok() {
+            assert!(
+                std::time::Instant::now() < end,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// An absence check: polls `still` for `window`; panics naming `what` as
+    /// soon as it stops holding.
+    pub fn holds_for(what: &str, window: std::time::Duration, mut still: impl FnMut() -> bool) {
+        let end = std::time::Instant::now() + window;
+        loop {
+            assert!(still(), "{what} stopped holding");
+            if std::time::Instant::now() >= end {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// Waits until process `pid` shows `arg` on its command line; panics at the
     /// deadline. Right after a spawn macOS can still report the parent's argv,
     /// and the engine tells a run's group from a stranger's by that argv.

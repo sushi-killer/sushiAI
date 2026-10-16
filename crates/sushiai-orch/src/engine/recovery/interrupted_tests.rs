@@ -69,19 +69,6 @@ fn spawn_group(marker: &std::path::Path) -> std::process::Child {
     child
 }
 
-/// Waits for `child` to end (reaping it: a zombie's pid still answers
-/// `kill(pid, 0)`). `true` when it ended within `secs`.
-fn ends_within(child: &mut std::process::Child, secs: u64) -> bool {
-    let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_secs(secs) {
-        if child.try_wait().unwrap().is_some() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    false
-}
-
 #[test]
 fn recover_interrupted_kills_a_stale_process_group_if_still_alive() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,10 +84,10 @@ fn recover_interrupted_kills_a_stale_process_group_if_still_alive() {
     crate::engine::recovery::interrupted::tasks(&store, |_, _| RunFate::Interrupted, |_, _| {})
         .unwrap();
 
-    assert!(
-        ends_within(&mut child, 2),
-        "stale process group should have been killed on recovery"
-    );
+    // try_wait reaps it: a zombie's pid still answers `kill(pid, 0)`.
+    crate::procs::testing::wait_until("the stale process group to be killed on recovery", || {
+        child.try_wait().unwrap().is_some()
+    });
 }
 
 #[test]
@@ -116,10 +103,12 @@ fn recover_interrupted_leaves_a_reused_pgid_alone() {
     crate::engine::recovery::interrupted::tasks(&store, |_, _| RunFate::Interrupted, |_, _| {})
         .unwrap();
 
-    assert!(
-        !ends_within(&mut stranger, 1),
-        "a process that is not the run must not be killed"
+    crate::procs::testing::holds_for(
+        "a process that is not the run staying alive",
+        std::time::Duration::from_secs(1),
+        || stranger.try_wait().unwrap().is_none(),
     );
-    let _ = stranger.kill();
+    // The whole group: its `sleep` child would outlive the shell and the test.
+    unsafe { libc::killpg(stranger.id() as i32, libc::SIGKILL) };
     let _ = stranger.wait();
 }

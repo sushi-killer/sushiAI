@@ -317,11 +317,9 @@ async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
 
     assert!(outcome.stalled, "{:?}", outcome.error);
     // The kill is sent at once; a loaded machine takes a moment to tear the group down.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while group_alive(pgid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!group_alive(pgid), "the adopted run must be stopped");
+    crate::procs::testing::wait_until("the adopted run to be stopped", || {
+        !group_alive(pgid)
+    });
 }
 
 #[tokio::test]
@@ -347,15 +345,10 @@ async fn a_stalled_adopted_run_whose_member_traps_sigterm_is_still_killed() {
     assert!(outcome.stalled, "{:?}", outcome.error);
     // Any member, not just the leader. The leader is this test's own child: reap it, or
     // its zombie still counts as a member; teardown after SIGKILL also takes a moment.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while unsafe { libc::kill(-pgid, 0) } == 0 && std::time::Instant::now() < deadline {
+    crate::procs::testing::wait_until("a member that traps SIGTERM to be killed", || {
         unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) };
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(
-        unsafe { libc::kill(-pgid, 0) } != 0,
-        "a member that traps SIGTERM must still be killed"
-    );
+        (unsafe { libc::kill(-pgid, 0) }) != 0
+    });
 }
 
 #[tokio::test]
@@ -396,11 +389,9 @@ async fn an_over_budget_adopted_run_is_killed() {
 
     assert!(outcome.over_budget, "{:?}", outcome.error);
     // The kill is sent at once; a loaded machine takes a moment to tear the group down.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while group_alive(pgid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!group_alive(pgid), "the adopted run must be stopped");
+    crate::procs::testing::wait_until("the adopted run to be stopped", || {
+        !group_alive(pgid)
+    });
 }
 
 #[test]

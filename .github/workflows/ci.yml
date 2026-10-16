@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, codex/**]
   pull_request:
+  # Every night the whole suite runs on both OSes, macOS included, whatever
+  # the day's pull requests changed.
+  schedule:
+    - cron: "23 2 * * *"
 
 # A new push to a pull request cancels its run that is still going.
 concurrency:
@@ -11,14 +15,19 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # What a pull request touches: docs alone skip the builds and tests, and the
-  # Rust jobs run only when Rust can be affected (scripts/ci-changes.mjs).
+  # What a pull request touches: docs alone skip the builds and tests, the
+  # Rust jobs run only when Rust can be affected, and the macOS Rust tests only
+  # when the platform can be affected (scripts/ci-changes.mjs). A push or a
+  # schedule has no diff to read, so everything runs there.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
       rust: ${{ steps.diff.outputs.rust }}
+      platform: ${{ steps.diff.outputs.platform }}
+      rust_build: ${{ steps.diff.outputs.rust_build }}
+      rust_test: ${{ steps.diff.outputs.rust_test }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,7 +68,11 @@ jobs:
       # rust-toolchain.toml pins the version, so a new stable clippy lint
       # cannot turn CI red on its own and every host builds with the same one.
       - run: rustup toolchain install
+      # Pull requests read main's cache and never write their own: the
+      # repository's 10 GB cache limit was nearly full of per-PR entries.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - run: npm run build
       - run: node scripts/build-once.mjs --stamp
@@ -79,37 +92,86 @@ jobs:
           node-version-file: .nvmrc
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The same commands as `npm run lint:rust`, the local runner's rust lint lane.
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: node scripts/check-crate-deps.mjs
 
-  rust:
+  # The Rust tests are built once per OS into a nextest archive; the shards
+  # of rust-test download it and each runs a part of the tests. ubuntu always,
+  # macOS only on a platform change, a push and the nightly run.
+  rust-build:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.rust_build) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest archive --workspace --archive-file nextest.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}
+          path: nextest.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+  rust-test:
+    needs: [changes, rust-build]
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.rust_test) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # The archive extracts its target directory to where the build job had
+      # it (the same path on every runner of an OS), so env!("CARGO_BIN_EXE_*")
+      # paths compiled into the tests resolve here too.
+      SUSHIAI_BIN: ${{ github.workspace }}/target/debug/sushiai
+    steps:
+      - uses: actions/checkout@v4
+      # The tests spawn node fake harnesses and run cargo, rustc and rustfmt.
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      # nextest runs every test binary in parallel instead of one by one.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: node scripts/test-rust.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}
+      - run: >-
+          cargo nextest run --archive-file nextest.tar.zst
+          --workspace-remap . --extract-to . --profile ci
+          --partition count:${{ matrix.shard }}/${{ matrix.shards }}
+      - if: always()
+        run: node scripts/nextest-summary.mjs target/nextest/ci/junit.xml "${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }}"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The required check: green only when every split job passed or was not
-  # needed for this change.
+  # needed for this change. A skipped job (docs only, no Rust, no platform
+  # change) counts as passed.
   deterministic:
-    needs: [changes, static, web, rust-lint, rust]
+    needs: [changes, static, web, rust-lint, rust-build, rust-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -133,6 +195,8 @@ jobs:
           cache: npm
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - run: npm run build
       - run: cargo build -p sushiai
@@ -159,7 +223,8 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
   # The desktop smoke drives a real Electron window, so it needs macOS. It
-  # starts a `sushiai` daemon of its own and builds the binary when missing.
+  # starts a `sushiai` daemon of its own: a debug build, which the smoke takes
+  # as readily as a release one and which builds in a fraction of the time.
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -171,9 +236,13 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - run: cargo build -p sushiai
       - run: npm run test:desktop
       - uses: actions/upload-artifact@v4
         if: always()

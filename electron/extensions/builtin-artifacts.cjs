@@ -5,6 +5,7 @@ const ARTIFACTS_MANIFEST = {
   apiVersion: 1,
   source: { kind: "builtin" },
   scope: "app",
+  icon: "file-text",
   description:
     "Opens what an agent wrote - docs, plans, decks, diagrams - next to its pane.",
   contributions: {

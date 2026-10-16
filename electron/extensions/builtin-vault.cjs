@@ -7,6 +7,7 @@ const VAULT_MANIFEST = {
   apiVersion: 1,
   source: { kind: "builtin" },
   scope: "app",
+  icon: "key-round",
   description:
     "Reads a project's values on This Mac from HashiCorp Vault, read-only.",
   contributions: {

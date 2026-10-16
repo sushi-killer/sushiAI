@@ -41,6 +41,7 @@ const COMPANION_TONES: Record<CompanionState, Tone> = {
 /** The icon the manifest itself declares: its first navigation entry, else
  * its first surface. Without one the card shows the default glyph. */
 const manifestIcon = (manifest: ExtensionManifest) =>
+  manifest.icon ??
   manifest.contributions.navigation[0]?.icon ??
   manifest.contributions.surfaces.find((surface) => surface.icon)?.icon;
 

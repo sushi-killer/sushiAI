@@ -59,6 +59,14 @@ const ICON_LIST = [
   "workflow",
   "terminal",
   "folder",
+  "key-round",
+  "file-text",
+  "clock",
+  "database",
+  "shield-check",
+  "bot",
+  "globe",
+  "server",
 ];
 const ICONS = new Set(ICON_LIST);
 
@@ -697,6 +705,10 @@ function validateExtensionManifest(input) {
   const source = validateExtensionSource(input.source);
   const companion = validateCompanion(input.companion, source.kind);
   const contributions = input.contributions || {};
+  // An optional extension-level icon: a surface or navigation entry without
+  // its own inherits it.
+  const extensionIcon =
+    input.icon === undefined ? undefined : icon(input.icon, "icon");
   const surfaces = (contributions.surfaces || []).map((surface) => {
     const surfaceId = id(surface?.id, "surface.id");
     const at = `surfaces[${surfaceId}]`;
@@ -778,9 +790,11 @@ function validateExtensionManifest(input) {
       ...(typeof surface.description === "string"
         ? { description: surface.description }
         : {}),
-      ...(surface.icon === undefined
-        ? {}
-        : { icon: icon(surface.icon, "surface.icon") }),
+      ...(surface.icon !== undefined
+        ? { icon: icon(surface.icon, "surface.icon") }
+        : extensionIcon
+          ? { icon: extensionIcon }
+          : {}),
       allowedHosts,
       defaultHost,
       instancePolicy,
@@ -882,7 +896,10 @@ function validateExtensionManifest(input) {
       allowedPlacements,
       defaultPlacement,
       label: requiredString(item.label, "navigation.label"),
-      icon: icon(item.icon, "navigation.icon"),
+      icon:
+        item.icon === undefined && extensionIcon
+          ? extensionIcon
+          : icon(item.icon, "navigation.icon"),
       order: order(item.order),
     };
   });
@@ -977,6 +994,7 @@ function validateExtensionManifest(input) {
     ...(typeof input.description === "string"
       ? { description: input.description }
       : {}),
+    ...(extensionIcon ? { icon: extensionIcon } : {}),
     ...(companion ? { companion } : {}),
     contributions: { surfaces, navigation, actions, commands },
   };

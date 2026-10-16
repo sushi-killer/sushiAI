@@ -180,6 +180,10 @@ function createSessionLauncher({
     const projectId = request.project || project?.id;
     if (projectId) params.project = projectId;
     if (request.group) params.group = request.group;
+    // A session a job started: kept out of the sidebar's session tree.
+    if (request.background === true) params.background = true;
+    // One print-mode turn (`claude -p`, `codex exec`) instead of a terminal.
+    if (request.headless === true) params.headless = true;
     if (request.agent === "claude" && Object.keys(claudeSettings).length)
       params.claudeSettings = claudeSettings;
     const result = await manager.request(

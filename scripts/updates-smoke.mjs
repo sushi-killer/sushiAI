@@ -9,7 +9,6 @@ await fs.writeFile(
   JSON.stringify({
     activeId: "review",
     socket: "/tmp/absent-sushiai-review.sock",
-    routines: [],
     fontScale: 1,
     workspaces: [
       {

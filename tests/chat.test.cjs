@@ -1,11 +1,9 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const {
-  chatArgs,
-  chatPrompt,
-  claudeEvent,
-  codexEvent,
-} = require("../electron/chat-args.cjs");
+const { harnessFor, chatPrompt } = require("../electron/harness.cjs");
+const chatArgs = (agent, options) => harnessFor(agent).chatArgs(options);
+const claudeEvent = harnessFor("claude").chatEvent;
+const codexEvent = harnessFor("codex").chatEvent;
 const {
   parseCodexCache,
   parseTomlRoot,

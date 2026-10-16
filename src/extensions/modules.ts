@@ -1,6 +1,7 @@
 import { lazy, type ComponentType } from "react";
 import type { Workspace } from "../types.ts";
 import { orchestratorModule } from "../orchestrator/module.ts";
+import { routinesModule } from "../routines/module.ts";
 import type { ExtensionSnapshot } from "./types.ts";
 import { VAULT_EXTENSION_ID } from "../vault/id.ts";
 
@@ -78,6 +79,7 @@ export type ModuleUi = {
  * changes between renders, so the rules of hooks hold. */
 export const moduleUis: readonly ModuleUi[] = Object.freeze([
   orchestratorModule,
+  routinesModule,
 ]);
 
 const ProjectVaultBlock = lazy(() =>

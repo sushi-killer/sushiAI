@@ -31,12 +31,21 @@ impl CallError {
 }
 
 /// One blocking connection to the daemon, after `hello`.
+/// What a listening connection receives besides responses.
+pub enum Incoming {
+    Note(String, Value),
+    /// Raw output of a session this connection attached to.
+    Output(Vec<u8>),
+}
+
 pub struct Conn {
-    reader: Box<dyn Read>,
-    writer: Box<dyn Write>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
     decoder: Decoder,
     next_id: u64,
     child: Option<Child>,
+    /// Frames read while waiting, oldest first.
+    queue: std::collections::VecDeque<Incoming>,
 }
 
 impl Conn {
@@ -64,8 +73,8 @@ impl Conn {
     }
 
     fn hello(
-        reader: Box<dyn Read>,
-        writer: Box<dyn Write>,
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
         child: Option<Child>,
         client: &str,
     ) -> Result<Conn, String> {
@@ -75,10 +84,51 @@ impl Conn {
             decoder: Decoder::new(),
             next_id: 1,
             child,
+            queue: std::collections::VecDeque::new(),
         };
         let params = json!({"protocol": PROTOCOL_VERSION, "client": client});
         conn.call("hello", params).map_err(CallError::message)?;
         Ok(conn)
+    }
+
+    /// Blocks until the daemon sends a notification or session output.
+    pub fn next_incoming(&mut self) -> Result<Incoming, String> {
+        let mut buf = [0u8; 8192];
+        loop {
+            if let Some(n) = self.queue.pop_front() {
+                return Ok(n);
+            }
+            let n = match self.reader.read(&mut buf) {
+                Ok(0) => return Err("the daemon closed the connection".into()),
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("daemon read failed: {e}")),
+            };
+            let frames = self
+                .decoder
+                .push(&buf[..n])
+                .map_err(|e| format!("bad frame from the daemon: {e}"))?;
+            for frame in frames {
+                match frame {
+                    Frame::Output { data, .. } => self.queue.push_back(Incoming::Output(data)),
+                    Frame::Json(text) => {
+                        if let Ok(Message::Notification(note)) = Message::parse(&text) {
+                            self.queue
+                                .push_back(Incoming::Note(note.method, note.params));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Blocks until the daemon sends a notification: `(method, params)`.
+    pub fn next_notification(&mut self) -> Result<(String, Value), String> {
+        loop {
+            if let Incoming::Note(method, params) = self.next_incoming()? {
+                return Ok((method, params));
+            }
+        }
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
@@ -190,13 +240,14 @@ mod tests {
         }
     }
 
-    fn conn(writer: Box<dyn Write>) -> Conn {
+    fn conn(writer: Box<dyn Write + Send>) -> Conn {
         Conn {
             reader: Box::new(std::io::empty()),
             writer,
             decoder: Decoder::new(),
             next_id: 1,
             child: None,
+            queue: std::collections::VecDeque::new(),
         }
     }
 

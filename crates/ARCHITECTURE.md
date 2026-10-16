@@ -26,7 +26,7 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
   Threads, no async runtime.
 - `sushiai`: the binary. Parses arguments and calls the libraries.
-  Subcommands: `daemon`, `status`, `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
+  Subcommands: `daemon`, `status`, `projects`, `hosts`, `routines`, `routine`, `ask`, `propose` (routines module), `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
   `hold` (internal, started by the daemon).
 
 `scripts/check-crate-deps.mjs` enforces the arrows above in CI.
@@ -298,6 +298,66 @@ extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: ra
   hibernate (its launch opens) becomes `hibernated` instead of `exited`; a hibernated record
   whose launch no longer opens at start becomes `exited`. Hibernated records older than 30
   days are pruned (at start and hourly) with their launch and tail.
+
+## Schedules, background sessions and owner asks
+
+Three generic pieces; they do not know what a job is.
+
+**Schedule entries.** `schedule.set {id, cron, tz, jitterSec?, timeoutSec?, overlap: "skip",
+catchupWindowSec?, create, enabled}` stores one entry in `<home>/schedules.json` (atomic,
+0600; the file keeps `create.env`, `schedule.list` never returns it). `create` is a
+`session.create` params object. Cron is five fields read in an IANA zone by
+`sushiai-core/src/cron.rs` (pure; `chrono-tz`). A cron that fires more often than every 5
+minutes is refused at `set`. A wall time inside a spring-forward gap fires after the gap; an
+autumn repeat fires once, unless the hour field is `*`.
+
+`sushiai-daemon/src/scheduler.rs` splits into `Engine` (state and decisions, `now` is an
+argument) and `Scheduler` (a `Clock` and a `Host` around it; the daemon's host is the
+registry). Once a second: a recorded run whose session ended is reported `ended`; a run over
+`timeoutSec` is closed and reported `timeout` (time spent on an open ask does not count);
+the latest passed slot, plus the entry's fixed jitter (a hash of the id, at most
+`jitterSec`), starts a session through `session.create` with the idempotency key
+`schedule:<id>:<slot>`. Passed slots collapse into one run. A slot more than 60 s late is a
+catch-up: it runs once if it is inside the window (default 7 days), else an event says it was
+dropped. A slot that finds the previous session running is `skipped` (policy `skip`).
+On the first tick after a daemon start a run recorded in the file is ended with the reason
+`daemon restarted` and a surviving session is closed. `schedule.fire {id}` runs an entry now.
+`schedule.event {id, kind: fired|skipped|caught_up|timeout|ended, reason?, session?,
+scheduledFor, startedAt, endedAt?}` goes to every client (times: unix ms).
+
+**Background sessions.** `SessionCreate.background` is copied to `SessionInfo.background`
+(both omitted when false). The daemon treats such a session like any other; clients keep it
+out of the session tree.
+
+**Owner ask.** A process inside an agent session sends `hook.ask {session, token, agent,
+text, options?: [{id, label}], ttlSec?}` on a `role: "hook"` connection. The session actor
+opens an ask (`tool: "owner.ask"`, `input: {text, options}`), announces it with the
+existing `session.ask` notification and changes no agent status. The owner answers with
+`ask.respond {askId, decision: allow|deny, message?, choice?}`; the waiting `hook.ask`
+returns `{answer: {decision, message?, choice?}}`. It returns `{answer: null}` when the ask
+expires (`ttlSec`, default the permission wait), the session ends, or the caller's
+connection closes; `session.askClosed {askId, decided}` is sent in each case.
+
+## Routines module
+
+`sushiai-routines` is a module crate: it depends on no sushiai core crate. A routine is a
+folder `<home>/routines/<id>/` (`routine.json`, `brief.md`, `runs/<n>/result.json`). The
+module owns no scheduler. Saving and enabling a routine sends one `schedule.set` (entry id
+`routine.<id>`, `create` = a background `session.create` with the harness argv, the brief
+wrapped in the untrusted-data preamble and `SUSHIAI_ROUTINE_ID`, `SUSHIAI_ROUTINE_DIR`
+and, in a dry run, `SUSHIAI_DRY_RUN=1`); disabling and deleting send `schedule.remove`.
+
+The bin glue (`crates/sushiai/src/routines_module.rs`, flag file `modules/routines.enabled`)
+supplies two traits: `Connector` (catalog, schedule, session calls over the daemon socket,
+plus a per-session output capture, because an exited session cannot be read) and `Git`.
+It listens for `schedule.event`: `fired` opens a run record, `ended` reads the answer
+(Codex: the `-o` file; Claude: the captured output), validates it against the result schema,
+retries once with the validation error, then writes `result.json`. A `failed` result counts
+toward three in a row, which turn the routine off with one `routines.event` marked
+`inbox`. `noop` is quiet. A dry run applies nothing: proposals from `sushiai propose` are
+recorded, never applied, and every action in the result is forced to `applied: false`.
+The `routines.*` methods and `routines.event` shapes are listed in `sushiai routines help`
+and `docs/architecture.md`.
 
 ## Invariants
 

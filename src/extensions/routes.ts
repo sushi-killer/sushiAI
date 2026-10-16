@@ -22,13 +22,7 @@ export type RouteRef = {
   targetSurfaceId?: string;
 };
 
-export const SECTIONS = new Set([
-  "Dashboard",
-  "Inbox",
-  "Routines",
-  "Extensions",
-  "Skills",
-]);
+export const SECTIONS = new Set(["Dashboard", "Inbox", "Extensions", "Skills"]);
 
 export const coreRoute = (mode: CoreMode): RouteRef => ({
   kind: "core",

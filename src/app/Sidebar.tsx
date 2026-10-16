@@ -1,3 +1,4 @@
+import { placePrimaryNav } from "./sidebarOrder.ts";
 import { useState } from "react";
 import {
   ChevronDown,
@@ -15,7 +16,6 @@ import {
   Server,
   Settings,
   Sparkles,
-  Workflow,
 } from "lucide-react";
 import { Icon } from "../PanelIcon.tsx";
 import { SleepMark } from "../ui/SleepMark.tsx";
@@ -80,21 +80,29 @@ function primaryNav({
       Glyph: Inbox,
       count: inboxCount > 0 ? inboxCount : undefined,
     },
-    { label: "Routines", Glyph: Workflow },
     { label: "Dashboard", Glyph: LayoutDashboard, count: workspaces.length },
     { label: "Extensions", Glyph: Plug },
     { label: "Skills", Glyph: Sparkles },
   ].map(({ label, Glyph, count }) => ({
     key: label,
+    order: 0,
     label,
     count,
     icon: <Glyph size={14} />,
     current: routeFromLegacy("Code", label).surfaceId === currentRouteId,
     open: () => toggleCoreSection(label),
   }));
+  const builtinIds = new Set(
+    registry
+      .snapshot()
+      .extensions.filter((entry) => entry.manifest.source.kind === "builtin")
+      .map((entry) => entry.manifest.id),
+  );
   const contributed = navigationFor(registry, "sidebar.primary").map(
     (item) => ({
       key: `${item.extensionId}:${item.id}`,
+      order: item.order ?? 0,
+      builtin: builtinIds.has(item.extensionId),
       label: item.label,
       count: undefined,
       icon: <ExtensionIcon icon={item.icon} />,
@@ -104,10 +112,7 @@ function primaryNav({
       open: () => openExtensionTarget(item.extensionId, item.targetSurfaceId),
     }),
   );
-  // Appended, not merged and re-sorted: a section of the app always comes
-  // before anything a manifest adds, whatever order it asks for, and the
-  // entries it adds keep the one order the registry hands every placement.
-  return [...builtin, ...contributed];
+  return placePrimaryNav(builtin, contributed);
 }
 
 function ProfileBlock({

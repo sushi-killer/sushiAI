@@ -93,6 +93,14 @@ test("shell launch sends a login shell command with no agent and the workspace a
   assert.equal(call.params.cwd, cwd);
 });
 
+test("a headless launch reaches session.create as headless", async (t) => {
+  const { launcher, requests, cwd } = setup(t);
+  await launcher.launch(base(cwd, { agent: "claude", headless: true }));
+  await launcher.launch(base(cwd, { agent: "claude" }));
+  assert.equal(requests[0].params.headless, true);
+  assert.equal(requests[1].params.headless, undefined);
+});
+
 test("subscription token goes to env and never into claudeSettings", async (t) => {
   const { launcher, requests, cwd } = setup(t, {
     accounts: { claude: { a1: { kind: "subscription", value: TOKEN } } },

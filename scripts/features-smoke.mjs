@@ -43,7 +43,6 @@ print(r)`)
     JSON.stringify({
       socket: endpoint,
       activeId: workspaceId,
-      routines: [],
       fontScale: 1,
       workspaces: [
         {

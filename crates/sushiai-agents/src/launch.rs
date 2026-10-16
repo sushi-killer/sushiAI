@@ -51,6 +51,10 @@ pub struct LaunchParams<'a> {
     pub permission_wait_secs: u64,
     /// Extra top-level keys for Claude's `--settings` (may hold secrets). Our `hooks` win.
     pub claude_settings: Option<&'a Map<String, Value>>,
+    /// Run one turn without a terminal UI. Claude gets `-p`. Codex runs `codex exec`, which
+    /// has no `--no-daemon`, and prints JSON lines (`--json`); `--skip-git-repo-check` lets
+    /// it start outside a git repository.
+    pub headless: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,12 +220,23 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
                 settings = merge_claude_settings(settings, caller)?;
             }
             argv.extend(["--settings".into(), settings.to_string()]);
+            if p.headless {
+                argv.push("-p".into());
+            }
             argv.extend(p.extra_args.iter().cloned());
         }
         Agent::Codex => {
             argv.push("codex".into());
+            if p.headless {
+                argv.push("exec".into());
+            }
             if let AgentSession::Resume(id) = &p.session {
                 argv.extend(["resume".into(), (*id).into()]);
+            }
+            if p.headless {
+                argv.extend(["--json".into(), "--skip-git-repo-check".into()]);
+                argv.extend(p.extra_args.iter().cloned());
+                return finish(p, argv);
             }
             // Codex 0.160 runs interactive turns in a shared background app server per
             // CODEX_HOME. Its hooks inherit that server's environment, not this child's, so
@@ -231,6 +246,10 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
             argv.extend(p.extra_args.iter().cloned());
         }
     }
+    finish(p, argv)
+}
+
+fn finish(p: &LaunchParams, mut argv: Vec<String>) -> Result<LaunchSpec, LaunchError> {
     if let Some(prompt) = p.prompt {
         argv.push("--".into());
         argv.push(prompt.into());
@@ -242,4 +261,151 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
         ("SUSHIAI_AGENT".into(), p.agent.as_str().into()),
     ];
     Ok(LaunchSpec { argv, vars })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BIN: &str = "/home/u/.sushiai/bin/sushiai";
+
+    fn argv(agent: Agent, resume: bool, headless: bool) -> Vec<String> {
+        let extra = vec!["--flag".to_string()];
+        let session = if resume {
+            AgentSession::Resume("abc-1")
+        } else {
+            AgentSession::New("abc-1")
+        };
+        build(&LaunchParams {
+            agent,
+            hook_bin: BIN,
+            socket: "/s",
+            sushiai_session_id: "i",
+            session_token: "t",
+            session,
+            extra_args: &extra,
+            prompt: Some("hi"),
+            permission_wait_secs: 600,
+            claude_settings: None,
+            headless,
+        })
+        .unwrap()
+        .argv
+    }
+
+    /// Claude's argv with the long `--settings` JSON replaced.
+    fn claude(resume: bool, headless: bool) -> Vec<String> {
+        let mut v = argv(Agent::Claude, resume, headless);
+        let at = v.iter().position(|a| a == "--settings").unwrap();
+        v[at + 1] = "<settings>".into();
+        v
+    }
+
+    fn words(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_interactive_and_headless() {
+        assert_eq!(
+            claude(false, false),
+            words(&[
+                "claude",
+                "--session-id",
+                "abc-1",
+                "--settings",
+                "<settings>",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+        assert_eq!(
+            claude(false, true),
+            words(&[
+                "claude",
+                "--session-id",
+                "abc-1",
+                "--settings",
+                "<settings>",
+                "-p",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+        assert_eq!(
+            claude(true, false),
+            words(&[
+                "claude",
+                "--resume",
+                "abc-1",
+                "--settings",
+                "<settings>",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+        assert_eq!(
+            claude(true, true),
+            words(&[
+                "claude",
+                "--resume",
+                "abc-1",
+                "--settings",
+                "<settings>",
+                "-p",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+    }
+
+    #[test]
+    fn codex_interactive_and_headless() {
+        assert_eq!(
+            argv(Agent::Codex, false, false),
+            words(&["codex", "--no-daemon", "--flag", "--", "hi"])
+        );
+        assert_eq!(
+            argv(Agent::Codex, true, false),
+            words(&[
+                "codex",
+                "resume",
+                "abc-1",
+                "--no-daemon",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+        assert_eq!(
+            argv(Agent::Codex, false, true),
+            words(&[
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+        assert_eq!(
+            argv(Agent::Codex, true, true),
+            words(&[
+                "codex",
+                "exec",
+                "resume",
+                "abc-1",
+                "--json",
+                "--skip-git-repo-check",
+                "--flag",
+                "--",
+                "hi"
+            ])
+        );
+    }
 }

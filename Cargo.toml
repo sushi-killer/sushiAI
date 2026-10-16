@@ -21,12 +21,15 @@ tracing-subscriber = "0.3"
 tempfile = "3"
 base64 = "0.22"
 libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 sushiai-protocol = { path = "crates/sushiai-protocol" }
 sushiai-core = { path = "crates/sushiai-core" }
 sushiai-daemon = { path = "crates/sushiai-daemon" }
 sushiai-hold = { path = "crates/sushiai-hold" }
 sushiai-orch = { path = "crates/sushiai-orch" }
+sushiai-routines = { path = "crates/sushiai-routines" }
 
 [profile.dev]
 debug = "line-tables-only"

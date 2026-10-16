@@ -8,7 +8,6 @@ await fs.writeFile(
   JSON.stringify({
     activeId: "test",
     socket: "/tmp/absent-local-test.sock",
-    routines: [],
     fontScale: 1,
     workspaces: [
       {

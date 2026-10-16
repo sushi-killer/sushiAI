@@ -237,7 +237,7 @@ const CORE_SHARED = new Set(
     "app-db",
     "connections",
     "terminal-flow",
-    "chat-args",
+    "harness",
     "agent-models",
     "worktree",
     "project-git",

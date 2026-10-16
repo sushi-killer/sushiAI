@@ -1,4 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 import { createServer } from "vite";
 
@@ -35,10 +38,35 @@ await server.listen();
 const url = "http://127.0.0.1:5173";
 let electron;
 
+// A dev run keeps its own daemon home, so it never fights an installed app
+// (which may be an older build) over ~/.sushiai/daemon.sock. HOME and
+// CODEX_HOME stay the real ones; SUSHIAI_DEV_SHARED=1 shares the installed
+// app's daemon and sessions (both apps must then be the same build). Anything
+// the caller already set wins.
+function devEnv() {
+  const vars = { ...process.env, BRIDGE_DEV_URL: url };
+  if (process.env.SUSHIAI_DEV_SHARED === "1") return vars;
+  const real = homedir();
+  vars.HOME = vars.HOME || real;
+  vars.CODEX_HOME = vars.CODEX_HOME || join(real, ".codex");
+  // A shell started by the app exports the default home: that is not a choice.
+  if (!vars.SUSHIAI_HOME || vars.SUSHIAI_HOME === join(real, ".sushiai")) {
+    vars.SUSHIAI_HOME = join(real, ".sushiai-dev");
+    mkdirSync(vars.SUSHIAI_HOME, { recursive: true, mode: 0o700 });
+    // First run only: the catalog and settings; never sessions or state.
+    for (const name of ["catalog.json", "settings.json"]) {
+      const from = join(real, ".sushiai", name);
+      const to = join(vars.SUSHIAI_HOME, name);
+      if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
+    }
+  }
+  return vars;
+}
+
 function start() {
   electron = spawn("node_modules/.bin/electron", ["."], {
     stdio: "inherit",
-    env: { ...process.env, BRIDGE_DEV_URL: url },
+    env: devEnv(),
   });
   electron.on("exit", async (code) => {
     if (exitAction(code) === "respawn") {

@@ -1356,6 +1356,13 @@ iframe {
   overflow: auto;
   padding: 40px 38px 30px;
 }
+/* A page whose view draws its own header. */
+.section-page.bare {
+  display: flex;
+  flex-direction: column;
+  /* 22/24/24/24 of the concept, less the canvas' 1px border. */
+  padding: 21px 23px 23px;
+}
 .page-eyebrow,
 .dialog-eyebrow {
   color: #777f86;
@@ -2523,42 +2530,6 @@ iframe {
   to {
     transform: rotate(360deg);
   }
-}
-.routine-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.routine-list > div {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  padding: 17px;
-  border: 1px solid #303030;
-  border-radius: 10px;
-  background: #181818;
-}
-.routine-list > div > div {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.routine-list strong {
-  font-size: 13px;
-  font-weight: 500;
-}
-.routine-list code {
-  font-size: 11px;
-  color: #777;
-}
-.routine-list button {
-  padding: 8px;
-  border-radius: 6px;
-  color: #aaa;
-}
-.routine-list button:hover {
-  background: #333;
 }
 .toast {
   position: fixed;

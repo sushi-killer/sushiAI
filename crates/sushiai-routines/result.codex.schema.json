@@ -1,0 +1,62 @@
+{
+  "$id": "sushiai/routine-result/v1-codex",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "title",
+    "summary",
+    "actions",
+    "missing",
+    "next",
+    "counts"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["done", "noop", "needs_you", "failed", "missing_tool"]
+    },
+    "title": { "type": "string" },
+    "summary": {
+      "type": "string",
+      "description": "Markdown for the result screen"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "text", "link", "applied"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "for example slack.post, git.pr, tracker.comment"
+          },
+          "text": { "type": "string" },
+          "link": { "type": ["string", "null"] },
+          "applied": {
+            "type": "boolean",
+            "description": "false in a dry run: would do"
+          }
+        }
+      }
+    },
+    "missing": { "type": ["array", "null"], "items": { "type": "string" } },
+    "next": {
+      "type": ["string", "null"],
+      "description": "Suggested next step"
+    },
+    "counts": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "number" }
+        }
+      }
+    }
+  }
+}

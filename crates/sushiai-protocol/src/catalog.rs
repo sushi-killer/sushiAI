@@ -17,6 +17,10 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub folders: Vec<ProjectFolder>,
+    /// Free-text line on what the project is for. Optional; clients that do not know it
+    /// leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
     pub rev: u64,
     /// Milliseconds since the epoch, set by the writer.
     pub updated_at: u64,

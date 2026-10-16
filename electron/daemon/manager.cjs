@@ -31,7 +31,9 @@
 //   states(): ConnectorState[]       {host, state, generation, reason?, message?, version?, capabilities?, update?}
 //   hello(host): {host, version, capabilities, build?} | null   `host` is the daemon's own
 //                                    host name (projects.sync must use it);
-//                                    `build` is the sha256 of its binary
+//                                    `build` is the sha256 of its binary;
+//                                    `foreign: true` marks a local daemon of
+//                                    another app's build
 //   setUpdate(host, bool)            flags a ready host whose binary differs
 //                                    from the bundled one (`update: true`)
 //   request(host, method, params, {timeoutMs}?)
@@ -153,10 +155,13 @@ function createDaemonManager({
 
   // `now` asks for an immediate reconnect, granted once until a connection
   // succeeds, so a daemon that dies at once cannot spin.
-  function schedule(entry, now = false) {
+  // `slowMs` (a connector's `retryAfterMs`) fixes the pause: a failure that
+  // only another app's action can clear is checked on a slow, steady beat.
+  function schedule(entry, now = false, slowMs = 0) {
     if (closed || entry.removed || entry.suspended || entry.timer) return;
     let delay = 0;
-    if (now && !entry.immediateUsed) entry.immediateUsed = true;
+    if (slowMs > 0) delay = slowMs;
+    else if (now && !entry.immediateUsed) entry.immediateUsed = true;
     else {
       const base = Math.min(backoffMaxMs, backoffMinMs * 2 ** entry.attempt);
       entry.attempt += 1;
@@ -313,7 +318,8 @@ function createDaemonManager({
         error.message,
         error.hint,
       );
-      if (error.retry !== false) schedule(entry, error.retryNow);
+      if (error.retry !== false)
+        schedule(entry, error.retryNow, error.retryAfterMs);
       return;
     }
     if (stale()) {
@@ -332,8 +338,12 @@ function createDaemonManager({
       daemon: client.hello.daemon,
       capabilities: client.hello.capabilities || [],
       build: client.hello.build,
+      // The local daemon is another app's build, not the one this app resolved.
+      foreign: client.foreignBuild === true,
     };
-    entry.update = false;
+    // A connector may hand over a daemon that works but lacks what this build
+    // wants (a packaged app never replaces it): the owner sees "update".
+    entry.update = client.needsUpdate === true;
     entry.generation += 1;
     const generation = entry.generation;
     client.on("notification", (method, params) => {
@@ -454,6 +464,7 @@ function createDaemonManager({
             version: entry.hello.daemon,
             capabilities: entry.hello.capabilities,
             ...(entry.hello.build ? { build: entry.hello.build } : {}),
+            ...(entry.hello.foreign ? { foreign: true } : {}),
           }
         : null;
     },

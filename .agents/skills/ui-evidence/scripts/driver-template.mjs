@@ -86,6 +86,18 @@ try {
       contentSize: { width, height },
     };
   });
+  // `node artifacts/.driver.mjs --measure` also writes
+  // artifacts/<name>.measure.json for scripts/figma-parity.mjs.
+  if (process.argv.includes("--measure")) {
+    const { writeMeasure } = await import(
+      `${root}/.agents/skills/ui-evidence/scripts/measure.mjs`
+    );
+    report.measure = await writeMeasure(
+      page,
+      "evidence-window",
+      ".workspace-canvas",
+    );
+  }
   await page.screenshot({ path: shot("evidence-window") });
   await page.locator(".sidebar").screenshot({ path: shot("evidence-sidebar") });
 } catch (error) {

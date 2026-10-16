@@ -6,7 +6,6 @@ export type Dialog =
   | { kind: "settings" }
   | { kind: "notifications" }
   | { kind: "updates" }
-  | { kind: "routine" }
   | { kind: "close-session"; workspaceId: string; panelId: string }
   // `cwd` stands in for an id the caller does not have (the Run on menu knows
   // only the folder): the dialog then opens for the workspace in that folder.
@@ -28,7 +27,6 @@ export const DIALOG_META: Record<
   settings: { label: "Settings", className: "" },
   notifications: { label: "Notifications", className: "" },
   updates: { label: "Software updates", className: "" },
-  routine: { label: "New routine", className: "" },
   "close-session": { label: "Close session", className: "cs-dialog" },
   "workspace-actions": {
     label: "Workspace controls",

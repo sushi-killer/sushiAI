@@ -81,13 +81,13 @@ test("toggling the same section twice returns to the workspace", async () => {
   const start = { mode: "Code", section: null };
   const opened = navigationReducer(start, {
     type: "toggleSection",
-    section: core("Routines"),
+    section: core("Dashboard"),
   });
-  assert.deepEqual(opened.section, core("Routines"));
+  assert.deepEqual(opened.section, core("Dashboard"));
   assert.equal(
     navigationReducer(opened, {
       type: "toggleSection",
-      section: core("Routines"),
+      section: core("Dashboard"),
     }).section,
     null,
   );
@@ -223,7 +223,6 @@ test("mode, a core section and an extension page survive the snapshot round trip
         workspaces: [workspace],
         activeId: "w",
         socket: "",
-        routines: [],
         fontScale: 1,
         mode: state.mode,
         section: sectionName(state.section),

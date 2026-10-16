@@ -109,6 +109,10 @@ retro (`artifacts/RETRO-project-environments.md`).
 - Tests and examples use synthetic data: `192.0.2.0/24`, `user@devbox`,
   invented names. Real hosts, IPs, paths and credentials stay out of files,
   commits and screenshots.
+- A lane that changes how a screen looks runs the matching `$ui-evidence`
+  driver, opens the PNGs with the Read tool and lists what it saw (crooked,
+  cramped, clipped, low contrast) before it reports done; a new screen also
+  goes to `design-critic`. Green tests do not count as having looked.
 - One owner, complete cutover (`AGENTS.md`): remove the old path in the same
   change.
 - The exit code is the verdict, not a summary line. Use `npm run ci` or

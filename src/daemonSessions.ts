@@ -12,6 +12,8 @@ import type {
 export type HostSessions = {
   /** The host's connection is up. Nothing ends while this is false. */
   ready: boolean;
+  /** The host's connection state while it is not ready. */
+  state?: DaemonState["state"];
   /** A full `session.list` was applied for the current connection. Absence
    * from `sessions` means "gone" only after this is true. */
   listed: boolean;
@@ -275,6 +277,7 @@ function endPanel(panel: Panel, session?: DaemonSession): Panel {
   const terminal = panel.kind === "terminal";
   const next: Panel = { ...panel, ended: true };
   delete next.status;
+  delete next.hostState;
   if (session) {
     // The host still has the record, so it is what Reopen continues: a shell
     // that was left after its agent quit has nothing to continue. Only a host
@@ -316,6 +319,7 @@ function unchanged(panel: Panel, next: Panel): Panel {
 function livePanel(panel: Panel, session: DaemonSession): Panel {
   const next: Panel = { ...panel };
   delete next.ended;
+  delete next.hostState;
   const status = panelStatus(session, panel.status);
   if (status === undefined) delete next.status;
   else next.status = status;
@@ -343,7 +347,9 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
 /** Brings the panels bound to a daemon session in line with what each host
  * lists. Known panels take the session's status, title and folder; a session
  * that exited or is gone ends its panel; `detached` is still live. A host that
- * is not ready, or whose full list has not arrived, changes nothing. A session
+ * is not ready ends nothing, but its panels carry `hostState` so they show the
+ * host's state instead of the last snapshot. A host whose full list has not
+ * arrived changes nothing. A session
  * the desktop did not create is never adopted: panels are only updated. Returns
  * the same array when nothing changes. */
 export function reconcileSessions(
@@ -353,6 +359,18 @@ export function reconcileSessions(
   let changed = false;
   const next = workspaces.map((workspace) => {
     const host = hosts[daemonHost(workspace.connection)];
+    if (host && !host.ready && host.state && host.state !== "ready") {
+      const hostState = host.state;
+      let marked = false;
+      const panels = workspace.panels.map((panel) => {
+        if (!panel.sessionId || panel.hostState === hostState) return panel;
+        marked = true;
+        return { ...panel, hostState };
+      });
+      if (!marked) return workspace;
+      changed = true;
+      return { ...workspace, panels };
+    }
     if (!host?.ready || !host.listed) return workspace;
     let touched = false;
     const panels = workspace.panels.map((panel) => {

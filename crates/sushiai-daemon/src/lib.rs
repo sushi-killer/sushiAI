@@ -16,6 +16,7 @@ mod module;
 pub mod process;
 mod procs;
 mod registry;
+mod scheduler;
 mod server;
 mod session;
 mod wake;
@@ -101,6 +102,7 @@ async fn run(home: Home, modules: Vec<ModuleSlot>) -> Result<(fs::File, Arc<Regi
     tokio::select! {
         () = server::serve(listener, registry.clone()) => {}
         () = prune_loop(registry.clone()) => {}
+        () = scheduler::run(registry.clone()) => {}
         () = registry.stopped() => {
             // The response to `daemon.shutdown` is queued; give its connection time to send it.
             tokio::time::sleep(STOP_GRACE).await;
@@ -328,6 +330,7 @@ fn probe_holders(registry: &Registry) -> Vec<SessionInfo> {
             rows: 24,
             project: None,
             group: None,
+            background: false,
             agent: Default::default(),
         });
     }
@@ -383,7 +386,15 @@ async fn reattach(
     .await;
     match attached {
         Ok((conn, screen, seq)) => {
-            session::start(registry.clone(), info, conn, screen, seq, sock, false);
+            session::start(
+                registry.clone(),
+                info,
+                conn,
+                screen,
+                seq,
+                sock,
+                session::Spawn::default(),
+            );
             Ok(())
         }
         Err(e) => {

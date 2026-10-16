@@ -3,13 +3,7 @@ const path = require("node:path");
 const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { quote } = require("../connections.cjs");
-const {
-  chatArgs,
-  chatPrompt,
-  claudeEvent,
-  codexEvent,
-  IMAGE,
-} = require("../chat-args.cjs");
+const { harnessFor, isHarness, chatPrompt, IMAGE } = require("../harness.cjs");
 const { chatModels } = require("../agent-models.cjs");
 
 function registerChatIpc({
@@ -53,8 +47,8 @@ function registerChatIpc({
       else if (typeof cwd !== "string" || !cwd.startsWith("/"))
         throw new Error("Choose an absolute remote project folder.");
       if (chats.has(panelId)) throw new Error("A response is already running.");
-      if (!["claude", "codex"].includes(agent))
-        throw new Error("Choose Claude Code or Codex.");
+      if (!isHarness(agent)) throw new Error("Choose Claude Code or Codex.");
+      const harness = harnessFor(agent);
       const binary = remote ? "/usr/bin/ssh" : executable(agent);
       if (!binary)
         throw new Error(
@@ -108,7 +102,7 @@ function registerChatIpc({
       const prompt = chatPrompt(messages);
       if (prompt.length > 200000)
         throw new Error("Conversation is too long. Start a new chat.");
-      let args = chatArgs(agent, { model, effort, permission, dirs, images });
+      let args = harness.chatArgs({ model, effort, permission, dirs, images });
       if (remote)
         args = [
           ...connections.args(remote),
@@ -122,12 +116,12 @@ function registerChatIpc({
         detached: true,
       });
       chats.set(panelId, proc);
-      if (agent === "codex")
+      if (!harness.modelFromEvents)
         send("chat-data", {
           panelId,
           model: model || chatModels().codex.defaultModelId || "",
         });
-      const parse = agent === "claude" ? claudeEvent : codexEvent;
+      const parse = harness.chatEvent;
       let buffered = "",
         diagnostics = "",
         warnings = "",

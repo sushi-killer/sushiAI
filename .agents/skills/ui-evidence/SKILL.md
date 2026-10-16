@@ -156,6 +156,37 @@ scroll area's `scrollHeight`/`clientHeight`. The script fails unless (a) and
 (b) are not scrolled, (c) is scrolled at exactly the cap, and every window
 stays anchored bottom-right.
 
+## Drivers
+
+Run each after `npm run build`, from the repo root. Open every PNG they write.
+
+| Driver                                 | Covers                                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------- |
+| `driver-template.mjs`                  | any flow: copy it, replace `STEPS`                                     |
+| `routines.mjs`                         | Routines page R1-R11 with a stubbed module, widths 1440 to the minimum |
+| `builder.mjs`                          | routine builder chat, see below                                        |
+| `orchestrator-panel.mjs`               | one orchestrator task detail from a seed                               |
+| `orchestrator-blueprint.mjs`           | pipeline diagram, narrow and wide                                      |
+| `orchestrator-notices.mjs`             | mascot notices and the quick answer                                    |
+| `worktrees.mjs`                        | workspace grouping and worktree cleanup                                |
+| `mascot.mjs`, `mascot-core-update.mjs` | the desktop mascot                                                     |
+
+## Routine builder chat
+
+`node .agents/skills/ui-evidence/scripts/builder.mjs` (no arguments) feeds the
+real builder path with a fake model: a `claude` and a `codex` in a temp dir at
+the front of `PATH` print the turn the driver queued, and the throwaway daemon
+home carries `modules/routines.enabled`. `HOME`, `SUSHIAI_HOME` and the app data dir are in the
+throwaway profile `/tmp/sbld-*`. Routine list, show and grant are stubbed. It saves
+`artifacts/routines-mvp/screens-v4/<state>-<1440|900|600>.png` for: `a-ask`
+(owner card with a choice, a choice with Other, a text and a multi question, one
+action), `a2-filled`, `b-needs-you` (run-result JSON shown readable),
+`c-long` (long Russian message with a list), `d-access-sheet` and
+`d-access-notice` (built routine with ungranted access), `e-failed`,
+`f-no-sushiai` (codex, "sushiai is not available"). The JSON report lists
+sideways overflow (exit 1) and interactive elements under 24 px (`smallTargets`).
+It also writes `artifacts/builder-<state>.measure.json` at 1440.
+
 ## Boundaries
 
 - Drivers launch with `SUSHIAI_TEST_WINDOW=hidden`; a visible window is an

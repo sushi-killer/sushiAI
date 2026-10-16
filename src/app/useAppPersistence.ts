@@ -20,7 +20,6 @@ export function useAppPersistence(
   const {
     workspaces,
     activeId,
-    routines,
     fontScale,
     mode,
     tabMode,
@@ -41,7 +40,6 @@ export function useAppPersistence(
     () => ({
       workspaces,
       activeId,
-      routines,
       fontScale,
       mode,
       tabMode,
@@ -61,7 +59,6 @@ export function useAppPersistence(
     [
       workspaces,
       activeId,
-      routines,
       fontScale,
       mode,
       tabMode,

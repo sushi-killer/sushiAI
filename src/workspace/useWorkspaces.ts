@@ -4,10 +4,12 @@ import { initialWorkspace } from "../workspaceState.ts";
 import {
   LOCAL_ENDPOINT,
   canReopen,
+  daemonHost,
+  sessionPanelId,
   wakeInPlace,
   wakeRequest,
 } from "../daemonSessions.ts";
-import type { ClosedProject, Routine, Saved } from "../workspaceState.ts";
+import type { ClosedProject, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText, isGone } from "../lib/errors.ts";
@@ -328,6 +330,43 @@ export function useWorkspaces({
     setActiveId(id);
     showWorkspace();
     setZoomed(null);
+  }
+  /** Shows a session the daemon of `host` already runs ("local" or a
+   * connection id) as a terminal pane: in the workspace of that host, or in a
+   * new one when there is none. The session keeps running as it was. */
+  function openSession(host: string, sessionId: string, title = "Session") {
+    const endpoint = host === LOCAL_ENDPOINT ? LOCAL_ENDPOINT : `ssh:${host}`;
+    const panel: Panel = {
+      id: sessionPanelId(endpoint, sessionId),
+      kind: "terminal",
+      title,
+      sessionId,
+    };
+    const items = workspacesRef.current;
+    const same = (w: Workspace) => daemonHost(w.connection) === host;
+    const owner = same(activeRef.current)
+      ? activeRef.current
+      : items.find(same);
+    const holder = items.find((w) => w.panels.some((p) => p.id === panel.id));
+    const targetId = holder?.id ?? owner?.id ?? uid();
+    const cwd =
+      owner?.cwd ?? (host === LOCAL_ENDPOINT ? activeRef.current.cwd : "~");
+    setWorkspaces((list) =>
+      placeLaunchedPanel(list, {
+        targetId,
+        request: {
+          operationId: "",
+          endpoint,
+          kind: "terminal",
+          cwd,
+          label: title,
+        },
+        panel,
+        cwd,
+      }),
+    );
+    switchWorkspace(targetId);
+    setSelected(panel.id);
   }
   async function addPanel(
     kind: PanelKind,
@@ -655,27 +694,6 @@ export function useWorkspaces({
     }));
     if (zoomed === panel.id) setZoomed(null);
   }
-  async function runRoutine(routine: Routine) {
-    if (!window.bridge) return notify("Run routines in the desktop app.");
-    const bridge = window.bridge;
-    // The shell holds the typed command until the pane attaches.
-    await launchSession(
-      {
-        operationId: uid(),
-        endpoint: active.connection || LOCAL_ENDPOINT,
-        cwd: active.cwd,
-        label: routine.name,
-        kind: "terminal",
-        workspaceId: active.id,
-      },
-      { id: "", kind: "terminal", title: routine.name },
-      undefined,
-      (host, sessionId) =>
-        bridge.sessionInput(host, sessionId, routine.command + "\r"),
-    );
-    showWorkspace();
-  }
-
   const closing = useRef(new Set<string>());
   async function endWorkspace(workspace: Workspace) {
     // A second click while the first is closing it does nothing.
@@ -817,13 +835,13 @@ export function useWorkspaces({
     renameWorkspace,
     createWorkspace,
     addPanel,
+    openSession,
     closePanel,
     showPanel,
     drop,
     sendChat,
     newThread,
     deleteThread,
-    runRoutine,
     endSessions,
     endWorkspace,
     closedProjects,

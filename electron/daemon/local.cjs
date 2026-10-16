@@ -7,14 +7,18 @@
 //   home    $SUSHIAI_HOME, else ~/.sushiai, created 0700
 //   binary  $SUSHIAI_DAEMON_BIN, else <resources>/sushiai when packaged,
 //           else the newer (mtime) of the repo's target/release and target/debug
-//   build   `hello.build` is the sha256 of the running daemon's own binary. A
-//           daemon whose build differs from the resolved binary (or reports
-//           none) is shut down and replaced, once per app run (two apps with
-//           different binaries must not fight); after that a mismatch is
-//           "incompatible" and not retried. <home>/bin/sushiai belongs to the
-//           daemon itself.
+//   build   `hello.build` is the sha256 of the running daemon's own binary.
+//           The crate version is no compatibility test (it never changes);
+//           `hello.capabilities` is: a daemon of another build is shared only
+//           when it serves every REQUIRED_CAPABILITIES entry. Otherwise a dev
+//           run replaces it once per app run; a packaged app never replaces a
+//           live daemon: it connects and marks it `needsUpdate` ("restart the
+//           daemon to update"). After the one replacement a mismatch is
+//           "incompatible" and retried slowly. <home>/bin/sushiai belongs to
+//           the daemon itself.
 //   hooks   `sushiai hooks install` once per app version (stamp file in home);
-//           never in a test run (it would write the owner's ~/.codex)
+//           never in a test run (it would write the owner's ~/.codex) and
+//           never for a home other than ~/.sushiai (the hooks would point to it)
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -27,6 +31,20 @@ const START_TIMEOUT_MS = 15000;
 const STOP_TIMEOUT_MS = 8000;
 const POLL_MS = 100;
 const HOOKS_STAMP = "hooks-installed";
+// The daemon capabilities this app uses (crates/sushiai-protocol CAPABILITIES).
+const REQUIRED_CAPABILITIES = [
+  "sessions",
+  "attach",
+  "resync",
+  "agents",
+  "catalog",
+  "catalogRead",
+  "hibernate",
+  "schedules",
+  "ownerAsk",
+];
+// A failed "incompatible" connect is looked at again on this steady beat.
+const INCOMPATIBLE_RETRY_MS = 30000;
 // What a detached daemon (and every session it starts) may see of the app's
 // own environment: nothing of Electron, npm or the shell the app came from.
 const DAEMON_ENV_KEYS = [
@@ -132,6 +150,7 @@ function createLocalConnector({
   pollMs = POLL_MS,
   log = () => {},
   testMode = Boolean(env.SUSHIAI_TEST_WINDOW),
+  defaultHome = path.join(os.homedir(), ".sushiai"),
 } = {}) {
   const home = resolveHome(env);
   const socketPath = path.join(home, "daemon.sock");
@@ -184,6 +203,9 @@ function createLocalConnector({
     }
     // A test run must never write the owner's Codex files or bin link.
     if (testMode) return;
+    // Hooks name the home they were installed from: a throwaway home would
+    // leave ~/.codex pointing at it.
+    if (home !== defaultHome) return;
     try {
       await installHooksOnce();
     } catch (error) {
@@ -196,16 +218,33 @@ function createLocalConnector({
   const isCurrent = (client) =>
     client.hello.daemon === bundledVersion && client.hello.build === binarySha;
 
+  // Another build works for this app when it serves everything the app uses.
+  const shareable = (client) =>
+    REQUIRED_CAPABILITIES.every((name) =>
+      client.hello.capabilities?.includes(name),
+    );
+
+  /** A daemon of another build that stays: the manager learns it is foreign,
+   * and `needsUpdate` when it lacks what this app uses. */
+  function shared(client, needsUpdate) {
+    client.foreignBuild = true;
+    if (needsUpdate) client.needsUpdate = true;
+    return client;
+  }
+
   function incompatible(client) {
     client.close();
     return Object.assign(
       new Error(
         `Another sushiAI build owns the daemon on this Mac (${client.hello.daemon}, bundled ${bundledVersion}). Restart the daemon to use this app's build.`,
       ),
-      { reason: "incompatible", retry: false },
+      { reason: "incompatible", retryAfterMs: INCOMPATIBLE_RETRY_MS },
     );
   }
 
+  // `exited` resolves when the started child ends (a daemon that loses the
+  // lock to another one exits after a few seconds); `failed` rejects when it
+  // cannot start at all.
   function startDaemon() {
     const fd = fs.openSync(path.join(home, "daemon.log"), "a", 0o600);
     try {
@@ -220,32 +259,47 @@ function createLocalConnector({
         ),
       );
       failed.catch(() => {});
+      const exited = new Promise((resolve) =>
+        child.once("exit", (code, signal) => resolve({ code, signal })),
+      );
       child.unref?.();
-      failed.pid = child.pid;
-      return failed;
+      return { failed, exited, pid: child.pid };
     } finally {
       fs.closeSync(fd);
     }
   }
 
+  let lastConnectError = "";
   async function tryConnect() {
     try {
       return await connect({ socketPath, clientName: "desktop" });
-    } catch {
+    } catch (error) {
+      // Nobody listening is the normal answer while a daemon starts; log each
+      // distinct reason once.
+      if (error?.message !== lastConnectError) {
+        lastConnectError = error?.message;
+        log(`daemon connect failed: ${lastConnectError}`);
+      }
       return null;
     }
   }
 
-  async function connectWithin(ms, failed) {
+  async function connectWithin(ms, starting) {
     const deadline = Date.now() + ms;
+    let exit = null;
+    starting.exited.then((info) => (exit = info));
     for (;;) {
       const client = await tryConnect();
       if (client) return client;
+      if (exit)
+        throw new Error(
+          `sushiai daemon exited before it answered (${exit.signal || `code ${exit.code}`}); see ${path.join(home, "daemon.log")}`,
+        );
       if (Date.now() >= deadline)
         throw new Error(
           `sushiai daemon did not come up within ${Math.round(ms / 1000)} s (see ${path.join(home, "daemon.log")})`,
         );
-      await Promise.race([sleep(pollMs), failed]);
+      await Promise.race([sleep(pollMs), starting.failed, starting.exited]);
     }
   }
 
@@ -289,7 +343,14 @@ function createLocalConnector({
       for (;;) {
         if (client && isCurrent(client)) return client;
         if (client) {
-          // Another build, or no daemon of this binary is running.
+          // Another build that serves everything this app uses is shared (its
+          // sessions stay), whoever started it.
+          if (shareable(client)) return shared(client, false);
+          // A packaged app never stops a live daemon: it works with it and
+          // tells the owner to restart the daemon to update.
+          if (isPackaged) return shared(client, true);
+          // A dev run replaces it once; a daemon that shows up after that
+          // (another app won the race) is not this build's to replace.
           if (replaced || fresh) throw incompatible(client);
           replaced = true;
           log(
@@ -299,8 +360,7 @@ function createLocalConnector({
           await client.request("daemon.shutdown", {}).catch(() => {});
           await waitGone(client);
         }
-        const starting = startDaemon();
-        client = await connectWithin(startTimeoutMs, starting);
+        client = await connectWithin(startTimeoutMs, startDaemon());
         fresh = true;
       }
     },
@@ -314,4 +374,5 @@ module.exports = {
   ensureHome,
   resolveBinary,
   HOOKS_STAMP,
+  REQUIRED_CAPABILITIES,
 };

@@ -417,6 +417,11 @@ class Projects {
     const project = {
       id,
       name: String(input.name).trim().slice(0, 200),
+      // One free-text line on what the project is for; an input without it
+      // (an import, a stale copy) keeps the stored one.
+      purpose: String(input.purpose ?? existing?.purpose ?? "")
+        .trim()
+        .slice(0, 300),
       git: {
         url: String(input.git?.url || ""),
         // Empty means "whatever the remote's own default is": a clone then
@@ -485,7 +490,9 @@ class Projects {
       existing &&
       (existing.git?.defaultBranch || "").trim() !==
         project.git.defaultBranch.trim();
-    if (removed.length || branchEdited) this.#changed();
+    const purposeEdited =
+      existing && (existing.purpose || "") !== project.purpose;
+    if (removed.length || branchEdited || purposeEdited) this.#changed();
     return this.#withHints(project, this.#secrets());
   }
 

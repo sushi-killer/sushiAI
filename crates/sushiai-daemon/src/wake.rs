@@ -84,6 +84,9 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
         group: None,
         claude_settings: launch.claude_settings,
         idempotency_key: None,
+        background: info.background,
+        // A wake resumes the conversation for the owner, so it is interactive.
+        headless: false,
     };
     let socket = registry.home.socket().to_string_lossy().into_owned();
     let prepared = agent::prepare(&request, &socket, id)?;

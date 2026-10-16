@@ -1,0 +1,682 @@
+/* Routines: the page (start, list, detail, builder, document) and its
+   Settings tab. One pattern: list left, the routine's detail in one card on
+   the right. The parts that are not specific to this page (composer, list
+   rows, notice, key-value rows, segmented control, menus, breadcrumb, doc
+   column, sheet) are the shared primitives in src/ui. What stays here is the
+   placement: the columns, their breakpoints and the page's own blocks. The
+   page is a size container, so it adapts to its own width, not the window's:
+   it is the same in a full page and in a narrow pane. Tokens only. */
+.rt-page {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--gap-lg);
+  min-width: 0;
+  min-height: 0;
+  container: rt / inline-size;
+}
+.rt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  min-height: var(--control-h);
+}
+.rt-head h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-page);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.rt-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* R1: a centred column like the empty chat. */
+.rt-center {
+  display: flex;
+  padding-bottom: 78px;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rt-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gap-lg);
+  max-width: 620px;
+  width: 100%;
+  text-align: center;
+}
+.rt-start h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 27px;
+}
+.rt-start > .ui-meta {
+  font-size: var(--text-md);
+  line-height: 16px;
+}
+.rt-recipes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.rt-lead {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+
+/* List and detail: two columns, or one at a time in a narrow page. */
+.rt-split {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 20px;
+  min-height: 0;
+  flex: 1;
+}
+.rt-list {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.rt-detail-col {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+.rt-to-list {
+  display: none;
+  align-self: flex-start;
+}
+.rt-page .rt-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rt-page .rt-detail {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding: 20px;
+}
+.rt-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rt-detail-title {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--gap-xs);
+}
+.rt-detail-head h2,
+.rt-run-head h2 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 19px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-detail-head .ui-meta {
+  line-height: 15px;
+}
+.rt-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  margin-top: auto;
+}
+.rt-delete {
+  margin-left: auto;
+  color: var(--danger);
+}
+.rt-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--gap-sm);
+}
+
+/* How it works, how it runs */
+.rt-scheme {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rt-scheme > .ui-meta {
+  line-height: 15px;
+}
+
+/* Last runs, result */
+.rt-runs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rt-runs button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.rt-run-date {
+  flex: none;
+  width: 92px;
+  overflow: hidden;
+  font-size: var(--text-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-run-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-run {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--gap-lg);
+}
+.rt-run-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-xs);
+}
+.rt-run-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+}
+.rt-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 15px;
+  padding: 0;
+  cursor: pointer;
+}
+.rt-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-lg);
+}
+.rt-result section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+.rt-summary {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  line-height: 20px;
+}
+.rt-summary-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-lead);
+  font-weight: 600;
+  line-height: 18px;
+}
+/* R6 failure */
+.rt-failure {
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-lg);
+  background: var(--danger-bg);
+  padding: var(--gap-md);
+}
+.rt-page .rt-failure h3 {
+  margin: 0 0 var(--gap-sm);
+  color: var(--danger);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.rt-fix {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
+  padding: var(--gap-xs) var(--gap-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+}
+.rt-fix code {
+  min-width: 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+/* A row of actions in a rows card: R10 what it did, R5 what waits. */
+.rt-action,
+.rt-review-text {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  margin: 0;
+  padding: 10px 14px;
+}
+.rt-action.would {
+  color: var(--text-muted);
+}
+.rt-action-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+.rt-action-text strong {
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.rt-action-text small {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.rt-log {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  padding: var(--gap-sm) var(--gap-md);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Owner card of a run */
+.rt-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+.rt-review-text {
+  display: block;
+  font-size: var(--text-md);
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rt-review-actions,
+.rt-review-reply {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+}
+
+/* Builder: chat card left, scheme card right */
+.rt-builder {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--gap-lg);
+}
+.rt-build {
+  display: grid;
+  grid-template-columns: minmax(0, 430fr) minmax(0, 536fr);
+  gap: 20px;
+  min-height: 0;
+  flex: 1;
+}
+.rt-page .rt-chat {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  border-color: var(--line);
+  padding: 16px;
+}
+.rt-built .rt-detail-actions {
+  margin-top: 0;
+}
+.rt-transcript {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+.rt-you {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-control);
+  font-size: var(--text-md);
+  line-height: 19px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.rt-reply {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: 19px;
+  overflow-wrap: anywhere;
+}
+/* A builder turn that failed: an error line, not a reply */
+.rt-failed {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  color: var(--danger);
+  font-size: var(--text-md);
+  line-height: 19px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+/* The builder's question card under an agent message */
+.rt-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.rt-ask-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 18px;
+}
+.rt-ask-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+.rt-ask-label {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 16px;
+}
+.rt-ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+}
+.rt-ask .ui-chip {
+  height: 34px;
+  color: var(--text);
+  gap: 6px;
+  padding: 0 14px;
+}
+.rt-ask .ui-chip.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+  color: var(--text);
+}
+.rt-ask .ui-chip.selected::before {
+  content: "\2713";
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+.rt-ask .ui-chip.other {
+  border-style: dashed;
+  background: transparent;
+}
+.rt-ask .ui-chip:disabled:not(.selected) {
+  opacity: 0.6;
+}
+/* The text answer matches the composer: same radius, size and focus ring. */
+.rt-ask-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  resize: none;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  color: var(--text);
+  caret-color: var(--text);
+  font: inherit;
+  font-size: var(--text-md);
+  line-height: 18px;
+  overflow-y: hidden;
+}
+.rt-ask-input::placeholder {
+  color: var(--text-faint);
+}
+.rt-ask-input:focus,
+.rt-ask-input:focus-visible {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: none;
+}
+.rt-ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--gap-md);
+}
+.rt-ask-hint {
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  line-height: 16px;
+}
+.rt-ask-hint.done {
+  margin-right: 0;
+}
+.rt-status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* R8: the tools a routine waits for. */
+.rt-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+  padding: 10px 14px;
+}
+.rt-access-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+.rt-access-text strong {
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.rt-access-text small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.rt-access-tool {
+  margin-top: 2px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+}
+.rt-access-note {
+  margin: 0;
+}
+
+/* R9 settings */
+.rt-settings {
+  display: flex;
+  flex-direction: column;
+  max-width: 665px;
+  container: rts / inline-size;
+}
+.rt-settings > section {
+  display: flex;
+  flex-direction: column;
+}
+.rt-settings > section > .ui-eyebrow {
+  padding-top: var(--gap-xl);
+}
+.rt-settings > section > .ui-meta {
+  padding: 3px 0 10px;
+  font-size: var(--text-input);
+  line-height: 15px;
+}
+.rt-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 150px));
+  gap: var(--gap-md);
+  padding-top: 14px;
+}
+.rt-fields label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+.rt-field-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+}
+/* Two classes: the legacy `.modal select` pads every select in a dialog. */
+.rt-fields .ui-select {
+  height: 29px;
+  padding: 0 24px 0 var(--gap-sm);
+  font-size: var(--text-input);
+  line-height: 15px;
+}
+.routines-attention h3 {
+  margin: 0 0 var(--gap-sm);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.routines-attention p {
+  margin: 0 0 var(--gap-xs);
+}
+
+/* ---- Narrow pages ---------------------------------------------------------
+   Under 720px of page width the list and the detail take turns: the list
+   first, the detail with a back control after a pick. The builder stacks its
+   chat over the routine. Nothing scrolls sideways. */
+@container rt (max-width: 719px) {
+  .rt-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rt-split[data-pane="list"] .rt-detail-col,
+  .rt-split[data-pane="detail"] .rt-list {
+    display: none;
+  }
+  .rt-to-list {
+    display: inline-flex;
+  }
+  .rt-build {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: start;
+    flex: none;
+  }
+  .rt-builder {
+    overflow-y: auto;
+  }
+  .rt-page .rt-chat {
+    max-height: max(340px, min(560px, 72vh));
+  }
+  .rt-center {
+    padding-bottom: 0;
+  }
+  .rt-page .rt-detail {
+    padding: var(--gap-lg) var(--gap-md);
+  }
+}
+@container rt (max-width: 479px) {
+  .rt-run-date {
+    width: 78px;
+  }
+  .rt-start h2 {
+    font-size: var(--text-title);
+    line-height: 20px;
+  }
+  .rt-detail-actions .ui-button {
+    flex: 1 1 auto;
+  }
+  .rt-delete {
+    margin-left: 0;
+  }
+}
+@container rts (max-width: 420px) {
+  .rt-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -96,6 +96,8 @@ export type DaemonLaunchRequest = {
   extraArgs?: string[];
   project?: string;
   group?: string;
+  /** A session a job started, kept out of the sidebar's session tree. */
+  background?: boolean;
   claudeAccountId?: string;
   codexAccountId?: string;
   modelProfileId?: string;
@@ -177,6 +179,9 @@ type PanelState = {
   /** A session that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
   ended?: boolean;
+  /** The state of the panel's host while it is not ready (failed, offline,
+   * connecting); absent when the host is ready. */
+  hostState?: ConnectorState["state"];
   /** The daemon session this panel is bound to. */
   sessionId?: string;
   /** The agent CLI's own session id, kept so Reopen can resume it. */
@@ -298,6 +303,8 @@ export type Workspace = {
 export type Project = {
   /** The folder name under ~/sushiai on a host; fixed when the project is made. */
   slug?: string;
+  /** One line on what the project is for; agents read it to pick a project. */
+  purpose?: string;
   /** Folders attached to the project (by host and path). */
   folders?: { endpoint: string; cwd: string }[];
   id: string;
@@ -670,6 +677,8 @@ export interface Bridge {
       askId: string;
       decision: "allow" | "deny";
       message?: string;
+      /** The option id picked for an owner question. */
+      choice?: string;
     },
   ): Promise<void>;
   daemonTerminalAttach(input: {
@@ -970,6 +979,15 @@ export interface Bridge {
     method: string,
     ...args: unknown[]
   ): Promise<unknown>;
+  /** What a built-in module's daemon side publishes, tagged with the module
+   * and the host it came from. Built-in modules only. */
+  onModuleEvent(
+    callback: (event: {
+      moduleId: string;
+      host: string;
+      event: unknown;
+    }) => void,
+  ): () => void;
   projectHostOverrides(
     id: string,
     host: string,

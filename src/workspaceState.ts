@@ -33,8 +33,6 @@ const localEndpoint = (endpoint: string | undefined) =>
     ? endpoint
     : LOCAL_ENDPOINT;
 
-export type Routine = { id: string; name: string; command: string };
-
 /** A workspace the sidebar dropped ("Close workspace and sessions") but the
  * Dashboard still offers back - id, name, cwd, host endpoint and the git
  * identity read at close time, so it can be reopened where it left off and
@@ -72,7 +70,6 @@ export type AgentFocus = {
 export type Saved = {
   workspaces: Workspace[];
   activeId: string;
-  routines: Routine[];
   fontScale: number;
   mode?: "Agent" | "Code" | "Chat";
   tabMode?: boolean;
@@ -421,6 +418,8 @@ export function restore(store: SnapshotStore = snapshotStore()): Saved | null {
     // The old snapshots' `socket` is gone: This Mac is "local" (see localEndpoint).
     // The next save writes the new shape; until then the remap repeats harmlessly.
     delete (normalized as { socket?: string }).socket;
+    // Saved shell-command routines are gone; drop the field once.
+    delete (normalized as { routines?: unknown }).routines;
     const migrated = sweepLeftovers(normalized);
     if (migrated !== normalized) {
       try {

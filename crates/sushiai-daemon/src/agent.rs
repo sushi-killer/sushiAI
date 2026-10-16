@@ -123,6 +123,19 @@ pub struct Prepared {
     pub agent: AgentInfo,
 }
 
+/// `PATH` with the folder of `exe` in front.
+fn path_with_dir(exe: &str, path: Option<&str>) -> String {
+    let dir = std::path::Path::new(exe)
+        .parent()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match path.filter(|p| !p.is_empty()) {
+        Some(p) if !dir.is_empty() => format!("{dir}:{p}"),
+        Some(p) => p.to_string(),
+        None => dir,
+    }
+}
+
 /// Builds the command line, the child variables and the agent record for a new session.
 /// Only `claude` and `codex` get hooks; any other agent name just labels a plain command.
 pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fail> {
@@ -190,9 +203,21 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         prompt: p.prompt.as_deref(),
         permission_wait_secs: ASK_WAIT_SECS,
         claude_settings: p.claude_settings.as_ref(),
+        headless: p.headless,
     })
     .map_err(|e| invalid(&e.to_string()))?;
     env.extend(spec.vars);
+    if p.headless {
+        // A print-mode turn calls the daemon's own CLI by name (`sushiai ...`) and may start
+        // its MCP server by name, so the daemon's folder comes first on its PATH.
+        let base = env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var("PATH").ok());
+        env.push(("PATH".into(), path_with_dir(&hook_bin, base.as_deref())));
+    }
     let agent_info = AgentInfo {
         name: Some(agent.as_str().into()),
         agent_session: minted,
@@ -282,6 +307,24 @@ pub fn clip_input(input: Value) -> Value {
     Value::String(text[..end].to_string())
 }
 
+/// What `hook.ask` returns to a waiting process: the owner's decision (`allow` = answered,
+/// `deny` = declined), the picked option and free text.
+pub fn owner_answer(decision: Decision, message: Option<String>, choice: Option<String>) -> Value {
+    let mut v = json!({
+        "decision": match decision {
+            Decision::Allow => "allow",
+            Decision::Deny => "deny",
+        }
+    });
+    if let Some(m) = message {
+        v["message"] = json!(m);
+    }
+    if let Some(c) = choice {
+        v["choice"] = json!(c);
+    }
+    v
+}
+
 /// The JSON a `PermissionRequest` hook prints. Claude and Codex share the shape.
 pub fn permission_answer(decision: Decision, message: Option<&str>) -> Value {
     let mut d = match decision {
@@ -311,6 +354,17 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_answer_carries_choice_and_words_for_either_decision() {
+        let picked = owner_answer(Decision::Allow, Some("later".into()), Some("b".into()));
+        assert_eq!(
+            picked,
+            json!({"decision": "allow", "message": "later", "choice": "b"})
+        );
+        let declined = owner_answer(Decision::Deny, None, None);
+        assert_eq!(declined, json!({"decision": "deny"}));
+    }
+
+    #[test]
     fn an_oversize_input_is_cut_and_a_small_one_is_kept() {
         let small = json!({"command": "ls"});
         assert_eq!(clip_input(small.clone()), small);
@@ -327,5 +381,34 @@ mod tests {
         let parts: Vec<usize> = id.split('-').map(str::len).collect();
         assert_eq!(parts, [8, 4, 4, 4, 12]);
         assert!(id.split('-').nth(2).is_some_and(|p| p.starts_with('4')));
+    }
+
+    #[test]
+    fn the_daemons_folder_leads_the_path_of_a_headless_session_only() {
+        assert_eq!(
+            path_with_dir("/opt/app/sushiai", Some("/usr/bin")),
+            "/opt/app:/usr/bin"
+        );
+        assert_eq!(path_with_dir("/opt/app/sushiai", None), "/opt/app");
+        let create = |headless: bool| -> SessionCreate {
+            serde_json::from_value(json!({
+                "cwd": "/tmp", "cols": 80, "rows": 24, "agent": "claude",
+                "prompt": "hi", "headless": headless,
+                "env": {"PATH": "/usr/bin"},
+            }))
+            .expect("create")
+        };
+        let path_of = |headless: bool| {
+            prepare(&create(headless), "/tmp/x.sock", "s1")
+                .expect("prepare")
+                .env
+                .into_iter()
+                .rev()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v)
+        };
+        let headless = path_of(true).expect("path");
+        assert!(headless.ends_with(":/usr/bin") && headless.len() > ":/usr/bin".len());
+        assert_eq!(path_of(false).as_deref(), Some("/usr/bin"));
     }
 }

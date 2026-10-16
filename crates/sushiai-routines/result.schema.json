@@ -1,0 +1,37 @@
+{
+  "$id": "sushiai/routine-result/v1",
+  "type": "object",
+  "required": ["status", "title", "summary", "actions"],
+  "properties": {
+    "status": {
+      "enum": ["done", "noop", "needs_you", "failed", "missing_tool"]
+    },
+    "title": { "type": "string", "maxLength": 120 },
+    "summary": {
+      "type": "string",
+      "description": "Markdown for the result screen"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "text", "applied"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "for example slack.post, git.pr, tracker.comment"
+          },
+          "text": { "type": "string" },
+          "link": { "type": "string" },
+          "applied": {
+            "type": "boolean",
+            "description": "false in a dry run: would do"
+          }
+        }
+      }
+    },
+    "missing": { "type": "array", "items": { "type": "string" } },
+    "next": { "type": "string", "description": "Suggested next step" },
+    "counts": { "type": "object", "additionalProperties": { "type": "number" } }
+  }
+}

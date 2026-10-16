@@ -63,6 +63,8 @@ const CHANNELS = {
       if (r[key] !== undefined && typeof r[key] !== "string")
         throw new Error(`Invalid ${key}.`);
     strings(r.extraArgs, "extraArgs");
+    if (r.background !== undefined && typeof r.background !== "boolean")
+      throw new Error("Invalid background.");
   },
   "daemon-session-close": (h, id, graceful) => {
     host(h);
@@ -112,6 +114,7 @@ const CHANNELS = {
     text(r.sessionId, "session id");
     text(r.askId, "ask id");
     text(r.message, "message", { optional: true });
+    text(r.choice, "choice", { optional: true });
     if (r.decision !== "allow" && r.decision !== "deny")
       throw new Error("Invalid decision.");
   },
@@ -173,9 +176,9 @@ const LIFECYCLE = {
     { id, scrollback },
   ],
   "daemon-session-input": (_h, id, data) => ["session.input", { id, data }],
-  "daemon-ask-respond": (_h, { askId, decision, message }) => [
+  "daemon-ask-respond": (_h, { askId, decision, message, choice }) => [
     "ask.respond",
-    { askId, decision, message },
+    { askId, decision, message, ...(choice ? { choice } : {}) },
   ],
 };
 // Channels whose result the renderer reads; the others resolve to undefined.

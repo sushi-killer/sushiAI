@@ -347,7 +347,8 @@ function missingCapability(name, update) {
   return error;
 }
 
-const hasOrch = (state) => !!state?.capabilities?.includes(ORCH_CAPABILITY);
+const hasModule = (state, capability) =>
+  !!state?.capabilities?.includes(capability);
 
 /** The manager's state of `host` once it is not "connecting" (immediately when
  * it already is not). Resolves undefined for a host the manager does not know. */
@@ -373,9 +374,11 @@ function settledState(manager, host, timeoutMs, timeoutMessage) {
   });
 }
 
-/** The opt-in of the `orch` module on a host (owner O1). Enabling runs
- * `sushiai orch register` there (local: the bundled binary; remote: over the
- * existing ssh exec path), disabling runs `sushiai orch unregister`; then the
+/** The opt-in of a daemon module on a host (owner O1; `module` is `orch`
+ * unless a caller names another one, which must be a capability of the same
+ * name). Enabling runs `sushiai <module> register` there (local: the bundled
+ * binary; remote: over the existing ssh exec path), disabling runs
+ * `sushiai <module> unregister`; then the
  * host's daemon restarts (`daemon.shutdown`, then reconnect) when it does not
  * serve the module yet or still does. Sessions survive: they live in their
  * holders. `host` is "local" or "ssh:<profile id>". */
@@ -384,6 +387,8 @@ function createModuleSwitch({
   runLocal,
   restartLocal,
   exec,
+  module = ORCH_CAPABILITY,
+  label = "the orchestrator",
   readyTimeoutMs = READY_TIMEOUT_MS,
   settleMs,
   attempts,
@@ -395,11 +400,27 @@ function createModuleSwitch({
     if (!manager) throw new Error("The sushiai daemon is not running.");
     const name = managerHostOf(host);
     const verb = on ? "register" : "unregister";
-    if (host === LOCAL_HOST) await runLocal(["orch", verb]);
+    // Restarting the local daemon stops whatever answers, which may be another
+    // app's. Turning a module on there cannot work from this app.
+    if (
+      on &&
+      host === LOCAL_HOST &&
+      manager.hello?.(name)?.foreign &&
+      !hasModule(
+        manager.states().find((item) => item.host === name),
+        module,
+      )
+    )
+      throw new Error(
+        "another sushiAI build owns the daemon; use Restart daemon to run this build",
+      );
+    if (host === LOCAL_HOST) await runLocal([module, verb]);
     else
       await exec(
         host,
-        posixCommand(`${REMOTE_PATH}\n"${REMOTE_BIN}/sushiai" orch ${verb}`),
+        posixCommand(
+          `${REMOTE_PATH}\n"${REMOTE_BIN}/sushiai" ${module} ${verb}`,
+        ),
         { timeout: 60000 },
       );
     const state = await settledState(
@@ -408,7 +429,7 @@ function createModuleSwitch({
       readyTimeoutMs,
       `The sushiai daemon on ${name} did not become ready.`,
     );
-    if (state?.state !== "ready" || hasOrch(state) === on) return;
+    if (state?.state !== "ready" || hasModule(state, module) === on) return;
     if (host === LOCAL_HOST) await restartLocal();
     else await manager.request(name, "daemon.shutdown", {}).catch(() => {});
     // The daemon takes a moment to go; a retry that meets it still answers.
@@ -417,9 +438,9 @@ function createModuleSwitch({
       attempts,
       settleMs,
     });
-    if (after?.state !== "ready" || hasOrch(after) !== on)
+    if (after?.state !== "ready" || hasModule(after, module) !== on)
       throw new Error(
-        `The sushiai daemon on ${name} did not restart ${on ? "with" : "without"} the orchestrator.`,
+        `The sushiai daemon on ${name} did not restart ${on ? "with" : "without"} ${label}.`,
       );
   }
 
@@ -541,7 +562,7 @@ class OrchestratorService {
     if (state?.state !== "ready") throw notReady(state, this.name);
     // A ready daemon without the module: the owner turned the Orchestrator on
     // after this host's daemon started, so the host is enabled now.
-    if (hasOrch(state)) this.enableFailure = null;
+    if (hasModule(state, ORCH_CAPABILITY)) this.enableFailure = null;
     else if (this.moduleSwitch && reach) {
       try {
         await this.moduleSwitch.enable(this.host);

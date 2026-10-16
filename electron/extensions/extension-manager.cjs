@@ -11,6 +11,7 @@ const SCHEMA_VERSION = 2;
 const DISABLEABLE_BUILTINS = new Set([
   "builtin.orchestrator",
   "builtin.artifacts",
+  "builtin.routines",
 ]);
 
 /** `startsOff` lists the built-in ids that begin switched off: the code that

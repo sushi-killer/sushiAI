@@ -62,6 +62,8 @@ npm ci
 npm run dev
 ```
 
+`npm run dev` is isolated by default: it runs its own daemon in `~/.sushiai-dev` (the catalog and settings are copied from `~/.sushiai` on the first run; sessions are not), so it never fights an installed app over the daemon socket. `SUSHIAI_DEV_SHARED=1 npm run dev` shares the installed app's daemon and sessions instead, which needs both apps on the same build. A value you set yourself (`SUSHIAI_HOME`, `HOME`, `CODEX_HOME`) wins.
+
 Build and run the production interface:
 
 ```sh

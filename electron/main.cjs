@@ -73,6 +73,11 @@ const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const { createCompanions } = require("./extensions/companion-process.cjs");
 const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
 const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
+const { ROUTINES_MANIFEST } = require("./extensions/builtin-routines.cjs");
+const { configureRoutinesSkill } = require("./routines-skill.cjs");
+const { registerRoutines } = require("./routines.cjs");
+const { createHostProbe } = require("./routines-probe.cjs");
+const { chatModels } = require("./agent-models.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
 const {
@@ -110,8 +115,14 @@ const companions = createCompanions({
 const extensions = new ExtensionManager({
   dataDir: app.getPath("userData"),
   companions,
-  builtins: [ORCHESTRATOR_MANIFEST, ARTIFACTS_MANIFEST, VAULT_MANIFEST],
-  // Opting in to the Orchestrator is the owner's act.
+  builtins: [
+    ORCHESTRATOR_MANIFEST,
+    ARTIFACTS_MANIFEST,
+    VAULT_MANIFEST,
+    ROUTINES_MANIFEST,
+  ],
+  // Only the Orchestrator starts off (opting in is the owner's act); Routines
+  // starts on.
   builtinsStartOff: [ORCHESTRATOR_MANIFEST.id],
   // Folders dropped here are read as JSON manifests and carry no code; the
   // extension folder is never executed. A manifest may name a companion
@@ -125,6 +136,13 @@ const extensions = new ExtensionManager({
 });
 configureArtifactsSkill({
   isEnabled: () => extensions.isEnabled(ARTIFACTS_MANIFEST.id),
+  subscribe: (listener) => extensions.onChange(listener),
+  home: os.homedir(),
+  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
+});
+configureRoutinesSkill({
+  extensionId: ROUTINES_MANIFEST.id,
+  isEnabled: () => extensions.isEnabled(ROUTINES_MANIFEST.id),
   subscribe: (listener) => extensions.onChange(listener),
   home: os.homedir(),
   codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
@@ -275,6 +293,23 @@ const onDaemonEvent = (listener) => {
   daemonEventListeners.add(listener);
   return () => daemonEventListeners.delete(listener);
 };
+const daemonLaunch = createDaemonLaunch({
+  manager: {
+    request: (...args) => {
+      if (!daemonManager) throw new Error("daemon manager is not running");
+      return daemonManager.request(...args);
+    },
+  },
+  projects,
+  // `connections` is created in whenReady.
+  connections: {
+    inspect: (...args) => connections.inspect(...args),
+    exec: (...args) => connections.exec(...args),
+    hasShell: (endpoint) => connections.hasShell(endpoint),
+  },
+  modelProviders,
+  codexAccounts,
+}).launch;
 daemonIpc = registerDaemonIpc({
   handle,
   send,
@@ -283,23 +318,7 @@ daemonIpc = registerDaemonIpc({
   attachmentsDir: path.join(app.getPath("temp"), "sushiai-attachments"),
   exec: (...args) => connections.exec(...args),
   installHost: installDaemonHost,
-  launch: createDaemonLaunch({
-    manager: {
-      request: (...args) => {
-        if (!daemonManager) throw new Error("daemon manager is not running");
-        return daemonManager.request(...args);
-      },
-    },
-    projects,
-    // `connections` is created in whenReady.
-    connections: {
-      inspect: (...args) => connections.inspect(...args),
-      exec: (...args) => connections.exec(...args),
-      hasShell: (endpoint) => connections.hasShell(endpoint),
-    },
-    modelProviders,
-    codexAccounts,
-  }).launch,
+  launch: daemonLaunch,
 });
 registerExtensionIpc({
   handle,
@@ -449,6 +468,36 @@ orchestrator = registerOrchestratorExtension({
     : { homeDir: app.getPath("home"), codexHome: process.env.CODEX_HOME },
   hostsChanged: () => send("orchestrator-hosts-changed"),
 });
+const routines = registerRoutines({
+  moduleIpc,
+  extensions,
+  send: (channel, value) => send(channel, value),
+  getManager: () => daemonManager,
+  getConnections: () => connections,
+  getProjects: () => projects,
+  readStore: (name) => readStore(app.getPath("userData"), name),
+  writeStore: (name, value) => writeStore(app.getPath("userData"), name, value),
+  chatModels: () => chatModels(os.homedir()),
+  probeHost: createHostProbe({
+    exec: (...args) => connections.exec(...args),
+  }),
+  // The Standard route of the Orchestrator's settings is a new routine's
+  // default agent; without the Orchestrator there is none.
+  standardSettings: () => orchestrator.call("settings.get", {}, "local"),
+  // A test run never writes the owner's Claude or Codex files.
+  moduleSwitch: testMode.test
+    ? null
+    : createModuleSwitch({
+        getManager: () => daemonManager,
+        runLocal: (args) => localConnector.runCli(args),
+        restartLocal: () => localConnector.restart(),
+        exec: (...args) => connections.exec(...args),
+        module: "routines",
+        label: "Routines",
+      }),
+  launch: (request) => daemonLaunch(request),
+  log: (message) => console.log(message),
+});
 // Turning an extension off also drops the notices it already queued.
 extensions.onChange((id, enabled) => {
   if (!enabled) notices.clear(id);
@@ -543,6 +592,9 @@ app.whenReady().then(async () => {
     .catch((error) =>
       console.error(`Orchestrator start failed: ${error.message}`),
     );
+  void routines
+    .start()
+    .catch((error) => console.error(`Routines start failed: ${error.message}`));
   // After the saved on/off state and approvals are loaded and the host list
   // is known: wanted companion processes start now.
   void extensions.ready

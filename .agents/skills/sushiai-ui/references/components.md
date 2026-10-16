@@ -196,6 +196,35 @@ badge.
 - Switch: `Toggle` (`src/ui/Toggle.tsx`) - a real checkbox drawn
   32x18; it needs a `label` prop for its accessible name.
 
+## Shared page primitives (`src/ui`)
+
+Generic pieces a page places and sizes; none of them knows its host or
+placement. Import from `src/ui/index.ts`; the one stylesheet is `src/ui/ui.css`.
+
+| Need                              | Primitive                                   | Notes                                                                                           |
+| --------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Growing text field + button       | `Composer`                                  | pill; grows to 6 lines then scrolls; button on the bottom edge; Enter sends, Shift+Enter breaks |
+| One of N options in one frame     | `Segmented`                                 | `radiogroup`; the third copy of a segmented control is this one                                 |
+| Menu opened from a text button    | `Popover`, `MenuItem`, `MenuHead`           | moves inside the window and its scrolling ancestor, opens upward when there is no room below    |
+| Titled group of selectable rows   | `ListGroup`                                 | selected = the row only; no hairline next to it                                                 |
+| One line that needs attention     | `Notice`                                    | `warning` or `danger`; title, detail, action                                                    |
+| Card of hairline rows             | `Rows`; key-value: `KeyValue`+`KeyValueRow` | a plain value shortens with an ellipsis; `note` is a remark under it                            |
+| Header of a page below a list     | `Breadcrumb`                                | links shorten with an ellipsis, the last part is the `h1`                                       |
+| Status dot                        | `Dot`                                       | 6px, `live` pulses; `ui-tone-*`                                                                 |
+| Line of facts under a title       | `MetaLine`                                  | `single` keeps one line with an ellipsis                                                        |
+| Reading column                    | `DocColumn`, `DocBody`                      | 720px max, head with kind badge, facts and tools                                                |
+| Surface, small heading            | `Card`, `Eyebrow`                           | `raised` is the lighter card next to a list                                                     |
+| Radio cards                       | `ChoiceGroup`                               | 220px minimum, wraps                                                                            |
+| Setting: text left, control right | `SettingRow`                                | the control drops under the text when narrow                                                    |
+| Confirm over a page               | `Sheet`                                     | scrim covers the nearest `data-sheet-host`, not the window frame                                |
+| Checkbox                          | `Check`                                     | 16px; `Toggle` is the switch                                                                    |
+| Text input, select                | `ui-input`, `ui-select` classes             | 28px                                                                                            |
+
+A page that holds these is a size container (`container: <name> / inline-size`)
+and adapts with `@container`, so it behaves the same full-page and in a narrow
+pane. The Routines page is the worked example
+(`src/styles/components/routines.css`).
+
 ## Popover menu
 
 Canonical: the account menu in `PanelPickerDialog.tsx`

@@ -68,6 +68,7 @@ function createCatalogSync({
         mine.push({
           id: project.id,
           name: project.name || "",
+          ...(project.purpose ? { purpose: project.purpose } : {}),
           folders,
           rev: revision,
           updatedAt,

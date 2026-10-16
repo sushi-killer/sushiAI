@@ -96,6 +96,12 @@ fn base_paths(log: &Path) -> Vec<String> {
 }
 
 fn assert_fresh_and_removed(log: &Path, count: usize) {
+    // A task can ask before its last base run is logged and removed on a
+    // loaded runner: wait for them, then hold the count exactly.
+    wait_until("the base runs to be logged and removed", || {
+        let paths = base_paths(log);
+        (paths.len() >= count && paths.iter().all(|p| !Path::new(p).exists())).then_some(())
+    });
     let paths = base_paths(log);
     assert_eq!(paths.len(), count, "{paths:?}");
     for (i, path) in paths.iter().enumerate() {

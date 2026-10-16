@@ -23,6 +23,7 @@
 // ORCHD_CODEX_BIN pointed at /usr/bin/false so no agent really runs. Prints
 // the JSON report and exits non-zero on any failure.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -249,7 +250,7 @@ try {
   await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
 
   app = await electron.launch({
-    args: ["."],
+    args: ELECTRON_ARGS,
     cwd: root,
     env: {
       ...process.env,

@@ -328,6 +328,32 @@ mod cases {
     }
 
     #[test]
+    fn a_file_a_check_wants_changed_is_writable_and_a_grepped_fixture_is_not() {
+        let (_dir, repo) = repo_with(&[
+            ("src/git/history.rs", "Command::new(\"git\")\n"),
+            ("src/git/branches.rs", "Command::new(\"git\")\n"),
+            ("src/git/command.rs", "fn run() {}\n"),
+            ("src/prompts/clip.rs", "fn clip() {}\n"),
+            ("data.txt", "fixture\n"),
+            ("tests/y.test.cjs", "it(\"rejects empty\")\n"),
+        ]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.fixture_data().checks = vec![
+            // An absence the base fails: the task must change these files.
+            check("! rg -n 'Command::new(\"git\")' src/git/history.rs src/git/branches.rs"),
+            check("test ! -e src/prompts/clip.rs"),
+            // The brief's form: the path is grep's pattern, not a file it reads.
+            check("{ git diff --name-only $ORCHD_BASE_SHA; git ls-files --others --exclude-standard; } | grep -qx 'src/git/command.rs'"),
+            // A match the base already has guards a fixture.
+            check("grep -q fixture data.txt && test -f impl.txt"),
+            // A test file stays protected even under an absence probe.
+            check("! rg -q 'it(\"rejects empty\")' tests/y.test.cjs"),
+        ];
+        let kept: Vec<String> = protected_hashes(&repo, "HEAD", &task).into_keys().collect();
+        assert_eq!(kept, vec!["data.txt", "tests/y.test.cjs"]);
+    }
+
+    #[test]
     fn a_file_the_task_is_asked_to_change_is_not_protected_but_tests_and_fixtures_are() {
         let (_dir, repo) = repo_with(&[
             ("prompts/orchestrator.yaml", "x\n"),

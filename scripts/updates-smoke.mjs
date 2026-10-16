@@ -1,4 +1,5 @@
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "./lib/browser.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -27,7 +28,7 @@ const app = await electron.launch({
   ...(process.env.SUSHIAI_EXECUTABLE
     ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
     : {}),
-  args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
+  args: process.env.SUSHIAI_EXECUTABLE ? ELECTRON_ARGS.slice(1) : ELECTRON_ARGS,
   env: {
     ...process.env,
     SUSHIAI_TEST_WINDOW: "hidden",

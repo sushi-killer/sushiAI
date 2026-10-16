@@ -6,6 +6,7 @@
 // { queueLength, expiresAt, buttons, exitCode }; exits non-zero unless
 // queueLength is 1, expiresAt is null and exitCode is 75.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
@@ -17,7 +18,7 @@ let app = null;
 try {
   await fs.mkdir(`${root}/artifacts`, { recursive: true });
   app = await electron.launch({
-    args: ["."],
+    args: ELECTRON_ARGS,
     cwd: root,
     env: {
       ...process.env,

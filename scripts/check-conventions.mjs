@@ -578,6 +578,29 @@ for (const dir of ["scripts", ".agents", ".github"])
         );
     }
   }
+// Tests prove logic, never prose: a test that asserts a document's wording
+// breaks on every rewrite and proves nothing. docs-map.test.cjs is the one
+// exception: it checks that the paths docs/MAP.md names exist; the rule's own
+// test holds examples as strings.
+const docTestRoot = process.env.DOC_TEST_ROOT_OVERRIDE || root;
+// A read of a repository document: `read("README.md")` through a helper, or
+// a path joined from the repository root. A fixture file in a temp dir is fine.
+const READS_DOC =
+  /(?:read\w*\(\s*|path\.join\(\s*(?:root|__dirname)[^)]*?,\s*)["'`](?:(?:README|AGENTS|CLAUDE)\.md|docs\/[^"'`]*\.md)["'`]/;
+const DOC_TEST_EXEMPT = new Set([
+  "docs-map.test.cjs",
+  "check-conventions.test.cjs",
+]);
+for (const entry of await readdir(path.join(docTestRoot, "tests")).catch(
+  () => [],
+)) {
+  if (!/\.(cjs|mjs|js)$/.test(entry) || DOC_TEST_EXEMPT.has(entry)) continue;
+  const text = await readFile(path.join(docTestRoot, "tests", entry), "utf8");
+  if (READS_DOC.test(text))
+    problems.push(
+      `tests/${entry}: reads a document to assert its wording; tests prove logic, a doc criterion is a check command`,
+    );
+}
 // A script or test that gives a daemon its own SUSHIAI_HOME must give it a HOME
 // too: `sushiai hooks install` and Codex's files resolve from HOME, and the
 // owner's real ~/.codex and ~/.sushiai/bin link are never a test's to touch.

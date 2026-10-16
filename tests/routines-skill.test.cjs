@@ -6,11 +6,8 @@ const path = require("node:path");
 
 const root = path.join(__dirname, "..");
 const SKILL = path.join(root, "electron", "extensions", "routines-skill.md");
-const DOCS = [
-  SKILL,
-  path.join(root, "docs", "routines.md"),
-  path.join(root, "docs", "releases", "unreleased", "routines.md"),
-];
+// Release fragments are deleted at release time, so no test pins one.
+const DOCS = [SKILL, path.join(root, "docs", "routines.md")];
 
 function commandList() {
   const rust = fs.readFileSync(

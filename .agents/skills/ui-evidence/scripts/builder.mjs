@@ -20,6 +20,7 @@
 // SUSHIAI_HOME, CODEX_HOME and the app data dir live in it, and the test window mode uses the mock
 // keychain. The run exits 1 on sideways overflow, a page error or a failed step.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import {
   stopDaemon,
@@ -158,7 +159,7 @@ await fs.writeFile(`${profile}/h/modules/routines.enabled`, "");
 
 // ---- app ---------------------------------------------------------------------
 const app = await electron.launch({
-  args: ["."],
+  args: ELECTRON_ARGS,
   cwd: root,
   env: {
     ...process.env,

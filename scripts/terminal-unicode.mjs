@@ -1,4 +1,5 @@
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "./lib/browser.mjs";
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 import { daemonBinary, stopDaemon } from "./lib/daemon-binary.mjs";
@@ -10,7 +11,9 @@ try {
     ...(process.env.SUSHIAI_EXECUTABLE
       ? { executablePath: process.env.SUSHIAI_EXECUTABLE }
       : {}),
-    args: process.env.SUSHIAI_EXECUTABLE ? [] : ["."],
+    args: process.env.SUSHIAI_EXECUTABLE
+      ? ELECTRON_ARGS.slice(1)
+      : ELECTRON_ARGS,
     cwd: process.cwd(),
     env: {
       ...process.env,

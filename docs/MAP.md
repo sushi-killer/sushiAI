@@ -74,7 +74,7 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `scripts/hooks` holds the agent hooks: `scripts/hooks/guard-bash.mjs`, `scripts/hooks/check-touched.mjs`, `scripts/hooks/lesson-reminder.mjs`. They are wired in `.claude/settings.json`.
 - `scripts/test-desktop.mjs` runs the desktop tests.
 - `scripts/figma-export.mjs` turns a Figma node dump into a snapshot, `scripts/figma-codegen.mjs` emits token-only CSS from it and `scripts/figma-parity.mjs` compares it with a measurement of the app. The test is `tests/figma-export.test.cjs`. The skill is `.agents/skills/figma-to-code`.
-- `.github/workflows/ci.yml` runs `npm run ci` in CI.
+- `.github/workflows/ci.yml` runs the same checks as `npm run ci` in CI, split into parallel jobs. Locally `scripts/ci.mjs` runs them in lanes through `scripts/lib/run-lanes.mjs`.
 
 ## Skills
 

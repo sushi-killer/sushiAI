@@ -24,10 +24,12 @@ fn is_plain_file(target: &str) -> bool {
             })
 }
 
-/// Whether every part of `command` names only targets the planner made: a
-/// planner test file, or a plain file that is absent on the base. A bare
-/// word, `$(…)` or a backtick in it, or a part without a target (`go test
-/// ./...`), fails.
+/// Whether `command` is about files the planner made: every part that names
+/// targets names only planner test files or plain files absent on the base,
+/// and at least one part names one. A part without targets (a build step
+/// such as `cargo build -p app`) does not decide; a bare word next to targets,
+/// `$(…)` or a backtick fails, and so does a command with no target at all
+/// (`go test ./...`).
 fn made_by_planner(task: &Task, command: &str) -> bool {
     let command = flat_command(command);
     let absent = targets_absent_on_base(&task.repo, &task.base_sha, &command);
@@ -37,12 +39,17 @@ fn made_by_planner(task: &Task, command: &str) -> bool {
             || (is_plain_file(target) && absent.iter().any(|a| a == target))
     };
     let segments = command_segments(&command);
-    !segments.is_empty()
+    segments
+        .iter()
+        .any(|segment| !check_targets(segment).is_empty())
         && segments.iter().all(|segment| {
             if segment.contains("$(") || segment.contains('`') {
                 return false;
             }
             let targets = check_targets(segment);
+            if targets.is_empty() {
+                return true;
+            }
             // Every word after the runner must be a flag or one of the
             // targets: a bare word may name a directory or a path of the base.
             let words = segment
@@ -214,3 +221,6 @@ pub(crate) fn targets_absent_on_base(repo: &str, base_sha: &str, command: &str) 
         .filter(|t| !target_in_tree(t, &files))
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

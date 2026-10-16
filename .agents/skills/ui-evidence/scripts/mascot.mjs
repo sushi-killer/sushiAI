@@ -5,6 +5,7 @@
 // network), photographs the mascot window and writes <outDir>/<prefix>-*.png.
 // Uses a throwaway profile; never the owner's profile or the dev server port.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
@@ -65,7 +66,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 900));
 try {
   await fs.mkdir(outDir, { recursive: true });
   app = await electron.launch({
-    args: ["."],
+    args: ELECTRON_ARGS,
     cwd: root,
     env: {
       ...process.env,

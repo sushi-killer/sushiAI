@@ -1,4 +1,5 @@
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -93,7 +94,7 @@ await fs.writeFile(
 
 try {
   app = await electron.launch({
-    args: ["."],
+    args: ELECTRON_ARGS,
     cwd: root,
     env: {
       ...process.env,

@@ -94,8 +94,13 @@ struct CaptureState {
     finished: bool,
 }
 
-fn collect(socket: &Path, id: &str, capture: &Capture) {
-    let attached = Conn::direct(socket, "routines-capture").and_then(|mut conn| {
+/// How long `session_watch` waits for its attach before it returns anyway.
+const ATTACH_WAIT: Duration = Duration::from_secs(5);
+
+/// Attaches to the session. `session_watch` waits for this before it returns, so a
+/// session that ends at once is still seen by the attach.
+fn attach(socket: &Path, id: &str, capture: &Capture) -> Result<Conn, String> {
+    Conn::direct(socket, "routines-capture").and_then(|mut conn| {
         let snapshot = conn
             .call("session.attach", json!({"id": id, "scrollback": 2000}))
             .map_err(|e| e.message())?;
@@ -107,7 +112,11 @@ fn collect(socket: &Path, id: &str, capture: &Capture) {
             .unwrap_or_else(|e| e.into_inner())
             .snapshot = attach.snapshot;
         Ok(conn)
-    });
+    })
+}
+
+/// Collects what an attached session prints until it exits.
+fn collect(attached: Result<Conn, String>, id: &str, capture: &Capture) {
     if let Ok(mut conn) = attached {
         while let Ok(incoming) = conn.next_incoming() {
             match incoming {
@@ -218,9 +227,16 @@ impl Connector for DaemonConnector {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_string(), capture.clone());
-        let socket = self.socket.clone();
-        let id = id.to_string();
-        std::thread::spawn(move || collect(&socket, &id, &capture));
+        // Waits for the attach, bounded: a session that ends at once is still seen, and a
+        // stalled daemon never holds the caller (the routines event reader).
+        let (socket, id) = (self.socket.clone(), id.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let attached = attach(&socket, &id, &capture);
+            let _ = tx.send(());
+            collect(attached, &id, &capture);
+        });
+        let _ = rx.recv_timeout(ATTACH_WAIT);
     }
 
     fn session_read(&self, id: &str) -> Result<String, String> {

@@ -8,8 +8,65 @@
 //! settings define one, and a forced advisor run on the planner route that
 //! re-plans the remaining work), then `failed`.
 
-use super::*;
-use crate::overseer::Entry;
+#[cfg(test)]
+use crate::engine::decision::fail_and_continue;
+#[cfg(test)]
+use crate::engine::lifecycle::attempt_files::AttemptFiles;
+#[cfg(test)]
+use crate::engine::questions::parking::QuestionSlot;
+#[cfg(test)]
+use crate::engine::run_control::TaskSignals;
+#[cfg(test)]
+use crate::policy::variant::Variant;
+#[cfg(test)]
+use crate::task::AnsweredBy;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::Attempt;
+#[cfg(test)]
+use crate::task::Question;
+
+#[cfg(test)]
+use crate::engine::decision::advance_after_failure;
+#[cfg(test)]
+use crate::engine::decision::advance_after_failure_with;
+#[cfg(test)]
+use crate::engine::decision::LoopSignal;
+#[cfg(test)]
+use crate::engine::graph::dependencies::DEPENDENCY_QUESTION;
+#[cfg(test)]
+use crate::policy::routing::Tier;
+#[cfg(test)]
+use crate::task::VerifyOutcome;
+
+use crate::clock::now_ms;
+use crate::engine::decision;
+use crate::engine::decision::implement_attempt_count;
+use crate::engine::decision::EXHAUSTED_ANSWER_PREFIX;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::init_git_repo;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::harness::cancel::CancelToken;
+use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
+use crate::prompts::clip::truncate_chars;
+use crate::task::AttemptStatus;
+use crate::task::Blame;
+use crate::task::FailureKind;
+use crate::task::QuestionKind;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use crate::task::UnreviewedPart;
+use serde_json::json;
+use std::time::Duration;
+
+use crate::task::notes::overseer::Entry;
 
 /// Decision line a changed approach leaves for the owner to read.
 pub(super) fn approach_line(attempt_n: u32) -> String {
@@ -51,7 +108,7 @@ pub(super) fn base_tails<'a>(app: &'a App, base_sha: &str) -> impl Fn(&str) -> O
 /// failing test also fails on the base, or a test passed and failed on the
 /// same tree. A change that breaks a test it did not touch is not.
 pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> bool {
-    let signals = crate::precedents::attempt_signals(task, at);
+    let signals = crate::task::attempts::signals::attempt_signals(task, at);
     if signals.iter().any(|s| s == "timeout" || s == "install") {
         return true;
     }
@@ -64,11 +121,11 @@ pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> boo
         .iter()
         .filter(|o| o.code != Some(0))
         .any(|o| {
-            let now = crate::precedents::failing_tests(&o.tail);
+            let now = crate::policy::test_output::failing_tests(&o.tail);
             if now.is_empty() {
                 return false;
             }
-            let on_base = base(&o.command).map(|t| crate::precedents::failing_tests(&t));
+            let on_base = base(&o.command).map(|t| crate::policy::test_output::failing_tests(&t));
             if on_base.is_some_and(|b| now.iter().all(|t| b.contains(t))) {
                 return true;
             }
@@ -80,7 +137,7 @@ pub(super) fn environment_failure(task: &Task, at: usize, base: BaseTail) -> boo
                         .verify
                         .iter()
                         .filter(|e| e.command == o.command)
-                        .any(|e| crate::precedents::failing_tests(&e.tail) != now)
+                        .any(|e| crate::policy::test_output::failing_tests(&e.tail) != now)
             })
         })
 }
@@ -112,19 +169,21 @@ pub(super) fn failed_on_environment(task: &Task, base: BaseTail) -> bool {
 /// re-reads the failure and names a different plan for the rest of the work).
 pub(super) fn change_approach(task: &mut Task, settings: &Settings, attempt_n: u32) {
     let up = task.tier.up();
-    let tier_note = if up != task.tier && settings.tiers.get(&up) != settings.tiers.get(&task.tier)
-    {
-        task.tier = up;
-        task.tier_fallback = None;
+    let promote = up != task.tier && settings.tiers.get(&up) != settings.tiers.get(&task.tier);
+    let tier_note = if promote {
         format!("tier {}", up.as_str())
     } else {
         "the same tier".to_string()
     };
-    task.loop_state.approach_changed_after = Some(attempt_n);
-    task.decisions.push(format!(
-        "{} ({tier_note}; the planner re-plans the rest)",
-        approach_line(attempt_n)
-    ));
+    let tier = promote.then_some(up);
+    task.change_approach(
+        tier,
+        attempt_n,
+        format!(
+            "{} ({tier_note}; the planner re-plans the rest)",
+            approach_line(attempt_n)
+        ),
+    );
 }
 
 /// The text the owner reads when a task ends `failed`.
@@ -178,13 +237,13 @@ pub(super) fn end_ladder(app: &App, task: &mut Task) {
         .and_then(|a| a.failure.as_ref())
         .map(|f| decision::signature_phrase(&f.signature))
         .unwrap_or_else(|| "a failure".to_string());
-    task.question = None;
+    task.clear_question();
     task.mark_failed();
-    task.decisions.push(format!(
+    task.record_decision(format!(
         "Ladder: stopped after {} attempt(s) on {signature}; continue, a changed approach and the orchestrator's continues were used up",
         implement_attempt_count(task)
     ));
-    task.updated_at = now_ms();
+    task.touch(now_ms());
     app.save_task_logged(task);
     app.broadcast_task(task);
 }
@@ -277,19 +336,13 @@ pub(super) fn inherit_unreviewed(app: &App, task: &mut Task) {
             && child.status == TaskStatus::Done
             && !child.archived
         {
-            task.unreviewed = true;
-            if !task
-                .loop_state
-                .unreviewed_parts
-                .iter()
-                .any(|p| p.id == child.id)
-            {
-                task.loop_state.unreviewed_parts.push(UnreviewedPart {
+            task.inherit_unreviewed_part(
+                UnreviewedPart {
                     id: child.id.clone(),
                     title: child.title.clone(),
-                });
-                task.decisions.push(super::pr::unreviewed_part_line(&child));
-            }
+                },
+                crate::delivery::pr::body::unreviewed_part_line(&child),
+            );
         }
     }
 }
@@ -343,8 +396,7 @@ impl App {
         }
         for id in &failed {
             self.update_task(id, |t| {
-                t.loop_state.agent_restarted = true;
-                t.decisions.push(AGENT_RESTART_LINE.to_string());
+                t.record_agent_restart(AGENT_RESTART_LINE.to_string());
             })?;
         }
         Ok(())
@@ -368,7 +420,7 @@ impl App {
                     // to ask, the ladder takes its next rung.
                     let asked_again = self.settings.read().unwrap().auto_answer
                         && (task.loop_state.non_owner_continues as usize)
-                            < questions::MAX_ORCHESTRATOR_CONTINUES;
+                            < crate::engine::questions::exhausted::MAX_ORCHESTRATOR_CONTINUES;
                     if !asked_again {
                         self.step_unanswered_exhausted(&mut task);
                     }
@@ -382,12 +434,7 @@ impl App {
                     else {
                         continue;
                     };
-                    task.question = None;
-                    task.unreviewed = true;
-                    task.loop_state.unreviewed_attempt = Some(n);
-                    task.decisions.push(unreviewed_line(n));
-                    task.status = TaskStatus::Queued;
-                    task.updated_at = now_ms();
+                    task.accept_unreviewed_attempt(n, unreviewed_line(n), now_ms());
                     self.save_task_logged(&task);
                     self.broadcast_task(&task);
                 }
@@ -414,13 +461,14 @@ impl App {
             "Task \"{}\" is done but unreviewed: no review route gave a verdict. Its work was not landed; it waits on branch {} and a pull request marked unreviewed is opened.",
             task.title, task.branch
         );
-        chat::post_note(self, &task.repo, &text);
+        crate::engine::chat::store::post_note(self, &task.repo, &text);
         self.record_overseer(
             Entry::new(
                 "asked_owner",
                 &task.repo,
                 Some(&task.id),
-                &truncate_chars(&text, overseer::MAX_TEXT_CHARS),
+                &truncate_chars(&text, crate::task::notes::overseer::MAX_TEXT_CHARS),
+                crate::clock::now_ms(),
             )
             .with_detail(&text)
             .with_decision(&[key]),
@@ -464,13 +512,14 @@ impl App {
             return;
         }
         let report = failure_report(task);
-        chat::post_note(self, &task.repo, &report);
+        crate::engine::chat::store::post_note(self, &task.repo, &report);
         self.record_overseer(
             Entry::new(
                 "asked_owner",
                 &task.repo,
                 Some(&task.id),
-                &truncate_chars(&report, overseer::MAX_TEXT_CHARS),
+                &truncate_chars(&report, crate::task::notes::overseer::MAX_TEXT_CHARS),
+                crate::clock::now_ms(),
             )
             .with_detail(&report)
             .with_decision(&[key]),
@@ -479,7 +528,16 @@ impl App {
             let prompt = crate::prompts::get("overseer_failed")
                 .replace("{id}", &task.id)
                 .replace("{title}", &task.title);
-            chat::wake_overseer(self, &task.repo, prompt, false, "failed", Some(&task.id));
+            crate::engine::chat::wake::wake_overseer(
+                self,
+                &task.repo,
+                crate::engine::chat::wake::WakeRequest::new(
+                    prompt,
+                    false,
+                    "failed",
+                    Some(&task.id),
+                ),
+            );
         }
     }
 }
@@ -505,14 +563,10 @@ mod tests {
         a
     }
 
-    fn pending() -> Arc<StdMutex<Option<oneshot::Sender<Reply>>>> {
-        Arc::new(StdMutex::new(None))
-    }
-
     #[test]
     fn timeouts_do_not_count_toward_the_same_failure_stop() {
         let mut slow = task_with_status(TaskStatus::Running);
-        slow.attempts = (1..=3)
+        slow.fixture_data().attempts = (1..=3)
             .map(|n| timed_out_attempt(n, "verify:timeout"))
             .collect();
         // Three timeouts in a row: the environment, so the task goes on.
@@ -520,7 +574,7 @@ mod tests {
         assert!(slow.question.is_none());
         // The same three failures without such a signal stop the loop.
         let mut real = task_with_status(TaskStatus::Running);
-        real.attempts = (1..=3)
+        real.fixture_data().attempts = (1..=3)
             .map(|n| attempt_with_failure(n, "verify:timeout"))
             .collect();
         assert!(!advance_after_failure(&mut real, 10));
@@ -534,26 +588,21 @@ mod tests {
     async fn the_end_of_the_ladder_fails_the_task_with_a_report_and_asks_nothing() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.title = "Ship the change".into();
-        task.attempts = vec![attempt_with_failure(1, "verify:boom")];
+        task.fixture_data().title = "Ship the change".into();
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "verify:boom")];
         app.store.save_task(&task).unwrap();
-        let (id, pending) = (task.id.clone(), pending());
+        let id = task.id.clone();
+        let signals = TaskSignals::new();
         let mut budget = 1;
         let mut permit = None;
-        let cancel = CancelToken::new();
 
         // Budget spent: one changed approach, not a question.
         let signal = fail_and_continue(
             &app,
-            &id,
             &mut task,
-            0,
-            FailureKind::Verify,
-            "boom".into(),
+            decision::failure(FailureKind::Verify, "boom".into()),
             &mut budget,
-            &pending,
-            &cancel,
-            &mut permit,
+            &mut QuestionSlot::new(&signals, &mut permit),
         )
         .await;
         assert!(matches!(signal, LoopSignal::Continue));
@@ -563,20 +612,17 @@ mod tests {
         assert_eq!(budget, 3);
 
         // The approach is already changed: the task fails.
-        task.attempts.push(attempt_with_failure(2, "verify:boom"));
-        task.status = TaskStatus::Running;
+        task.fixture_data()
+            .attempts
+            .push(attempt_with_failure(2, "verify:boom"));
+        task.resume_phase(TaskStatus::Running, task.updated_at);
         budget = 2;
         let signal = fail_and_continue(
             &app,
-            &id,
             &mut task,
-            1,
-            FailureKind::Verify,
-            "boom".into(),
+            decision::failure(FailureKind::Verify, "boom".into()),
             &mut budget,
-            &pending,
-            &cancel,
-            &mut permit,
+            &mut QuestionSlot::new(&signals, &mut permit),
         )
         .await;
         assert!(matches!(signal, LoopSignal::Stop));
@@ -605,8 +651,8 @@ mod tests {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Done);
         app.notify_task_failed(&task);
-        task.status = TaskStatus::Failed;
-        task.parent = Some("parent".into());
+        task.resume_phase(TaskStatus::Failed, task.updated_at);
+        task.fixture_data().parent = Some("parent".into());
         app.notify_task_failed(&task);
         assert!(app.notice_log().is_empty());
     }
@@ -643,9 +689,9 @@ mod tests {
     #[test]
     fn a_change_that_breaks_an_untouched_test_three_times_still_stops_the_loop() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = (1..=3).map(broken_untouched_test).collect();
+        task.fixture_data().attempts = (1..=3).map(broken_untouched_test).collect();
         // The signal is there (the failing file is outside the diff) ...
-        assert!(!crate::precedents::attempt_signals(&task, 2).is_empty());
+        assert!(!crate::task::attempts::signals::attempt_signals(&task, 2).is_empty());
         // ... but nothing backs it up: it is the approach, not the environment.
         assert!(!advance_after_failure(&mut task, 10));
         assert_eq!(
@@ -658,7 +704,7 @@ mod tests {
     #[test]
     fn an_outside_diff_failure_that_also_fails_on_the_base_is_the_environment() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = (1..=3).map(broken_untouched_test).collect();
+        task.fixture_data().attempts = (1..=3).map(broken_untouched_test).collect();
         let base = |_: &str| Some("not ok 1 - tests/untouched.test.cjs\n".to_string());
         assert!(failed_on_environment(&task, &base));
         assert!(advance_after_failure_with(&mut task, 10, &base));
@@ -668,7 +714,7 @@ mod tests {
     #[test]
     fn a_dependency_that_broke_an_untouched_test_is_not_restarted_by_itself() {
         let mut dep = task_with_status(TaskStatus::Failed);
-        dep.attempts = (1..=3).map(broken_untouched_test).collect();
+        dep.fixture_data().attempts = (1..=3).map(broken_untouched_test).collect();
         assert!(!failed_on_environment(&dep, &|_| None));
     }
 
@@ -679,27 +725,30 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         let repo = repo.display().to_string();
         let mut dep = task_with_status(TaskStatus::Failed);
-        dep.id = "dep".into();
-        dep.repo = repo.clone();
+        dep.fixture_data().id = "dep".into();
+        dep.fixture_data().repo = repo.clone();
         let mut waiting = task_with_status(TaskStatus::Waiting);
-        waiting.id = "waiting".into();
-        waiting.repo = repo;
-        waiting.depends_on = vec!["dep".into()];
-        waiting.question = Some(Question::new(
+        waiting.fixture_data().id = "waiting".into();
+        waiting.fixture_data().repo = repo;
+        waiting.fixture_data().depends_on = vec!["dep".into()];
+        waiting.fixture_data().question = Some(Question::new(
             format!("{DEPENDENCY_QUESTION} dep"),
             vec!["retry the dependency".into(), "stop".into()],
             QuestionKind::DependencyEnded,
             AskedBy::Verify,
+            crate::clock::now_ms(),
         ));
         app.store.save_task(&dep).unwrap();
         app.store.save_task(&waiting).unwrap();
         let retry = || {
             app.answer_dependency_question(
                 waiting.clone(),
-                "retry the dependency",
+                &crate::engine::questions::reply::Reply {
+                    text: ("retry the dependency").to_string(),
+                    default_evidence: None,
+                    like: None,
+                },
                 Some(AnsweredBy::Overseer),
-                None,
-                None,
             )
         };
         // The first agent retry goes through, and its record survives the requeue.
@@ -732,41 +781,36 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         init_git_repo(&repo);
         let mut parent = task_with_status(TaskStatus::Running);
-        parent.id = "parent".into();
-        parent.repo = repo.display().to_string();
-        parent.worktree = parent.repo.clone();
-        parent.variant = Some(Variant {
+        parent.fixture_data().id = "parent".into();
+        parent.fixture_data().repo = repo.display().to_string();
+        parent.fixture_data().worktree = parent.repo.clone();
+        parent.fixture_data().variant = Some(Variant {
             land: true,
             ..Variant::default()
         });
-        parent.attempts = vec![attempt_with_failure(1, "none")];
+        parent.fixture_data().attempts = vec![attempt_with_failure(1, "none")];
         let mut child = task_with_status(TaskStatus::Done);
-        child.id = "child".into();
-        child.repo = parent.repo.clone();
-        child.parent = Some("parent".into());
-        child.unreviewed = true;
+        child.fixture_data().id = "child".into();
+        child.fixture_data().repo = parent.repo.clone();
+        child.fixture_data().parent = Some("parent".into());
+        child.fixture_data().unreviewed = true;
         app.store.save_task(&child).unwrap();
         // The parent's own attempt had a verdict: its flag was reset.
-        parent.unreviewed = false;
+        parent.fixture_data().unreviewed = false;
+        app.store.save_task(&parent).unwrap();
         let mut permit = None;
-        let pending = Arc::new(StdMutex::new(None));
+        let signals = TaskSignals::new();
         let run_dir = dir.path().join("run");
         std::fs::create_dir(&run_dir).unwrap();
         let wt = repo.clone();
-        finish_attempt(
-            &app,
-            "parent",
-            &mut parent,
-            0,
-            1,
-            &wt,
-            &run_dir,
-            &mut 3,
-            &pending,
-            &CancelToken::new(),
-            &mut permit,
-        )
-        .await;
+        AttemptFiles::new(0, 1, wt, run_dir)
+            .finish(
+                &app,
+                &mut parent,
+                &mut 3,
+                &mut QuestionSlot::new(&signals, &mut permit),
+            )
+            .await;
         assert!(parent.unreviewed, "{:?}", parent.decisions);
         assert!(
             !parent.decisions.iter().any(|d| d.starts_with("Land:")),
@@ -781,12 +825,12 @@ mod tests {
     async fn a_task_that_fails_again_with_the_same_attempts_is_told_again() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = vec![attempt_with_failure(1, "verify:boom")];
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "verify:boom")];
         task.mark_failed();
         app.notify_task_failed(&task);
         app.notify_task_failed(&task);
         // A restart whose setup fails three times: Failed again, same attempts.
-        task.status = TaskStatus::Running;
+        task.resume_phase(TaskStatus::Running, task.updated_at);
         task.mark_failed();
         app.notify_task_failed(&task);
         let told = app
@@ -801,23 +845,25 @@ mod tests {
     async fn open_attempts_failing_and_no_verdict_questions_are_retired_on_start() {
         let (app, _dir) = test_app();
         let mut exhausted = task_with_status(TaskStatus::Waiting);
-        exhausted.attempts = vec![attempt_with_failure(1, "verify:boom")];
-        exhausted.question = Some(Question::new(
+        exhausted.fixture_data().attempts = vec![attempt_with_failure(1, "verify:boom")];
+        exhausted.fixture_data().question = Some(Question::new(
             "Attempts keep failing",
             vec!["continue".into(), "stop".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         ));
         let mut silent = task_with_status(TaskStatus::Waiting);
-        silent.id = "silent".into();
+        silent.fixture_data().id = "silent".into();
         let mut attempt = attempt_with_failure(1, "blocked:no verdict");
         attempt.status = AttemptStatus::Blocked;
-        silent.attempts = vec![attempt];
-        silent.question = Some(Question::new(
+        silent.fixture_data().attempts = vec![attempt];
+        silent.fixture_data().question = Some(Question::new(
             "The review gave no verdict",
             vec!["approve".into()],
             QuestionKind::ReviewNoVerdict,
             AskedBy::Review,
+            crate::clock::now_ms(),
         ));
         app.store.save_task(&exhausted).unwrap();
         app.store.save_task(&silent).unwrap();
@@ -833,27 +879,30 @@ mod tests {
         assert_eq!(pending_unreviewed(&silent), Some(0));
         // A decision line pushed later does not hide the pending attempt.
         let mut later = silent.clone();
-        later.decisions.push("Owner: looked at it".into());
+        later
+            .fixture_data()
+            .decisions
+            .push("Owner: looked at it".into());
         assert_eq!(pending_unreviewed(&later), Some(0));
-        later.loop_state.unreviewed_attempt = None;
+        later.fixture_data().loop_state.unreviewed_attempt = None;
         assert_eq!(pending_unreviewed(&later), None);
     }
 
     #[test]
     fn the_changed_approach_is_a_field_not_a_decision_line() {
         let mut task = task_with_status(TaskStatus::Running);
-        task.attempts = vec![attempt_with_failure(1, "verify:x")];
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "verify:x")];
         assert!(!approach_changed(&task) && !approach_pending(&task));
         change_approach(&mut task, &Settings::default(), 1);
         assert!(approach_changed(&task) && approach_pending(&task));
-        task.decisions.clear();
+        task.fixture_data().decisions.clear();
         assert!(approach_changed(&task) && approach_pending(&task));
     }
 
     #[test]
     fn the_resumed_planner_gets_a_continuation_not_the_parse_failure_brief() {
         let variant = Variant::default();
-        let text = crate::brief::build_plan_continue_brief(&variant, true);
+        let text = crate::engine::planning::prompt::build_plan_continue_brief(&variant, true);
         assert!(text.contains("cut off"), "{text}");
         assert!(!text.contains("did not contain"), "{text}");
     }
@@ -862,12 +911,12 @@ mod tests {
     async fn an_environment_failure_of_a_top_level_task_is_restarted_once_by_code() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Failed);
-        task.repo = std::env::temp_dir().display().to_string();
-        task.attempts = vec![attempt_with_failure(1, "verify:check")];
-        task.attempts[0].stage = Stage::Implement;
+        task.fixture_data().repo = std::env::temp_dir().display().to_string();
+        task.fixture_data().attempts = vec![attempt_with_failure(1, "verify:check")];
+        task.fixture_data().attempts[0].stage = Stage::Implement;
         // Only the typed cause counts: the failure text says nothing.
         assert!(!restartable_on_environment(&task));
-        task.attempts[0].cause = Some(Blame::Environment);
+        task.fixture_data().attempts[0].cause = Some(Blame::Environment);
         assert!(restartable_on_environment(&task));
         app.store.save_task(&task).unwrap();
         let restarts = |app: &App| {

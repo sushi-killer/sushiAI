@@ -8,8 +8,25 @@
 //! entry with the text [`DEFERRED`] carries the keys of a notice held for the
 //! morning, and its detail is the notice.
 
-use super::*;
-use crate::overseer::Entry;
+#[cfg(test)]
+use crate::task::AskedBy;
+
+use crate::clock::now_ms;
+use crate::engine::digest;
+use crate::engine::state::App;
+use crate::policy::questions::owner_only;
+use crate::policy::settings::Settings;
+use crate::store;
+use crate::task::Question;
+#[cfg(test)]
+use crate::task::QuestionKind;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
+
+use crate::policy::questions::identity::{kind_name, option_part};
+use crate::task::notes::overseer::Entry;
 
 /// Log text of a notice held back by quiet hours.
 pub(crate) const DEFERRED: &str = "Deferred to the morning digest (quiet hours)";
@@ -86,24 +103,6 @@ pub(crate) fn in_quiet(window: Option<(u16, u16)>, minute: u16) -> bool {
         Some((from, to)) if from < to => (from..to).contains(&minute),
         Some((from, to)) => minute >= from || minute < to,
     }
-}
-
-/// A question kind as its serialized name.
-pub(crate) fn kind_name(kind: QuestionKind) -> String {
-    serde_json::to_value(kind)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
-}
-
-/// The sorted options of a question joined by 0x1f, each on one line.
-pub(crate) fn option_part(options: &[String]) -> String {
-    let mut options: Vec<String> = options
-        .iter()
-        .map(|o| o.replace(['\n', '\u{1f}'], " "))
-        .collect();
-    options.sort();
-    options.join("\u{1f}")
 }
 
 /// The key of a question: task id, kind, sorted options and, when known, the
@@ -243,7 +242,7 @@ impl App {
         tasks
             .into_iter()
             .filter(|t| t.status == TaskStatus::Waiting && !t.archived)
-            .filter_map(|t| Some((t.id, t.question?.asked_at.unwrap_or(0))))
+            .filter_map(|t| Some((t.id.clone(), t.question.as_ref()?.asked_at.unwrap_or(0))))
             .collect()
     }
 
@@ -281,7 +280,11 @@ impl App {
 
     /// The overseer log, newest first.
     pub(crate) fn notice_log(&self) -> Vec<Entry> {
-        crate::overseer::read(&self.data_dir, None, Some(crate::overseer::MAX_LINES))
+        crate::store::overseer::read(
+            &self.data_dir,
+            None,
+            Some(crate::store::overseer::MAX_LINES),
+        )
     }
 
     /// The gate for a finished overseer turn; `None` for a wake the gate does
@@ -348,10 +351,10 @@ impl App {
             decision_key: key,
             repo: task.repo.clone(),
             task_id: task.id.clone(),
-            kind_title: crate::overseer::question_title(question.kind, &question.text),
+            kind_title: crate::task::notes::overseer::question_title(question.kind, &question.text),
             parked_at: now,
         });
-        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &parked) {
+        if let Err(e) = store::files::write_json_atomic(&self.quiet_parked_path(), &parked) {
             eprintln!("orch: recording a parked question failed: {e}");
         }
     }
@@ -418,12 +421,12 @@ impl App {
                 lines.len(),
                 lines.join("\n")
             );
-            if !chat::post_note(self, &repo, &text) {
+            if !crate::engine::chat::store::post_note(self, &repo, &text) {
                 continue;
             }
             let keys: Vec<String> = listed.iter().map(|(p, _)| p.decision_key.clone()).collect();
             left.retain(|k| !keys.contains(k));
-            let mut told = Entry::new("asked_owner", &repo, None, &text)
+            let mut told = Entry::new("asked_owner", &repo, None, &text, now_ms())
                 .with_detail(&text)
                 .with_decision(&keys);
             told.ts = now.max(told.ts);
@@ -435,7 +438,7 @@ impl App {
             .into_iter()
             .filter(|p| left.contains(&p.decision_key))
             .collect();
-        if let Err(e) = store::write_json_atomic(&self.quiet_parked_path(), &rest) {
+        if let Err(e) = store::files::write_json_atomic(&self.quiet_parked_path(), &rest) {
             eprintln!("orch: updating parked questions failed: {e}");
         }
     }
@@ -500,12 +503,18 @@ impl App {
         }
         for (entry, keys) in held.into_iter().rev() {
             let text = entry.detail.clone().unwrap_or_else(|| entry.text.clone());
-            if !chat::post_note(self, &entry.repo, &text) {
+            if !crate::engine::chat::store::post_note(self, &entry.repo, &text) {
                 continue;
             }
-            let mut told = Entry::new("asked_owner", &entry.repo, entry.task_id.as_deref(), &text)
-                .with_detail(&text)
-                .with_decision(&keys);
+            let mut told = Entry::new(
+                "asked_owner",
+                &entry.repo,
+                entry.task_id.as_deref(),
+                &text,
+                now_ms(),
+            )
+            .with_detail(&text)
+            .with_decision(&keys);
             told.ts = now.max(told.ts);
             self.record_overseer(told);
         }
@@ -528,7 +537,7 @@ mod tests {
     }
 
     fn noticed(key: &str, ts: i64) -> Entry {
-        let mut e = Entry::new("asked_owner", "/repo", None, "Which way?")
+        let mut e = Entry::new("asked_owner", "/repo", None, "Which way?", now_ms())
             .with_decision(&[key.to_string()]);
         e.ts = ts;
         e
@@ -544,6 +553,7 @@ mod tests {
                 options.iter().map(|o| o.to_string()).collect(),
                 QuestionKind::PlanQuestion,
                 AskedBy::Plan,
+                crate::clock::now_ms(),
             );
             q.asked_at = Some(1_000);
             q
@@ -562,6 +572,7 @@ mod tests {
             vec!["A".into(), "B".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Plan,
+            crate::clock::now_ms(),
         );
         first.asked_at = Some(1_000);
         let mut second = first.clone();
@@ -621,7 +632,7 @@ mod tests {
 
     #[test]
     fn an_entry_without_a_decision_never_counts_and_a_digest_does() {
-        let mut plain = Entry::new("asked_owner", "/repo", None, "old note");
+        let mut plain = Entry::new("asked_owner", "/repo", None, "old note", now_ms());
         plain.ts = T0;
         let s = settings(4, "");
         assert_eq!(verdict(&[plain], "k", T0 + MIN, NOON, &s), Verdict::Notify);
@@ -706,7 +717,7 @@ mod tests {
                 Verdict::Resolved => "done",
                 _ => "skipped",
             };
-            let mut e = Entry::new(kind, "/repo", None, "turn").with_decision(&open);
+            let mut e = Entry::new(kind, "/repo", None, "turn", now_ms()).with_decision(&open);
             e.ts = now;
             log.push(e);
         }

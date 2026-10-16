@@ -68,11 +68,11 @@ fn simple_hash_is_stable_and_sensitive_to_content() {
 #[tokio::test]
 async fn helpers_folder_implement_attempt_keeps_a_unique_number_after_planning() {
     let (app, _dir, mut task, _) = slow_helper_task();
-    task.status = TaskStatus::Queued;
-    task.attempts[0].stage = Stage::Plan;
-    task.attempts[0].status = AttemptStatus::Passed;
-    task.attempts[0].failure = None;
-    task.brief_check.done = true;
+    task.fixture_data().status = TaskStatus::Queued;
+    task.fixture_data().attempts[0].stage = Stage::Plan;
+    task.fixture_data().attempts[0].status = AttemptStatus::Passed;
+    task.fixture_data().attempts[0].failure = None;
+    task.fixture_data().brief_check.done = true;
     {
         let mut settings = app.settings.write().unwrap();
         settings.brief_check_route.clear();
@@ -123,7 +123,7 @@ async fn concurrent_task_updates_preserve_every_decision() {
                 barrier.wait();
                 app.update_task(&id, |task| {
                     std::thread::sleep(Duration::from_millis(5));
-                    task.decisions.push(i.to_string());
+                    task.fixture_data().decisions.push(i.to_string());
                 })
                 .unwrap();
             })
@@ -172,7 +172,7 @@ async fn save_task_logged_reports_task_id_on_failure() {
     if std::env::var_os(CHILD_ENV).is_some() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Queued);
-        task.id = ID.to_string();
+        task.fixture_data().id = ID.to_string();
         std::fs::create_dir_all(app.store.task_path(ID)).unwrap();
         app.save_task_logged(&task);
         return;

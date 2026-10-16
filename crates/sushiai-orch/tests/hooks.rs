@@ -3,7 +3,12 @@
 
 mod common;
 
-use common::*;
+use common::process::Daemon;
+
+use common::attempts::run_file;
+use common::harness::{fake_harness_script, FAKE_CLAUDE_HOOK_SCRIPT, FAKE_CLAUDE_PASS};
+use common::polling::{poll_task_status, remove_dir_retrying};
+use common::repository::init_git_repo;
 
 #[test]
 fn stop_hook_blocks_on_failing_verify_then_task_passes_once_fixed() {

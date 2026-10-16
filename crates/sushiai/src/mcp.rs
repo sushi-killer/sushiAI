@@ -214,7 +214,7 @@ pub fn run(args: impl Iterator<Item = String>) -> i32 {
     sushiai_orch::prompts::set_data_dir(&crate::orch_cli::data_dir(&home));
     // The daemon is reached on the first tool call: `initialize` and `tools/list` need none.
     let call = crate::daemon_client::orch_caller("mcp");
-    sushiai_orch::mcp::serve_stdio(
+    sushiai_orch::api::mcp::serve_stdio(
         task,
         read_only,
         call,

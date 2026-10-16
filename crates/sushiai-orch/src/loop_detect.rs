@@ -1,17 +1,11 @@
 //! The live loop detector (`variant.loop_detect`): rules from OpenHands'
-//! stuck detector, run over a Claude implement run's stream. The stall
+//! stuck detector, run over a Claude or Codex implement run's stream. The stall
 //! watchdog only catches silence; an agent repeating itself looks busy.
 
 use std::collections::BTreeMap;
 
 /// The same tool call (name + identical input) this many times in a row.
 const REPEATED_CALLS: u32 = 3;
-/// This many consecutive tool results that are errors with the same text
-/// (digits ignored). Audit 2026-10: all 13 loop kills in 186 tasks were this
-/// rule, firing on a normal red-green cycle (`cargo test` exit 101, a
-/// formatter diff, `git status` exit 1) whose output differs each time; a
-/// real loop repeats one error, so only a repeat counts.
-const ERROR_STREAK: u32 = 3;
 /// The same file edited this many times with no command run in between.
 // ponytail: any command counts as a check -- agents run a targeted test, not the
 // task's exact verify string; per-verify matching if this misses real loops.
@@ -31,8 +25,6 @@ pub struct LoopHit {
 pub struct LoopDetector {
     last_call: Option<(String, String)>,
     call_run: u32,
-    error_run: u32,
-    last_error: Option<String>,
     edits: BTreeMap<String, u32>,
 }
 
@@ -56,7 +48,6 @@ impl LoopDetector {
         for b in blocks {
             let hit = match (ty, b.get("type").and_then(|x| x.as_str())) {
                 ("assistant", Some("tool_use")) => self.tool_call(b),
-                ("user", Some("tool_result")) => self.tool_result(b),
                 _ => None,
             };
             if hit.is_some() {
@@ -66,26 +57,14 @@ impl LoopDetector {
         None
     }
 
-    /// Codex `item.*` events: a command counts as a Bash call when it starts
-    /// and as a result when it completes; a completed `file_change` edits
-    /// each of its paths.
+    /// Codex `item.*` events: a command counts as a Bash call when it starts;
+    /// a completed `file_change` edits each of its paths.
     fn codex_item(&mut self, ty: &str, item: &serde_json::Value) -> Option<LoopHit> {
         let started = ty == "item.started";
         match item.get("type").and_then(|x| x.as_str())? {
             "command_execution" if started => {
                 let cmd = item.get("command").and_then(|x| x.as_str())?;
                 self.call("Bash", serde_json::json!({ "command": cmd }))
-            }
-            "command_execution" if ty == "item.completed" => {
-                let code = item.get("exit_code").and_then(|x| x.as_i64());
-                let text = item
-                    .get("aggregated_output")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
-                self.result(
-                    code.is_some_and(|c| c != 0),
-                    format!("Exit code {}\n{text}", code.unwrap_or(0)),
-                )
             }
             "file_change" if ty == "item.completed" => {
                 let changes = item.get("changes")?.as_array()?;
@@ -144,63 +123,6 @@ impl LoopDetector {
             ),
         })
     }
-
-    fn tool_result(&mut self, b: &serde_json::Value) -> Option<LoopHit> {
-        self.result(result_is_error(b), result_text(b))
-    }
-
-    fn result(&mut self, is_error: bool, text: String) -> Option<LoopHit> {
-        if !is_error {
-            self.error_run = 0;
-            self.last_error = None;
-            return None;
-        }
-        let key: String = text
-            .chars()
-            .filter(|c| !c.is_ascii_digit())
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if self.last_error.as_ref() == Some(&key) {
-            self.error_run += 1;
-        } else {
-            self.error_run = 1;
-            self.last_error = Some(key);
-        }
-        (self.error_run >= ERROR_STREAK).then(|| LoopHit {
-            rule: "error_streak",
-            detail: format!(
-                "Loop detected (error_streak): {} tool results in a row were errors; the last one: {}",
-                self.error_run,
-                clip(&text, 300)
-            ),
-        })
-    }
-}
-
-fn result_text(b: &serde_json::Value) -> String {
-    match b.get("content") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// `is_error`, or a Bash result reporting a non-zero `Exit code N`.
-fn result_is_error(b: &serde_json::Value) -> bool {
-    if b.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
-        return true;
-    }
-    result_text(b)
-        .strip_prefix("Exit code ")
-        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|n| n.parse::<i32>().ok())
-        .is_some_and(|n| n != 0)
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -246,53 +168,6 @@ mod tests {
         let a = call("Read", json!({"file_path":"a.rs"}));
         let b = call("Read", json!({"file_path":"b.rs"}));
         assert!(run(&mut d, &[a.clone(), a.clone(), b, a.clone(), a]).is_none());
-    }
-
-    #[test]
-    fn three_error_results_in_a_row_fire_but_a_success_resets() {
-        let mut d = LoopDetector::new();
-        let bad = result("nope", true);
-        assert!(run(
-            &mut d,
-            &[
-                bad.clone(),
-                bad.clone(),
-                result("ok", false),
-                bad.clone(),
-                bad.clone()
-            ]
-        )
-        .is_none());
-        assert_eq!(d.feed(&bad).unwrap().rule, "error_streak");
-    }
-
-    #[test]
-    fn failures_with_different_output_are_a_red_green_cycle_not_a_loop() {
-        let mut d = LoopDetector::new();
-        let lines: Vec<String> = ["test a failed", "formatter diff in b.rs", "git status", "c"]
-            .iter()
-            .map(|t| result(&format!("Exit code 1\n{t}"), false))
-            .collect();
-        assert!(run(&mut d, &lines).is_none());
-        // The same failure again, only its timing differs.
-        let mut d = LoopDetector::new();
-        let lines: Vec<String> = (1..=3)
-            .map(|n| result(&format!("Exit code 101\ntest x failed in {n}.{n}s"), false))
-            .collect();
-        assert_eq!(run(&mut d, &lines).unwrap().rule, "error_streak");
-    }
-
-    #[test]
-    fn a_nonzero_bash_exit_counts_as_an_error() {
-        let mut d = LoopDetector::new();
-        let bad = result("Exit code 2\nboom", false);
-        assert_eq!(
-            run(&mut d, &[bad.clone(), bad.clone(), bad]).unwrap().rule,
-            "error_streak"
-        );
-        let zero = result("Exit code 0\nfine", false);
-        let mut d = LoopDetector::new();
-        assert!(run(&mut d, &[zero.clone(), zero.clone(), zero]).is_none());
     }
 
     #[test]
@@ -354,13 +229,13 @@ mod tests {
             "repeated_call"
         );
         let mut d = LoopDetector::new();
-        let lines: Vec<String> = (0..3)
-            .flat_map(|i| [started(&format!("c{i}")), done(1)])
-            .collect();
-        assert_eq!(run(&mut d, &lines).unwrap().rule, "error_streak");
-        let mut d = LoopDetector::new();
-        let lines = vec![change; 8];
+        let lines = vec![change.clone(); 8];
         assert_eq!(run(&mut d, &lines).unwrap().rule, "repeated_edit");
+        let mut d = LoopDetector::new();
+        let mut lines = vec![change.clone(); 7];
+        lines.push(started("cargo test one_check"));
+        lines.extend(vec![change; 7]);
+        assert!(run(&mut d, &lines).is_none());
         let mut d = LoopDetector::new();
         let lines: Vec<String> = (0..4)
             .flat_map(|i| [started(&format!("c{i}")), done(0)])

@@ -3,7 +3,16 @@
 
 mod common;
 
-use common::*;
+use common::polling::deadline;
+use common::process::is_alive;
+use common::process::Daemon;
+
+use common::harness::fake_harness_script;
+use common::polling::{remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit};
+use common::protocol::{raw_request_with_params, request_on, stop_daemon, wait_for_socket};
+use common::repository::init_git_repo;
+
 use std::path::Path;
 
 #[test]

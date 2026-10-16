@@ -1,70 +1,15 @@
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::clock::now_ms;
+use crate::engine::state::App;
+use crate::task::graph::has_cycle;
+use crate::task::graph::wait_edges;
+use crate::task::AnswerSource;
+use crate::task::ParkRecord;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde::Deserialize;
 
-pub(super) struct Cancellation {
-    park: Option<ParkRecord>,
-    explicit: bool,
-    line: String,
-    last_answer: Option<AnsweredQuestion>,
-    pub(super) restart: bool,
-    pub(super) restart_children: bool,
-}
-
-impl Cancellation {
-    pub(super) fn apply(&self, task: &mut Task) {
-        task.queue.park = if self.restart {
-            None
-        } else {
-            self.park.clone()
-        };
-        task.queue.stopped_explicitly = self.explicit && !self.restart;
-        task.status = if self.restart || task.queue.park.is_some() {
-            TaskStatus::Queued
-        } else {
-            TaskStatus::Stopped
-        };
-        if !task.decisions.contains(&self.line) {
-            task.decisions.push(self.line.clone());
-        }
-        if let Some(p) = &self.park {
-            let note = format!("Park: {} (by {})", p.reason, p.by.label());
-            if !task.decisions.contains(&note) {
-                task.decisions.push(note);
-            }
-        }
-        if let Some(answer) = &self.last_answer {
-            if !task.question_history.contains(answer) {
-                task.question_history.push(answer.clone());
-            }
-        }
-        task.queue.restart_children = self.restart_children;
-        task.question = None;
-    }
-}
-
-impl AnswerSource {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Owner => "Owner",
-            Self::Lead => "Lead",
-            Self::Chat => "orchestrator chat",
-            Self::Mcp => "MCP caller",
-            Self::Overseer => "overseer",
-            Self::Policy => "policy",
-        }
-    }
-
-    pub(super) fn control_line(self, action: &str, reason: Option<&str>) -> String {
-        let origin = match self {
-            Self::Owner => format!("Owner: {action} (UI)"),
-            Self::Lead => format!("Lead: {action} (RPC)"),
-            source => format!("Orchestrator: {action} (requested by {})", source.label()),
-        };
-        match reason.map(str::trim).filter(|r| !r.is_empty()) {
-            Some(reason) => format!("{origin}: {reason}"),
-            None => origin,
-        }
-    }
-}
+use crate::task::queue::cancellation::Cancellation;
 
 impl App {
     pub(super) fn is_suspended(&self, task: &Task) -> bool {
@@ -89,24 +34,7 @@ impl App {
     ) -> Result<(), String> {
         let mut cancellations = self.cancellations.lock().unwrap();
         let live = self.controls.lock().unwrap().contains_key(&task.id);
-        task.question = None;
-        task.queue.park = park.clone();
-        task.queue.stopped_explicitly = explicit;
-        task.status = if park.is_some() {
-            TaskStatus::Queued
-        } else {
-            TaskStatus::Stopped
-        };
-        if !task.decisions.contains(&line) {
-            task.decisions.push(line.clone());
-        }
-        if let Some(p) = &park {
-            let note = format!("Park: {} (by {})", p.reason, p.by.label());
-            if !task.decisions.contains(&note) {
-                task.decisions.push(note);
-            }
-        }
-        task.updated_at = now_ms();
+        task.interrupt(park.clone(), explicit, line.clone(), now_ms());
         {
             let lock = self.task_lock(&task.id);
             let _guard = lock.lock().unwrap();
@@ -115,20 +43,13 @@ impl App {
         if live {
             cancellations.insert(
                 task.id.clone(),
-                Cancellation {
-                    park,
-                    explicit,
-                    line,
-                    last_answer: task.question_history.last().cloned(),
-                    restart: false,
-                    restart_children: false,
-                },
+                Cancellation::new(park, explicit, line, task.question_history.last().cloned()),
             );
         }
         drop(cancellations);
         self.broadcast_task(task);
         if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
-            control.cancel.cancel();
+            control.signals.cancel.cancel();
         }
         self.advance_queue(&task.repo);
         Ok(())
@@ -137,13 +58,8 @@ impl App {
     pub(super) fn apply_cancellation(&self, task: &mut Task) {
         if let Some(end) = self.cancellations.lock().unwrap().get(&task.id) {
             end.apply(task);
-        } else if task.queue.park.is_some() {
-            task.status = TaskStatus::Queued;
         } else {
-            task.status = self.cancelled_status(&task.status);
-        }
-        if task.status == TaskStatus::Stopped || task.queue.park.is_some() {
-            task.question = None;
+            task.finish_cancellation(self.cancelled_status(&task.status));
         }
     }
 

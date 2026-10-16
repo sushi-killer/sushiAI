@@ -22,4 +22,3 @@ fn orchestrator_answer_line_includes_question_answer_and_reason() {
         "Orchestrator: Which theme? -> light (README says so)"
     );
 }
-

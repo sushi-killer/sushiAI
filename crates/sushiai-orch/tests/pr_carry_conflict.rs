@@ -5,7 +5,11 @@
 
 mod common;
 
-use common::*;
+use common::harness::{cheap_route_on_claude, fake_harness_script};
+use common::polling::{poll_until, wait_until};
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -38,6 +42,13 @@ dir="$(dirname "$0")"
 brief=$(cat)
 case "$brief" in
 "## Pull request draft"*)
+if [ -f "$dir/advance-on-draft" ]; then
+remote=$(cat "$dir/advance-on-draft")
+rm "$dir/advance-on-draft"
+t=$(mktemp -d)
+git clone -q "$remote" "$t"
+(cd "$t" && echo theirs > pr.txt && git -c user.name=o -c user.email=o@example.invalid add pr.txt && git -c user.name=o -c user.email=o@example.invalid commit -qm later && git push -q origin HEAD:refs/heads/main)
+fi
 printf '%s\n' '{"type":"result","result":"{\"branch\":\"\",\"title\":\"\",\"body\":\"\"}"}'
 ;;
 "## Pull request body check"*)
@@ -418,3 +429,78 @@ fn a_second_conflict_after_the_resolution_ends_the_task_failed_with_one_notice()
     assert_eq!(notices, 1, "{:?}", s.chat());
     s.daemon.shutdown_and_wait();
 }
+
+#[test]
+fn an_owner_stop_during_conflict_setup_keeps_the_entire_saved_task_unchanged() {
+    let mut s = setup(false, &[]);
+    let mut settings = s.daemon.request("settings.get", json!({}));
+    settings["sandbox"] = json!("host");
+    s.daemon
+        .request("settings.set", json!({"settings": settings}));
+    let blocked = s.tools.path().join("blocked-worktree");
+    let started = s.tools.path().join("conflict-setup-started");
+    let release = s.tools.path().join("conflict-setup-release");
+    let script = format!(
+        "if [ -f '{}' ] && [ \"$(cat '{}')\" = \"$ORCHD_WORKTREE_PATH\" ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; fi",
+        blocked.display(), blocked.display(), started.display(), release.display()
+    );
+    std::fs::create_dir_all(s.repo.path().join(".sushiai")).unwrap();
+    std::fs::write(
+        s.repo.path().join(".sushiai/setup.json"),
+        json!({"setup": script}).to_string(),
+    )
+    .unwrap();
+    git_out(s.repo.path(), &["add", "-f", "."]);
+    git_out(s.repo.path(), &["commit", "-q", "-m", "add setup barrier"]);
+    git_out(s.repo.path(), &["push", "-q", "origin", "main"]);
+    let id = s.create("test -f pr.txt");
+    let done = s.wait_task(&id, "initial task did not finish", |t| {
+        t["status"] == "done"
+    });
+    let worktree = done["worktree"].as_str().unwrap();
+    std::fs::write(&blocked, worktree).unwrap();
+    if Path::new(worktree).join(".git").exists() {
+        git_out(s.repo.path(), &["worktree", "remove", "--force", worktree]);
+    }
+    s.advance_origin(&[("late-base.txt", "new base\n")]);
+    std::fs::write(
+        s.tools.path().join("advance-on-draft"),
+        s.remote.path().to_str().unwrap(),
+    )
+    .unwrap();
+    let path = s
+        .daemon
+        .data_dir()
+        .join("tasks")
+        .join(&id)
+        .join("task.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["prPending"] = json!(true);
+    saved.as_object_mut().unwrap().remove("prPlan");
+    std::fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let mut settings = s.daemon.request("settings.get", json!({}));
+    settings["prOnDoneOff"] = json!(false);
+    s.daemon
+        .request("settings.set", json!({"settings": settings}));
+    let claude = s.tools.path().join("fake-claude.sh");
+    let gh = s.tools.path().join("fake-gh.sh");
+    s.daemon.restart(&[
+        ("ORCHD_CLAUDE_BIN", claude.to_str().unwrap()),
+        ("ORCHD_GH_BIN", gh.to_str().unwrap()),
+    ]);
+    wait_until("conflict setup barrier", || started.exists().then_some(()));
+    s.daemon.request("task.stop", json!({"id": id}));
+    let stopped = s.task(&id);
+    assert_eq!(stopped["status"], "stopped", "{stopped}");
+    std::fs::write(&release, "").unwrap();
+    wait_until("the stopped PR carry to return", || {
+        let error = s.daemon.request_error("task.pr", json!({"id": id}));
+        error.contains("only a done task").then_some(())
+    });
+    assert_eq!(s.task(&id), stopped);
+    assert!(!s.gh_log().contains("pr create"));
+    s.daemon.shutdown_and_wait();
+}
+
+#[path = "pr_carry_conflict/checks.rs"]
+mod check_repair_tests;

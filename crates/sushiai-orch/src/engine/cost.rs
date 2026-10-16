@@ -1,6 +1,23 @@
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::attempts::pricing::price_claude_resume;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
+use crate::engine::state::App;
+use crate::harness;
+use crate::policy::routing::Harness;
+use crate::store::Store;
+use crate::task::AskedBy;
+use crate::task::Attempt;
+use crate::task::AttemptStatus;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::Usage;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-type Prices = std::collections::BTreeMap<String, crate::model::Price>;
+type Prices = std::collections::BTreeMap<String, crate::policy::pricing::Price>;
 
 /// What a Claude run spent, replayed from its saved `events.jsonl`: the
 /// CLI's own figure when its `result` made it to disk, else the priced
@@ -28,7 +45,13 @@ fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
                 vec![plan.join("events.jsonl"), retry]
             }
         }
-        Stage::Implement | Stage::Review if attempt.cost_usd.is_none() => {
+        Stage::Implement if attempt.cost_usd.is_none() => {
+            vec![
+                run_dir.join("resume-rejected.events.jsonl"),
+                run_dir.join("events.jsonl"),
+            ]
+        }
+        Stage::Review if attempt.cost_usd.is_none() => {
             vec![run_dir.join("events.jsonl")]
         }
         Stage::Implement | Stage::Review => vec![],
@@ -40,11 +63,11 @@ fn uncounted_event_files(run_dir: &Path, attempt: &Attempt) -> Vec<PathBuf> {
 /// -- see [`replay_run_cost`] -- to the attempt and the task. That covers
 /// the attempt's review helper runs too, kept in
 /// `review_cost_usd`. Claude only, for the attempt's own runs; the review
-/// may run on either harness.
+/// may run on either harness. Rejected-resume archives retain their own metadata.
 pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store, prices: &Prices) {
     let run_dir = store.run_dir(&task.id, task.attempts[idx].n);
     let attempt = &task.attempts[idx];
-    if attempt.harness == Harness::Claude {
+    if attempt.harness == Harness::Claude || run_dir.join("resume-rejected.events.jsonl").exists() {
         let mut total = None;
         let mut estimated = false;
         let mut usage = Usage {
@@ -53,25 +76,9 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store,
             cached: 0,
         };
         for path in uncounted_event_files(&run_dir, attempt) {
-            let Some(mut outcome) = replay_run_cost(&path, prices) else {
+            let Some(outcome) = replay_attempt_run(task, attempt, &path, store, prices) else {
                 continue;
             };
-            if attempt.stage == Stage::Implement {
-                let argv: Vec<String> = std::fs::read_to_string(run_dir.join("run.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|meta| serde_json::from_value(meta["argv"].clone()).ok())
-                    .unwrap_or_default();
-                if let Some(resume) = argv.windows(2).find(|w| w[0] == "--resume") {
-                    price_claude_resume(
-                        &task.attempts,
-                        attempt.n,
-                        &resume[1],
-                        prices,
-                        &mut outcome,
-                    );
-                }
-            }
             let cost = outcome.cost_usd.unwrap_or(0.0);
             *total.get_or_insert(0.0) += cost;
             estimated |= outcome.cost_estimated;
@@ -80,21 +87,63 @@ pub(super) fn settle_unfinished_cost(task: &mut Task, idx: usize, store: &Store,
             usage.cached += outcome.usage_cached;
         }
         if let Some(cost) = total {
-            let attempt = &mut task.attempts[idx];
-            attempt.cost_usd = Some(attempt.cost_usd.unwrap_or(0.0) + cost);
-            attempt.cost_estimated |= estimated;
-            let saved = attempt.usage.get_or_insert(Usage {
-                input: 0,
-                output: 0,
-                cached: 0,
-            });
-            saved.input += usage.input;
-            saved.output += usage.output;
-            saved.cached += usage.cached;
-            task.cost_usd += cost;
+            crate::task::costs::add_attempt_spend(task, idx, cost, estimated, usage);
         }
     }
     settle_interrupted_review(task, idx, store, prices);
+}
+
+pub(super) fn rejected_resume_cost(
+    task: &Task,
+    idx: usize,
+    store: &Store,
+    prices: &Prices,
+) -> Option<harness::RunOutcome> {
+    let attempt = &task.attempts[idx];
+    let path = store
+        .run_dir(&task.id, attempt.n)
+        .join("resume-rejected.events.jsonl");
+    replay_attempt_run(task, attempt, &path, store, prices)
+}
+
+fn replay_attempt_run(
+    task: &Task,
+    attempt: &Attempt,
+    path: &Path,
+    store: &Store,
+    prices: &Prices,
+) -> Option<harness::RunOutcome> {
+    let mut outcome = if attempt.harness == Harness::Claude {
+        replay_run_cost(path, prices)?
+    } else {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut outcome = harness::replay_events(attempt.harness, &text);
+        let price = prices.get(&attempt.model)?;
+        outcome.cost_usd = Some(price.codex_cost(
+            outcome.usage_input,
+            outcome.usage_cached,
+            outcome.usage_output,
+        ));
+        outcome
+    };
+    if attempt.stage == Stage::Implement && attempt.harness == Harness::Claude {
+        let metadata = crate::harness::run_files::RunFiles::of(path).meta;
+        let argv: Vec<String> = std::fs::read_to_string(metadata)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|meta| serde_json::from_value(meta["argv"].clone()).ok())
+            .unwrap_or_default();
+        if let Some(resume) = argv.windows(2).find(|w| w[0] == "--resume") {
+            price_claude_resume(
+                &crate::engine::attempts::pricing::session_attempts(task, store, prices),
+                attempt.n,
+                &resume[1],
+                prices,
+                &mut outcome,
+            );
+        }
+    }
+    Some(outcome)
 }
 
 /// A review's cost is saved right after it ends. Replay the attempt's helper
@@ -114,8 +163,12 @@ pub(super) fn settle_interrupted_review(
             .map(|o| o.cost_usd.unwrap_or(0.0))
             .reduce(|a, b| a + b);
         if let Some(cost) = cost {
-            task.attempts[idx].review_cost_usd = Some(cost);
-            task.cost_usd += cost;
+            crate::task::costs::settle_helper(
+                task,
+                idx,
+                crate::task::costs::HelperStage::Review,
+                cost,
+            );
         }
     }
 }
@@ -146,8 +199,7 @@ pub(super) fn settle_interrupted_advisor(task: &mut Task, store: &Store, prices:
     let Some(cost) = cost else {
         return false;
     };
-    task.attempts[idx].advisor_cost_usd = Some(cost);
-    task.cost_usd += cost;
+    crate::task::costs::settle_helper(task, idx, crate::task::costs::HelperStage::Advisor, cost);
     true
 }
 
@@ -181,14 +233,14 @@ async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Op
     }
     let data = app.data_dir.clone();
     let now = now_ms();
-    let records = tokio::task::spawn_blocking(move || crate::costs::read_all(&data))
+    let records = tokio::task::spawn_blocking(move || crate::store::costs::read_all(&data))
         .await
         .ok()?;
     let (day, spent) = crate::costs::spend_today(&records, now);
     if spent < budget || task.daily_budget_ok_day.as_deref() == Some(day.as_str()) {
         return None;
     }
-    task.decisions.push(format!(
+    task.record_decision(format!(
         "Orchestrator: daily budget ${budget:.2} reached (${spent:.2} spent on {day} UTC); the {run} run waits for the owner"
     ));
     Some(Question::new(
@@ -197,8 +249,7 @@ async fn daily_budget_question(app: &Arc<App>, task: &mut Task, run: &str) -> Op
         ),
         vec![DAILY_RUN_ANYWAY.into(), "stop".into()],
         QuestionKind::DailyBudget,
-        asked_by_run(run),
-    ))
+        asked_by_run(run), crate::clock::now_ms()))
 }
 
 /// The stage a budget gate's `run` argument names.
@@ -214,24 +265,20 @@ fn asked_by_run(run: &str) -> AskedBy {
 /// review): while the task's spend meets its `variant.max_cost_usd` budget,
 /// it waits for the owner -- "raise" adds the budget once more, "stop"
 /// stops it -- instead of running. Never interrupts a run already going.
-/// On `true` the task is back in `resume_status` holding a slot; on `false`
-/// it is stopped (the wait already persisted that).
-#[allow(clippy::too_many_arguments)]
+/// Restores the entering phase and slot after an answer; changes return to
+/// lifecycle admission and cancellation remains a separate outcome.
 pub(super) async fn wait_while_over_budget(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
     run: &str,
-    resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> bool {
+    slot: &mut QuestionSlot<'_>,
+) -> Result<(), WaitEnd> {
+    let resume_status = task.status;
     let mut waited = false;
     loop {
         let question = if let Some(budget) = task.cost_budget().filter(|b| task.cost_usd >= *b) {
             let step = task.variant().max_cost_usd;
-            task.decisions.push(format!(
+            task.record_decision(format!(
                 "Orchestrator: budget ${budget:.2} reached (${:.2} spent); the {run} run waits for the owner",
                 task.cost_usd
             ));
@@ -242,48 +289,28 @@ pub(super) async fn wait_while_over_budget(
                 ),
                 vec!["raise".into(), "stop".into()],
                 QuestionKind::Budget,
-                asked_by_run(run),
-            )
+                asked_by_run(run), crate::clock::now_ms())
         } else if let Some(q) = daily_budget_question(app, task, run).await {
             q
         } else {
             break;
         };
-        task.question = Some(question.clone());
-        task.status = TaskStatus::Waiting;
-        task.updated_at = now_ms();
+        task.ask(question.clone(), now_ms());
         waited = true;
-        match wait_for_answer(app, task_id, task, pending_answer, cancel, permit).await {
-            None => return false,
-            Some(answer) => {
-                if is_budget_raise(&question, &answer) {
-                    task.budget_raises += 1;
-                }
-                if is_daily_budget_run_anyway(&question, &answer) {
-                    task.daily_budget_ok_day = Some(crate::costs::today(now_ms()));
-                }
-            }
+        let answer = slot.answer(app, task).await?;
+        if is_budget_raise(&question, &answer) {
+            task.raise_budget();
+        }
+        if is_daily_budget_run_anyway(&question, &answer) {
+            task.allow_daily_budget(crate::policy::calendar::day(now_ms()));
         }
     }
     if !waited {
-        return true;
+        return Ok(());
     }
-    task.status = resume_status;
-    task.updated_at = now_ms();
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    if permit.is_none() {
-        let acquired = tokio::select! {
-            _ = cancel.cancelled() => None,
-            p = app.slots.clone().acquire_owned() => p.ok(),
-        };
-        match acquired {
-            Some(p) => *permit = Some(p),
-            None => {
-                mark_stopped_if_not_already(app, task_id).await;
-                return false;
-            }
-        }
+    if slot.resume(app, task, resume_status).await {
+        Ok(())
+    } else {
+        Err(WaitEnd::Stopped)
     }
-    true
 }

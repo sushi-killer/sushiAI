@@ -104,6 +104,7 @@ const KIND_LABELS: Record<string, string> = {
   dependency_ended: "Dependency ended",
   impossible: "Task impossible",
   preexisting_failure: "Base check failing",
+  pr_check: "PR check failing",
   budget: "Task budget",
   protected_path: "Protected path",
   permission: "Permission",

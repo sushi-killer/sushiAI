@@ -1,0 +1,6 @@
+{"type":"item.started","item":{"id":"call-1","type":"command_execution","command":"cargo test check_1"}}
+{"type":"item.completed","item":{"id":"call-1","type":"command_execution","command":"cargo test check_1","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"item.started","item":{"id":"call-2","type":"command_execution","command":"cargo test check_1"}}
+{"type":"item.completed","item":{"id":"call-2","type":"command_execution","command":"cargo test check_1","exit_code":101,"aggregated_output":"test failed in 1.2s"}}
+{"type":"item.started","item":{"id":"call-3","type":"command_execution","command":"cargo test check_1"}}
+{"type":"item.completed","item":{"id":"call-3","type":"command_execution","command":"cargo test check_1","exit_code":101,"aggregated_output":"test failed in 1.2s"}}

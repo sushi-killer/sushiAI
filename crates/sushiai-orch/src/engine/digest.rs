@@ -1,4 +1,31 @@
-use super::*;
+#[cfg(test)]
+use crate::engine::owner_notice;
+#[cfg(test)]
+use crate::store::overseer;
+#[cfg(test)]
+use crate::task::AnsweredBy;
+#[cfg(test)]
+use crate::task::AskedBy;
+#[cfg(test)]
+use crate::task::Question;
+#[cfg(test)]
+use crate::task::QuestionKind;
+
+#[cfg(test)]
+use crate::api::events::Event;
+use crate::clock::now_ms;
+#[cfg(test)]
+use crate::engine::questions::answers::record_answer;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::store;
+use crate::task::TaskStatus;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 /// How often the timer checks the clock.
 const DIGEST_CHECK: Duration = Duration::from_secs(60);
@@ -70,7 +97,7 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .filter(|t| !t.archived && (t.updated_at >= cutoff || t.status == TaskStatus::Waiting))
-            .map(|t| t.repo)
+            .map(|t| t.repo.clone())
             .collect();
         repos.sort();
         repos.dedup();
@@ -78,14 +105,23 @@ impl App {
         for repo in repos {
             let last = days.get(&repo).map(String::as_str);
             if digest_due(digest_hour, hour, &today, last)
-                && chat::wake_overseer(self, &repo, self.digest_prompt(&repo), true, "digest", None)
+                && crate::engine::chat::wake::wake_overseer(
+                    self,
+                    &repo,
+                    crate::engine::chat::wake::WakeRequest::new(
+                        self.digest_prompt(&repo),
+                        true,
+                        "digest",
+                        None,
+                    ),
+                )
             {
                 days.insert(repo, today.clone());
                 changed = true;
             }
         }
         if changed {
-            let _ = store::write_json_atomic(&self.digest_days_path(), &days);
+            let _ = store::files::write_json_atomic(&self.digest_days_path(), &days);
         }
     }
 
@@ -110,6 +146,13 @@ impl App {
 mod tests {
     use super::*;
 
+    fn gate(verdict: owner_notice::Verdict) -> Option<owner_notice::Gate> {
+        Some(owner_notice::Gate {
+            verdict,
+            keys: vec!["t5|agent_question|A".to_string()],
+        })
+    }
+
     #[test]
     fn the_digest_is_due_only_at_its_hour_and_once_a_day() {
         assert!(digest_due(Some(8), 8, "2026-10-10", None));
@@ -121,69 +164,100 @@ mod tests {
 
     #[tokio::test]
     async fn a_due_tick_lands_one_digest_in_the_chat_session_and_not_a_second() {
-        let _harness = chat::fake_overseer_harness();
+        let _harness = crate::engine::chat::test_support::fake_overseer_harness();
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_path = repo.to_string_lossy().to_string();
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.repo = repo_path.clone();
-        task.updated_at = 1;
+        task.fixture_data().repo = repo_path.clone();
+        task.fixture_data().updated_at = 1;
         app.store.save_task(&task).unwrap();
         let secs = 1_760_000_000;
         let (_, hour, _) = local_day_and_time(secs).unwrap();
         app.settings.write().unwrap().digest_hour = Some(hour);
         app.digest_tick(secs);
-        chat::wait_idle(&app, &repo_path).await;
-        assert_eq!(chat::fake_overseer_calls(&repo), 1);
-        assert!(chat::thread_has_text(&app, &repo_path, "Overseer note."));
+        crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(&repo),
+            1
+        );
+        assert!(crate::engine::chat::test_support::thread_has_text(
+            &app,
+            &repo_path,
+            "Overseer note."
+        ));
         app.digest_tick(secs);
-        chat::wait_idle(&app, &repo_path).await;
-        assert_eq!(chat::fake_overseer_calls(&repo), 1);
+        crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(&repo),
+            1
+        );
         // Another day wakes it again.
         app.digest_tick(secs + 86_400);
-        chat::wait_idle(&app, &repo_path).await;
-        assert_eq!(chat::fake_overseer_calls(&repo), 2);
+        crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(&repo),
+            2
+        );
     }
 
     #[test]
     fn a_turn_end_is_logged_by_what_the_overseer_did() {
         let (app, _dir) = test_app();
-        let end = |started: i64, task: &str, end: chat::TurnEnd| {
-            chat::record_overseer_end(
+        let end = |started: i64, task: &str, end: crate::engine::chat::overseer::TurnEnd| {
+            crate::engine::chat::overseer::record_overseer_end(
                 &app,
                 "/r",
-                "waiting",
-                Some(task),
-                started,
-                Some(0.25),
-                end,
-                None,
+                crate::engine::chat::overseer::OverseerRecord {
+                    reason: "waiting",
+                    task_id: Some(task),
+                    started,
+                    cost_usd: Some(0.25),
+                    end,
+                    gate: None,
+                },
             )
         };
         // No answer: the reply is for the owner, with the turn's cost.
-        end(0, "t1", chat::TurnEnd::Reply("Which branch?\nmore".into()));
+        end(
+            0,
+            "t1",
+            crate::engine::chat::overseer::TurnEnd::Reply("Which branch?\nmore".into()),
+        );
         // The overseer answered during the turn: no owner note, still the cost.
-        app.record_overseer(overseer::Entry::new("answered", "/r", Some("t2"), "q"));
-        end(0, "t2", chat::TurnEnd::Reply("Answered.".into()));
-        end(0, "t3", chat::TurnEnd::Stopped);
-        end(0, "t4", chat::TurnEnd::Failed("harness exploded".into()));
+        app.record_overseer(crate::task::notes::overseer::Entry::new(
+            "answered",
+            "/r",
+            Some("t2"),
+            "q",
+            crate::clock::now_ms(),
+        ));
+        end(
+            0,
+            "t2",
+            crate::engine::chat::overseer::TurnEnd::Reply("Answered.".into()),
+        );
+        end(0, "t3", crate::engine::chat::overseer::TurnEnd::Stopped);
+        end(
+            0,
+            "t4",
+            crate::engine::chat::overseer::TurnEnd::Failed("harness exploded".into()),
+        );
         // The turn settled its question itself: kept as `done`, never a notice.
-        let gate = |verdict| {
-            Some(owner_notice::Gate {
-                verdict,
-                keys: vec!["t5|agent_question|A".to_string()],
-            })
-        };
-        chat::record_overseer_end(
+        crate::engine::chat::overseer::record_overseer_end(
             &app,
             "/r",
-            "waiting",
-            Some("t5"),
-            0,
-            None,
-            chat::TurnEnd::Reply("Retried it.\nSecond line.".into()),
-            gate(owner_notice::Verdict::Resolved),
+            crate::engine::chat::overseer::OverseerRecord {
+                reason: "waiting",
+                task_id: Some("t5"),
+                started: 0,
+                cost_usd: None,
+                end: crate::engine::chat::overseer::TurnEnd::Reply(
+                    "Retried it.\nSecond line.".into(),
+                ),
+                gate: gate(owner_notice::Verdict::Resolved),
+            },
         );
         let log = overseer::read(&app.data_dir, None, None);
         let got: Vec<_> = log
@@ -208,20 +282,27 @@ mod tests {
             Some("Retried it.\nSecond line.")
         );
         assert_eq!(resolved.decision, None);
+    }
+
+    #[test]
+    fn duplicate_and_deferred_overseer_replies_keep_only_the_held_decision() {
+        let (app, _dir) = test_app();
         // A duplicate and a deferred reply are logged as skipped with the reply behind them.
         for (verdict, text) in [
             (owner_notice::Verdict::Duplicate, owner_notice::DUPLICATE),
             (owner_notice::Verdict::Deferred, owner_notice::DEFERRED),
         ] {
-            chat::record_overseer_end(
+            crate::engine::chat::overseer::record_overseer_end(
                 &app,
                 "/r",
-                "waiting",
-                Some("t5"),
-                0,
-                None,
-                chat::TurnEnd::Reply("Keep going?".into()),
-                gate(verdict),
+                crate::engine::chat::overseer::OverseerRecord {
+                    reason: "waiting",
+                    task_id: Some("t5"),
+                    started: 0,
+                    cost_usd: None,
+                    end: crate::engine::chat::overseer::TurnEnd::Reply("Keep going?".into()),
+                    gate: gate(verdict),
+                },
             );
             let last = &overseer::read(&app.data_dir, None, Some(1))[0];
             assert_eq!((last.kind.as_str(), last.text.as_str()), ("skipped", text));
@@ -236,37 +317,31 @@ mod tests {
 
     #[tokio::test]
     async fn the_overseer_log_records_a_wake_and_its_digest_and_a_busy_skip() {
-        let _harness = chat::fake_overseer_harness();
+        let _harness = crate::engine::chat::test_support::fake_overseer_harness();
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_path = repo.to_string_lossy().to_string();
         let mut events = app.events_tx.subscribe();
-        assert!(chat::wake_overseer(
+        assert!(crate::engine::chat::wake::wake_overseer(
             &app,
             &repo_path,
-            "p".into(),
-            true,
-            "digest",
-            None
+            crate::engine::chat::wake::WakeRequest::new("p".into(), true, "digest", None)
         ));
         // The chat is busy now: a second wake is skipped and logged.
-        assert!(!chat::wake_overseer(
+        assert!(!crate::engine::chat::wake::wake_overseer(
             &app,
             &repo_path,
-            "p".into(),
-            false,
-            "done",
-            Some("t1")
+            crate::engine::chat::wake::WakeRequest::new("p".into(), false, "done", Some("t1"))
         ));
         // The skipped wake is queued and fires when the digest turn ends.
         for _ in 0..400 {
-            if chat::fake_overseer_calls(&repo) >= 2 {
+            if crate::engine::chat::test_support::fake_overseer_calls(&repo) >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        chat::wait_idle(&app, &repo_path).await;
+        crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
         let log = overseer::read(&app.data_dir, Some(&repo_path), None);
         let kinds: Vec<_> = log.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(
@@ -277,7 +352,10 @@ mod tests {
         let skipped = log.iter().find(|e| e.kind == "skipped").unwrap();
         assert_eq!(skipped.task_id.as_deref(), Some("t1"));
         assert!(skipped.text.contains("busy"), "{log:?}");
-        assert_eq!(chat::fake_overseer_calls(&repo), 2);
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(&repo),
+            2
+        );
         let mut seen = 0;
         while let Ok(event) = events.try_recv() {
             if matches!(event, Event::Overseer { .. }) {
@@ -289,53 +367,45 @@ mod tests {
 
     #[tokio::test]
     async fn a_shutdown_drops_queued_wakes_and_starts_no_new_turn() {
-        let _harness = chat::fake_overseer_harness();
+        let _harness = crate::engine::chat::test_support::fake_overseer_harness();
         let (app, dir) = test_app();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_path = repo.to_string_lossy().to_string();
-        assert!(chat::wake_overseer(
+        assert!(crate::engine::chat::wake::wake_overseer(
             &app,
             &repo_path,
-            "p".into(),
-            true,
-            "digest",
-            None
+            crate::engine::chat::wake::WakeRequest::new("p".into(), true, "digest", None)
         ));
-        assert!(!chat::wake_overseer(
+        assert!(!crate::engine::chat::wake::wake_overseer(
             &app,
             &repo_path,
-            "p".into(),
-            false,
-            "done",
-            Some("t1")
+            crate::engine::chat::wake::WakeRequest::new("p".into(), false, "done", Some("t1"))
         ));
         assert_eq!(app.deferred_wakes.lock().unwrap().len(), 1);
         app.shutdown();
         assert!(app.deferred_wakes.lock().unwrap().is_empty());
-        chat::wait_idle(&app, &repo_path).await;
-        assert!(!chat::wake_overseer(
+        crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
+        assert!(!crate::engine::chat::wake::wake_overseer(
             &app,
             &repo_path,
-            "p".into(),
-            false,
-            "done",
-            Some("t2")
+            crate::engine::chat::wake::WakeRequest::new("p".into(), false, "done", Some("t2"))
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(chat::fake_overseer_calls(&repo) <= 1);
+        assert!(crate::engine::chat::test_support::fake_overseer_calls(&repo) <= 1);
         assert!(!app.chat_turns.lock().unwrap().contains_key(&repo_path));
     }
 
     #[test]
     fn an_answer_to_attempts_keep_failing_restarts_the_limit_pauses() {
         let mut task = task_with_status(TaskStatus::Waiting);
-        task.queue.rate_pauses = 7;
+        task.fixture_data().queue.rate_pauses = 7;
         let q = Question::new(
             "Attempts keep failing",
             vec!["continue".into()],
             QuestionKind::AttemptsFailing,
             AskedBy::Implement,
+            crate::clock::now_ms(),
         );
         record_answer(&mut task, Some(&q), "continue", AnsweredBy::Owner);
         assert_eq!(task.queue.rate_pauses, 0);

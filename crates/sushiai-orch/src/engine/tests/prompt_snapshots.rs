@@ -8,16 +8,17 @@ use crate::prompts::assert_engine_snapshot as snapshot;
 
 fn snapshot_task() -> Task {
     let mut task = test_support::task_with_status(TaskStatus::Running);
-    task.title = "Add a Save button".into();
-    task.goal = "Add a Save button to the settings dialog that writes the settings file.".into();
-    task.criteria = vec![
+    task.fixture_data().title = "Add a Save button".into();
+    task.fixture_data().goal =
+        "Add a Save button to the settings dialog that writes the settings file.".into();
+    task.fixture_data().criteria = vec![
         "The settings dialog shows a Save button -- check: `npm test -- settings`".into(),
         "Clicking Save writes settings.json -- check: `npm test -- save`".into(),
     ];
-    task.verify = vec!["npm test -- settings".into(), "npm run lint".into()];
-    task.final_verify = vec!["npm run build".into()];
-    task.paths = vec!["src/settings.ts".into()];
-    task.request = Some("Add a Save button to the settings dialog.".into());
+    task.fixture_data().verify = vec!["npm test -- settings".into(), "npm run lint".into()];
+    task.fixture_data().final_verify = vec!["npm run build".into()];
+    task.fixture_data().paths = vec!["src/settings.ts".into()];
+    task.fixture_data().request = Some("Add a Save button to the settings dialog.".into());
     task
 }
 
@@ -25,7 +26,7 @@ fn snapshot_task() -> Task {
 fn prompt_snapshot_impossible_criterion_judge() {
     snapshot(
         "answer_policy_judge",
-        &answer_policy::impossible_brief(
+        &crate::engine::answer_policy::judge::impossible_brief(
             "The settings dialog shows a Save button -- check: `npm test -- settings`",
             "There is no settings dialog in this repository; src/settings.ts does not exist.",
         ),
@@ -36,7 +37,7 @@ fn prompt_snapshot_impossible_criterion_judge() {
 fn prompt_snapshot_planner_check_judge() {
     snapshot(
         "answer_policy_planner_check_judge",
-        &answer_policy::planner_check_brief(
+        &crate::engine::answer_policy::planner::planner_check_brief(
             "Clicking Save writes settings.json -- check: `npm test -- save`",
             &[
                 "node --test tests/save.test.cjs".to_string(),
@@ -52,7 +53,7 @@ fn prompt_snapshot_test_claim_judge() {
     let task = snapshot_task();
     snapshot(
         "test_claim_judge",
-        &test_claim::judge_brief(
+        &crate::engine::test_claim::brief::judge_brief(
             &task,
             "tests/save.test.ts",
             "test('save writes settings.json', () => {\n  expect(save()).toBe(true);\n});\n",
@@ -66,7 +67,7 @@ fn prompt_snapshot_test_claim_rewrite() {
     let task = snapshot_task();
     snapshot(
         "test_claim_rewrite",
-        &test_claim::rewrite_brief(
+        &crate::engine::test_claim::brief::rewrite_brief(
             &task,
             "tests/save.test.ts",
             "test('save writes settings.json', () => {\n  expect(save()).toBe(true);\n});\n",
@@ -77,10 +78,11 @@ fn prompt_snapshot_test_claim_rewrite() {
 
 #[test]
 fn prompt_snapshot_brief_check() {
-    let tools = json!({"builtIn": "read files", "mcp": ["asana: read tools none; write tools none"]});
+    let tools =
+        json!({"builtIn": "read files", "mcp": ["asana: read tools none; write tools none"]});
     snapshot(
         "brief_check_check",
-        &brief_check::build_check_brief(
+        &crate::engine::brief_check::reply::build_check_brief(
             "Add a Save button.",
             &["It shows a Save button".to_string(), "It saves".to_string()],
             &tools,
@@ -94,7 +96,7 @@ fn prompt_snapshot_brief_check_refresh() {
     let changed = vec!["src/settings.ts".to_string(), "src/save.ts".to_string()];
     snapshot(
         "brief_check_refresh",
-        &brief_check::refresh_brief(&task, &changed),
+        &crate::engine::brief_check::reply::refresh_brief(&task, &changed),
     );
 }
 
@@ -102,14 +104,16 @@ fn prompt_snapshot_brief_check_refresh() {
 fn prompt_snapshot_brief_check_redraft_note() {
     snapshot(
         "brief_check_redraft_note",
-        &brief_check::redraft_request_note("\"It saves\" and \"It never writes a file\""),
+        &crate::engine::brief_check::reply::redraft_request_note(
+            "\"It saves\" and \"It never writes a file\"",
+        ),
     );
 }
 
 #[test]
 fn prompt_snapshot_plan_gate_review() {
     let task = snapshot_task();
-    let child = brief::PlanSubtask {
+    let child = crate::engine::planning::draft::PlanSubtask {
         key: "a".into(),
         title: "Save button".into(),
         goal: "Show the button".into(),
@@ -120,7 +124,7 @@ fn prompt_snapshot_plan_gate_review() {
     };
     snapshot(
         "plan_gate_review",
-        &plan_gate::build_review_prompt(&task, "Add a Save button.", &[child]),
+        &plan_gate::prompt::build_review_prompt(&task, "Add a Save button.", &[child]),
     );
 }
 
@@ -140,7 +144,10 @@ fn prompt_snapshot_plan_gate_findings() {
             text: "Two subtasks edit src/settings.ts.".into(),
         },
     ];
-    snapshot("plan_gate_findings", &plan_gate::findings_block(&findings));
+    snapshot(
+        "plan_gate_findings",
+        &plan_gate::prompt::findings_block(&findings),
+    );
 }
 
 #[test]
@@ -153,18 +160,24 @@ fn prompt_snapshot_healing_feasibility() {
         "ms": 10,
     }))
     .unwrap();
-    snapshot("healing_feasibility", &healing::feasibility_prompt(&task, &failed));
+    snapshot(
+        "healing_feasibility",
+        &crate::verify::healing::reply::feasibility_prompt(&task, &failed),
+    );
 }
 
 #[test]
 fn prompt_snapshot_healing_ruling() {
     let task = snapshot_task();
-    let rep = healing::Repeated {
+    let rep = crate::verify::healing::reply::Repeated {
         criterion: 1,
         earlier: (1, "Clicking Save writes nothing yet.".into()),
         current: (2, "No test proves the write.".into()),
     };
-    snapshot("healing_ruling", &healing::ruling_prompt(&task, &rep));
+    snapshot(
+        "healing_ruling",
+        &crate::verify::healing::reply::ruling_prompt(&task, &rep),
+    );
 }
 
 #[test]
@@ -174,7 +187,10 @@ fn prompt_snapshot_healing_answer() {
         "Owner: use the JSON file, not the database".to_string(),
         "Policy: keep going".to_string(),
     ];
-    snapshot("healing_answer", &healing::answer_prompt(&task, &answers));
+    snapshot(
+        "healing_answer",
+        &crate::verify::healing::reply::answer_prompt(&task, &answers),
+    );
 }
 
 #[test]
@@ -196,7 +212,11 @@ fn prompt_snapshot_past_work() {
 fn prompt_snapshot_permissions_tools_for_the_plan() {
     snapshot(
         "permissions_tools_plan",
-        &permissions::tools_block_text(&tools_fixture().0, &tools_fixture().1, true),
+        &crate::engine::permissions::brief::tools_block_text(
+            &tools_fixture().0,
+            &tools_fixture().1,
+            true,
+        ),
     );
 }
 
@@ -204,11 +224,15 @@ fn prompt_snapshot_permissions_tools_for_the_plan() {
 fn prompt_snapshot_permissions_tools_for_the_implementer() {
     snapshot(
         "permissions_tools_implement",
-        &permissions::tools_block_text(&tools_fixture().0, &tools_fixture().1, false),
+        &crate::engine::permissions::brief::tools_block_text(
+            &tools_fixture().0,
+            &tools_fixture().1,
+            false,
+        ),
     );
     snapshot(
         "permissions_tools_none",
-        &permissions::tools_block_text(&[], &[], false),
+        &crate::engine::permissions::brief::tools_block_text(&[], &[], false),
     );
 }
 
@@ -229,14 +253,17 @@ fn prompt_snapshot_chat_tools() {
         ),
         ("sheets".to_string(), Vec::new(), Vec::new()),
     ];
-    snapshot("chat_tools_prompt", &chat_tools::tools_prompt(&listed));
+    snapshot(
+        "chat_tools_prompt",
+        &chat_tools::turn::tools_prompt(&listed),
+    );
 }
 
 #[test]
 fn prompt_snapshot_chat_tools_send() {
     snapshot(
         "chat_tools_send",
-        &chat_tools::send_prompt(
+        &chat_tools::approved::send_prompt(
             "create_issue",
             &json!({"title": "Crash on save", "labels": ["bug"]}),
         ),

@@ -5,7 +5,13 @@
 
 mod common;
 
-use common::*;
+use common::harness::fake_harness_script;
+use common::native_sandbox::fit_sandbox;
+use common::polling::{poll_until, remove_dir_retrying, wait_until};
+use common::process::{socket_of, spawn_daemon, wait_for_exit, Daemon};
+use common::protocol::{request_on, stop_daemon, wait_for_socket};
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -102,12 +108,8 @@ fn a_retry_starts_no_attempt_until_the_base_branch_moves() {
     remove_dir_retrying(worktree);
 }
 
-#[test]
-fn a_base_retry_keeps_the_stored_planner_tests_and_implementation_work() {
-    let scripts = tempfile::tempdir().unwrap();
-    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
-    let plan_reply = scripts.path().join("plan.json");
-    let test_content = "test -f CHANGED_MARKER.txt\n";
+fn planned_retry_reply(scripts: &Path, test_content: &str) -> std::path::PathBuf {
+    let plan_reply = scripts.join("plan.json");
     let plan = json!({
         "title": "Planned base retry",
         "goal": "Write the marker",
@@ -124,6 +126,15 @@ fn a_base_retry_keeps_the_stored_planner_tests_and_implementation_work() {
         json!({"type": "result", "result": format!("```sushi-plan\n{plan}\n```")}).to_string(),
     )
     .unwrap();
+    plan_reply
+}
+
+#[test]
+fn a_base_retry_keeps_the_stored_planner_tests_and_implementation_work() {
+    let scripts = tempfile::tempdir().unwrap();
+    let script = fake_harness_script(scripts.path(), "fake.sh", FAKE);
+    let test_content = "test -f CHANGED_MARKER.txt\n";
+    let plan_reply = planned_retry_reply(scripts.path(), test_content);
     let daemon = Daemon::spawn(&[
         ("ORCHD_CLAUDE_BIN", script.to_str().unwrap()),
         ("PLAN_REPLY", plan_reply.to_str().unwrap()),

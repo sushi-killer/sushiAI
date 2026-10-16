@@ -99,20 +99,20 @@ flowchart TB
 
   subgraph orch["orchestrator module (crates/sushiai-orch) - hosted by the sushiai daemon, loaded only when the Orchestrator extension is on; desktop calls orch.* over the daemon connection and receives orch.event; file-backed runs are re-adopted by process group after a daemon restart"]
     direction LR
-    proto["protocol.rs<br/>orch.* request and result types"]
-    engine["engine/<br/>task loop, gates, routing"]
-    chat["chat.rs<br/>orchestrator chat"]
-    audit["audit.rs<br/>repo.audit, read-only"]
+    proto["api/<br/>orch.* validation, events and scoped MCP"]
+    engine["engine/lifecycle/<br/>admission, execution, inspection,<br/>verification, review and completion"]
+    chat["engine/chat/<br/>orchestrator chat"]
+    audit["engine/audit/<br/>repo.audit, read-only"]
     insights["timeline.rs<br/>task.timeline, failures.catalogue"]
     pipeline["engine/pipeline.rs<br/>pipeline.describe, task.preset"]
     evolution["evolution/<br/>signals when a task ends,<br/>clusters, proposals, measurement"]
     evolveCli["sushiai orch evolve<br/>evolution.run / evolution.adopt"]
     costs["costs.rs<br/>costs.summary, sushiai orch costs"]
-    harness["harness.rs<br/>claude -p / codex exec"]
-    side["git.rs (worktrees, commit)<br/>messages.rs (merging)"]
+    harness["harness/<br/>claude -p / codex exec,<br/>native session and process receipts"]
+    side["git/ shared IO + delivery/git/<br/>commit, carry and recovery;<br/>messages.rs (engine owner) for merging"]
     store[("data dir<br/>tasks/, runs/, settings.json<br/>(presets, repoPresets),<br/>costs.jsonl, chats/, audits/,<br/>evolution/ (signals.jsonl, detected.jsonl,<br/>proposals/)")]
     mcp["sushiai mcp<br/>task_* tools, stdio;<br/>host / hosts_list go as orch.relay.call"]
-    chatTools["engine/chat_tools.rs<br/>connected MCP servers, OK-card writes"]
+    chatTools["engine/chat_tools/<br/>discovery, read grants and approved writes"]
     mcpConfig[("owner's MCP config<br/>~/.claude.json, plugins")]
     prompts[("prompts/orchestrator.yaml<br/>+ data dir prompts.yaml override")]
     skill[("~/.claude, ~/.codex, ~/.agents skills<br/>sushiai-orchestrator (serve --install-skill)")]
@@ -184,6 +184,96 @@ A `session.open` event opens a Preview: `src/extensions/useOpenSignals.ts` acts 
 App state lives in one database, `sushiai.db` (`node:sqlite`, `electron/app-db.cjs`, one cached handle per profile, WAL, owner-only file mode, migrations on `user_version`). Each old JSON store (`projects.json`, `workspace-state.json`, `connections.json`, `orchestrator-hosts.json`) is imported once into its tables and renamed `<name>.imported`. The renderer's workspace snapshot keeps its IPC (`workspace-state-read/write/flush`); the main process splits it into `workspaces` rows (the id is the daemon group) and `app_state` keys, and writes only what changed in one transaction. SSH connection profiles and enabled orchestrator hosts are tables too. Every other main-process store (model providers and profiles, Claude and Codex account lists, provider and project secrets, window bounds, update settings, app preferences) is a named map in the generic `store(name, key, value)` table, read with `readStore` and written with `writeStore`/`putStore` (changed keys only, one transaction). Secrets keep their `safeStorage` ciphertext, whose key lives in the macOS Keychain; when secure storage is unavailable, provider keys fall back to unencrypted storage, as before. Files stay files only where another program reads them or they can be regenerated: Codex homes, CLI settings staged for a launch, extension manifests, attachments, update downloads, the skills catalog cache. `scripts/check-conventions.mjs` fails on a new `*.json` name under `electron/` that is not on its allowlist. Project metadata is a `projects` table and a `folders` table keyed by host and path, which holds each folder's attached project and its last git identity (remote key, common dir, checkout, branch); environment and account values are stored in the `project-secrets` store, encrypted through Electron `safeStorage`, and deleted in the same transaction as their project. The renderer receives presence and masked hints, while the main process resolves values for the selected project, stage, and host. Local sessions receive their stage-specific environment at launch. Every SSH host the owner added receives a project's values (adding the host is the consent) unless the owner switched sending off for that project and host; remote task values cross through `orch.secrets.set` over the daemon connection; remote session values travel in `session.create` `env` over the daemon protocol (through the ssh proxy) and live only in the holder's environment and the daemon's memory, never in `argv` or `state.json`. Codex accounts are not values in that store: each one is its own Codex home under userData (`codex-accounts/<id>`), signed in by `codex login` and refreshed by Codex itself, with the rest of `~/.codex` linked in. A local session runs Codex with `CODEX_HOME` set to it; an SSH session gets the account's login through the same `session.create` `env`, for that session only. A ChatGPT login refreshed there (its refresh token is single-use) is left in a named session home on the host and collected over SSH at the account's next start, the newer login winning. Switching sending off prevents later reads from including that host's project values and replaces what that host's daemon already holds (when the host is offline, at the next connection).
 
 Every writer of the project store (`upsert`, `updateEnv`, `updateMcp`, `mergeImport`, `setSecret`, `setHostSecret`, `clearSecret`, `setHostWithheld`, `setHostOverrides`, `setGitToken`, `delete`) runs one at a time under a single lock and reads fresh state; `upsert` never rewrites the variables or MCP servers of an existing project, and ids that are not own keys of the store are unknown projects. Project IPCs: `projects:env:update` and `projects:mcp:update` (variables and servers, MCP credentials become `${VAR}` references), `projects:git-token:set`, `projects:import-local`, `projects:import-mcp-text`, `projects:scan-source`, `projects:env:review-text`, `projects:env:classify`, `projects:local-install`, and `projects:host:prepare`. A host the owner added gets a project's values with no prompt: the "+" picker's "Prepare <host> and start" and the New project flow just clone, install, send the values and go on. The one control is "Don't send secrets to this host" (Project settings → Hosts, off by default, stored as `hosts[host].withheld`): with it on, `projects:host:prepare` clones with the host's own git login and installs with no value, task and terminal reads return none, and `setHostWithheld` makes `OrchestratorHosts.refreshSecrets(host)` re-push the allowed values so the host's daemon drops what it holds. Tasks and sessions get the values. `#withMcp` sends the enabled server definitions, with `${VAR}` references, to a remote orchestrator regardless of that switch; the values behind those references and the project's variables reach a remote orchestrator only through `#pushSecrets`, which honours it. Every folder has a project: `Projects.resolveProject` is the one resolver - the project the folder is attached to, else the project of its git remote (the branch's upstream remote, else `origin`, else the first one, through `insteadOf`), else a project with an attached folder of the same common git dir on that host - and a folder that gains a remote later keeps its project, which follows the remote. `projects:identify` gives the sidebar a folder's project id and git identity: it answers from the stored row at once and reads git once per run in the background (the local active workspace re-reads on a slow timer for its branch, a remote host is never polled), writing only when something changed, so an offline host's checkouts still join their project. The sidebar merges rows by that project id, then by remote, then by common dir on one host; grouping by host only splits the display; `projects:import-local` pulls a folder's `.env`, `.env.local`, `.mcp.json` and Claude config into the project (new keys only, empty secrets filled, removed keys not brought back unless asked), previewable. `claude-mcp-usage` counts MCP tool calls per server and plugin from Claude Code's own transcripts for the last 30 days.
+
+### Orchestrator module ownership
+
+The orchestrator remains one crate. `lib.rs` exposes the named host interface;
+`engine/mod.rs` declares owners and contains no import or re-export umbrella.
+
+```mermaid
+flowchart LR
+  API[api: wire validation and scoped MCP] --> Engine[engine: lifecycle and synchronization]
+  Engine --> Task[task: pure state operations]
+  Engine --> Harness[harness: native streams, sessions and processes]
+  Engine --> Verify[verify: repository evidence and check execution]
+  Engine --> Delivery[delivery: commit, carry and PR IO]
+  Engine --> Store[store: persisted JSON and atomic files]
+  Task --> Policy[policy: pure routing and permission rules]
+  Engine --> Policy
+  Engine --> Flows[policy/pipelines: typed flow definitions]
+  Flows --> YAML[(pipelines/*.yaml: compiled operations and outcomes)]
+  Verify --> Git[git: shared repository IO]
+  Delivery --> Git
+```
+
+`Task` exposes read access through an opaque state wrapper; production writes
+use typed operations in `task/`. Existing JSON names and defaults are retained;
+optional amendment, delivery-check and repair receipts record the new owner-control
+and PR-repair behavior. Engine adapters classify repository evidence before calling pure
+check authority, amendment, criterion removal and baseline operations. Unknown
+provenance is protected from non-owner removal. Captured positional edits use
+full content identity; a new positional RPC captures the current criterion.
+
+`engine/planning/` owns planner rounds and graph drafts. Native argv, stream
+parsing, early session identity, process cancellation and guarding live in
+`harness/`; App observations and exact cost settlement live in
+`engine/attempts/`. `engine/verification/` schedules checks and base jobs;
+`verify/` owns their execution, scoping, cache facts and classification.
+`git/` is shared IO; delivery transactions live in `delivery/git/`.
+
+Compiled task, planning and delivery graphs in `pipelines/` drive their existing
+coordinators through typed operation/outcome transitions. `policy/pipelines/`
+validates each graph and its receipt capabilities; existing operations retain
+permission, snapshot, budget, cancellation and publication gates. The pipeline UI
+catalog is compiled YAML too, with the existing RPC grouping and IDs. There is no
+runtime override or persisted stage cursor. See [pipeline definitions](orchd-pipelines.md).
+
+`engine/lifecycle/run.rs` owns iteration and failure-budget handling. The
+native receipt retains its starting base even after the work moves; verification
+and review use the current carried base. Native settlement publishes the selected
+A/B result, provider fingerprint, usage and cost once, without reconstructing a
+settled result from current route or price settings. A saved sibling selection
+must read that sibling's retained artifacts rather than the primary run's files.
+
+A pending amendment is saved in the task before its acknowledgement. Store writes
+preserve the current receipt; only a content-checked operation may replace or
+consume it. The loop publishes the accepted contract before asynchronous baseline
+work, and startup consumes saved amendments before resuming work. Waiting tasks
+return an applied/pending response without waiting for an answer or baseline IO.
+Owner start clears `pausedUntil` and wakes a live pause.
+
+Admission and mutation share the existing per-task lock. No synchronous mutex
+is held over an await. Asynchronous plan/check results carry a full content
+snapshot, including the base and planner file contents. The shared check-contract
+publication boundary in `engine/persistence/contract.rs` admits dependency refresh,
+feasibility and repeated-criterion healing, protected-test rewrites, review-generated
+checks and parent waivers under the task lock. A pending owner edit defers that
+mutation; completed helper spend and observations remain recorded. A queued amendment's
+admitted plan is persisted before its baseline starts, so another live RPC sees
+the current contract. Async baseline observations are published only while
+that identity and the running phase remain current. A carry may retarget a
+queued edit across the base change only when every other contract field is
+unchanged. Delivery admission persists `landing` under the same lock, and a
+pending edit causes another check round. Recovery recognizes only a clean HEAD
+with the exact existing `Task-Id` and `Attempt` trailers as an already completed
+branch commit.
+
+An ephemeral `task/checks/CheckAdmission` pairs the existing content snapshot
+with explicit owner answers and overturned assumptions. It admits helper,
+native-settlement, parent-check and delivery results against the current owner
+decision under the task lock. Automatic observations do not invalidate their own
+publication. A rejected result retains its measured output, usage and cost;
+the coordinator reloads current state before deciding what runs next. The
+serialized check snapshot and cache identity remain unchanged.
+
+The generic workspace test in `crates/sushiai/tests/rust_standards.rs` loads
+crate-local `rust-standards.json` profiles. It measures rustfmt output with
+`syn`, separates production/test/data lines, checks module dependencies and
+pure owners, and rejects unregistered size, function and argument overages.
+Exceptions name an exact item, category, reason and ceiling; mixed runtime
+files of 1,000 lines cannot be grandfathered. The current implementation's
+remaining violations are reported by this gate and must be resolved before
+the architecture work is ready to merge.
 
 ## 2. Task lifecycle
 
@@ -407,10 +497,10 @@ the cause to be fixed before starting it again. This cap is fixed at 3.
 
 ### Self-healing briefs
 
-`engine/healing.rs` lets the orchestrator repair a task's own contract without the owner,
+`engine/verification/healing/` lets the orchestrator repair a task's own contract without the owner,
 each change a decision line plus an assumption (`by: orchd`) the owner can
 overturn. From the first attempt on, a background job (no slot, no task
-writes) runs every verify/check command on the base (`base_check.rs`); one
+writes) runs every verify/check command on the base (`engine/verification/base/`); one
 that fails goes to the cheap judge (`briefCheckRoute`), which leaves it,
 rewrites it to a check the repo can run, or marks it non-gating. The loop
 applies the result before finalVerify runs and before a failing verify
@@ -425,6 +515,45 @@ before the next attempt and review. A brief-check contradiction in a planner
 draft resumes the planner's own session once with the conflict (a short
 correction turn); without a session, or when the resumed run fails or does not
 parse, it falls back to a fresh draft.
+
+### Pull request checks and repair
+
+`engine/graph/carry/` runs final commands in the checkout that will be published.
+Post-carry failures use the same rerun and base-fingerprint judgement as ordinary
+verification. A waiver records the command, named tests and evidence; it does not
+rewrite a measured nonzero exit as a pass.
+
+A persistent new failure queues one designated step for the task's own
+implementer on that carried tree, including the measured failure in both resumed
+and fresh briefs. It retains the task's tier, uses one candidate, and does not
+raise the general attempt budget. Passing gates resume PR publication. The same
+cause after that step leaves the task Waiting on one owner-only `pr_check`
+question; explicit owner retry authorizes one further step. Stop keeps the work
+unpublished. Parent carry conflicts use the normal Base moved step with the
+conflicting files.
+
+PR readiness retains the authority accepted by the carry through Git and GitHub
+preparation. Delivery prepares typed writes after its prerequisite reads; the
+engine checks current owner authority and dispatches each command under the task
+lock, then awaits completion and readback outside that lock. Push pins the
+prepared commit and remote lease. The factual PR receipt is saved under the
+same task lock, preserving an intervening stop or owner answer.
+
+Conflict and check repair share one resolution handoff. It compares their
+persisted intent with the current task, respects suspension and cancellation,
+and retains or starts the existing task control under the task lock. This
+prevents rejected asynchronous preparation from leaving queued work without
+a loop. It adds no actor or persisted stage.
+
+Parents retain their actual ordinary, final, grounded and scrubbed held-out
+check receipts even when they need no implementation attempt. Raw failed exits
+remain failed in Validation; any accepted waiver is shown separately.
+
+PR drafting describes what changed and why. Code rebuilds Validation at publication
+from recorded command outcomes, checkout commits, checked trees and waivers.
+Reused passes retain their original checkout provenance and add no execution time.
+Older receipts without a checkout commit say so; matching their tree to a commit
+is labelled as a tree match rather than an invented execution commit.
 
 ## 2b. Evolution flow
 
@@ -452,9 +581,9 @@ flowchart TD
   basecheck["Base preflight, in the background from attempt 1 (no slot)<br/>finalVerify runs on the base (one job per sha + command, cached,<br/>a failure is re-run once); verify and checks run on the base too and the<br/>feasibility judge rules on each failure; the job writes no task state.<br/>A parent's verify still blocks its subtasks, with one question"]
   gate["Preflight gate, before review and finalVerify run on the worktree<br/>waits for the preflight, applies the judge's rulings to the task"]
   tier["Tier<br/>planner's tier, else standard"]
-  impl["Implement<br/>route = tiers[tier]; a failed-check retry resumes the same route's session<br/>with failure output and new answers; other retries start fresh"]
+  impl["Implement<br/>route = tiers[tier]; verify and time-budget retries resume the same route's session<br/>with the current plan and historical evidence; other retries start fresh"]
   stall["Stall watchdog<br/>no output for variant.stallTimeoutSecs -> kill"]
-  timebudget["Time budget<br/>implement run past settings.implementBudgetMins -> kill,<br/>report-only resume of its session, kind time_budget"]
+  timebudget["Time budget<br/>stop at settings.implementBudgetMins, kind time_budget;<br/>keep early session id, existing handoff or changed-file fallback; no report turn"]
   rebase["Carry onto moved base<br/>conflicts go back to the agent"]
   checklist["Checklist (a merged task)<br/>each item's check runs first; a failing item<br/>fails the attempt by name, before the full verify"]
   verify["Verify<br/>task.verify in the worktree<br/>cached by diff + untracked contents"]
@@ -530,7 +659,7 @@ The base preflight is a background job per task: attempt 1 starts at once and
 the job holds no slot. Its result lives in memory; only the loop applies it to
 its own task. After a daemon restart the gate starts the job again.
 
-The parent preflight (`graph.rs` `parent_base_preflight`) still blocks: it holds
+The parent preflight (`engine/graph/base.rs` `parent_base_preflight`) still blocks: it holds
 no slot either, and its answer decides what the subtasks must make pass before
 any of them starts, so moving it to the background would let a subtask run
 against a check the owner may drop.
@@ -554,7 +683,7 @@ flowchart LR
   orch -->|task_create / task_answer via MCP| planner
 ```
 
-Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/model.rs`): the
+Task agents run with `sandbox: native` by default (`crates/sushiai-orch/src/policy/settings.rs`): the
 sandbox keeps writes inside the task's worktree and the network is open
 (`allowedDomains: ["*"]`). `sandbox: host` turns it off.
 

@@ -4,7 +4,22 @@
 //! route on a missing harness is swapped for the nearest route of an
 //! available one, and with no harness at all a task waits for the owner.
 
-use super::*;
+use crate::clock::now_ms;
+use crate::engine::questions::parking::{QuestionSlot, WaitEnd};
+use crate::engine::state::App;
+use crate::harness::environment::augmented_path;
+use crate::harness::environment::resolve_binary;
+use crate::policy::pricing::route_cost;
+use crate::policy::routing::route_strength;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::settings::Settings;
+use crate::task::AskedBy;
+use crate::task::Question;
+use crate::task::QuestionKind;
+use crate::task::Task;
+use std::path::Path;
+use std::sync::Arc;
 
 const HARNESSES: [Harness; 2] = [Harness::Claude, Harness::Codex];
 
@@ -91,8 +106,7 @@ fn install_question() -> Question {
         ),
         vec!["retry".to_string()],
         QuestionKind::HarnessMissing,
-        AskedBy::Implement,
-    )
+        AskedBy::Implement, crate::clock::now_ms())
 }
 
 impl App {
@@ -139,7 +153,7 @@ impl App {
 
     /// The orchestrator chat's route, moved to an available harness.
     pub(super) fn chat_route(&self, settings: &Settings) -> Option<Route> {
-        let wanted = chat::orchestrator_route(settings)?;
+        let wanted = crate::engine::chat::launch::orchestrator_route(settings)?;
         self.usable_route(settings, wanted).map(|(route, _)| route)
     }
 
@@ -164,50 +178,28 @@ impl App {
 }
 
 /// Parks the task with an install question while no harness is available.
-/// `true` when one is (the task is back in `resume_status` holding a slot);
-/// `false` when the task was stopped meanwhile.
+/// Reacquires a slot when a harness becomes available; a changed contract
+/// returns to lifecycle admission and a stopped task remains stopped.
 pub(super) async fn wait_for_harness(
     app: &Arc<App>,
-    task_id: &str,
     task: &mut Task,
-    resume_status: TaskStatus,
-    pending_answer: &Arc<StdMutex<Option<oneshot::Sender<Reply>>>>,
-    cancel: &CancelToken,
-    permit: &mut Option<SlotPermit>,
-) -> bool {
+    slot: &mut QuestionSlot<'_>,
+) -> Result<(), WaitEnd> {
+    let resume_status = task.status;
     if app.any_harness_available() {
-        return true;
+        return Ok(());
     }
     while !app.any_harness_available() {
-        task.decisions
-            .push("Orchestrator: no agent CLI found; waiting for one to be installed".to_string());
-        task.question = Some(install_question());
-        task.status = TaskStatus::Waiting;
-        task.updated_at = now_ms();
-        if wait_for_answer(app, task_id, task, pending_answer, cancel, permit)
-            .await
-            .is_none()
-        {
-            return false;
-        }
+        task.record_decision(
+            "Orchestrator: no agent CLI found; waiting for one to be installed".to_string(),
+        );
+        task.ask(install_question(), now_ms());
+        slot.answer(app, task).await?;
         app.refresh_availability();
     }
-    task.status = resume_status;
-    task.updated_at = now_ms();
-    app.save_task_logged(task);
-    app.broadcast_task(task);
-    if permit.is_none() {
-        let acquired = tokio::select! {
-            _ = cancel.cancelled() => None,
-            p = app.slots.clone().acquire_owned() => p.ok(),
-        };
-        match acquired {
-            Some(p) => *permit = Some(p),
-            None => {
-                mark_stopped_if_not_already(app, task_id).await;
-                return false;
-            }
-        }
+    if slot.resume(app, task, resume_status).await {
+        Ok(())
+    } else {
+        Err(WaitEnd::Stopped)
     }
-    true
 }

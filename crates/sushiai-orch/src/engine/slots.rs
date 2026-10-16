@@ -1,4 +1,16 @@
-use super::*;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+#[cfg(test)]
+use crate::engine::test_support::test_app;
+use crate::harness::cancel::CancelToken;
+use crate::task::Task;
+#[cfg(test)]
+use crate::task::TaskStatus;
+use crate::task::Wait;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::Semaphore;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError};
 
 struct State {
@@ -133,10 +145,10 @@ pub(super) enum Slot {
 pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelToken) -> Slot {
     if let Ok(permit) = app.slots.clone().try_acquire_owned() {
         if matches!(task.queue.wait, Some(Wait::Slot { .. })) {
-            task.queue.wait = None;
+            task.set_wait(None);
             if let Err(e) = app.update_task(&task.id, |t| {
                 if matches!(t.queue.wait, Some(Wait::Slot { .. })) {
-                    t.queue.wait = None;
+                    t.set_wait(None);
                 }
             }) {
                 eprintln!("orch: updating task {} failed: {e}", task.id);
@@ -149,8 +161,8 @@ pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelTo
         running: running as u32,
         limit: limit as u32,
     };
-    task.queue.wait = Some(wait.clone());
-    if let Err(e) = app.update_task(&task.id, |t| t.queue.wait = Some(wait)) {
+    task.set_wait(Some(wait.clone()));
+    if let Err(e) = app.update_task(&task.id, |t| t.set_wait(Some(wait))) {
         eprintln!("orch: updating task {} failed: {e}", task.id);
     }
     let got = tokio::select! {
@@ -160,10 +172,10 @@ pub(super) async fn take_slot(app: &Arc<App>, task: &mut Task, cancel: &CancelTo
             Err(_) => Slot::Closed,
         },
     };
-    task.queue.wait = None;
+    task.set_wait(None);
     if let Err(e) = app.update_task(&task.id, |t| {
         if matches!(t.queue.wait, Some(Wait::Slot { .. })) {
-            t.queue.wait = None;
+            t.set_wait(None);
         }
     }) {
         eprintln!("orch: updating task {} failed: {e}", task.id);
@@ -179,7 +191,7 @@ mod tests {
     async fn take_slot_fast_path_clears_a_stale_slot_wait() {
         let (app, _dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
-        task.queue.wait = Some(Wait::Slot {
+        task.fixture_data().queue.wait = Some(Wait::Slot {
             running: 2,
             limit: 2,
         });

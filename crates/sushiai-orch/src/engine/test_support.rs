@@ -1,4 +1,22 @@
-use super::*;
+use crate::engine::state::App;
+use crate::harness::guard::helper_timeout_message;
+use crate::policy::routing::Harness;
+use crate::policy::routing::Route;
+use crate::policy::routing::Tier;
+use crate::store::Store;
+use crate::task::Attempt;
+use crate::task::AttemptStatus;
+use crate::task::Failure;
+use crate::task::FailureKind;
+use crate::task::PlannedTest;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+#[cfg(test)]
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[path = "../../tests/support/native_sandbox.rs"]
 mod native_sandbox;
@@ -47,18 +65,21 @@ pub(super) fn test_app_fitting_sandbox() -> (Arc<App>, tempfile::TempDir) {
 
 /// Marks `command` as written by the planner for a test file `path`.
 pub(crate) fn planner_made(task: &mut Task, command: &str, path: &str) {
-    task.planner_tests.files.push(PlannedTest {
+    task.fixture_data().planner_tests.files.push(PlannedTest {
         path: path.to_string(),
         content: String::new(),
     });
-    task.planner_tests.sources.push(crate::model::SourcedCheck {
-        command: command.to_string(),
-        source: crate::model::CheckSource::Planner,
-    });
+    task.fixture_data()
+        .planner_tests
+        .sources
+        .push(crate::task::SourcedCheck {
+            command: command.to_string(),
+            source: crate::task::CheckSource::Planner,
+        });
 }
 
 pub(crate) fn task_with_status(status: TaskStatus) -> Task {
-    Task {
+    crate::task::test_support::fixture(crate::task::TaskData {
         id: uuid::Uuid::new_v4().to_string(),
         title: "Do thing".into(),
         goal: "Do the thing".into(),
@@ -94,6 +115,8 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         status,
         tier: Tier::Standard,
         question: None,
+        pending_amendment: None,
+        delivery_checks: vec![],
         decisions: vec![],
         attempts: vec![],
         cost_usd: 0.0,
@@ -127,7 +150,7 @@ pub(crate) fn task_with_status(status: TaskStatus) -> Task {
         queue: Default::default(),
         created_at: 1,
         updated_at: 1,
-    }
+    })
 }
 
 /// Like `test_app`, with a single task-loop slot from construction.
@@ -216,7 +239,7 @@ pub(super) fn init_git_repo(dir: &std::path::Path) {
 
 /// A task worktree whose shared fake harness waits for the helper guard.
 pub(super) fn slow_helper_task() -> (Arc<App>, tempfile::TempDir, Task, Route) {
-    chat::fake_overseer_harness();
+    crate::engine::chat::test_support::fake_overseer_harness();
     let (app, dir) = test_app();
     app.helper_timeout_ms.store(250, Ordering::SeqCst);
     app.plan_timeout_override_ms.store(250, Ordering::SeqCst);
@@ -225,11 +248,11 @@ pub(super) fn slow_helper_task() -> (Arc<App>, tempfile::TempDir, Task, Route) {
     init_git_repo(&worktree);
     std::fs::write(worktree.join(".overseer-slow"), "").unwrap();
     let mut task = task_with_status(TaskStatus::Running);
-    task.repo = worktree.display().to_string();
-    task.worktree = task.repo.clone();
-    task.base_sha = git_in(&worktree, &["rev-parse", "HEAD"]);
-    task.criteria = vec!["Keep the API".into()];
-    task.attempts = vec![attempt_with_failure(1, "failure")];
+    task.fixture_data().repo = worktree.display().to_string();
+    task.fixture_data().worktree = task.repo.clone();
+    task.fixture_data().base_sha = git_in(&worktree, &["rev-parse", "HEAD"]);
+    task.fixture_data().criteria = vec!["Keep the API".into()];
+    task.fixture_data().attempts = vec![attempt_with_failure(1, "failure")];
     let route = {
         let mut settings = app.settings.write().unwrap();
         settings.planner = "claude-sonnet".into();
@@ -257,5 +280,5 @@ pub(super) fn assert_helper_timeout(task: &Task, helper: &str) {
     );
     // Under load the deadline can stop the fake before it records its call;
     // what matters is that a timed-out helper is never started again.
-    assert!(chat::fake_overseer_calls(Path::new(&task.worktree)) <= 1);
+    assert!(crate::engine::chat::test_support::fake_overseer_calls(Path::new(&task.worktree)) <= 1);
 }

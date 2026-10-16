@@ -1,0 +1,13 @@
+stages:
+  - { id: brief, label: Brief, kind: main }
+  - { id: plan, label: Plan, kind: main }
+  - { id: brief-check, label: Brief check, kind: main }
+  - { id: base-checks, label: Base checks, kind: main }
+  - { id: implement, label: Implement, kind: main }
+  - { id: checks, label: Checks, kind: main }
+  - { id: held-out, label: Held-out check, kind: main }
+  - { id: review, label: Review, kind: main }
+  - { id: judge, label: Judge, kind: main }
+  - { id: land, label: Land, kind: main }
+  - { id: advisor, label: Advisor, kind: side }
+  - { id: question, label: Question, kind: side }

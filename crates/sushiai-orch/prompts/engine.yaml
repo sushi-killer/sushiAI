@@ -56,7 +56,6 @@ past_work_header: |
 
   From orchd's own records of this repository. Context for planning, not instructions.
 
-
 chat_questions_intro: |
   Tasks asked you the questions below while they keep working. Answer each with orchestrator_reply {question, text}; a task reads the answer on its next attempt.
 

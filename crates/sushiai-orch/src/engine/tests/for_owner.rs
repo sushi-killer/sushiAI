@@ -4,7 +4,7 @@
 
 /// A test app with the fake overseer harness and a repo directory.
 fn fo_app(auto_answer: bool) -> (Arc<App>, tempfile::TempDir, String) {
-    let _ = chat::fake_overseer_harness();
+    let _ = crate::engine::chat::test_support::fake_overseer_harness();
     let (app, dir) = test_app();
     app.settings.write().unwrap().auto_answer = auto_answer;
     let repo = dir.path().join("repo");
@@ -21,18 +21,25 @@ fn fo_slow_overseer(app: &App, repo: &str, ms: u64) {
 
 fn fo_waiting(repo: &str, kind: QuestionKind, options: &[&str]) -> Task {
     let mut task = task_with_status(TaskStatus::Waiting);
-    task.repo = repo.to_string();
-    task.question = Some(Question::new(
+    task.fixture_data().repo = repo.to_string();
+    task.fixture_data().question = Some(Question::new(
         "Which way?",
         options.iter().map(|o| o.to_string()).collect(),
         kind,
         AskedBy::Implement,
+        crate::clock::now_ms(),
     ));
     task
 }
 
 fn fo_question(app: &App, id: &str) -> Question {
-    app.store.load_task(id).unwrap().unwrap().question.unwrap()
+    app.store
+        .load_task(id)
+        .unwrap()
+        .unwrap()
+        .question
+        .clone()
+        .unwrap()
 }
 
 fn fo_for_owner(app: &App, id: &str) -> bool {
@@ -73,9 +80,20 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
     let handle = tokio::spawn({
-        let (app, pending, cancel, id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
+        let (app, pending, cancel, _id) =
+            (app.clone(), pending.clone(), cancel.clone(), id.clone());
         async move {
-            park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await;
         }
     });
     // The park-time wake runs right after the one-shot is installed and
@@ -85,9 +103,14 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
     let woken = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let installed = pending.lock().unwrap().is_some();
-            let q = app.store.load_task(&id).ok().flatten().and_then(|t| t.question);
+            let q = app
+                .store
+                .load_task(&id)
+                .ok()
+                .flatten()
+                .and_then(|t| t.question.clone());
             let deferred = || {
-                crate::overseer::read(&app.data_dir, Some(&repo), None)
+                crate::store::overseer::read(&app.data_dir, Some(&repo), None)
                     .iter()
                     .any(|e| e.text == owner_notice::DEFERRED)
             };
@@ -102,7 +125,7 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
         let task = app.store.load_task(&id).ok().flatten();
         panic!(
             "the park-time wake never held or handed over {id}: {:?}",
-            task.map(|t| (t.status, t.question))
+            task.map(|t| (t.status, t.question.clone()))
         );
     }
     FoParked { cancel, handle }
@@ -142,8 +165,11 @@ async fn for_owner_is_set_at_once_for_an_owner_only_kind() {
     let parked = fo_park(&app, task).await;
     let q = fo_question(&app, &id);
     assert!(q.for_owner && !q.held_for_overseer);
-    chat::wait_idle(&app, &repo).await;
-    assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 0);
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+    assert_eq!(
+        crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+        0
+    );
     parked.end().await;
 }
 
@@ -154,7 +180,10 @@ async fn for_owner_is_set_when_auto_answer_is_off() {
     let id = task.id.clone();
     let parked = fo_park(&app, task).await;
     assert!(fo_for_owner(&app, &id));
-    assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 0);
+    assert_eq!(
+        crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+        0
+    );
     parked.end().await;
 }
 
@@ -188,9 +217,12 @@ async fn for_owner_is_set_when_no_overseer_turn_can_start() {
     let one = fo_park(&app, first).await;
     let two = fo_park(&app, second).await;
     let q = fo_question(&app, &second_id);
-    assert!(q.held_for_overseer && !q.for_owner, "queued is the overseer's");
+    assert!(
+        q.held_for_overseer && !q.for_owner,
+        "queued is the overseer's"
+    );
     app.settings.write().unwrap().routes.clear();
-    chat::wait_idle(&app, &repo).await;
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     let q = fo_question(&app, &second_id);
     assert!(q.for_owner && !q.held_for_overseer);
     one.end().await;
@@ -208,8 +240,11 @@ async fn for_owner_is_set_when_the_overseer_turn_ends_with_the_question_open() {
         let task = fo_waiting(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
         let id = task.id.clone();
         let parked = fo_park(&app, task).await;
-        chat::wait_idle(&app, &repo).await;
-        assert_eq!(chat::fake_overseer_calls(Path::new(&repo)), 1);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        assert_eq!(
+            crate::engine::chat::test_support::fake_overseer_calls(Path::new(&repo)),
+            1
+        );
         let q = fo_question(&app, &id);
         assert!(q.for_owner && !q.held_for_overseer, "slow: {slow}");
         parked.end().await;
@@ -228,14 +263,14 @@ async fn for_owner_is_set_when_a_turn_outlives_the_hold_ttl() {
     app.release_expired_holds(now_ms() + HOLD_TTL_MS + 1);
     let q = fo_question(&app, &id);
     assert!(!q.held_for_overseer && !q.for_owner);
-    chat::wait_idle(&app, &repo).await;
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     assert!(fo_for_owner(&app, &id), "handed on when the turn ends");
     parked.end().await;
 
     // A hold no turn or queued wake owns any more goes to the owner at once.
     let (app, _dir, repo) = fo_app(true);
     let mut task = fo_waiting(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
-    let q = task.question.as_mut().unwrap();
+    let q = task.fixture_data().question.as_mut().unwrap();
     q.held_for_overseer = true;
     q.held_at = Some(now_ms() - HOLD_TTL_MS - 1);
     app.store.save_task(&task).unwrap();
@@ -255,34 +290,53 @@ async fn for_owner_is_never_set_at_the_attempts_failing_cap() {
         QuestionKind::AttemptsFailing,
         &["continue", "change approach", "stop"],
     );
-    task.attempts.push(attempt_with_failure(1, "s"));
-    task.loop_state.non_owner_continues = MAX_ORCHESTRATOR_CONTINUES as u32;
+    task.fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "s"));
+    task.fixture_data().loop_state.non_owner_continues = MAX_ORCHESTRATOR_CONTINUES as u32;
     app.store.save_task(&task).unwrap();
-    let id = task.id.clone();
+    let _id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
     let cancel = CancelToken::new();
     let mut events = app.subscribe();
-    let answered =
-        wait_for_exhausted_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await;
-    assert_eq!(answered.map(|a| a.text).as_deref(), Some("change approach"));
+    let answered = wait_for_exhausted_answer(
+        &app,
+        &mut task,
+        &mut QuestionSlot::new(
+            &crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+            &mut None,
+        ),
+    )
+    .await;
+    assert_eq!(answered.map(|a| a.text).as_deref(), Ok("change approach"));
     assert!(task.question.is_none() && task.status == TaskStatus::Queued);
     while let Ok(event) = events.try_recv() {
         if let Event::Task { task } = event {
-            assert!(task.question.is_none_or(|q| !q.for_owner), "never the owner's");
+            assert!(
+                task.question.clone().is_none_or(|q| !q.for_owner),
+                "never the owner's"
+            );
         }
     }
 
     // A hold on it that lapses steps the ladder too.
     let (app, _dir, repo) = fo_app(true);
     let mut task = fo_waiting(&repo, QuestionKind::AttemptsFailing, &["continue", "stop"]);
-    task.attempts.push(attempt_with_failure(1, "s"));
-    let q = task.question.as_mut().unwrap();
+    task.fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "s"));
+    let q = task.fixture_data().question.as_mut().unwrap();
     q.held_for_overseer = true;
     q.held_at = Some(now_ms() - HOLD_TTL_MS - 1);
     app.store.save_task(&task).unwrap();
     app.release_expired_holds(now_ms());
     let task = app.store.load_task(&task.id).unwrap().unwrap();
-    assert!(task.question.is_none_or(|q| !q.for_owner));
+    assert!(task.question.clone().is_none_or(|q| !q.for_owner));
     assert_ne!(task.status, TaskStatus::Waiting);
 }
 
@@ -291,7 +345,7 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
     let (app, _dir, repo) = fo_app(true);
     fo_slow_overseer(&app, &repo, 1000);
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.repo = repo.clone();
+    task.fixture_data().repo = repo.clone();
     app.store.save_task(&task).unwrap();
     let id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
@@ -300,23 +354,17 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
     let handle = tokio::spawn({
         let (app, pending, cancel, id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
         async move {
-            ask_plan_question(
-                &app,
-                &id,
-                "The planner has 2 blocking question(s); answer them all in one reply:\n\n1. A?\n2. B?",
-                vec![],
-                (vec![], None),
-                &pending,
-                &cancel,
-                &mut None,
-            )
+            ask_plan_question(&app, &id, crate::task::Question { risk: vec![], default_option: None, ..crate::task::Question::new("The planner has 2 blocking question(s); answer them all in one reply:\n\n1. A?\n2. B?", vec![], crate::task::QuestionKind::PlanQuestion, crate::task::AskedBy::Plan, crate::clock::now_ms()) }, &crate::engine::run_control::TaskSignals { resume: Default::default(),  cancel: cancel.clone(), pending_answer: pending.clone(), pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)) }, &mut None)
             .await;
         }
     });
     fo_until_waiting_broadcast(&mut events).await;
     let q = fo_question(&app, &id);
-    assert!(q.held_for_overseer && !q.for_owner, "the overseer looks first");
-    chat::wait_idle(&app, &repo).await;
+    assert!(
+        q.held_for_overseer && !q.for_owner,
+        "the overseer looks first"
+    );
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     let q = fo_question(&app, &id);
     assert!(q.for_owner && !q.held_for_overseer);
     cancel.cancel();
@@ -325,7 +373,7 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
     // With auto-answer off nobody else looks: the owner's at once.
     let (app, _dir, repo) = fo_app(false);
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.repo = repo.clone();
+    task.fixture_data().repo = repo.clone();
     app.store.save_task(&task).unwrap();
     let id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
@@ -337,11 +385,23 @@ async fn for_owner_is_set_for_the_owner_batch_once_nobody_else_takes_it() {
             ask_plan_question(
                 &app,
                 &id,
-                "The planner has 2 blocking question(s); answer them all in one reply:",
-                vec![],
-                (vec![], None),
-                &pending,
-                &cancel,
+                crate::task::Question {
+                    risk: vec![],
+                    default_option: None,
+                    ..crate::task::Question::new(
+                        "The planner has 2 blocking question(s); answer them all in one reply:",
+                        vec![],
+                        crate::task::QuestionKind::PlanQuestion,
+                        crate::task::AskedBy::Plan,
+                        crate::clock::now_ms(),
+                    )
+                },
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
                 &mut None,
             )
             .await;
@@ -365,8 +425,8 @@ async fn for_owner_is_set_for_a_deferred_notice_when_quiet_hours_end() {
         let task = fo_waiting(&repo, QuestionKind::AgentQuestion, &["A", "B"]);
         let id = task.id.clone();
         let parked = fo_park(&app, task).await;
-        chat::wait_idle(&app, &repo).await;
-        let log = crate::overseer::read(&app.data_dir, Some(&repo), None);
+        crate::engine::chat::test_support::wait_idle(&app, &repo).await;
+        let log = crate::store::overseer::read(&app.data_dir, Some(&repo), None);
         assert!(
             log.iter().any(|e| e.text == owner_notice::DEFERRED),
             "{log:?}"
@@ -400,7 +460,7 @@ async fn for_owner_is_never_set_while_the_overseer_holds_the_question() {
     app.wait_sla_tick(now_ms()).await;
     let q = fo_question(&app, &id);
     assert!(q.held_for_overseer && !q.for_owner);
-    chat::wait_idle(&app, &repo).await;
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     assert!(fo_for_owner(&app, &id));
     let mut seen = Vec::new();
     while let Ok(Event::Task { task }) = events.try_recv() {
@@ -420,7 +480,7 @@ async fn for_owner_is_never_set_while_the_overseer_holds_the_question() {
 }
 
 #[tokio::test]
-async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
+async fn for_owner_is_never_set_when_the_policy_answers() {
     // The answer policy answers before the task parks.
     let (app, _dir, repo) = fo_app(true);
     let mut task = fo_waiting(
@@ -430,17 +490,31 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
     );
     app.store.save_task(&task).unwrap();
     let mut events = app.subscribe();
-    let id = task.id.clone();
+    let _id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
-    let answer = wait_for_answer(&app, &id, &mut task, &pending, &CancelToken::new(), &mut None)
-        .await;
-    assert_eq!(answer.as_deref(), Some("retry the dependency"));
+    let answer = QuestionSlot::new(
+        &crate::engine::run_control::TaskSignals {
+            resume: Default::default(),
+            cancel: CancelToken::new(),
+            pending_answer: pending.clone(),
+            pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        },
+        &mut None,
+    )
+    .answer(&app, &mut task)
+    .await;
+    assert_eq!(answer.as_deref(), Ok("retry the dependency"));
     while let Ok(event) = events.try_recv() {
         if let Event::Task { task } = event {
-            assert!(task.question.is_none_or(|q| !q.for_owner));
+            assert!(task.question.clone().is_none_or(|q| !q.for_owner));
         }
     }
 
+    app.shutdown();
+}
+
+#[tokio::test]
+async fn for_owner_is_never_set_when_a_precedent_answers() {
     // An owner precedent answers it as the overseer, with no turn.
     let (app, dir, _) = fo_app(true);
     let root = dir.path().join("git");
@@ -456,24 +530,27 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
         ],
         QuestionKind::PreexistingFailure,
         AskedBy::Implement,
+        crate::clock::now_ms(),
     );
     base.commands = vec!["cargo test".into()];
     for _ in 0..2 {
         let mut answered = task_with_status(TaskStatus::Queued);
-        answered.repo = repo.clone();
+        answered.fixture_data().repo = repo.clone();
         record_answer_for(
             &mut answered,
             Some(&base),
-            PRE_EXISTING_RETRY,
+            &crate::engine::questions::reply::Reply {
+                text: (PRE_EXISTING_RETRY).to_string(),
+                default_evidence: (None).map(str::to_string),
+                like: (None).map(str::to_string),
+            },
             AnsweredBy::Owner,
-            None,
-            None,
         );
         app.store.save_task(&answered).unwrap();
     }
     let mut task = task_with_status(TaskStatus::Waiting);
-    task.repo = repo.clone();
-    task.question = Some(base);
+    task.fixture_data().repo = repo.clone();
+    task.fixture_data().question = Some(base);
     let id = task.id.clone();
     app.store.save_task(&task).unwrap();
     let pending = Arc::new(StdMutex::new(None));
@@ -481,16 +558,32 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {
-            cancel: cancel.clone(),
-            pending_answer: pending.clone(),
-            pending_amend: Arc::new(StdMutex::new(None)),
+            signals: crate::engine::run_control::TaskSignals {
+                resume: Default::default(),
+                cancel: cancel.clone(),
+                pending_answer: pending.clone(),
+                pending_amend: Arc::new(StdMutex::new(None)),
+            },
             handle: tokio::spawn(async {}),
         },
     );
     let mut events = app.subscribe();
     let parked = tokio::spawn({
-        let (app, pending, cancel, id) = (app.clone(), pending.clone(), cancel.clone(), id.clone());
-        async move { park_for_answer(&app, &id, &mut task, &pending, &cancel, &mut None).await }
+        let (app, pending, cancel, _id) =
+            (app.clone(), pending.clone(), cancel.clone(), id.clone());
+        async move {
+            QuestionSlot::new(
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
+                &mut None,
+            )
+            .park(&app, &mut task)
+            .await
+        }
     });
     let answer = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
@@ -499,7 +592,7 @@ async fn for_owner_is_never_set_when_the_policy_or_a_precedent_answers() {
     assert_eq!(answer.as_deref(), Some(PRE_EXISTING_RETRY));
     while let Ok(event) = events.try_recv() {
         if let Event::Task { task } = event {
-            assert!(task.question.is_none_or(|q| !q.for_owner));
+            assert!(task.question.clone().is_none_or(|q| !q.for_owner));
         }
     }
     let answered = app.store.load_task(&id).unwrap().unwrap();
@@ -517,7 +610,7 @@ async fn for_owner_is_never_on_the_waiting_broadcast_before_the_hold() {
     let (app, _dir, repo) = fo_app(true);
     fo_slow_overseer(&app, &repo, 800);
     let mut task = task_with_status(TaskStatus::Drafting);
-    task.repo = repo.clone();
+    task.fixture_data().repo = repo.clone();
     app.store.save_task(&task).unwrap();
     let id = task.id.clone();
     let pending = Arc::new(StdMutex::new(None));
@@ -529,11 +622,23 @@ async fn for_owner_is_never_on_the_waiting_broadcast_before_the_hold() {
             ask_plan_question(
                 &app,
                 &id,
-                "Which plan?",
-                vec!["A".into(), "B".into()],
-                (vec![], None),
-                &pending,
-                &cancel,
+                crate::task::Question {
+                    risk: vec![],
+                    default_option: None,
+                    ..crate::task::Question::new(
+                        "Which plan?",
+                        vec!["A".into(), "B".into()],
+                        crate::task::QuestionKind::PlanQuestion,
+                        crate::task::AskedBy::Plan,
+                        crate::clock::now_ms(),
+                    )
+                },
+                &crate::engine::run_control::TaskSignals {
+                    resume: Default::default(),
+                    cancel: cancel.clone(),
+                    pending_answer: pending.clone(),
+                    pending_amend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                },
                 &mut None,
             )
             .await;
@@ -546,7 +651,7 @@ async fn for_owner_is_never_on_the_waiting_broadcast_before_the_hold() {
         .and_then(|t| t.question.clone())
         .unwrap();
     assert!(first.held_for_overseer && !first.for_owner, "{first:?}");
-    chat::wait_idle(&app, &repo).await;
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     cancel.cancel();
     handle.await.unwrap();
 
@@ -570,6 +675,6 @@ async fn for_owner_is_never_on_the_waiting_broadcast_before_the_hold() {
         waiting.iter().all(|q| q.held_for_overseer && !q.for_owner),
         "{waiting:?}"
     );
-    chat::wait_idle(&app, &repo).await;
+    crate::engine::chat::test_support::wait_idle(&app, &repo).await;
     parked.end().await;
 }

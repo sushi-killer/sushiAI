@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sushiai_orch::engine::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
-use sushiai_orch::engine::verify::{run_verify_command, VerifyEnvironment};
+use sushiai_orch::harness::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
+use sushiai_orch::verify::command::run_verify_command;
+use sushiai_orch::verify::command::VerifyEnvironment;
 
 /// Written by a child `sh`, never through a descriptor of this process: a
 /// test thread that forks while it is open for writing makes the next exec
@@ -98,11 +99,13 @@ async fn setup_opt_out_disables_wrapper_stats_and_server_even_with_sccache() {
         r#"{"compilerCache":false,"setup":"true"}"#,
     )
     .unwrap();
-    sushiai_orch::worktree_env::run_setup(
+    sushiai_orch::worktree_env::WorktreeEnvironment::new(
         tmp.path(),
         tmp.path(),
         &env.path,
         Duration::from_secs(5),
+    )
+    .setup(
         |script| {
             let command = env.build_command(tmp.path(), script, None, "");
             assert_no_cache_env(&command);
@@ -344,25 +347,29 @@ fn setup_keeps_per_worktree_build_outputs_with_the_shared_wrapper() {
         .build()
         .unwrap();
     runtime
-        .block_on(sushiai_orch::worktree_env::run_setup(
-            tmp.path(),
-            &wt,
-            &path,
-            Duration::from_secs(5),
-            |script| {
-                let mut command = tokio::process::Command::new("/bin/sh");
-                command.args(["-c", script]);
-                #[cfg(unix)]
-                unsafe {
-                    command.pre_exec(|| {
-                        libc::setsid();
-                        Ok(())
-                    });
-                }
-                command
-            },
-            std::future::pending(),
-        ))
+        .block_on(
+            sushiai_orch::worktree_env::WorktreeEnvironment::new(
+                tmp.path(),
+                &wt,
+                &path,
+                Duration::from_secs(5),
+            )
+            .setup(
+                |script| {
+                    let mut command = tokio::process::Command::new("/bin/sh");
+                    command.args(["-c", script]);
+                    #[cfg(unix)]
+                    unsafe {
+                        command.pre_exec(|| {
+                            libc::setsid();
+                            Ok(())
+                        });
+                    }
+                    command
+                },
+                std::future::pending(),
+            ),
+        )
         .unwrap();
     let wrapper = std::env::var("RUSTC_WRAPPER").unwrap_or_else(|_| "sccache".into());
     assert_eq!(

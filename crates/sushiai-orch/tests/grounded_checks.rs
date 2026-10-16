@@ -3,7 +3,13 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::polling::{poll_until, remove_dir_retrying, settle, wait_until};
+use common::process::Daemon;
+use common::protocol::stop_daemon;
+use common::repository::{git_out, init_git_repo};
+
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -217,6 +223,47 @@ emit "$REPORT""#,
     cleanup(s, &[&done]);
 }
 
+fn assert_held_out_private(daemon: &Daemon, id: &str, done: &Value, held: &str) {
+    let attempts = implement_attempts(done);
+    // Nothing the implementer or reviewer could read holds the command.
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "plan") {
+                    continue;
+                }
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &daemon.data_dir().join("tasks").join(id).join("runs"),
+        &mut files,
+    );
+    assert!(files.iter().any(|f| f.ends_with("runs/2/brief.md")));
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            !text.contains(held),
+            "{} leaks the held-out command",
+            f.display()
+        );
+    }
+    let decisions = done["decisions"].to_string();
+    assert!(!decisions.contains(held), "{decisions}");
+    assert!(!attempts
+        .iter()
+        .any(|a| a["failure"].to_string().contains(held)));
+    assert!(!attempts
+        .iter()
+        .any(|a| a["verify"].to_string().contains(held)));
+}
+
 #[test]
 fn a_failing_held_out_check_fails_the_attempt_and_its_command_never_leaks() {
     // The held-out command prints itself (held.sh holds exactly that text).
@@ -280,43 +327,7 @@ emit "$REPORT""#,
         s.daemon.child.try_wait().unwrap()
     });
 
-    // Nothing the implementer or reviewer could read holds the command.
-    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "plan") {
-                    continue;
-                }
-                walk(&path, out);
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(
-        &s.daemon.data_dir().join("tasks").join(&id).join("runs"),
-        &mut files,
-    );
-    assert!(files.iter().any(|f| f.ends_with("runs/2/brief.md")));
-    for f in &files {
-        let bytes = std::fs::read(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        assert!(
-            !text.contains(held),
-            "{} leaks the held-out command",
-            f.display()
-        );
-    }
-    let decisions = done["decisions"].to_string();
-    assert!(!decisions.contains(held), "{decisions}");
-    assert!(!attempts
-        .iter()
-        .any(|a| a["failure"].to_string().contains(held)));
-    assert!(!attempts
-        .iter()
-        .any(|a| a["verify"].to_string().contains(held)));
+    assert_held_out_private(&s.daemon, &id, &done, held);
 
     // The review names the result by criterion only, and the check that
     // passed on the base as not grounded.
@@ -668,8 +679,11 @@ fn task_create_validates_checks_and_refuses_the_retired_flag() {
         .unwrap()
         .contains("groundedChecks"));
 
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mcp.rs")).unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/api/mcp/schema/tasks.rs"
+    ))
+    .unwrap();
     assert_eq!(
         source.matches("\"variant\": {\"type\": \"object\"").count(),
         1

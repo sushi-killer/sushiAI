@@ -3,111 +3,21 @@
 //! them, the one-time `orchd costs backfill`, and the `orchd costs` CLI.
 //! Every place orchd runs a harness writes its record when the run ends.
 
-use crate::model::{now_ms, Attempt, Audit, Harness, Proposal, Stage, Task, TaskStatus};
-use serde::{Deserialize, Serialize};
+use crate::clock::now_ms;
+use crate::policy::calendar::{day as day_of, parse_day};
+#[cfg(test)]
+use crate::policy::routing::Harness;
+#[cfg(test)]
+use crate::store::costs::append;
+#[cfg(test)]
+use crate::store::costs::costs_path;
+use crate::store::costs::{backfill, read_all, read_tasks, CostRecord};
+use crate::task::{Task, TaskStatus};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-/// Every stage a record can name. `brief_check` and `eval_check` are for
-/// runs that use a model; today those checks run shell commands only.
-pub const STAGES: [&str; 18] = [
-    "plan",
-    "implement",
-    "review",
-    "advisor",
-    "brief_check",
-    "refresh",
-    "pick",
-    "final",
-    "eval_check",
-    "triage",
-    "answer_judge",
-    "finding_judge",
-    "pr_draft",
-    "audit",
-    "evolution",
-    "attribution",
-    "chat",
-    "other",
-];
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 const DAY_MS: i64 = 86_400_000;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CostRecord {
-    pub ts: i64,
-    pub repo: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    /// The audit or evolution proposal a non-task run belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub stage: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<u32>,
-    pub route_id: String,
-    pub harness: Harness,
-    pub model: String,
-    pub cost_usd: f64,
-    #[serde(default)]
-    pub estimated: bool,
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub cached_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-    #[serde(default)]
-    pub ms: u64,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub backfilled: bool,
-}
-
-pub fn costs_path(data: &Path) -> PathBuf {
-    data.join("costs.jsonl")
-}
-
-/// Appends one line. Best effort: a run's cost record must never fail the
-/// run.
-pub fn append(data: &Path, record: &CostRecord) {
-    let mut record = record.clone();
-    if !STAGES.contains(&record.stage.as_str()) {
-        record.stage = "other".into();
-    }
-    let mut line = match serde_json::to_string(&record) {
-        Ok(line) => line,
-        Err(e) => {
-            eprintln!("orch: serializing cost record failed: {e}");
-            return;
-        }
-    };
-    line.push('\n');
-    let result = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(costs_path(data))
-        .and_then(|mut file| file.write_all(line.as_bytes()));
-    if let Err(e) = result {
-        eprintln!("orch: appending cost record failed: {e}");
-    }
-}
-
-/// Every record; a corrupt line is skipped.
-pub fn read_all(data: &Path) -> Vec<CostRecord> {
-    std::fs::read_to_string(costs_path(data))
-        .unwrap_or_else(|e| {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("orch: reading cost records failed: {e}");
-            }
-            String::new()
-        })
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
-}
 
 // -- summary -----------------------------------------------------------------
 
@@ -176,11 +86,6 @@ pub fn spend_today(records: &[CostRecord], now: i64) -> (String, f64) {
     (day_of(now), spent)
 }
 
-/// The UTC date `now` falls in, as `YYYY-MM-DD`.
-pub fn today(now: i64) -> String {
-    day_of(now)
-}
-
 #[derive(Debug, Clone, Default)]
 struct Acc {
     cost: f64,
@@ -217,54 +122,6 @@ impl Acc {
         }
         v
     }
-}
-
-fn day_of(ts: i64) -> String {
-    // Days since the epoch -> civil date (proleptic Gregorian, UTC).
-    let z = ts.div_euclid(DAY_MS) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Days since the epoch of a `YYYY-MM-DD` calendar date (the inverse of
-/// [`day_of`]); an impossible date such as 2026-02-30 is an error.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = y - i64::from(m <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn parse_day(text: &str) -> Result<i64, String> {
-    let bad = || format!("{text:?} is not a UTC date YYYY-MM-DD");
-    let b = text.as_bytes();
-    if b.len() != 10
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || !b
-            .iter()
-            .enumerate()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
-    {
-        return Err(bad());
-    }
-    let num = |r: std::ops::Range<usize>| text[r].parse::<i64>().map_err(|_| bad());
-    let days = days_from_civil(num(0..4)?, num(5..7)?, num(8..10)?);
-    // Out-of-range months and days do not survive the round trip.
-    if day_of(days * DAY_MS) != text {
-        return Err(bad());
-    }
-    Ok(days)
 }
 
 fn key_part(r: &CostRecord, by: &str) -> String {
@@ -415,11 +272,6 @@ pub fn source_summary(tasks: &[Task], q: &Query, now: i64) -> Value {
         .into()
 }
 
-/// Every stored task, for the lead-touch rate.
-pub fn read_tasks(data: &Path) -> Vec<Task> {
-    read_dir_json(&data.join("tasks"), Some("task.json"))
-}
-
 /// The text `orchd costs` prints for a summary.
 pub fn render(summary: &Value) -> String {
     let money = |v: &Value| format!("${:.2}", v["costUsd"].as_f64().unwrap_or(0.0));
@@ -474,187 +326,6 @@ pub fn render(summary: &Value) -> String {
         }
     }
     out
-}
-
-// -- backfill ------------------------------------------------------------------
-
-fn model_of(models: Option<&crate::model::Fingerprint>, fallback: &str) -> String {
-    models
-        .and_then(|f| f.models.first().cloned())
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-fn attempt_records(task: &Task) -> Vec<CostRecord> {
-    let base = |a: &Attempt, stage: &str, cost: f64| CostRecord {
-        ts: a.ended_at.unwrap_or(a.started_at),
-        repo: task.repo.clone(),
-        task_id: Some(task.id.clone()),
-        run_id: None,
-        stage: stage.into(),
-        attempt: Some(a.n),
-        route_id: a.route_id.clone(),
-        harness: a.harness,
-        model: a.model.clone(),
-        cost_usd: cost,
-        estimated: false,
-        input_tokens: 0,
-        cached_tokens: 0,
-        output_tokens: 0,
-        ms: a.ended_at.map_or(0, |e| (e - a.started_at).max(0) as u64),
-        backfilled: true,
-    };
-    let mut out = Vec::new();
-    for a in &task.attempts {
-        if let Some(cost) = a.cost_usd {
-            let stage = match a.stage {
-                Stage::Plan => "plan",
-                Stage::Implement => "implement",
-                Stage::Review => "review",
-            };
-            let mut r = base(a, stage, cost);
-            r.model = model_of(a.fingerprint.as_ref(), &a.model);
-            r.estimated = a.cost_estimated;
-            if let Some(u) = &a.usage {
-                r.input_tokens = u.input;
-                r.cached_tokens = u.cached;
-                r.output_tokens = u.output;
-            }
-            out.push(r);
-        }
-        for (stage, cost, fp) in [
-            ("review", a.review_cost_usd, &a.review_fingerprint),
-            ("advisor", a.advisor_cost_usd, &a.advisor_fingerprint),
-        ] {
-            let Some(cost) = cost else { continue };
-            let mut r = base(a, stage, cost);
-            r.route_id = "unknown".into();
-            r.ms = 0;
-            if let Some(fp) = fp {
-                r.harness = fp.harness;
-                r.model = model_of(Some(fp), &a.model);
-            }
-            out.push(r);
-        }
-    }
-    out
-}
-
-fn read_dir_json<T: serde::de::DeserializeOwned>(dir: &Path, file: Option<&str>) -> Vec<T> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!(
-                    "orch: listing {} for cost backfill failed: {e}",
-                    dir.display()
-                );
-            }
-            return Vec::new();
-        }
-    };
-    entries
-        .filter_map(|entry| match entry {
-            Ok(entry) => Some(entry),
-            Err(e) => {
-                eprintln!(
-                    "orch: reading entry in {} for cost backfill failed: {e}",
-                    dir.display()
-                );
-                None
-            }
-        })
-        .filter_map(|e| {
-            let path = match file {
-                Some(f) => e.path().join(f),
-                None => e.path(),
-            };
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!(
-                        "orch: reading {} for cost backfill failed: {e}",
-                        path.display()
-                    );
-                    return None;
-                }
-            };
-            serde_json::from_str(&text).ok()
-        })
-        .collect()
-}
-
-/// Derives records from `task.json`, `audit.json` and proposal files, once:
-/// a task, audit or proposal that already has a record is skipped. Returns
-/// how many records it appended.
-pub fn backfill(data: &Path) -> usize {
-    let existing = read_all(data);
-    let tasks_done: HashSet<&str> = existing
-        .iter()
-        .filter_map(|r| r.task_id.as_deref())
-        .collect();
-    let runs_done: HashSet<&str> = existing
-        .iter()
-        .filter_map(|r| r.run_id.as_deref())
-        .collect();
-    let mut fresh: Vec<CostRecord> = Vec::new();
-
-    let tasks: Vec<Task> = read_dir_json(&data.join("tasks"), Some("task.json"));
-    for task in tasks.iter().filter(|t| !tasks_done.contains(t.id.as_str())) {
-        fresh.extend(attempt_records(task));
-    }
-    let audits: Vec<Audit> = read_dir_json(&data.join("audits"), Some("audit.json"));
-    for a in audits
-        .iter()
-        .filter(|a| a.cost_usd > 0.0 && !runs_done.contains(a.id.as_str()))
-    {
-        fresh.push(CostRecord {
-            ts: a.ended_at.unwrap_or(a.started_at),
-            repo: a.repo.clone(),
-            task_id: None,
-            run_id: Some(a.id.clone()),
-            stage: "audit".into(),
-            attempt: None,
-            route_id: a.route_id.clone(),
-            harness: a.harness,
-            model: model_of(a.fingerprint.as_ref(), &a.model),
-            cost_usd: a.cost_usd,
-            estimated: false,
-            input_tokens: a.usage.as_ref().map_or(0, |u| u.input),
-            cached_tokens: a.usage.as_ref().map_or(0, |u| u.cached),
-            output_tokens: a.usage.as_ref().map_or(0, |u| u.output),
-            ms: a.ended_at.map_or(0, |e| (e - a.started_at).max(0) as u64),
-            backfilled: true,
-        });
-    }
-    let proposals: Vec<Proposal> = read_dir_json(&data.join("evolution").join("proposals"), None);
-    for p in proposals
-        .iter()
-        .filter(|p| p.cost_usd > 0.0 && !runs_done.contains(p.id.as_str()))
-    {
-        let fp = p.fingerprint.as_ref();
-        fresh.push(CostRecord {
-            ts: p.created_at,
-            repo: p.repo.clone(),
-            task_id: None,
-            run_id: Some(p.id.clone()),
-            stage: "evolution".into(),
-            attempt: None,
-            route_id: "unknown".into(),
-            harness: fp.map_or(Harness::Claude, |f| f.harness),
-            model: model_of(fp, "unknown"),
-            cost_usd: p.cost_usd,
-            estimated: false,
-            input_tokens: 0,
-            cached_tokens: 0,
-            output_tokens: 0,
-            ms: 0,
-            backfilled: true,
-        });
-    }
-    for r in &fresh {
-        append(data, r);
-    }
-    fresh.len()
 }
 
 // -- CLI -----------------------------------------------------------------------
@@ -831,7 +502,7 @@ mod tests {
             "status": "done", "tier": "standard", "createdAt": at, "updatedAt": at,
         }))
         .unwrap();
-        t.lead_touch = touched.map(|touched| crate::model::LeadTouch {
+        t.fixture_data().lead_touch = touched.map(|touched| crate::task::LeadTouch {
             touched,
             note: String::new(),
             at,
@@ -844,7 +515,7 @@ mod tests {
     fn lead_touch_rate_counts_marked_done_tasks_per_repo_and_week() {
         let now = 40 * DAY_MS;
         let mut running = done_task("r", "/a", now, Some(true));
-        running.status = TaskStatus::Running;
+        running.fixture_data().status = TaskStatus::Running;
         let tasks = vec![
             done_task("1", "/a", now - DAY_MS, Some(true)),
             done_task("2", "/a", now - DAY_MS, Some(false)),
@@ -935,7 +606,7 @@ mod tests {
         assert_eq!(touch["touched"], 1);
         let mut created = tasks.clone();
         for (t, at) in created.iter_mut().zip([1, 2, 3, 2]) {
-            t.created_at = day(at);
+            t.fixture_data().created_at = day(at);
         }
         let sources = source_summary(&created, &q, now);
         assert_eq!(sources["unknown"]["tasks"], 2);

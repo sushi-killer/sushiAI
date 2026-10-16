@@ -7,7 +7,7 @@ fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
         a.session_id = Some(session.into());
         a.cost_usd = Some(cost);
         a.review_cost_usd = Some(9.0);
-        task.attempts.push(a);
+        task.fixture_data().attempts.push(a);
     }
     app.store.save_task(&task).unwrap();
     let mut outcome = harness::RunOutcome {
@@ -18,8 +18,11 @@ fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
         &app,
         &task.id,
         4,
-        Harness::Claude,
-        Some("resumed"),
+        crate::engine::attempts::pricing::ProviderRun {
+            harness: Harness::Claude,
+            model: None,
+            resume: Some("resumed"),
+        },
         &mut outcome,
     );
     assert!((outcome.cost_usd.unwrap() - 0.4).abs() < 1e-9);
@@ -40,8 +43,11 @@ fn resumed_claude_cost_is_own_spend_and_excludes_review_costs() {
         &app,
         &task.id,
         4,
-        Harness::Claude,
-        Some("resumed"),
+        crate::engine::attempts::pricing::ProviderRun {
+            harness: Harness::Claude,
+            model: None,
+            resume: Some("resumed"),
+        },
         &mut streamed,
     );
     assert_eq!(streamed.cost_usd, Some(expected));
@@ -56,7 +62,7 @@ fn an_interrupted_resumed_attempt_settles_only_its_own_session_spend() {
     let dir = store.run_dir(&task.id, 2);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("run.json"),
+        crate::harness::run_files::RunFiles::of(&dir.join("events.jsonl")).meta,
         r#"{"argv":["-p","--resume","sess-1"]}"#,
     )
     .unwrap();
@@ -68,8 +74,8 @@ fn an_interrupted_resumed_attempt_settles_only_its_own_session_spend() {
     let mut previous = attempt_with_failure(1, "verify");
     previous.session_id = Some("sess-1".into());
     previous.cost_usd = Some(0.3);
-    task.cost_usd = 0.3;
-    task.attempts = vec![previous, attempt_with_failure(2, "verify")];
+    task.fixture_data().cost_usd = 0.3;
+    task.fixture_data().attempts = vec![previous, attempt_with_failure(2, "verify")];
     settle_unfinished_cost(&mut task, 1, &store, &Settings::default().prices);
     assert!((task.cost_usd - 0.7).abs() < 1e-9);
     assert!((task.attempts[1].cost_usd.unwrap() - 0.4).abs() < 1e-9);
@@ -92,8 +98,8 @@ fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
     let prices = Settings::default().prices;
     let settle = |saved: Option<f64>| {
         let mut task = task.clone();
-        task.cost_usd = saved.unwrap_or(0.0);
-        task.attempts = vec![Attempt {
+        task.fixture_data().cost_usd = saved.unwrap_or(0.0);
+        task.fixture_data().attempts = vec![Attempt {
             stage: Stage::Plan,
             cost_usd: saved,
             ..attempt_with_failure(1, "x")
@@ -111,7 +117,7 @@ fn a_plan_attempt_settles_only_the_runs_whose_cost_is_not_saved_yet() {
 fn backfill_turns_task_costs_into_records_once() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Done);
-    task.attempts = vec![
+    task.fixture_data().attempts = vec![
         Attempt {
             stage: Stage::Plan,
             cost_usd: Some(0.02),
@@ -138,8 +144,8 @@ fn backfill_turns_task_costs_into_records_once() {
         },
     ];
     app.store.save_task(&task).unwrap();
-    assert_eq!(crate::costs::backfill(&app.data_dir), 4);
-    let mut records = crate::costs::read_all(&app.data_dir);
+    assert_eq!(crate::store::costs::backfill(&app.data_dir), 4);
+    let mut records = crate::store::costs::read_all(&app.data_dir);
     records.sort_by(|a, b| a.stage.cmp(&b.stage));
     let stages: Vec<&str> = records.iter().map(|r| r.stage.as_str()).collect();
     assert_eq!(stages, ["advisor", "implement", "plan", "review"]);
@@ -152,15 +158,15 @@ fn backfill_turns_task_costs_into_records_once() {
     assert!((total - 1.77).abs() < 1e-9);
     // A second run adds nothing, and a live record for a task also keeps it
     // from being derived again.
-    assert_eq!(crate::costs::backfill(&app.data_dir), 0);
-    assert_eq!(crate::costs::read_all(&app.data_dir).len(), 4);
+    assert_eq!(crate::store::costs::backfill(&app.data_dir), 0);
+    assert_eq!(crate::store::costs::read_all(&app.data_dir).len(), 4);
 }
 
 #[test]
 fn helpers_folder_cost_replay_reads_only_the_attempts_review_and_advisor() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Queued);
-    task.attempts = vec![attempt_with_failure(1, "failure")];
+    task.fixture_data().attempts = vec![attempt_with_failure(1, "failure")];
     let result = |cost: f64| format!(r#"{{"type":"result","total_cost_usd":{cost},"result":"x"}}"#);
     for (stage, attempt, cost) in [
         ("review", 1, 0.25),
@@ -190,10 +196,10 @@ fn helpers_folder_cost_replay_reads_only_the_attempts_review_and_advisor() {
     assert!(!settle_interrupted_advisor(&mut task, &app.store, &prices));
     assert_eq!(task.cost_usd, 0.875);
     let mut old = task.clone();
-    old.id = uuid::Uuid::new_v4().to_string();
-    old.cost_usd = 0.0;
-    old.attempts[0].review_cost_usd = None;
-    old.attempts[0].advisor_cost_usd = None;
+    old.fixture_data().id = uuid::Uuid::new_v4().to_string();
+    old.fixture_data().cost_usd = 0.0;
+    old.fixture_data().attempts[0].review_cost_usd = None;
+    old.fixture_data().attempts[0].advisor_cost_usd = None;
     for stage in ["review", "advisor"] {
         let dir = app.store.run_dir(&old.id, 1).join(stage);
         std::fs::create_dir_all(&dir).unwrap();

@@ -3,8 +3,37 @@
 //! of the overseer log for a top-level task. Everything here but
 //! [`App::record_task_metrics`] is pure.
 
-use super::*;
-use crate::costs::{self, CostRecord};
+#[cfg(test)]
+use crate::task::AnsweredQuestion;
+#[cfg(test)]
+use crate::task::Attempt;
+#[cfg(test)]
+use crate::task::PlanFinding;
+#[cfg(test)]
+use serde_json::json;
+
+use crate::api::events::Event;
+use crate::clock::now_ms;
+use crate::engine::decision::implement_attempt_count;
+use crate::engine::state::App;
+#[cfg(test)]
+use crate::engine::test_support::task_with_status;
+use crate::store;
+use crate::store::overseer;
+use crate::task::AnsweredBy;
+use crate::task::AttemptStatus;
+use crate::task::Failure;
+use crate::task::FailureCause;
+use crate::task::FailureKind;
+use crate::task::QuestionKind;
+use crate::task::Severity;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskMetrics;
+use crate::task::TaskStatus;
+use crate::task::COST_PHASES;
+
+use crate::store::costs::CostRecord;
 use std::collections::{BTreeMap, HashSet};
 
 /// How many finished top-level tasks the repo line of the entry covers.
@@ -246,23 +275,29 @@ impl App {
         let finished = matches!(task.status, TaskStatus::Done | TaskStatus::Failed);
         if !finished {
             if task.metrics.is_some() {
-                let _ = self.update_task(task_id, |t| t.metrics = None);
+                let _ = self.update_task(task_id, |t| t.record_metrics(None));
             }
             return;
         }
         let mut all = self.repo_tasks(&task.repo);
         let metrics = task.metrics.clone().unwrap_or_else(|| {
-            let records = costs::read_all(&self.data_dir);
+            let records = store::costs::read_all(&self.data_dir);
             compute(&task, &all, &records, now_ms())
         });
         if task.parent.is_none() {
             if let Some(current) = all.iter_mut().find(|current| current.id == task.id) {
-                current.metrics = Some(metrics.clone());
+                current.record_metrics(Some(metrics.clone()));
             }
             let line = entry_text(&metrics);
             let detail = format!("{line}\n{}", repo_line(&all));
-            let entry = overseer::Entry::new("done", &task.repo, Some(&task.id), &line)
-                .with_detail(&detail);
+            let entry = crate::task::notes::overseer::Entry::new(
+                "done",
+                &task.repo,
+                Some(&task.id),
+                &line,
+                crate::clock::now_ms(),
+            )
+            .with_detail(&detail);
             if matches!(overseer::append_task_once(&self.data_dir, &entry), Ok(true)) {
                 let _ = self.events_tx.send(Event::Overseer {
                     entry: Box::new(entry),
@@ -271,7 +306,7 @@ impl App {
         }
         // Only the metrics are written, under the task lock: the slow work
         // above must not save a stale copy over an owner's mark.
-        let _ = self.update_task(task_id, |t| t.metrics = Some(metrics));
+        let _ = self.update_task(task_id, |t| t.record_metrics(Some(metrics)));
     }
 }
 
@@ -298,7 +333,7 @@ mod tests {
 
     fn failed_with(kind: FailureKind) -> Task {
         let mut t = task_with_status(TaskStatus::Failed);
-        t.attempts = vec![attempt(
+        t.fixture_data().attempts = vec![attempt(
             Stage::Implement,
             AttemptStatus::Failed,
             Some(kind),
@@ -338,21 +373,25 @@ mod tests {
     #[test]
     fn a_done_task_has_no_cause() {
         let mut t = failed_with(FailureKind::Verify);
-        t.status = TaskStatus::Done;
+        t.resume_phase(TaskStatus::Done, crate::clock::now_ms());
         assert_eq!(cause(&t), None);
     }
 
     #[test]
     fn a_base_check_failure_is_env() {
         let mut t = failed_with(FailureKind::Verify);
-        t.attempts[0].failure.as_mut().unwrap().signature = "base:npm test".into();
+        t.fixture_data().attempts[0]
+            .failure
+            .as_mut()
+            .unwrap()
+            .signature = "base:npm test".into();
         assert_eq!(cause(&t), Some(FailureCause::Env));
     }
 
     #[test]
     fn env_questions_are_env_and_the_latest_signal_wins() {
         let mut t = failed_with(FailureKind::Review);
-        t.question_history.push(AnsweredQuestion {
+        t.fixture_data().question_history.push(AnsweredQuestion {
             question: "q".into(),
             options: vec![],
             kind: QuestionKind::HarnessMissing,
@@ -365,27 +404,27 @@ mod tests {
             commands: Vec::new(),
         });
         assert_eq!(cause(&t), Some(FailureCause::Env));
-        t.question_history[0].answered_at = 5;
+        t.fixture_data().question_history[0].answered_at = 5;
         assert_eq!(cause(&t), Some(FailureCause::ReviewLoop));
-        t.question_history[0].kind = QuestionKind::PreexistingFailure;
-        t.question_history[0].answered_at = 30;
+        t.fixture_data().question_history[0].kind = QuestionKind::PreexistingFailure;
+        t.fixture_data().question_history[0].answered_at = 30;
         assert_eq!(cause(&t), Some(FailureCause::Env));
     }
 
     #[test]
     fn a_failed_plan_stage_without_implementing_is_plan() {
         let mut t = task_with_status(TaskStatus::Failed);
-        t.attempts = vec![attempt(
+        t.fixture_data().attempts = vec![attempt(
             Stage::Plan,
             AttemptStatus::Failed,
             Some(FailureKind::Error),
             10,
         )];
         assert_eq!(cause(&t), Some(FailureCause::Plan));
-        t.attempts[0].failure = None;
-        t.attempts[0].status = AttemptStatus::Interrupted;
+        t.fixture_data().attempts[0].failure = None;
+        t.fixture_data().attempts[0].status = AttemptStatus::Interrupted;
         assert_eq!(cause(&t), Some(FailureCause::Plan));
-        t.attempts.push(attempt(
+        t.fixture_data().attempts.push(attempt(
             Stage::Implement,
             AttemptStatus::Failed,
             Some(FailureKind::Loop),
@@ -397,26 +436,27 @@ mod tests {
     #[test]
     fn a_critical_plan_gate_finding_makes_an_impl_failure_plan() {
         let mut t = failed_with(FailureKind::Verify);
-        t.plan_gate.findings.push(PlanFinding {
+        t.fixture_data().plan_gate.findings.push(PlanFinding {
             id: "coverage-1".into(),
             severity: Severity::Critical,
             kind: "coverage".into(),
             text: "x".into(),
         });
         assert_eq!(cause(&t), Some(FailureCause::Plan));
-        t.attempts[0].failure.as_mut().unwrap().kind = FailureKind::Review;
+        t.fixture_data().attempts[0].failure.as_mut().unwrap().kind = FailureKind::Review;
         assert_eq!(cause(&t), Some(FailureCause::ReviewLoop));
     }
 
     #[test]
     fn first_pass_needs_one_implement_attempt_and_no_owner_answer() {
         let mut t = task_with_status(TaskStatus::Done);
-        t.attempts = vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 10)];
+        t.fixture_data().attempts =
+            vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 10)];
         assert!(first_pass(&t, &[]));
         assert_eq!(owner_touches(&t, &[]), 0);
-        t.decisions.push("Amended: verify".into());
+        t.record_decision("Amended: verify".into());
         assert_eq!(owner_touches(&t, &[]), 1);
-        t.question_history.push(AnsweredQuestion {
+        t.fixture_data().question_history.push(AnsweredQuestion {
             question: "q".into(),
             options: vec![],
             kind: QuestionKind::AgentQuestion,
@@ -430,9 +470,10 @@ mod tests {
         });
         assert!(!first_pass(&t, &[]));
         assert_eq!(owner_touches(&t, &[]), 2);
-        t.question_history[0].answered_by = AnsweredBy::Policy;
+        t.fixture_data().question_history[0].answered_by = AnsweredBy::Policy;
         assert!(first_pass(&t, &[]));
-        t.attempts
+        t.fixture_data()
+            .attempts
             .push(attempt(Stage::Implement, AttemptStatus::Passed, None, 11));
         assert!(!first_pass(&t, &[]));
     }
@@ -440,14 +481,15 @@ mod tests {
     #[test]
     fn a_parent_is_first_pass_when_every_subtask_is() {
         let mut part = task_with_status(TaskStatus::Done);
-        part.attempts = vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 1)];
+        part.fixture_data().attempts =
+            vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 1)];
         let mut other = part.clone();
         let parent = task_with_status(TaskStatus::Done);
         assert!(first_pass(&parent, &[&part, &other]));
-        other.attempts.push(part.attempts[0].clone());
+        other.fixture_data().attempts.push(part.attempts[0].clone());
         assert!(!first_pass(&parent, &[&part, &other]));
         let mut own = parent.clone();
-        own.attempts = part.attempts.clone();
+        own.fixture_data().attempts = part.attempts.clone();
         assert!(!first_pass(&own, &[&part]));
     }
 
@@ -520,13 +562,13 @@ mod tests {
             });
             let mut m = metrics(i % 4 == 0, None, &[("implement", 1.0)]);
             m.ended_at = i;
-            t.metrics = Some(m);
+            t.record_metrics(Some(m));
             tasks.push(t);
         }
         // Two oldest fall out of the window; subtasks never count.
         let mut sub = task_with_status(TaskStatus::Done);
-        sub.parent = Some("p".into());
-        sub.metrics = Some(metrics(true, None, &[]));
+        sub.fixture_data().parent = Some("p".into());
+        sub.fixture_data().metrics = Some(metrics(true, None, &[]));
         tasks.push(sub);
         // window = ended_at 2..=21: 10 landed, first pass on 4,8,..,20 = 5.
         assert_eq!(
@@ -534,7 +576,7 @@ mod tests {
             "Repo (last 20 finished): first-pass rate 25% (5/20); average cost per landed task $2.00 (10 landed)"
         );
         let mut failed = task_with_status(TaskStatus::Failed);
-        failed.metrics = Some(metrics(false, Some(FailureCause::Env), &[]));
+        failed.fixture_data().metrics = Some(metrics(false, Some(FailureCause::Env), &[]));
         assert!(repo_line(&[failed]).ends_with("average cost per landed task n/a (0 landed)"));
     }
 }

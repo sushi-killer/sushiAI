@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::*;
+use common::attempts::run_file;
+use common::harness::fake_harness_script;
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::init_git_repo;
 
 /// Answers by what it is asked: the check prompt gets `$CHECK_RESULT`, a
 /// planner brief a draft, anything else an implementation. Every kind of
@@ -217,7 +221,7 @@ fn helpers_folder_brief_check_does_not_borrow_implement_attempt_one() {
     let ns: std::collections::HashSet<u64> =
         attempts.iter().map(|a| a["n"].as_u64().unwrap()).collect();
     assert_eq!(ns.len(), attempts.len(), "{}", r.task);
-    let records = sushiai_orch::costs::read_all(r.daemon.data_dir());
+    let records = sushiai_orch::store::costs::read_all(r.daemon.data_dir());
     let check = records.iter().find(|c| c.stage == "brief_check").unwrap();
     assert!(check.attempt.is_none());
     assert_eq!(check.task_id.as_deref(), Some(id));

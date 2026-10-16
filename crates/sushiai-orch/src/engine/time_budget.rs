@@ -1,94 +1,26 @@
-use super::*;
-
-/// How long the report-only turn may run.
-const REPORT_TURN_MINS: f64 = 3.0;
-
 /// What an attempt that ran out of time leaves for the next one.
 pub(super) struct BudgetReport {
     pub handoff: String,
     pub summary: Option<String>,
-    /// What the report turn cost; `0.0` when it did not run.
-    pub cost: f64,
 }
 
-/// The run was stopped at its wall-clock budget. Resumes its session once,
-/// read-only, for a report-only turn: no tools to change anything, no MCP,
-/// no Stop hook. Without a session, or when the turn fails or reports no
-/// handoff, the handoff names the budget and the changed files instead.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn report_after_budget(
-    app: &Arc<App>,
-    task_id: &str,
-    attempt_n: u32,
-    route: &Route,
-    worktree: &Path,
-    run_dir: &Path,
-    session: Option<&str>,
+/// Keep the report the stopped run already produced, or a factual handoff.
+pub(super) fn report_after_budget(
+    mins: f64,
+    final_text: Option<&str>,
     changed_files: &[String],
-    cancel: &CancelToken,
 ) -> BudgetReport {
-    let mins = app.settings.read().unwrap().implement_budget_mins;
-    let mut cost = 0.0;
-    let mut report = None;
-    if let Some(session) = session {
-        let req = harness::RunRequest {
-            harness: route.harness,
-            worktree,
-            model: route.model.as_deref(),
-            effort: route.effort.as_deref(),
-            max_budget_usd: None,
-            review: true,
-            task_run: false,
-            task_sandbox: None,
-            mcp_config: None,
-            settings_path: None,
-            network_allowed: false,
-            codex_mcp: &[],
-            images: &[],
-            repo_settings: false,
-            resume: Some(session),
-        };
-        let events = run_dir.join("report.events.jsonl");
-        let guard = Guard::off().with_time_budget(REPORT_TURN_MINS, now_ms());
-        let prompt = brief::time_budget_report_prompt();
-        if let Ok(outcome) = run_harness(
-            app,
-            task_id,
-            attempt_n,
-            RunTrack::No,
-            worktree,
-            &req,
-            CostTag::task("implement", &route.id),
-            &prompt,
-            &events,
-            cancel,
-            guard,
-        )
-        .await
-        {
-            // A resumed Claude session's own total covers the run before it.
-            let own = match route.harness {
-                Harness::Claude => outcome.streamed_cost(&app.settings.read().unwrap().prices),
-                Harness::Codex => None,
-            };
-            cost = own.or(outcome.cost_usd).unwrap_or(0.0);
-            if !outcome.time_budget {
-                report = brief::parse_report(&outcome.final_text.unwrap_or_default())
-                    .filter(|r| !r.handoff.trim().is_empty());
-            }
-        }
-    }
-    match report {
-        Some(r) => BudgetReport {
-            handoff: r.handoff.trim().to_string(),
-            summary: Some(r.summary).filter(|s| !s.trim().is_empty()),
-            cost,
-        },
-        None => BudgetReport {
-            handoff: fallback_handoff(mins, changed_files),
-            summary: None,
-            cost,
-        },
+    let report = final_text.and_then(crate::engine::attempts::report::parse_report);
+    BudgetReport {
+        handoff: report
+            .as_ref()
+            .map(|r| r.handoff.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback_handoff(mins, changed_files)),
+        summary: report
+            .map(|r| r.summary.trim().to_string())
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -112,7 +44,7 @@ fn fallback_handoff(mins: f64, changed_files: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_handoff;
+    use super::{fallback_handoff, report_after_budget};
 
     #[test]
     fn the_fallback_names_the_budget_and_the_files() {
@@ -120,5 +52,26 @@ mod tests {
         assert!(text.contains("45 minute"));
         assert!(text.contains("a.rs, b.rs"));
         assert!(fallback_handoff(0.05, &[]).contains("no file changed"));
+    }
+
+    #[test]
+    fn the_existing_report_is_kept_without_another_turn() {
+        let text = r#"```sushi-report
+{"outcome":"partial","summary":" half done ","handoff":" finish the writer ","decisions":[],"question":""}
+```"#;
+        let report = report_after_budget(45.0, Some(text), &[]);
+        assert_eq!(report.summary.as_deref(), Some("half done"));
+        assert_eq!(report.handoff, "finish the writer");
+    }
+
+    #[test]
+    fn a_summary_without_a_handoff_keeps_its_summary_and_names_the_changed_files() {
+        let text = r#"```sushi-report
+{"outcome":"partial","summary":"half done","decisions":[],"question":""}
+```"#;
+        let report = report_after_budget(0.05, Some(text), &["writer.rs".into()]);
+        assert_eq!(report.summary.as_deref(), Some("half done"));
+        assert!(report.handoff.contains("writer.rs"));
+        assert!(report_after_budget(0.05, None, &[]).summary.is_none());
     }
 }

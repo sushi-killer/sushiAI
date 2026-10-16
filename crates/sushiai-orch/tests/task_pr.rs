@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::*;
+use common::harness::{cheap_route_on_claude, fake_harness_script};
+use common::polling::poll_until;
+use common::process::Daemon;
+use common::repository::{git_out, init_git_repo};
+
 use std::path::Path;
 
 const SCRIPT: &str = r#"#!/bin/sh

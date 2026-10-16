@@ -2,7 +2,7 @@
 async fn recover_on_start_skips_archived_tasks() {
     let (app, _dir) = test_app();
     let mut task = task_with_status(TaskStatus::Queued);
-    task.archived = true;
+    task.fixture_data().archived = true;
     app.store.save_task(&task).unwrap();
 
     app.recover_on_start().unwrap();
@@ -39,23 +39,26 @@ async fn recover_on_start_continues_after_unreadable_task_and_failed_saves() {
     let healthy = task_with_status(TaskStatus::Queued);
     app.store.save_task(&healthy).unwrap();
     let mut interrupted = task_with_status(TaskStatus::Running);
-    interrupted.created_at = 2;
+    interrupted.fixture_data().created_at = 2;
     let mut attempt = attempt_with_failure(1, "interrupted");
     attempt.status = AttemptStatus::Running;
     attempt.failure = None;
-    interrupted.attempts.push(attempt);
+    interrupted.fixture_data().attempts.push(attempt);
     app.store.save_task(&interrupted).unwrap();
 
     let mut unsavable = interrupted.clone();
-    unsavable.id = uuid::Uuid::new_v4().to_string();
-    unsavable.created_at = 3;
+    unsavable.fixture_data().id = uuid::Uuid::new_v4().to_string();
+    unsavable.fixture_data().created_at = 3;
     app.store.save_task(&unsavable).unwrap();
     let unsavable_dir = app.store.task_dir(&unsavable.id);
     let unsavable_permissions = std::fs::metadata(&unsavable_dir).unwrap().permissions();
 
     let mut advisor = task_with_status(TaskStatus::Queued);
-    advisor.created_at = 4;
-    advisor.attempts.push(attempt_with_failure(1, "advisor"));
+    advisor.fixture_data().created_at = 4;
+    advisor
+        .fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "advisor"));
     app.store.save_task(&advisor).unwrap();
     let helper = app
         .store
@@ -117,8 +120,10 @@ async fn recover_on_start_starts_timers_after_listing_failures() {
 
 fn running_implement_task(app: &App, dir: &Path) -> (Task, PathBuf) {
     let mut task = task_with_status(TaskStatus::Running);
-    task.attempts.push(attempt_with_failure(1, "x"));
-    let attempt = &mut task.attempts[0];
+    task.fixture_data()
+        .attempts
+        .push(attempt_with_failure(1, "x"));
+    let attempt = &mut task.fixture_data().attempts[0];
     attempt.status = AttemptStatus::Running;
     attempt.failure = None;
     // A process group that is gone: a short child, reaped.
@@ -143,23 +148,28 @@ async fn a_run_that_ended_while_the_daemon_was_down_is_resumed_from_its_files() 
     std::fs::write(run_dir.join("events.exit"), "1\n").unwrap();
     std::fs::write(run_dir.join("events.stderr.log"), "boom\n").unwrap();
 
-    let recovered = app
-        .store
-        .recover_interrupted_with(
-            |task, idx| app.run_fate(task, idx),
-            |_, _| panic!("a run with its files is not interrupted"),
-        )
-        .unwrap();
+    let recovered = crate::engine::recovery::interrupted::tasks(
+        &app.store,
+        |task, idx| app.run_fate(task, idx),
+        |_, _| panic!("a run with its files is not interrupted"),
+    )
+    .unwrap();
     assert!(recovered.is_empty());
     let task = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(task.attempts[0].status, AttemptStatus::Running);
     assert_eq!(recovery::resumable_attempt(&app, &task), Some(0));
 
     // The loop follows it and gets the outcome run_harness would have given.
-    let outcome = recovery::follow_run(&app.arc(), &task, 0, &CancelToken::new(), Guard::off())
-        .await
-        .ok()
-        .expect("outcome");
+    let outcome = recovery::follow_run(
+        &app.arc(),
+        &task,
+        &task.attempts[0],
+        &CancelToken::new(),
+        Guard::off(),
+    )
+    .await
+    .ok()
+    .expect("outcome");
     assert_eq!(outcome.error.as_deref(), Some("boom"));
     assert_eq!(outcome.session_id.as_deref(), Some("s1"));
     assert_eq!(outcome.cost_usd, Some(0.5));
@@ -177,15 +187,14 @@ async fn a_dead_run_without_an_exit_file_is_interrupted_and_its_spend_kept() {
     )
     .unwrap();
 
-    let recovered = app
-        .store
-        .recover_interrupted_with(
-            |task, idx| app.run_fate(task, idx),
-            |task, idx| {
-                settle_unfinished_cost(task, idx, &app.store, &Default::default());
-            },
-        )
-        .unwrap();
+    let recovered = crate::engine::recovery::interrupted::tasks(
+        &app.store,
+        |task, idx| app.run_fate(task, idx),
+        |task, idx| {
+            settle_unfinished_cost(task, idx, &app.store, &Default::default());
+        },
+    )
+    .unwrap();
 
     assert_eq!(recovered.len(), 1);
     let task = app.store.load_task(&task.id).unwrap().unwrap();
@@ -230,12 +239,15 @@ async fn a_live_group_that_is_not_the_run_is_treated_as_dead_and_left_alone() {
     std::fs::write(run_dir.join("events.raw"), "").unwrap();
     // The saved pgid now belongs to a stranger's process.
     let stranger = spawn_group(&run_dir.join("events.exit"), true);
-    task.attempts[0].pgid = Some(stranger);
+    task.fixture_data().attempts[0].pgid = Some(stranger);
     app.store.save_task(&task).unwrap();
 
-    app.store
-        .recover_interrupted_with(|task, idx| app.run_fate(task, idx), |_, _| {})
-        .unwrap();
+    crate::engine::recovery::interrupted::tasks(
+        &app.store,
+        |task, idx| app.run_fate(task, idx),
+        |_, _| {},
+    )
+    .unwrap();
 
     let task = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(task.attempts[0].status, AttemptStatus::Interrupted);
@@ -252,12 +264,12 @@ async fn a_live_group_of_the_run_is_resumed() {
     let (mut task, run_dir) = running_implement_task(&app, dir.path());
     std::fs::write(run_dir.join("events.raw"), "").unwrap();
     let run = spawn_group(&run_dir.join("events.exit"), false);
-    task.attempts[0].pgid = Some(run);
+    task.fixture_data().attempts[0].pgid = Some(run);
     app.store.save_task(&task).unwrap();
 
     assert!(matches!(
         app.run_fate(&task, 0),
-        crate::store::RunFate::Resume
+        crate::harness::run_files::RunFate::Resume
     ));
     kill_group(run);
 }
@@ -267,7 +279,7 @@ fn adopted(app: &App, dir: &Path, raw: &str) -> (Task, i32) {
     let (mut task, run_dir) = running_implement_task(app, dir);
     std::fs::write(run_dir.join("events.raw"), raw).unwrap();
     let pgid = spawn_group(&run_dir.join("events.exit"), false);
-    task.attempts[0].pgid = Some(pgid);
+    task.fixture_data().attempts[0].pgid = Some(pgid);
     app.store.save_task(&task).unwrap();
     (task, pgid)
 }
@@ -275,7 +287,13 @@ fn adopted(app: &App, dir: &Path, raw: &str) -> (Task, i32) {
 async fn follow_within(app: &App, task: &Task, guard: Guard) -> harness::RunOutcome {
     tokio::time::timeout(
         Duration::from_secs(20),
-        recovery::follow_run(&app.arc(), task, 0, &CancelToken::new(), guard),
+        recovery::follow_run(
+            &app.arc(),
+            task,
+            &task.attempts[0],
+            &CancelToken::new(),
+            guard,
+        ),
     )
     .await
     .expect("the guard never stopped the adopted run")
@@ -315,7 +333,7 @@ async fn a_stalled_adopted_run_whose_member_traps_sigterm_is_still_killed() {
         &run_dir.join("events.exit"),
         false,
     );
-    task.attempts[0].pgid = Some(pgid);
+    task.fixture_data().attempts[0].pgid = Some(pgid);
     app.store.save_task(&task).unwrap();
     let variant = Variant {
         stall_timeout_secs: 1,
@@ -349,7 +367,7 @@ async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
         &run_dir.join("events.exit"),
         false,
     );
-    task.attempts[0].pgid = Some(pgid);
+    task.fixture_data().attempts[0].pgid = Some(pgid);
     app.store.save_task(&task).unwrap();
     let variant = Variant {
         stall_timeout_secs: 4,
@@ -389,14 +407,14 @@ fn a_run_that_ends_while_its_fate_is_decided_is_resumed_not_interrupted() {
     let exit = dir.path().join("events.exit");
     // The group is seen dead, and the exit file lands in the same instant:
     // the wrapper writes it before its group can die.
-    let fate = recovery::fate_of_run(&exit, || {
+    let fate = crate::harness::run_files::fate_of_run(&exit, || {
         std::fs::write(&exit, "0\n").unwrap();
         false
     });
-    assert!(matches!(fate, crate::store::RunFate::Resume));
+    assert!(matches!(fate, crate::harness::run_files::RunFate::Resume));
     let gone = dir.path().join("never.exit");
     assert!(matches!(
-        recovery::fate_of_run(&gone, || false),
-        crate::store::RunFate::Interrupted
+        crate::harness::run_files::fate_of_run(&gone, || false),
+        crate::harness::run_files::RunFate::Interrupted
     ));
 }

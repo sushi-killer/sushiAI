@@ -1,5 +1,22 @@
-use super::*;
+use crate::api::validation::validate_task_id;
+use crate::clock::now_ms;
+use crate::engine::review::evidence::attempt_screenshots;
+use crate::engine::review::evidence::evidence_scope;
+use crate::engine::state::App;
+use crate::git::paths::short_sha;
+use crate::policy::delivery::BaseFrom;
+use crate::prompts::clip::truncate_chars;
 use crate::report::{self, Facts};
+use crate::task::creation::NewTask;
+use crate::task::LeadTouch;
+use crate::task::Stage;
+use crate::task::Task;
+use crate::task::TaskStatus;
+use serde::Deserialize;
+use serde_json::json;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 const DAY_MS: i64 = 86_400_000;
 const EXCERPT_MAX: usize = 3000;
@@ -69,18 +86,20 @@ pub(super) fn task_range(task: &Task) -> (String, String) {
 pub(super) async fn refresh_diff_stat(task: &mut Task) {
     let (from, to) = task_range(task);
     let repo = PathBuf::from(&task.repo);
-    let stat = tokio::task::spawn_blocking(move || git::range_stat(&repo, &from, &to).ok())
-        .await
-        .unwrap_or(None);
+    let stat = tokio::task::spawn_blocking(move || {
+        crate::git::changes::range_stat(&repo, &from, &to).ok()
+    })
+    .await
+    .unwrap_or(None);
     if stat.is_some() {
-        task.diff_stat = stat;
+        task.record_task_diff_stat(stat);
     }
 }
 
 /// Stamps a landing: `landed_at` now, and the diff stat of what landed.
 pub(super) async fn record_landing(task: &mut Task) {
-    task.landed_at = Some(now_ms());
-    task.loop_state.rereviews = 0;
+    task.stamp_landing(now_ms());
+
     refresh_diff_stat(task).await;
 }
 
@@ -89,7 +108,7 @@ pub(super) async fn record_landing(task: &mut Task) {
 fn attempt_facts(
     store: &crate::store::Store,
     graph: &[&Task],
-    rules: &crate::model::WorkBuckets,
+    rules: &crate::policy::settings::WorkBuckets,
 ) -> Vec<report::AttemptFact> {
     let mut out = Vec::new();
     for task in graph {
@@ -115,13 +134,13 @@ fn gather_facts(
     task: &Task,
     store: &crate::store::Store,
     graph: &[&Task],
-    rules: &crate::model::WorkBuckets,
+    rules: &crate::policy::settings::WorkBuckets,
 ) -> Facts {
     let repo = Path::new(&task.repo);
     let (from, to) = task_range(task);
     let mut facts = Facts {
-        commits: git::log_subjects(repo, &from, &to).unwrap_or_default(),
-        files: git::numstat(repo, &from, &to).unwrap_or_default(),
+        commits: crate::git::history::log_subjects(repo, &from, &to).unwrap_or_default(),
+        files: crate::git::changes::numstat(repo, &from, &to).unwrap_or_default(),
         images: Vec::new(),
         attempts: attempt_facts(store, graph, rules),
     };
@@ -143,20 +162,22 @@ fn gather_facts(
 /// that are absent from its base branch.
 fn refresh_unlanded(task: &mut Task) {
     if task.parent.is_some() || task.status != TaskStatus::Done || task.landed_sha.is_some() {
-        task.unlanded = None;
+        task.record_unlanded(None);
         return;
     }
     let Some(base) = task.base_ref.as_deref() else {
-        task.unlanded = None;
+        task.record_unlanded(None);
         return;
     };
-    task.unlanded = git::cherry_count(Path::new(&task.repo), base, &task.branch)
-        .ok()
-        .filter(|commits| *commits > 0)
-        .map(|commits| crate::model::Unlanded {
-            commits,
-            base: base.to_string(),
-        });
+    task.record_unlanded(
+        crate::git::history::cherry_count(Path::new(&task.repo), base, &task.branch)
+            .ok()
+            .filter(|commits| *commits > 0)
+            .map(|commits| crate::task::Unlanded {
+                commits,
+                base: base.to_string(),
+            }),
+    );
 }
 
 /// Why a landed task counts as touched, when it does: its landing is no
@@ -166,19 +187,20 @@ fn auto_touch_note(task: &Task) -> Option<String> {
     let sha = task.landed_sha.as_deref()?;
     let base = task.base_ref.as_deref()?;
     let repo = Path::new(&task.repo);
-    if !git::is_ancestor(repo, sha, base)? {
+    if !crate::git::history::is_ancestor(repo, sha, base)? {
         return Some(format!(
             "the landing {} is no longer on {base}: it was rewritten or reverted",
             short_sha(sha)
         ));
     }
-    let landed_at = git::commit_time_ms(repo, sha)?;
-    let files: std::collections::HashSet<String> = git::numstat(repo, &format!("{sha}^"), sha)
-        .ok()?
-        .into_iter()
-        .map(|f| f.0)
-        .collect();
-    let later = git::commits_after(repo, sha, base).ok()?;
+    let landed_at = crate::git::history::commit_time_ms(repo, sha)?;
+    let files: std::collections::HashSet<String> =
+        crate::git::changes::numstat(repo, &format!("{sha}^"), sha)
+            .ok()?
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+    let later = crate::git::history::commits_after(repo, sha, base).ok()?;
     let fix = later.iter().find(|c| {
         !c.by_orchd && c.ts_ms <= landed_at + DAY_MS && c.files.iter().any(|f| files.contains(f))
     })?;
@@ -191,14 +213,10 @@ fn auto_touch_note(task: &Task) -> Option<String> {
 /// Puts the mark and what `write_report` set on `from` (a copy loaded with
 /// `decisions_before` decisions) onto `t`, the task as stored now.
 fn keep_report(t: &mut Task, from: &Task, decisions_before: usize) {
-    t.lead_touch = from.lead_touch.clone();
-    t.unlanded = from.unlanded.clone();
-    t.deliverables = from.deliverables.clone();
-    t.report = from.report.clone();
-    t.report_at = from.report_at;
+    t.adopt_report(from);
     for line in from.decisions.iter().skip(decisions_before) {
         if !t.decisions.contains(line) {
-            t.decisions.push(line.clone());
+            t.record_decision(line.clone());
         }
     }
 }
@@ -219,12 +237,12 @@ impl App {
         let Some(note) = auto_touch_note(task) else {
             return false;
         };
-        task.lead_touch = Some(LeadTouch {
+        task.record_lead_touch(Some(LeadTouch {
             touched: true,
             note,
             at: now_ms(),
             by: "auto".to_string(),
-        });
+        }));
         true
     }
 
@@ -252,21 +270,26 @@ impl App {
             let facts = crate::store::Store::new(&data)
                 .map(|store| gather_facts(&t, &store, &graph, &rules))
                 .unwrap_or_default();
-            let text = report::build(&t, &graph, &crate::costs::read_all(&data), &facts);
-            (text, t.lead_touch, t.unlanded)
+            let text = report::build(&t, &graph, &crate::store::costs::read_all(&data), &facts);
+            (text, t.lead_touch.clone(), t.unlanded.clone())
         })
         .await
         .unwrap_or_default();
         if text.is_empty() {
             return;
         }
-        task.lead_touch = touched;
-        task.unlanded = unlanded;
+
         let dir = self.store.task_dir(&task.id);
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("report.md"), &text);
-        task.report = Some(text);
-        task.report_at.get_or_insert_with(now_ms);
+        task.record_report(
+            crate::task::delivery::operations::ReportObservation {
+                text,
+                lead_touch: touched,
+                unlanded,
+            },
+            now_ms(),
+        );
     }
 
     /// `task.report {id}` -> `{id, report}`: the report of a done top-level
@@ -322,12 +345,12 @@ impl App {
             return Err("the task is not done".to_string());
         }
         let owner_note = p.note.unwrap_or_default().trim().to_string();
-        task.lead_touch = p.touched.map(|touched| LeadTouch {
+        task.record_lead_touch(p.touched.map(|touched| LeadTouch {
             touched,
             note: owner_note.clone(),
             at: now_ms(),
             by: "owner".to_string(),
-        });
+        }));
         let decisions = task.decisions.len();
         if task.report.is_some() {
             self.write_report(&mut task).await;
@@ -364,7 +387,7 @@ impl App {
                 .load_task(f)
                 .ok()
                 .flatten()
-                .and_then(|t| t.request)
+                .and_then(|t| t.request.clone())
                 .is_some_and(|r| r.starts_with(&prefix))
         });
         if exists {
@@ -373,11 +396,11 @@ impl App {
         let (follow_up, line) = match self.spawn_follow_up(&task, note).await {
             Ok(new) => {
                 let mut new = new;
-                new.decisions.push(format!(
+                new.record_decision(format!(
                     "Follow-up of task {}: the owner marked it as needing a fix: {note}",
                     task.id
                 ));
-                new.follow_up_of = Some(task.id.clone());
+                new.link_follow_up(task.id.clone());
                 self.store.save_task(&new).map_err(|e| e.to_string())?;
                 self.broadcast_task(&new);
                 self.spawn_task_loop(new.id.clone(), true);
@@ -385,7 +408,7 @@ impl App {
                     "Created follow-up task {} from the owner's note: {note}",
                     new.id
                 );
-                (Some(new.id), line)
+                (Some(new.id.clone()), line)
             }
             Err(e) => (
                 None,
@@ -395,8 +418,8 @@ impl App {
         // The copy loaded above is stale after the slow creation: only the
         // link and the decision go onto the task as stored now.
         self.update_task(id, |t| {
-            t.follow_ups.extend(follow_up);
-            t.decisions.push(line);
+            t.record_follow_ups(follow_up);
+            t.record_decision(line);
         })
     }
 
@@ -416,7 +439,8 @@ impl App {
         let branch = task.branch.clone();
         let base = tokio::task::spawn_blocking(move || match (sha, base_ref) {
             (Some(sha), Some(base))
-                if git::is_ancestor(Path::new(&repo), &sha, &base) == Some(true) =>
+                if crate::git::history::is_ancestor(Path::new(&repo), &sha, &base)
+                    == Some(true) =>
             {
                 base
             }
@@ -430,6 +454,7 @@ impl App {
             repo_root: PathBuf::from(&task.repo),
             project_id: task.project_id.clone(),
             title: follow_up_title(task),
+            decisions: vec![],
             goal: String::new(),
             criteria: vec![],
             verify: vec![],
@@ -439,7 +464,7 @@ impl App {
             request: Some(request),
             branch: None,
             base,
-            base_from: fresh_base::BaseFrom::Plain,
+            base_from: BaseFrom::Plain,
             variant,
             depends_on: vec![],
             parent: None,
@@ -497,7 +522,7 @@ impl App {
                 if task.report.is_some() {
                     app.write_report(&mut task).await;
                 }
-                task.updated_at = now_ms();
+                task.touch(now_ms());
                 app.save_task_logged(&task);
                 app.broadcast_task(&task);
             }
@@ -513,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn the_rereviews_of_a_landing_start_over_with_the_next_one() {
         let mut task = task_with_status(TaskStatus::Landing);
-        task.loop_state.rereviews = 3;
+        task.fixture_data().loop_state.rereviews = 3;
         record_landing(&mut task).await;
         assert_eq!(task.loop_state.rereviews, 0);
     }
@@ -521,14 +546,14 @@ mod tests {
     #[test]
     fn a_follow_up_title_is_one_line_naming_the_original() {
         let mut task = task_with_status(TaskStatus::Done);
-        task.title = "Columns are in the wrong order\nfor the Totals row".into();
+        task.fixture_data().title = "Columns are in the wrong order\nfor the Totals row".into();
         let title = follow_up_title(&task);
         assert_eq!(
             title,
             "Follow-up: Columns are in the wrong order for the Totals row"
         );
         assert!(!title.contains('\n'));
-        task.title = "x".repeat(200);
+        task.fixture_data().title = "x".repeat(200);
         assert!(follow_up_title(&task).chars().count() <= 81);
     }
 
@@ -560,7 +585,10 @@ mod tests {
         );
         recorder.join().unwrap();
         let stored = app.store.load_task(&id).unwrap().unwrap();
-        let mark = stored.lead_touch.expect("the owner's mark survives");
+        let mark = stored
+            .lead_touch
+            .clone()
+            .expect("the owner's mark survives");
         assert!(mark.touched && mark.by == "owner");
         assert!(stored.metrics.is_some());
         drop(home);
@@ -584,7 +612,10 @@ mod tests {
                 let mut stale = app.store.load_task(&id).unwrap().unwrap();
                 loaded_tx.send(()).unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                stale.decisions.push("written under the lock".into());
+                stale
+                    .fixture_data()
+                    .decisions
+                    .push("written under the lock".into());
                 app.store.save_task(&stale).unwrap();
             })
         };
@@ -594,7 +625,10 @@ mod tests {
             .unwrap();
         writer.join().unwrap();
         let stored = app.store.load_task(&id).unwrap().unwrap();
-        let mark = stored.lead_touch.expect("the owner's mark survives");
+        let mark = stored
+            .lead_touch
+            .clone()
+            .expect("the owner's mark survives");
         assert!(mark.touched && mark.by == "owner");
         assert!(stored
             .decisions

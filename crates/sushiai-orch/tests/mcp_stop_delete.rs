@@ -8,7 +8,7 @@ type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 fn run(task: Option<&str>, read_only: bool, requests: Vec<Value>) -> (Vec<Value>, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
-    let call: sushiai_orch::mcp::Caller = Box::new(move |method, params| {
+    let call: sushiai_orch::api::mcp::Caller = Box::new(move |method, params| {
         sink.lock().unwrap().push((method.to_string(), params));
         Ok(json!({}))
     });
@@ -18,7 +18,7 @@ fn run(task: Option<&str>, read_only: bool, requests: Vec<Value>) -> (Vec<Value>
         .collect::<Vec<_>>()
         .join("");
     let mut out: Vec<u8> = Vec::new();
-    sushiai_orch::mcp::serve_stdio(
+    sushiai_orch::api::mcp::serve_stdio(
         task.map(str::to_string),
         read_only,
         call,
@@ -57,9 +57,9 @@ fn the_orchestrator_server_lists_task_stop_and_task_delete() {
     let names = tool_names(&responses[0]);
     assert!(names.contains(&"task_stop".to_string()), "{names:?}");
     assert!(names.contains(&"task_delete".to_string()), "{names:?}");
-    assert!(sushiai_orch::mcp::ORCHESTRATOR_TOOLS.contains(&"task_stop"));
-    assert!(sushiai_orch::mcp::ORCHESTRATOR_TOOLS.contains(&"task_delete"));
-    assert_eq!(names, sushiai_orch::mcp::ORCHESTRATOR_TOOLS);
+    assert!(sushiai_orch::api::mcp::ORCHESTRATOR_TOOLS.contains(&"task_stop"));
+    assert!(sushiai_orch::api::mcp::ORCHESTRATOR_TOOLS.contains(&"task_delete"));
+    assert_eq!(names, sushiai_orch::api::mcp::ORCHESTRATOR_TOOLS);
 }
 
 #[test]

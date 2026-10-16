@@ -43,6 +43,34 @@ fn whole_repo_suite_matches_cargo_test_without_a_scope() {
     assert!(!suite(p, "cargo test --lib"));
     assert!(!suite(p, "cargo test --bin x"));
     assert!(!suite(p, "cargo test some_filter"));
+    assert!(suite(p, "cargo nextest run --workspace"));
+    assert!(suite(p, "cargo nextest run --no-fail-fast"));
+    assert!(!suite(p, "cargo nextest run -p x"));
+    assert!(!suite(p, "cargo nextest run -E 'test(a)'"));
+    assert!(!suite(p, "cargo nextest run some_filter"));
+}
+
+#[test]
+fn whole_repo_suite_counts_a_suite_script_that_starts_a_runner_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts":{
+            "test:daemon":"npm run lint:rust && node scripts/test-rust.mjs",
+            "test:desktop":"node scripts/test-desktop.mjs",
+            "test:contracts":"node --test tests/a.test.cjs tests/b.test.cjs",
+            "lint:rust":"cargo fmt --check && node scripts/check-crate-deps.mjs",
+            "smoke":"node scripts/smoke.mjs"
+        }}"#,
+    )
+    .unwrap();
+    let p = tmp.path();
+    assert!(suite(p, "npm run test:daemon"));
+    assert!(suite(p, "npm run test:desktop"));
+    // Named test files are a targeted check, and only suite scripts count.
+    assert!(!suite(p, "npm run test:contracts"));
+    assert!(!suite(p, "npm run lint:rust"));
+    assert!(!suite(p, "npm run smoke"));
 }
 
 #[test]

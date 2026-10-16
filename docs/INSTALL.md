@@ -2,10 +2,10 @@
 
 ## Download for macOS
 
-The **0.0.6** DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
+The latest DMG requires **Apple Silicon (M1 or newer)** and **macOS 13 Ventura or later**. This release does not include a prebuilt Intel package.
 
-1. Open the [0.0.6 release](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.6).
-2. Download `sushiAI-0.0.6-arm64.dmg`.
+1. Open the [latest release](https://github.com/sushi-killer/sushiAI/releases/latest).
+2. Download the `sushiAI-<version>-arm64.dmg` asset.
 3. Open the DMG and drag **sushiAI** to **Applications**.
 4. Launch sushiAI from Applications, then eject the disk image.
 
@@ -29,12 +29,12 @@ Open **Settings → Software updates** and choose **Install and restart** when a
 
 The app must be in a writable folder, such as your personal Applications folder. For manual installation, quit sushiAI and replace the app in Applications using the downloaded DMG.
 
-Version 0.0.1 Alpha does not include an updater. Download and install 0.0.6 manually once; subsequent updates can be installed from Settings.
+Builds before the updater shipped cannot update themselves. Install the latest DMG manually once; later updates can be installed from Settings.
 
 ## Set up your tools
 
 - **Shells:** terminals use your installed shell.
-- **Agents:** install and sign in to Claude Code, Codex, Gemini CLI, or Cursor Agent separately. sushiAI launches the CLIs available on your PATH. Codex needs **codex-cli 0.160 or newer** (the release with `--no-daemon`); host setup installs the current Codex on a remote host that has none.
+- **Agents:** install and sign in to Claude Code, Codex, or another agent CLI separately (structured chat supports Claude Code and Codex; other CLIs run as plain terminal sessions). sushiAI launches the CLIs available on your PATH. Codex needs **codex-cli 0.160 or newer** (the release with `--no-daemon`); host setup installs the current Codex on a remote host that has none.
 - **Persistent sessions:** nothing to install on This Mac. The app starts the bundled `sushiai` daemon in `~/.sushiai`; sessions survive an app restart or crash and reattach when you open the app again.
 - **Files, editing, and Git:** install Python 3 and Git. On macOS, sushiAI uses `/usr/bin/python3`; Xcode Command Line Tools provide these tools. Install them with `xcode-select --install` if needed.
 - **Remote project environments:** configure SSH access and install Python 3, Git, and your agent CLIs on the remote host. Verify SSH in Terminal before adding the host in the **Connections** tab of **Settings**, then choose **Install sushiai** on the host card: sushiAI uploads the matching `sushiai` build over SSH, checks its SHA-256 digest and installs it under `~/.sushiai` on the host. sushiAI prepares project checkouts under `~/sushiai/<slug>` on each host (and on This Mac for a new project): it clones there, pulls an existing checkout of the same repository with a fast-forward only update, and never reuses a folder that is another repository or not a git checkout. A checkout already located elsewhere can still be used, but is marked as a non-standard path. A host you add there receives a project's environment values (tasks and sessions) with no further question; switch "Don't send secrets to this host" on in the project's Hosts settings to keep a project's values off it.

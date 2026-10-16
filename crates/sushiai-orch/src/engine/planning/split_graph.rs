@@ -1,9 +1,9 @@
+use crate::clip::truncate_chars;
 use crate::engine::plan_gate;
 use crate::engine::planning::draft::PlanSubtask;
 use crate::engine::planning::graph::subtask_request;
 use crate::engine::planning::subtasks::SubtaskPlan;
 use crate::policy::delivery::BaseFrom;
-use crate::prompts::clip::truncate_chars;
 use crate::task::creation::NewTask;
 use crate::task::{valid_check, valid_checks, Check, ChecklistItem, Task};
 use crate::verify::command_gate::{gate_checks, gate_held_out};

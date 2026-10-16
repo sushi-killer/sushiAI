@@ -84,6 +84,13 @@ pub fn build_brief(task: &Task, git_status_short: &str, git_diff_stat: &str) -> 
     out.push_str("\n\n");
     out.push_str(&task.goal);
     out.push_str("\n\n");
+    if !task.addenda.is_empty() {
+        out.push_str("## Addendum from the owner\n\n");
+        for text in &task.addenda {
+            out.push_str(&format!("- {}\n", text.replace('\n', "\n  ")));
+        }
+        out.push('\n');
+    }
 
     append_check_plan(&mut out, task);
     append_plan_context(&mut out, task);

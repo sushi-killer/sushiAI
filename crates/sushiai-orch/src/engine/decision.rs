@@ -13,6 +13,7 @@ use crate::task::ReviewResult;
 #[cfg(test)]
 use crate::task::Verdict;
 
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::answer_policy::authority::check_authority;
 use crate::engine::questions::exhausted::settle_exhausted_answer;
@@ -25,7 +26,6 @@ use crate::engine::test_support::attempt_with_failure;
 use crate::engine::test_support::task_with_status;
 use crate::policy::routing::Tier;
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
 use crate::task::checks::authority::Origin;
 use crate::task::AskedBy;
 use crate::task::Attempt;

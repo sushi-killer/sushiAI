@@ -1,3 +1,4 @@
+use crate::clip::truncate_chars;
 use crate::engine::brief_check::judge::JudgeRun;
 use crate::engine::state::App;
 use crate::engine::verification::healing::contract::amend_criterion;
@@ -5,7 +6,6 @@ use crate::engine::verification::healing::contract::judge_route;
 use crate::engine::verification::healing::contract::overturnable;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
-use crate::prompts::clip::truncate_chars;
 use crate::task::state::Task;
 use crate::verify::healing::reply::answer_prompt;
 use crate::verify::healing::reply::new_answers;

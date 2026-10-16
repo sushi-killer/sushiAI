@@ -154,7 +154,7 @@ pub(super) fn answers() -> Vec<ToolSpec> {
         (
     "task_amend",
     "task.amend",
-    "Replace a drafting, running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks, heldOut or dependsOn (each field you pass replaces the task's; at least one is required). dependsOn replaces the full list of task ids only before the first implement attempt; an empty list makes the task ready. A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. Amended checks and heldOut are re-run on the base commit and only those failing there gate.",
+    "Replace a drafting, running, waiting, queued or stopped task's criteria, verify, finalVerify, screenshot, checks, heldOut or dependsOn (each field you pass replaces the task's; at least one is required), or append a free-text addendum (kept in order, shown to the executor after the goal). dependsOn replaces the full list of task ids only before the first implement attempt; an empty list makes the task ready. A live loop applies it at its next attempt boundary, never mid-run. The task gains an `Amended: <field names>` decision line. Amended checks and heldOut are re-run on the base commit and only those failing there gate.",
     json!({
         "type": "object",
         "properties": {
@@ -166,6 +166,7 @@ pub(super) fn answers() -> Vec<ToolSpec> {
             "checks": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "integer", "description": "0-based index into criteria."}, "run": {"type": "string"}}, "required": ["criterion", "run"]}, "description": "Replaces the task's checks; a criterion index out of range is rejected."},
             "heldOut": {"type": ["object", "null"], "properties": {"criterion": {"type": "integer"}, "run": {"type": "string"}}, "required": ["criterion", "run"], "description": "Replaces the held-out check; null removes it."},
             "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "The full new list of task ids; only before the first implement attempt; an empty list makes the task ready."},
+            "addendum": {"type": "string", "description": "A free-text supplement appended to the task's addenda and rendered in the executor brief right after the goal; must not be empty."},
         },
         "required": ["id"],
     }),

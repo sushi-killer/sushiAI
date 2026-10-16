@@ -30,4 +30,5 @@ pub mod api;
 pub use api::{CallError, Config};
 pub use engine::runtime::{CallFuture, Orch};
 
+pub mod clip;
 pub mod clock;

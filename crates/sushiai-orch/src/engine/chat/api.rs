@@ -5,10 +5,10 @@ use super::store::{begin_turn, change_idle, load, release_turn, save};
 use super::turn::ScheduledTurn;
 use super::turn::Turn;
 use super::types::ChatMode;
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::messages;
 use crate::engine::state::App;
-use crate::prompts::clip::truncate_chars;
 use serde_json::json;
 use std::path::Path;
 

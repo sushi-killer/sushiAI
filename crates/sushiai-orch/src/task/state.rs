@@ -164,6 +164,10 @@ pub struct TaskData {
     /// (it may still draft its plan meanwhile).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Free-text supplements the owner added with `task.amend`, in order;
+    /// the executor brief renders them right after the goal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addenda: Vec<String>,
     /// Repo-relative files or directories the planner said this subtask
     /// edits; siblings that overlap are serialised.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

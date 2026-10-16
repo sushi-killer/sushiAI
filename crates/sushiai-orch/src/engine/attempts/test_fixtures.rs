@@ -35,6 +35,7 @@ pub(crate) fn sample_task() -> Task {
         base_ref: None,
         fresh_base: None,
         depends_on: vec![],
+        addenda: vec![],
         paths: vec![],
         parent: None,
         status: TaskStatus::Running,

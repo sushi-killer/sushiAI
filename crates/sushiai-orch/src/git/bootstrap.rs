@@ -1,18 +1,12 @@
-use crate::git::command::run;
+use crate::git::command::{run, run_bytes, succeeds};
 use std::path::Path;
-use std::process::Command;
 
 /// `git check-ignore` reports true only when the main checkout actually
 /// ignores the path (its own `.gitignore`, global excludes, ...) -- being
 /// merely untracked isn't enough, or an ordinary WIP file someone forgot to
 /// `git add` would get bootstrap-copied into every worktree too.
 pub(crate) fn is_git_ignored(repo_root: &Path, rel_path: &str) -> bool {
-    Command::new("git")
-        .args(["check-ignore", "--quiet", rel_path])
-        .current_dir(repo_root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    succeeds(repo_root, &["check-ignore", "--quiet", rel_path])
 }
 
 /// Append `rel_paths` (repo-root-relative) to the worktree's own
@@ -48,13 +42,12 @@ fn append_to_info_exclude(worktree: &Path, rel_paths: &[String]) -> std::io::Res
 fn include_candidates(main_root: &Path) -> Vec<String> {
     let list = main_root.join(".worktreeinclude");
     let found: Vec<String> = if list.is_file() {
-        let out = Command::new("git")
-            .args(["ls-files", "-z", "--others", "--ignored"])
-            .arg(format!("--exclude-from={}", list.display()))
-            .current_dir(main_root)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        let exclude = format!("--exclude-from={}", list.display());
+        match run_bytes(
+            main_root,
+            &["ls-files", "-z", "--others", "--ignored", &exclude],
+        ) {
+            Ok(out) => String::from_utf8_lossy(&out)
                 .split('\0')
                 .filter(|p| !p.is_empty())
                 .map(str::to_string)

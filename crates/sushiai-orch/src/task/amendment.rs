@@ -15,6 +15,9 @@ pub(crate) struct Amendment {
     pub held_out: Option<Option<Check>>,
     pub depends_on: Option<Vec<String>>,
     pub dependency_titles: Vec<String>,
+    /// Free-text supplements appended to the task's `addenda`, in order.
+    #[serde(default)]
+    pub addenda: Vec<String>,
 }
 
 impl Amendment {
@@ -46,10 +49,13 @@ impl Amendment {
         if self.depends_on.is_some() {
             names.push("dependsOn");
         }
+        if !self.addenda.is_empty() {
+            names.push("addendum");
+        }
         names
     }
 
-    /// A later amendment wins field by field.
+    /// A later amendment wins field by field; addenda accumulate in order.
     pub fn merge(&mut self, later: Amendment) {
         if later.criteria.is_some() {
             self.criteria = later.criteria;
@@ -64,6 +70,7 @@ impl Amendment {
             self.depends_on = later.depends_on;
             self.dependency_titles = later.dependency_titles;
         }
+        self.addenda.extend(later.addenda);
     }
 
     /// The criteria whose check this amendment rebuilds from their new
@@ -159,6 +166,7 @@ impl Amendment {
         if let Some(h) = self.held_out {
             task.held_out = valid_check(h, len);
         }
+        task.addenda.extend(self.addenda);
         task.decisions.push(line);
         if !rebuilds.is_empty() {
             for (i, command) in &rebuilds {

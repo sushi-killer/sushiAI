@@ -1,8 +1,8 @@
 use super::actions::ActionState;
 use super::types::{ChatMessage, ChatMode};
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::harness::cancel::CancelToken;
-use crate::prompts::clip::truncate_chars;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;

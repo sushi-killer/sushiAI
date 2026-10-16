@@ -1,7 +1,7 @@
 use crate::api::validation::validate_task_id;
+use crate::clip::truncate_chars;
 use crate::engine::decision::implement_attempt_count;
 use crate::engine::state::App;
-use crate::prompts::clip::truncate_chars;
 use crate::task::graph::is_parent;
 use crate::task::queue::operations::Starter;
 use crate::task::AnswerSource;

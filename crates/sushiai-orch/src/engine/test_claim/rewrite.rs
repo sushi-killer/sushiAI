@@ -1,9 +1,9 @@
+use crate::clip::truncate_chars;
 use crate::engine::persistence::contract::{ContractInput, Publication};
 use crate::engine::protected::prepare::write_files;
 use crate::engine::protected::snapshot::protected_hashes;
 use crate::engine::questions::parking::WaitEnd;
 use crate::engine::state::App;
-use crate::prompts::clip::truncate_chars;
 use crate::task::PlannedTest;
 use crate::task::Task;
 use std::collections::BTreeMap;

@@ -1,8 +1,7 @@
-use crate::git::command::run;
+use crate::git::command::{run, succeeds};
 use crate::git::GitError;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// lowercase, [a-z0-9-], collapsed, max 40 chars, no leading/trailing '-'.
 pub fn slugify(title: &str, max_len: usize) -> String {
@@ -38,17 +37,15 @@ pub fn slugify(title: &str, max_len: usize) -> String {
 }
 
 pub fn branch_exists(repo_root: &Path, branch: &str) -> bool {
-    Command::new("git")
-        .args([
+    succeeds(
+        repo_root,
+        &[
             "show-ref",
             "--verify",
             "--quiet",
             &format!("refs/heads/{branch}"),
-        ])
-        .current_dir(repo_root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        ],
+    )
 }
 
 /// Default branch name `task/<slug>`, disambiguated with `-2`, `-3`, ... if

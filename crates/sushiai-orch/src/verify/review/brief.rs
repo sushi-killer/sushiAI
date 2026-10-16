@@ -1,4 +1,5 @@
-use crate::prompts::text::{tail_chars, untrusted_block};
+use crate::clip::tail_chars;
+use crate::prompts::text::untrusted_block;
 use crate::prompts::{brief_text, fill};
 use crate::task::attempt::VerifyOutcome;
 use crate::task::checks::commands::held_out_label;

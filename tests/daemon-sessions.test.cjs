@@ -145,23 +145,26 @@ test("each workspace follows its own host", async () => {
   assert.equal(after[1].panels[0].ended, true);
 });
 
-test("a session the desktop did not create is never adopted", async () => {
-  const { reconcileSessions } = await library;
-  const before = [
-    workspace([
-      panel("p1", "s1", { paneCwd: "/work/app" }),
-      { id: "t", kind: "terminal" },
-    ]),
-  ];
-  const after = reconcileSessions(before, {
+test("a live session no panel shows is adopted, and one being ended is not", async () => {
+  const { reconcileSessions, sessionPanelId, pruneClosing } = await library;
+  const before = [workspace([panel("p1", "s1", { paneCwd: "/work/app" })])];
+  const hosts = {
     local: ready([session("s1"), session("foreign", { group: "w1" })]),
-  });
-  assert.equal(after[0].panels.length, 2);
-  assert.equal(after.length, 1);
-  assert.equal(
-    reconcileSessions(before, { local: ready([session("s1")]) }),
-    before,
-  );
+  };
+  const adopted = reconcileSessions(before, hosts, new Set());
+  assert.equal(adopted[0].panels.length, 2);
+  assert.equal(adopted[0].panels[1].sessionId, "foreign");
+  assert.equal(reconcileSessions(adopted, hosts, new Set()), adopted);
+  const closing = new Set([sessionPanelId("local", "foreign")]);
+  assert.equal(reconcileSessions(before, hosts, closing), before);
+  pruneClosing(hosts, closing);
+  assert.equal(closing.size, 1, "still live on the host");
+  const exited = {
+    local: ready([session("s1"), session("foreign", { status: "exited" })]),
+  };
+  assert.equal(reconcileSessions(before, exited, closing), before);
+  pruneClosing(exited, closing);
+  assert.equal(closing.size, 0, "forgotten once the host reports it exited");
 });
 
 test("events update a host's sessions incrementally", async () => {

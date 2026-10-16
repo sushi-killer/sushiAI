@@ -1,6 +1,6 @@
 use super::MAX_FINDING_CHARS;
+use crate::clip::truncate_chars;
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
 use crate::task::{PlanFinding, Severity, Task};
 use serde::Deserialize;
 

@@ -32,6 +32,13 @@ impl AmendRequest {
             )),
         };
         let (criteria, visual_criteria) = criteria(&params)?;
+        let addenda = match params.get("addendum") {
+            None => Vec::new(),
+            Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+                vec![text.trim().to_string()]
+            }
+            Some(_) => return Err("addendum must be a non-empty string".to_string()),
+        };
         let amendment = Amendment {
             criteria,
             visual_criteria,
@@ -42,10 +49,11 @@ impl AmendRequest {
             held_out,
             depends_on: field(&params, "dependsOn", "an array of strings")?,
             dependency_titles: Vec::new(),
+            addenda,
         };
         if amendment.is_empty() {
             return Err(
-                "task.amend needs at least one of criteria, verify, finalVerify, screenshot, checks, heldOut, dependsOn"
+                "task.amend needs at least one of criteria, verify, finalVerify, screenshot, checks, heldOut, dependsOn, addendum"
                     .to_string(),
             );
         }

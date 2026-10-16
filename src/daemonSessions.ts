@@ -7,6 +7,7 @@ import type {
   Panel,
   Workspace,
 } from "./types";
+import { agentTitle } from "./app/agent-title.ts";
 
 /** What the desktop knows about one host's sessions. */
 export type HostSessions = {
@@ -344,20 +345,87 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   return unchanged(panel, next);
 }
 
+/** Panel ids of sessions this app asked to end. Reconcile skips them until the
+ * host reports the session exited or removed, so a session that is still
+ * listed as live does not come back as a fresh panel. */
+export const closingSessions = new Set<string>();
+
+/** Forgets the ending sessions the host no longer runs live. */
+export function pruneClosing(hosts: SessionsByHost, closing = closingSessions) {
+  for (const id of [...closing]) {
+    const [endpoint, sessionId] = id
+      .split(":")
+      .slice(1)
+      .map(decodeURIComponent);
+    const host = hosts[daemonHost(endpoint)];
+    const session = host?.sessions[sessionId];
+    if (host?.listed && (!session || session.status === "exited"))
+      closing.delete(id);
+  }
+}
+
+const LIVE = ["running", "detached", "hibernated", "waking"];
+const folderName = (cwd: string) => cwd.split("/").filter(Boolean).pop() || cwd;
+const holds = (root: string, cwd: string) =>
+  !!root &&
+  (cwd === root || cwd.startsWith(root.endsWith("/") ? root : root + "/"));
+
+/** The panel of a live session no panel shows. It is not in any layout. */
+function adoptedPanel(endpoint: string, session: DaemonSession): Panel {
+  const agent = session.agent;
+  const base: Panel = {
+    id: sessionPanelId(endpoint, session.id),
+    kind: agent ? "agent" : "terminal",
+    title:
+      session.title?.trim() ||
+      (agent || session.foregroundAgent
+        ? agentTitle((agent || session.foregroundAgent)!)
+        : "Session"),
+    sessionId: session.id,
+    started: true,
+    ...(agent ? { agent } : {}),
+  };
+  return livePanel(base, session);
+}
+
+/** Where an adopted session goes on its own host: the workspace of its group,
+ * else the deepest workspace whose folder holds its folder, else undefined. */
+function placement(
+  workspaces: Workspace[],
+  host: string,
+  session: DaemonSession,
+): number {
+  const mine = (w: Workspace) => daemonHost(w.connection) === host;
+  if (session.group) {
+    const byGroup = workspaces.findIndex(
+      (w) => w.id === session.group && mine(w),
+    );
+    if (byGroup >= 0) return byGroup;
+  }
+  let best = -1;
+  workspaces.forEach((w, index) => {
+    if (!mine(w) || !w.cwd || !holds(w.cwd, session.cwd)) return;
+    if (best < 0 || w.cwd.length > workspaces[best].cwd.length) best = index;
+  });
+  return best;
+}
+
 /** Brings the panels bound to a daemon session in line with what each host
  * lists. Known panels take the session's status, title and folder; a session
  * that exited or is gone ends its panel; `detached` is still live. A host that
  * is not ready ends nothing, but its panels carry `hostState` so they show the
  * host's state instead of the last snapshot. A host whose full list has not
- * arrived changes nothing. A session
- * the desktop did not create is never adopted: panels are only updated. Returns
- * the same array when nothing changes. */
+ * arrived changes nothing. A live session on a ready, listed host that no panel
+ * shows (started elsewhere, or by the CLI) is adopted as a panel outside the
+ * layout, so the sidebar and Inbox list it; `closing` names panel ids to skip.
+ * Returns the same array when nothing changes. */
 export function reconcileSessions(
   workspaces: Workspace[],
   hosts: SessionsByHost,
+  closing: ReadonlySet<string> = closingSessions,
 ): Workspace[] {
   let changed = false;
-  const next = workspaces.map((workspace) => {
+  let next = workspaces.map((workspace) => {
     const host = hosts[daemonHost(workspace.connection)];
     if (host && !host.ready && host.state && host.state !== "ready") {
       const hostState = host.state;
@@ -387,6 +455,42 @@ export function reconcileSessions(
     changed = true;
     return { ...workspace, panels };
   });
+  for (const [hostId, host] of Object.entries(hosts)) {
+    if (!host.ready || !host.listed) continue;
+    const bound = new Set<string>();
+    for (const w of next)
+      if (daemonHost(w.connection) === hostId)
+        for (const p of w.panels) if (p.sessionId) bound.add(p.sessionId);
+    for (const session of Object.values(host.sessions)) {
+      if (!LIVE.includes(session.status) || session.background) continue;
+      if (bound.has(session.id)) continue;
+      const endpoint =
+        hostId === LOCAL_ENDPOINT ? LOCAL_ENDPOINT : `ssh:${hostId}`;
+      const id = sessionPanelId(endpoint, session.id);
+      if (closing.has(id)) continue;
+      if (!changed) next = [...next];
+      changed = true;
+      bound.add(session.id);
+      const panel = adoptedPanel(endpoint, session);
+      let at = placement(next, hostId, session);
+      if (at < 0) {
+        const taken = session.group && next.some((w) => w.id === session.group);
+        next.push({
+          id:
+            session.group && !taken
+              ? session.group
+              : `host:${hostId}:${session.cwd}`,
+          name: folderName(session.cwd),
+          cwd: session.cwd,
+          connection: endpoint,
+          panels: [],
+          layout: null,
+        });
+        at = next.length - 1;
+      }
+      next[at] = { ...next[at], panels: [...next[at].panels, panel] };
+    }
+  }
   return changed ? next : workspaces;
 }
 

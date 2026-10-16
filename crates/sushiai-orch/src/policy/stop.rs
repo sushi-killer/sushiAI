@@ -3,6 +3,7 @@
 //! a git repo or a model call; `main.rs`/`engine.rs` do the IO and feed
 //! them in.
 
+use crate::clip::tail_chars;
 use crate::task::VerifyOutcome;
 
 pub struct StopFacts<'a> {
@@ -20,16 +21,6 @@ pub enum StopDecision {
 
 const MAX_BLOCKS: u32 = 3;
 const TAIL_CHARS: usize = 2000;
-
-/// The *last* `max` chars -- the failure detail is usually at the end of a
-/// verify command's output, not the start.
-fn tail_chars(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    s.chars().skip(count - max).collect()
-}
 
 /// Pure decision for `hook.stop`, matching the spec steps in order.
 pub fn decide_stop(facts: &StopFacts) -> StopDecision {

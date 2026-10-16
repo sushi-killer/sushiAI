@@ -214,3 +214,20 @@ fn the_implementer_brief_lists_indexed_criteria_and_gated_checks_only() {
     assert!(!brief.contains("SECRET-held-out-cmd"));
     assert!(brief.contains("```sushi-impossible"));
 }
+
+#[test]
+fn addendum_in_brief_is_its_own_section_after_the_goal_in_order() {
+    let mut task = sample_task();
+    let goal = task.goal.clone();
+    task.fixture_data().addenda = vec!["use the CSV path".into(), "keep it small".into()];
+    let brief = build_brief(&task, "", "");
+    let goal_at = brief.find(&goal).unwrap();
+    let section = brief.find("## Addendum from the owner").unwrap();
+    let first = brief.find("- use the CSV path").unwrap();
+    let second = brief.find("- keep it small").unwrap();
+    assert!(
+        goal_at < section && section < first && first < second,
+        "{brief}"
+    );
+    assert!(!build_brief(&sample_task(), "", "").contains("Addendum"));
+}

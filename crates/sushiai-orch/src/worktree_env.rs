@@ -8,6 +8,7 @@
 //! `npm_config_cache` on macOS and the shared compiler cache when that is
 //! installed. No project secret is added.
 
+use crate::clip::tail_chars;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
@@ -154,12 +155,6 @@ fn default_install(worktree: &Path) -> Option<Step> {
         return None;
     };
     Some(Step::Argv(argv.iter().map(|a| a.to_string()).collect()))
-}
-
-fn tail(text: &str) -> String {
-    let text = text.trim();
-    let skip = text.chars().count().saturating_sub(TAIL_CHARS);
-    text.chars().skip(skip).collect()
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -367,7 +362,11 @@ impl WorktreeEnvironment<'_> {
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         );
-        Err(format!("{label} failed ({}): {}", status, tail(&output)))
+        Err(format!(
+            "{label} failed ({}): {}",
+            status,
+            tail_chars(output.trim(), TAIL_CHARS)
+        ))
     }
 }
 

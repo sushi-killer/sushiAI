@@ -90,6 +90,7 @@ pub(crate) fn create(new: NewTask, workspace: Workspace) -> Task {
             base_ref: workspace.base_ref,
             fresh_base: workspace.fresh_base,
             depends_on: new.depends_on,
+            addenda: Vec::new(),
             paths: new.paths,
             parent: new.parent,
             tier: Tier::Standard,

@@ -4,7 +4,7 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_until, remove_dir_retrying};
+use common::polling::{poll_until, remove_dir_retrying, wait_until};
 use common::process::Daemon;
 use common::repository::init_git_repo;
 
@@ -116,14 +116,10 @@ fn finished(s: &str) -> bool {
 
 /// Polls until the task waits for `text`, the question the test is up to.
 fn wait_for_question(daemon: &Daemon, id: &str, text: &str) -> serde_json::Value {
-    for _ in 0..400 {
+    wait_until(&format!("the task to wait for {text:?}"), || {
         let task = daemon.request("task.get", json!({"id": id}));
-        if task["status"] == "waiting" && task["question"]["text"] == text {
-            return task;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    panic!("the task never waited for {text:?}");
+        (task["status"] == "waiting" && task["question"]["text"] == text).then_some(task)
+    })
 }
 
 #[test]

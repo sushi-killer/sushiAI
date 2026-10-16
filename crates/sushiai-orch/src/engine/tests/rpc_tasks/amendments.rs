@@ -244,3 +244,74 @@ async fn task_amend_hands_a_live_loops_task_to_the_loop_instead_of_saving() {
     let saved = app.store.load_task(&task.id).unwrap().unwrap();
     assert_eq!(saved.criteria, vec!["second"]);
 }
+
+#[tokio::test]
+async fn addendum_rejects_what_it_cannot_store() {
+    let (app, _dir) = test_app();
+    let mut task = task_with_status(TaskStatus::Stopped);
+    task.fixture_data().criteria = vec!["one".into()];
+    app.store.save_task(&task).unwrap();
+    for bad in [json!(""), json!("  \n "), json!(5), json!(["a"]), json!(null)] {
+        let err = app
+            .dispatch("task.amend", json!({"id": task.id, "addendum": bad}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("addendum must be"), "{bad}: {err}");
+    }
+    let err = app
+        .dispatch("task.amend", json!({"id": task.id}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("at least one") && err.contains("addendum"), "{err}");
+
+    let done = task_with_status(TaskStatus::Done);
+    app.store.save_task(&done).unwrap();
+    let err = app
+        .dispatch("task.amend", json!({"id": done.id, "addendum": "x"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("can be amended"), "{err}");
+    let mut archived = task_with_status(TaskStatus::Stopped);
+    archived.fixture_data().archived = true;
+    app.store.save_task(&archived).unwrap();
+    let err = app
+        .dispatch("task.amend", json!({"id": archived.id, "addendum": "x"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("archived"), "{err}");
+    let unchanged = app.store.load_task(&task.id).unwrap().unwrap();
+    assert!(unchanged.addenda.is_empty() && unchanged.decisions.is_empty());
+}
+
+#[tokio::test]
+async fn addendum_on_a_failed_task_is_recorded_and_appended() {
+    let (app, _dir) = test_app();
+    let task = task_with_status(TaskStatus::Failed);
+    app.store.save_task(&task).unwrap();
+    for text in ["one", "two"] {
+        app.dispatch(
+            "task.amend",
+            json!({"id": task.id, "addendum": text, "source": "mcp"}),
+        )
+        .await
+        .unwrap();
+    }
+    let stored = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(stored.addenda, vec!["one", "two"]);
+    assert_eq!(stored.decisions, vec!["Amended: addendum", "Amended: addendum"]);
+}
+
+#[test]
+fn addendum_merge_keeps_both_texts_in_order() {
+    use crate::task::amendment::Amendment;
+    let mut first = Amendment {
+        addenda: vec!["a".into()],
+        ..Default::default()
+    };
+    first.merge(Amendment {
+        addenda: vec!["b".into()],
+        ..Default::default()
+    });
+    assert_eq!(first.addenda, vec!["a", "b"]);
+    assert_eq!(first.fields(), vec!["addendum"]);
+}

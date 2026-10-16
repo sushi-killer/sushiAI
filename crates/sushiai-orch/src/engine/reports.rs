@@ -1,11 +1,11 @@
 use crate::api::validation::validate_task_id;
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::review::evidence::attempt_screenshots;
 use crate::engine::review::evidence::evidence_scope;
 use crate::engine::state::App;
 use crate::git::paths::short_sha;
 use crate::policy::delivery::BaseFrom;
-use crate::prompts::clip::truncate_chars;
 use crate::report::{self, Facts};
 use crate::task::creation::NewTask;
 use crate::task::LeadTouch;

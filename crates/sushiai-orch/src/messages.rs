@@ -20,9 +20,9 @@ use std::sync::Mutex as StdMutex;
 
 use crate::api::events::Event;
 use crate::api::validation::validate_task_id;
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::state::App;
-use crate::prompts::clip::truncate_chars;
 use crate::store;
 use crate::task::messages::Message;
 use crate::task::messages::MessageKind;
@@ -376,6 +376,7 @@ mod tests {
             base_ref: None,
             fresh_base: None,
             depends_on: vec![],
+            addenda: vec![],
             paths: vec![],
             parent: None,
             status: TaskStatus::Running,

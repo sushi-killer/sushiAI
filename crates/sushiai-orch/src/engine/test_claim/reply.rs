@@ -1,5 +1,5 @@
+use crate::clip::truncate_chars;
 use crate::engine::protected::paths::MAX_TEST_BYTES;
-use crate::prompts::clip::truncate_chars;
 
 const MAX_WHY_CHARS: usize = 300;
 

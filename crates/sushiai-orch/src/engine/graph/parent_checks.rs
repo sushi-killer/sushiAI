@@ -1,3 +1,4 @@
+use crate::clip::tail_chars;
 use crate::clock::now_ms;
 use crate::engine::delivery_gate::{begin_delivery, DeliveryGate};
 use crate::engine::graph::base::parent_finals_on_base;
@@ -16,7 +17,6 @@ use crate::engine::verification::held_out::run_held_out;
 use crate::engine::verification::runner::run_verify_commands;
 use crate::engine::verification::scoping::scope_task_checks;
 use crate::harness::cancel::CancelToken;
-use crate::prompts::text::tail_chars;
 use crate::task::checks::admission::CheckAdmission;
 use crate::task::graph::parent_cost;
 use crate::task::Task;

@@ -6,6 +6,7 @@
 //! knows anything about the repository being audited.
 
 use crate::api::events::Event;
+use crate::clip::tail_chars;
 use crate::clock::now_ms;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
@@ -20,7 +21,6 @@ use crate::harness::native::error::RunError;
 use crate::harness::run_files::read_cancelled_fingerprint;
 use crate::policy::routing::{Harness, Route};
 use crate::policy::settings::Settings;
-use crate::prompts::text::tail_chars;
 use crate::task::attempt::Usage;
 use crate::task::audit::{Audit, AuditStatus};
 use serde_json::json;

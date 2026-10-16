@@ -1,9 +1,9 @@
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
 use crate::policy::routing::Route;
-use crate::prompts::clip::truncate_chars;
 use crate::task::MissingTool;
 use crate::task::Task;
 use crate::task::TaskStatus;

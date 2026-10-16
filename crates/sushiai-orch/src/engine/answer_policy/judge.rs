@@ -1,3 +1,4 @@
+use crate::clip::truncate_chars;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
@@ -8,7 +9,6 @@ use crate::harness;
 use crate::harness::cancel::CancelToken;
 use crate::harness::guard::{helper_timeout_message, Guard};
 use crate::policy::routing::Harness;
-use crate::prompts::clip::truncate_chars;
 use crate::prompts::engine_text;
 use crate::task::{Question, Task};
 use serde_json::json;

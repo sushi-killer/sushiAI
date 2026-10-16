@@ -59,6 +59,8 @@ export type DaemonSession = {
   /** Unix milliseconds of the last agent status change. */
   statusSince?: number;
   asks?: DaemonAsk[];
+  /** A job session the daemon keeps out of the session tree. */
+  background?: boolean;
   /** Catalog binding (gap G11) and shell title (gap G13); not in Rust yet. */
   project?: string;
   group?: string;

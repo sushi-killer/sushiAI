@@ -9,7 +9,7 @@
   },
   "moduleEdges": {
     "task": ["policy"],
-    "policy": ["task"],
+    "policy": ["clip", "task"],
     "harness": [
       "clock",
       "loop_detect",
@@ -23,6 +23,7 @@
     ],
     "git": ["policy", "process", "procs", "task"],
     "verify": [
+      "clip",
       "git",
       "harness",
       "policy",
@@ -34,6 +35,7 @@
     ],
     "delivery": [
       "api",
+      "clip",
       "git",
       "harness",
       "policy",
@@ -47,6 +49,7 @@
     "engine": [
       "ab",
       "api",
+      "clip",
       "clock",
       "costs",
       "delivery",
@@ -70,12 +73,12 @@
       "verify/repository",
       "worktree_env"
     ],
-    "prompts": ["task"],
+    "prompts": ["clip", "task"],
     "process": [],
     "procs": ["process"],
     "sandbox": ["git"],
-    "worktree_env": ["git", "harness", "policy", "process", "procs"],
-    "loop_detect": ["policy"],
+    "worktree_env": ["clip", "git", "harness", "policy", "process", "procs"],
+    "loop_detect": ["clip", "policy"],
     "report": ["git", "store", "task"],
     "timeline": ["ab", "clock", "policy", "store", "task"],
     "costs": ["clock", "policy", "store", "task"],
@@ -85,7 +88,8 @@
     "skill": ["task", "prompts", "git"],
     "legacy": ["process"],
     "verify/repository": ["task", "policy", "git"],
-    "clock": []
+    "clock": [],
+    "clip": []
   },
   "pureRoots": ["task", "policy"],
   "forbiddenPurePaths": [

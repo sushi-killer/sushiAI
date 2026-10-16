@@ -659,3 +659,41 @@ fn amending_the_screenshot_command_sets_and_clears_it() {
     daemon.shutdown_and_wait();
     remove_dir_retrying(worktree);
 }
+
+#[test]
+fn addendum_survives_a_restart_in_order() {
+    let mut daemon = Daemon::spawn(&[]);
+    let repo = init_git_repo();
+    let task = daemon.request(
+        "task.create",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "title": "Addendum amend",
+            "goal": "Something",
+            "criteria": ["old"],
+            "verify": ["true"],
+            "start": false,
+        }),
+    );
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let amended = daemon.request("task.amend", json!({"id": id, "addendum": " first note "}));
+    assert_eq!(amended["amended"], json!(["addendum"]), "{amended}");
+    daemon.request("task.amend", json!({"id": id, "addendum": "second note"}));
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(saved["addenda"], json!(["first note", "second note"]));
+    assert!(saved["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d == "Amended: addendum"));
+    assert_eq!(saved["criteria"], json!(["old"]));
+
+    daemon.restart(&[]);
+    let saved = daemon.request("task.get", json!({"id": id}));
+    assert_eq!(saved["addenda"], json!(["first note", "second note"]));
+
+    let worktree = task["worktree"].as_str().unwrap().to_string();
+    daemon.shutdown_and_wait();
+    remove_dir_retrying(worktree);
+}

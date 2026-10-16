@@ -4,6 +4,7 @@
 //! evidence means the failure is the task's, and a verdict that lowers
 //! caution holds only when the test names it gives appear in the base output.
 
+use crate::clip::tail_chars;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
@@ -17,7 +18,6 @@ use crate::harness;
 use crate::harness::guard::helper_timeout_message;
 use crate::harness::guard::Guard;
 use crate::policy::routing::Harness;
-use crate::prompts::text::tail_chars;
 use crate::task::Blame;
 use crate::task::Stage;
 use crate::task::Task;

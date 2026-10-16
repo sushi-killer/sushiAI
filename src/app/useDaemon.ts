@@ -5,6 +5,7 @@ import {
   emptyFeed,
   configureHibernation,
   emptyHost,
+  pruneClosing,
   failList,
   feedEvent,
   finishList,
@@ -33,7 +34,7 @@ const connectionOf = (state: DaemonState | undefined): DaemonConnection =>
 /** Binds the workspace list to the sessions the daemons run: one full
  * `session.list` per host when it becomes ready, then incremental events.
  * No polling. The workspace list itself lives in App; this hook only
- * reconciles known panels into it. */
+ * reconciles known panels into it and adopts live sessions no panel shows. */
 export function useDaemon({
   notify,
   setWorkspaces,
@@ -50,6 +51,7 @@ export function useDaemon({
   const feeds = useRef<Record<string, HostFeed>>({});
 
   const reconcile = useCallback(() => {
+    pruneClosing(hosts.current);
     setSessions({ ...hosts.current });
     setWorkspaces((items) => reconcileSessions(items, hosts.current));
   }, [setWorkspaces]);

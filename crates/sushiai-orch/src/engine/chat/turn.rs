@@ -6,6 +6,7 @@ use super::store::finish_turn;
 use super::stream::run;
 use super::types::ChatMode;
 use super::wake::wake;
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::chat_tools;
 use crate::engine::messages;
@@ -13,7 +14,6 @@ use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
 use crate::policy::routing::Route;
-use crate::prompts::clip::truncate_chars;
 use std::sync::Arc;
 
 /// Who a turn answers: the owner's chat message, or the questions tasks sent

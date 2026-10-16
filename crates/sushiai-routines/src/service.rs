@@ -115,6 +115,9 @@ struct Inner {
     retrying: Mutex<HashSet<String>>,
     /// Routines whose next `fired` event comes from `run_now`.
     manual: Mutex<HashSet<String>>,
+    /// Serialises `resync` with the calls that change schedule entries, so a resync that
+    /// read the store earlier never removes an entry a concurrent enable just set.
+    sync: Mutex<()>,
 }
 
 /// The reason the daemon gives a run it ended because it started anew.
@@ -197,6 +200,7 @@ impl Routines {
                 events: Mutex::new(HashMap::new()),
                 retrying: Mutex::new(HashSet::new()),
                 manual: Mutex::new(HashSet::new()),
+                sync: Mutex::new(()),
             }),
         }
     }
@@ -245,6 +249,11 @@ impl Routines {
     // ----- methods -----
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
+        let _sync = matches!(
+            method,
+            "save" | "set_enabled" | "grant" | "revoke" | "delete" | "suspend"
+        )
+        .then(|| self.inner.sync.lock().unwrap_or_else(|e| e.into_inner()));
         match method {
             "list" => self.list(),
             "show" => self.show(str_param(&params, "id")?),
@@ -726,6 +735,7 @@ impl Routines {
     /// Keeps the daemon's schedule entries equal to the store: every enabled routine has one,
     /// no `routine.*` entry outlives its routine.
     pub fn resync(&self) {
+        let _sync = self.inner.sync.lock().unwrap_or_else(|e| e.into_inner());
         self.reconcile();
         let store = &self.inner.store;
         let catalog = self.catalog(&json!({}));

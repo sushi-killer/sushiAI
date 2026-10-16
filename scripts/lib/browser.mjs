@@ -41,3 +41,15 @@ export function resolveBrowser(chromium) {
   found.sort((a, b) => b.revision - a.revision);
   return found[0]?.file;
 }
+
+// Electron's launch arguments for a test or evidence run. A Linux host with
+// no display (an orchd sandbox blocks the X socket) draws headless, so
+// screenshots still render.
+export const ELECTRON_ARGS = [
+  ".",
+  ...(process.platform === "linux" &&
+  !process.env.DISPLAY &&
+  !process.env.WAYLAND_DISPLAY
+    ? ["--ozone-platform=headless"]
+    : []),
+];

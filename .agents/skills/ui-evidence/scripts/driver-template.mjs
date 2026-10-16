@@ -1,6 +1,7 @@
 // UI evidence driver. Copy to artifacts/.driver.mjs, replace STEPS, run with
 // node from the repo root, read every screenshot, then delete the copy.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { stopDaemon } from "../../../../scripts/lib/daemon-binary.mjs";
 
@@ -8,7 +9,7 @@ const root = process.cwd();
 const shot = (name) => `${root}/artifacts/${name}.png`;
 const profile = await fs.mkdtemp("/tmp/sushiai-evidence-");
 const app = await electron.launch({
-  args: ["."],
+  args: ELECTRON_ARGS,
   cwd: root,
   // A test run starts a daemon only with a SUSHIAI_HOME of its own, so the
   // owner's ~/.sushiai daemon is never touched.

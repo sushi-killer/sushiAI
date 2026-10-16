@@ -27,6 +27,7 @@
 // Settings overrides are merged over settings.get and saved with settings.set
 // after enabling the extension, before the panel mounts.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -327,7 +328,7 @@ if (!seedPath || !title) {
     await fs.writeFile(`${daemonHome}/modules/orch.enabled`, "");
 
     app = await electron.launch({
-      args: ["."],
+      args: ELECTRON_ARGS,
       cwd: root,
       env: {
         ...process.env,

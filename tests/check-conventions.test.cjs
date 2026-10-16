@@ -404,3 +404,32 @@ test("a module directory may not import the shell", () => {
 
   fs.rmSync(tree, { recursive: true, force: true });
 });
+
+test("a test that reads a document to assert its wording fails", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doc-test-"));
+  fs.mkdirSync(path.join(dir, "tests"));
+  const write = (name, body) =>
+    fs.writeFileSync(path.join(dir, "tests", name), body);
+  write(
+    "logic.test.cjs",
+    'fs.writeFileSync(path.join(repo, "README.md"), "x");',
+  );
+  write("docs-map.test.cjs", 'read("docs/MAP.md");');
+  assert.equal(run({ DOC_TEST_ROOT_OVERRIDE: dir }).status, 0);
+  write(
+    "readme.test.cjs",
+    'const read = (f) => fs.readFileSync(path.join(root, f), "utf8");\nread("README.md");',
+  );
+  write(
+    "install.test.cjs",
+    'fs.readFileSync(path.join(root, "docs/INSTALL.md"));',
+  );
+  const result = run({ DOC_TEST_ROOT_OVERRIDE: dir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /tests\/readme\.test\.cjs: reads a document/);
+  assert.match(result.stderr, /tests\/install\.test\.cjs: reads a document/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

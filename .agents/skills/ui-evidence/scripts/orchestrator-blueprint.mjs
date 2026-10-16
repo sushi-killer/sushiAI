@@ -9,6 +9,7 @@
 // Never runs a real harness: `claude` and `codex` on the PATH given to the
 // app are fake scripts that print an init line and sleep. See SKILL.md.
 import { _electron as electron } from "playwright";
+import { ELECTRON_ARGS } from "../../../../scripts/lib/browser.mjs";
 import fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -223,7 +224,7 @@ try {
   );
 
   app = await electron.launch({
-    args: ["."],
+    args: ELECTRON_ARGS,
     cwd: root,
     env: {
       ...process.env,

@@ -11,7 +11,6 @@ const hasNextest =
 if (!hasNextest) process.exit(run(["test", "--workspace", "--no-fail-fast"]));
 
 // The nextest setup script (.config/nextest.toml) builds the daemon binary once and hands
-// it to the tests as SUSHIAI_BIN.
-const tests = run(["nextest", "run", "--workspace", "--no-fail-fast"]);
-const docs = run(["test", "--workspace", "--doc"]);
-process.exit(tests || docs);
+// it to the tests as SUSHIAI_BIN. nextest does not run doc tests; the workspace has none
+// (tests/ci-pipeline.test.cjs keeps it so), so no `cargo test --doc` pass follows.
+process.exit(run(["nextest", "run", "--workspace", "--no-fail-fast"]));

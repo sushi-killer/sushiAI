@@ -44,15 +44,22 @@ export function lanesFor({ code, rust }) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // CI_ALL=1 runs every lane whatever changed.
+  const change = localChanges();
   const scope =
     process.env.CI_ALL === "1"
-      ? { code: true, rust: true }
-      : classify(localChanges());
+      ? { code: true, rust: true, platform: true }
+      : classify(change.files, change);
   const chosen = lanesFor(scope);
   const skipped = lanes.length - chosen.length;
   console.log(
-    `ci: code=${scope.code} rust=${scope.rust}` +
+    `ci: code=${scope.code} rust=${scope.rust} platform=${scope.platform}` +
       (skipped || !scope.rust ? " (CI_ALL=1 runs everything)" : ""),
   );
+  // The Rust tests here run on this host's OS only. CI adds the other one
+  // (macOS) only for platform changes; say so where that is not this host.
+  if (scope.platform && process.platform !== "darwin")
+    console.log(
+      `ci: a platform change (${scope.reason}); the macOS Rust tests run in CI`,
+    );
   process.exit(await runLanes(chosen));
 }

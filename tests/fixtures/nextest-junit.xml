@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" skipped="0" failures="1" errors="0" uuid="b9067eb8-df8f-4ef5-b2ef-45848ecc4848" timestamp="2026-10-17T00:56:13.206+03:00" time="0.014">
+    <testsuite name="ci-probe" tests="3" skipped="0" errors="0" failures="1">
+        <testcase name="passes" classname="ci-probe" timestamp="2026-10-17T00:56:13.206+03:00" time="0.006"/>
+        <testcase name="flaky_once" classname="ci-probe" timestamp="2026-10-17T00:56:13.214+03:00" time="0.006">
+            <flakyFailure timestamp="2026-10-17T00:56:13.206+03:00" time="0.006" message="thread &apos;flaky_once&apos; (262733382) panicked at src/lib.rs:14:9" type="test failure with exit code 101">thread &apos;flaky_once&apos; (262733382) panicked at src/lib.rs:14:9:
+first try
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+                <system-out>
+running 1 test
+test flaky_once ... FAILED
+
+failures:
+
+failures:
+    flaky_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+                <system-err>
+thread &apos;flaky_once&apos; (262733382) panicked at src/lib.rs:14:9:
+first try
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+            </flakyFailure>
+        </testcase>
+        <testcase name="always_fails" classname="ci-probe" timestamp="2026-10-17T00:56:13.206+03:00" time="0.006">
+            <failure message="thread &apos;always_fails&apos; (262733383) panicked at src/lib.rs:6:5" type="test failure with exit code 101">thread &apos;always_fails&apos; (262733383) panicked at src/lib.rs:6:5:
+always
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <rerunFailure timestamp="2026-10-17T00:56:13.214+03:00" time="0.006" message="thread &apos;always_fails&apos; (262733394) panicked at src/lib.rs:6:5" type="test failure with exit code 101">thread &apos;always_fails&apos; (262733394) panicked at src/lib.rs:6:5:
+always
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+                <system-out>
+running 1 test
+test always_fails ... FAILED
+
+failures:
+
+failures:
+    always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+                <system-err>
+thread &apos;always_fails&apos; (262733394) panicked at src/lib.rs:6:5:
+always
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+            </rerunFailure>
+            <system-out>
+running 1 test
+test always_fails ... FAILED
+
+failures:
+
+failures:
+    always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;always_fails&apos; (262733383) panicked at src/lib.rs:6:5:
+always
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+</testsuites>

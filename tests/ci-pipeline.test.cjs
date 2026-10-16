@@ -24,22 +24,39 @@ function expand(command, seen = new Set()) {
     .join(" && ");
 }
 
+const ciChanges = () =>
+  import(pathToFileURL(path.join(root, "scripts/ci-changes.mjs")).href);
+
+// A unified diff of one file: `removed` and `added` lines.
+const diffOf = (file, added, removed = []) =>
+  [
+    `diff --git a/${file} b/${file}`,
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    "@@ -1 +1 @@",
+    ...removed.map((l) => `-${l}`),
+    ...added.map((l) => `+${l}`),
+  ].join("\n");
+
 test("a pull request with docs alone skips the builds; Rust jobs need Rust", async () => {
-  const { classify } = await import(
-    pathToFileURL(path.join(root, "scripts/ci-changes.mjs")).href
-  );
+  const { classify } = await ciChanges();
+  const scope = (files) => {
+    const { code, rust } = classify(files);
+    return { code, rust };
+  };
   const docs = { code: false, rust: false };
-  assert.deepEqual(classify(["README.md", "docs/INSTALL.md"]), docs);
-  assert.deepEqual(classify(["docs/releases/unreleased/x.md"]), docs);
+  assert.deepEqual(scope(["README.md", "docs/INSTALL.md"]), docs);
+  assert.deepEqual(scope(["docs/releases/unreleased/x.md"]), docs);
+  assert.equal(classify(["README.md"]).platform, false);
   // Markdown that tests or tools read is code.
   for (const file of [
     ".agents/skills/ship-pr/SKILL.md",
     "crates/sushiai-orch/README.md",
     "tests/fixtures/a.md",
   ]) {
-    assert.deepEqual(classify([file]).code, true, file);
+    assert.deepEqual(scope([file]).code, true, file);
   }
-  assert.deepEqual(classify(["README.md", "src/App.tsx"]), {
+  assert.deepEqual(scope(["README.md", "src/App.tsx"]), {
     code: true,
     rust: false,
   });
@@ -50,10 +67,159 @@ test("a pull request with docs alone skips the builds; Rust jobs need Rust", asy
     "scripts/nextest-sushiai-bin.mjs",
     "electron/test-fixtures/mcp-home/x.json",
   ]) {
-    assert.deepEqual(classify([file]), { code: true, rust: true }, file);
+    assert.deepEqual(scope([file]), { code: true, rust: true }, file);
   }
-  // No diff to read (a push, a new branch): everything runs.
-  assert.deepEqual(classify([]), { code: true, rust: true });
+  // No diff to read (a push, a schedule, a new branch): everything runs.
+  assert.deepEqual(classify([]), {
+    code: true,
+    rust: true,
+    platform: true,
+    reason: "no diff",
+  });
+});
+
+test("the macOS Rust tests run only for a change that can differ on macOS", async () => {
+  const { classify } = await ciChanges();
+  const file = "crates/sushiai-orch/src/engine/x.rs";
+  const neutral = "fn plan() -> u32 { 1 }";
+  const run = (diff, text = neutral, files = [file]) =>
+    classify(files, { diff, read: () => text });
+
+  // A change under conditional compilation for macOS.
+  const macos = run(diffOf(file, ['#[cfg(target_os = "macos")]', neutral]));
+  assert.equal(macos.platform, true);
+  assert.match(macos.reason, /platform code/);
+  // An edit anywhere in a file that compiles per OS.
+  const cfgFile = run(diffOf(file, [neutral]), "#[cfg(unix)]\nfn a() {}");
+  assert.equal(cfgFile.platform, true);
+  assert.match(cfgFile.reason, /compiles per OS/);
+  // Removing platform code is a platform change too.
+  assert.equal(
+    run(diffOf(file, [], ["libc::killpg(pgid, 9);"])).platform,
+    true,
+  );
+  for (const line of [
+    "unsafe { libc::kill(-pgid, 0) };",
+    "cmd.process_group(0);",
+    'Command::new("sh").args(["-c", "sed -i s/a/b/ f"]);',
+    'std::fs::read("/proc/self/stat")',
+  ])
+    assert.equal(run(diffOf(file, [line])).platform, true, line);
+
+  // A Linux-only change does not need macOS either way it is read: the
+  // pattern names the cfg, the OS does not matter. A platform-neutral change
+  // runs the Rust tests on ubuntu only.
+  const plain = run(diffOf(file, [neutral]));
+  assert.deepEqual(
+    { rust: plain.rust, platform: plain.platform },
+    { rust: true, platform: false },
+  );
+  assert.equal(run(diffOf(file, ["// a comment about linux"])).platform, false);
+
+  // The build setup: dependencies, toolchain and CI.
+  for (const path of [
+    "Cargo.lock",
+    "crates/sushiai-orch/Cargo.toml",
+    "rust-toolchain.toml",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml",
+    "crates/sushiai-orch/tests/fixtures/fake.sh",
+  ])
+    assert.equal(classify([path]).platform, true, path);
+  // A crate with a platform-only dependency (scripts/ci-platform.json).
+  assert.equal(classify(["crates/sushiai-hold/src/lib.rs"]).platform, true);
+  // A file whose tests failed only on macOS before.
+  const history = classify([
+    "crates/sushiai-orch/src/engine/tests/recovery.rs",
+  ]);
+  assert.equal(history.platform, true);
+  assert.match(history.reason, /failed only on macOS/);
+  // Web and docs never run the Rust tests, on any OS.
+  for (const files of [["src/App.tsx"], ["docs/INSTALL.md"]]) {
+    const scope = classify(files, { diff: diffOf(files[0], ["libc::x"]) });
+    assert.equal(scope.rust, false, files[0]);
+    assert.equal(scope.platform, false, files[0]);
+  }
+});
+
+test("the Rust matrices shard ubuntu always and macOS only for a platform change", async () => {
+  const { matrices, SHARDS } = await ciChanges();
+  const plain = matrices({ platform: false });
+  assert.deepEqual(plain.build.os, ["ubuntu-latest"]);
+  assert.equal(plain.test.include.length, SHARDS["ubuntu-latest"]);
+  const all = matrices({ platform: true });
+  assert.deepEqual(all.build.os, ["ubuntu-latest", "macos-latest"]);
+  const mac = all.test.include.filter((s) => s.os === "macos-latest");
+  assert.deepEqual(
+    mac.map((s) => `${s.shard}/${s.shards}`),
+    Array.from(
+      { length: SHARDS["macos-latest"] },
+      (_, i) => `${i + 1}/${SHARDS["macos-latest"]}`,
+    ),
+  );
+});
+
+test("scripts/ci-platform.json matches the manifests and the test sources", async () => {
+  const { generate, readData } = await import(
+    pathToFileURL(path.join(root, "scripts/ci-platform.mjs")).href
+  );
+  const data = readData();
+  assert.deepEqual(
+    generate(data),
+    data,
+    "stale: run node scripts/ci-platform.mjs --write",
+  );
+  for (const entry of data.macosOnly)
+    assert.ok(entry.files.length > 0, `no source defines ${entry.test}`);
+});
+
+test("the workspace has no doc tests, so CI runs no cargo test --doc pass", () => {
+  // nextest skips doc tests. A ```rust block in a doc comment would be one.
+  const found = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "target") walk(full);
+      } else if (entry.name.endsWith(".rs")) {
+        // Fences open and close in turn; only an opening one names a language.
+        const fence = /^\s*\/\/[/!]\s*```([\w,]*)/gm;
+        const fences = [...fs.readFileSync(full, "utf8").matchAll(fence)];
+        for (const [, lang] of fences.filter((_, i) => i % 2 === 0))
+          if (["", "rust"].includes(lang))
+            found.push(path.relative(root, full));
+      }
+    }
+  };
+  walk(path.join(root, "crates"));
+  assert.deepEqual(
+    [...new Set(found)],
+    [],
+    "a doc test needs a `cargo test --doc` step in scripts/test-rust.mjs",
+  );
+});
+
+test("the nextest summary lists FLAKY tests apart from failed ones", async () => {
+  const { parse, summary } = await import(
+    pathToFileURL(path.join(root, "scripts/nextest-summary.mjs")).href
+  );
+  const xml = fs.readFileSync(
+    path.join(__dirname, "fixtures/nextest-junit.xml"),
+    "utf8",
+  );
+  const cases = parse(xml);
+  const status = Object.fromEntries(cases.map((c) => [c.id, c.status]));
+  assert.equal(status["ci-probe flaky_once"], "flaky");
+  assert.equal(status["ci-probe always_fails"], "failed");
+  assert.equal(status["ci-probe passes"], "passed");
+  const { text, flaky, failed } = summary(cases, "ubuntu 1/2");
+  assert.deepEqual(
+    flaky.map((c) => c.id),
+    ["ci-probe flaky_once"],
+  );
+  assert.equal(failed.length, 1);
+  assert.match(text, /1 FLAKY/);
+  assert.match(text, /`ci-probe flaky_once`/);
 });
 
 test("npm run ci still runs every check", async () => {

@@ -1,0 +1,35 @@
+{
+  "crates": ["crates/sushiai-hold"],
+  "macosOnly": [
+    {
+      "test": "sushiai-orch engine::tests::an_over_budget_adopted_run_is_killed",
+      "prs": [93, 98],
+      "runs": [38801285521, 38927709502, 38937455006],
+      "files": ["crates/sushiai-orch/src/engine/tests/recovery.rs"]
+    },
+    {
+      "test": "sushiai-orch engine::recovery::interrupted_tests::recover_interrupted_kills_a_stale_process_group_if_still_alive",
+      "prs": [98, 103],
+      "runs": [38931522638, 38959930467],
+      "files": ["crates/sushiai-orch/src/engine/recovery/interrupted_tests.rs"]
+    },
+    {
+      "test": "sushiai-orch engine::tests::a_live_group_of_the_run_is_resumed",
+      "prs": [101],
+      "runs": [38965681305],
+      "files": ["crates/sushiai-orch/src/engine/tests/recovery.rs"]
+    },
+    {
+      "test": "sushiai-orch::base_env_failure a_persistent_setup_failure_runs_exactly_twice_and_remains_unknown",
+      "prs": [103],
+      "runs": [38959930467],
+      "files": ["crates/sushiai-orch/tests/base_env_failure.rs"]
+    },
+    {
+      "test": "sushiai-orch::baseline_cargo a_task_that_breaks_nothing_new_is_waived_after_the_full_rerun",
+      "prs": [98],
+      "runs": [38931522638],
+      "files": ["crates/sushiai-orch/tests/baseline_cargo.rs"]
+    }
+  ]
+}

@@ -225,15 +225,6 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     let pgid = child.id() as i32;
     crate::procs::testing::wait_for_argv(pgid, zero);
     std::thread::spawn(move || child.wait());
-    // The run is recognised by its arguments: wait until the child has
-    // exec'd the shell, which a loaded runner can take a moment to do.
-    let marker = if foreign { Path::new("/no-run") } else { exit };
-    for _ in 0..100 {
-        if crate::harness::process::group_started_with(pgid, marker) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
     pgid
 }
 

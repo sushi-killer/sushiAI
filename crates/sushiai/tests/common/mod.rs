@@ -42,6 +42,24 @@ pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// How long an absence check watches: long enough for the daemon to act on
+/// something it should not do. A positive wait never uses it.
+pub const ABSENCE_WINDOW: Duration = Duration::from_millis(1500);
+
+/// An absence check: polls `still` for `window` and panics naming `what` as
+/// soon as it stops holding. This, not a bare sleep, is how a test waits for
+/// something not to happen.
+pub fn holds_for(what: &str, window: Duration, mut still: impl FnMut() -> bool) {
+    let end = Instant::now() + window;
+    loop {
+        assert!(still(), "{what} stopped holding");
+        if Instant::now() >= end {
+            return;
+        }
+        sleep(Duration::from_millis(50));
+    }
+}
+
 pub fn processes() -> Vec<(u32, u32, String)> {
     sushiai_daemon::process::list_pids()
         .into_iter()

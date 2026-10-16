@@ -1,4 +1,5 @@
 use super::process::Daemon;
+use super::protocol::log_tail;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -38,6 +39,24 @@ pub fn wait_until<T>(what: &str, check: impl FnMut() -> Option<T>) -> T {
         .unwrap_or_else(|| panic!("timed out after {:?} waiting for {what}", deadline()))
 }
 
+/// How long an absence check watches: long enough for the daemon's next tick
+/// to act on something it should not do. A positive wait never uses it.
+pub const ABSENCE_WINDOW: Duration = Duration::from_millis(1500);
+
+/// An absence check: polls `still` for `window` and panics naming `what` as
+/// soon as it stops holding (a forbidden start, a second run). This, not a
+/// bare sleep, is how a test waits for something not to happen.
+pub fn holds_for(what: &str, window: Duration, mut still: impl FnMut() -> bool) {
+    let end = Instant::now() + window;
+    loop {
+        assert!(still(), "{what} stopped holding");
+        if Instant::now() >= end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Removes a directory tree that a stopped daemon or its agents may have just released:
 /// success and NotFound return, ENOTEMPTY and EBUSY retry until the deadline, anything
 /// else panics. Call it after the daemon was stopped and reaped.
@@ -75,7 +94,10 @@ pub fn poll_task_status(daemon: &Daemon, task_id: &str) -> serde_json::Value {
     })
     .unwrap_or_else(|| {
         let status = last["status"].as_str().unwrap_or("");
-        panic!("task {task_id} did not settle in time, last status: {status}: {last}");
+        panic!(
+            "task {task_id} did not settle in time, last status: {status}: {last}\n{}",
+            log_tail(&daemon.socket)
+        );
     })
 }
 
@@ -96,7 +118,8 @@ pub fn poll_until(
     .unwrap_or_else(|| {
         let status = last["status"].as_str().unwrap_or("");
         panic!(
-            "task {task_id} did not reach the expected status in time, stuck at {status}: {last}"
+            "task {task_id} did not reach the expected status in time, stuck at {status}: {last}\n{}",
+            log_tail(&daemon.socket)
         );
     })
 }

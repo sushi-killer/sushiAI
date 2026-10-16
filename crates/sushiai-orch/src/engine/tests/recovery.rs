@@ -225,14 +225,9 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     std::thread::spawn(move || child.wait());
     // The run is recognised by its arguments: wait until the child has
     // exec'd the shell, which a loaded runner can take a moment to do.
-    let marker = if foreign { "/no-run".into() } else { exit.display().to_string() };
+    let marker = if foreign { Path::new("/no-run") } else { exit };
     for _ in 0..100 {
-        let args = std::process::Command::new("ps")
-            .args(["-o", "args=", "-p", &pgid.to_string()])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        if args.contains(&marker) {
+        if crate::harness::process::group_started_with(pgid, marker) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

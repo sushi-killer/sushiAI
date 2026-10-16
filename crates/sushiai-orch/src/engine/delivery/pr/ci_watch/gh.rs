@@ -2,8 +2,8 @@
 //! Actions runs of a commit or of a branch, a run's failed-job log, and the
 //! rerun of a run's failed jobs. Code reads only gh's typed JSON fields.
 
+use crate::clip::tail_chars;
 use crate::delivery::pr::command::{gh_bin, run_cmd, run_with_code, GH_TIMEOUT};
-use crate::prompts::text::tail_chars;
 use crate::task::VerifyOutcome;
 use serde::Deserialize;
 use std::path::PathBuf;

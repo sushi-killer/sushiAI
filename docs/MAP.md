@@ -47,6 +47,7 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 - `crates/sushiai-orch/src/engine/lifecycle/run.rs` runs a task through lifecycle operations. `crates/sushiai-orch/src/engine/planning` plans.
 - `crates/sushiai-orch/src/engine/verification` coordinates checks; `crates/sushiai-orch/src/verify` executes and classifies repository evidence. `crates/sushiai-orch/src/engine/review/native.rs` reviews.
 - `crates/sushiai-orch/src/engine/land.rs` lands. `crates/sushiai-orch/src/engine/rpc` validates and dispatches task RPC.
+- `crates/sushiai-orch/src/engine/delivery/pr` drafts, carries and opens pull requests; `crates/sushiai-orch/src/engine/delivery/pr/ci_watch.rs` watches an open pull request's checks and repairs the task's own failures or tells the owner about the rest.
 - `crates/sushiai-orch/src/engine/attempts/brief.rs` builds the executor brief; `crates/sushiai-orch/src/engine/planning/prompt.rs` builds planning prompts. `crates/sushiai-orch/src/policy/settings.rs` has `Settings`.
 - `crates/sushiai-orch/src/prompts/loader.rs` loads `crates/sushiai-orch/prompts/orchestrator.yaml`.
 - `crates/sushiai-orch/pipelines` holds compiled executable graphs and the stage catalog. `crates/sushiai-orch/src/policy/pipelines` validates them; `docs/orchd-pipelines.md` maps their coordinators.

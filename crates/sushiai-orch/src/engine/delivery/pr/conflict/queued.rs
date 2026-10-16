@@ -17,7 +17,7 @@ pub(super) fn admit(
             || fresh.archived
             || fresh.queue.park.is_some()
             || fresh.pending_amendment.is_some()
-            || fresh.pr_url.is_some()
+            || !fresh.pr_push_owed()
             || fresh.landed_sha.is_some()
             || !expected.matches(fresh)
         {

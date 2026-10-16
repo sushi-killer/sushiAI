@@ -27,6 +27,9 @@ pub struct QueueState {
     pub pr_conflict_tried: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_check_repair: Option<crate::task::delivery::PrCheckRepair>,
+    /// The watch of the open pull request's checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_ci_watch: Option<crate::task::delivery::PrCiWatch>,
     /// What the task waits for right now, if anything: a global slot, a
     /// subtask slot, dependencies, or a file another task has changed.
     #[serde(skip_serializing_if = "Option::is_none")]

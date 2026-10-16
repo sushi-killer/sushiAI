@@ -74,6 +74,31 @@ impl CommandWrite {
     }
 }
 
+/// Runs a command whose exit code carries a state (`gh pr checks` exits 1
+/// while a check fails and 8 while one is pending): the exit code and stdout,
+/// kept whatever the code. `Err` only when it could not run or timed out.
+pub(crate) async fn run_with_code(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<(Option<i32>, String), String> {
+    let CommandWrite {
+        child,
+        shown,
+        deadline,
+        ..
+    } = start(program, args, cwd, timeout)?;
+    let out = tokio::time::timeout_at(deadline, child.wait_with_output())
+        .await
+        .map_err(|_| format!("{shown} timed out after {}s", timeout.as_secs()))?
+        .map_err(|error| format!("{shown}: {error}"))?;
+    Ok((
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
 /// Runs a command in `cwd` with a timeout; stdout on success, stderr in the error.
 pub(crate) async fn run_cmd(
     program: &str,

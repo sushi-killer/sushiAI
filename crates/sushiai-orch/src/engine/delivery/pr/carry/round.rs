@@ -73,8 +73,14 @@ pub(super) async fn carry_round(
     } else if carried.conflicted {
         resolve_conflict(app, &task.id, base, plan).await?
     } else if let Some(failed) = carried.failed_check {
-        crate::engine::delivery::pr::repair::resolve_checks(app, &fresh, base, &failed, plan)
-            .await?
+        crate::engine::delivery::pr::repair::resolve_checks(
+            app,
+            &fresh,
+            base,
+            &failed,
+            crate::engine::delivery::pr::repair::Origin::Carry(plan),
+        )
+        .await?
     } else {
         carried
             .committed
@@ -90,7 +96,7 @@ pub(super) async fn carry_round(
             && !fresh.archived
             && fresh.queue.park.is_none()
             && fresh.pending_amendment.is_none()
-            && fresh.pr_url.is_none()
+            && fresh.pr_push_owed()
             && fresh.landed_sha.is_none()
             && !CheckAdmission::capture(task).matches(&fresh)
         {

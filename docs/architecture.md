@@ -533,6 +533,19 @@ question; explicit owner retry authorizes one further step. Stop keeps the work
 unpublished. Parent carry conflicts use the normal Base moved step with the
 conflicting files.
 
+`engine/delivery/pr/ci_watch.rs` watches an open pull request's GitHub checks
+after its publication, and again after a restart while the task's typed
+`PrCiWatch` is unfinished. Code only polls, reruns the failed jobs once and
+collects their logs. All green, no checks, or a gh that cannot list them ends
+the watch quietly. Failing tests that all fail in the base branch's latest run,
+or failed jobs that pass on their one rerun, are not the task's: the task is
+left alone and the owner gets one note per pull request and cause. Anything
+else is one attribution turn (`engine/attribution.rs`). The task's own failure
+goes through the same check repair with the failed job log in its detail; the
+task keeps its `prUrl`, the fix is pushed to the same branch, and the new head
+is watched again. A cause already repaired on that pull request goes to the
+owner instead.
+
 PR readiness retains the authority accepted by the carry through Git and GitHub
 preparation. Delivery prepares typed writes after its prerequisite reads; the
 engine checks current owner authority and dispatches each command under the task

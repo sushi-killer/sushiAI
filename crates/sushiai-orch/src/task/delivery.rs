@@ -91,3 +91,7 @@ pub(crate) mod validation;
 #[path = "delivery/repair.rs"]
 pub(crate) mod repair;
 pub use repair::PrCheckRepair;
+
+#[path = "delivery/ci_watch.rs"]
+pub(crate) mod ci_watch;
+pub use ci_watch::{CiRerun, PrCiWatch};

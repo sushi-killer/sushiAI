@@ -130,6 +130,8 @@ impl App {
             if t.status == TaskStatus::Done {
                 // The draft of a pull request a restart interrupted.
                 crate::engine::delivery::pr::pending::spawn_pr_on_done(self, &t);
+                // The unfinished watch of its open pull request's checks.
+                crate::engine::delivery::pr::ci_watch::resume(self, &t);
                 continue;
             }
             if matches!(

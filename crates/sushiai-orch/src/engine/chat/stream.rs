@@ -1,6 +1,7 @@
 use super::store::{save, turn_dir};
 use super::tools::{keep_tools, tools_in_line};
 use super::types::ChatTool;
+use crate::clip::tail_chars;
 use crate::clock::now_ms;
 use crate::engine::attempts::ledger::record_run;
 use crate::engine::attempts::ledger::CostTag;
@@ -12,7 +13,6 @@ use crate::harness;
 use crate::harness::environment::augmented_path;
 use crate::harness::environment::resolve_binary;
 use crate::harness::native::error::RunError;
-use crate::prompts::text::tail_chars;
 use crate::store::log::append_line;
 use std::sync::Arc;
 

@@ -1,26 +1,5 @@
+use crate::clip::truncate_bytes;
 use crate::prompts::{brief_text, fill};
-
-/// Truncate to at most `max` bytes on a char boundary, so we never split a
-/// multi-byte UTF-8 sequence.
-pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\u{2026}", &s[..end])
-}
-
-/// The last `max` characters of `s`.
-pub(crate) fn tail_chars(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    s.chars().skip(count - max).collect()
-}
 
 /// A failure detail opens with what failed (`<cmd> exited 101.`) and ends
 /// with why (the test runner's summary): keep both ends, drop the middle.
@@ -72,7 +51,7 @@ pub(crate) fn untrusted_block(label: &str, text: &str) -> String {
             ("label", &escape_untrusted_tags(label)),
             (
                 "text",
-                &escape_untrusted_tags(&truncate_chars(text, UNTRUSTED_MAX_CHARS)),
+                &escape_untrusted_tags(&truncate_bytes(text, UNTRUSTED_MAX_CHARS)),
             ),
         ],
     );

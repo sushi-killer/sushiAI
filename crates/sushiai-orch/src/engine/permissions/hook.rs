@@ -1,3 +1,4 @@
+use crate::clip::truncate_chars;
 use crate::engine::permissions::answers::permission_question;
 use crate::engine::permissions::answers::record_permission_answer;
 use crate::engine::permissions::gate::gate_for;
@@ -10,7 +11,6 @@ use crate::policy::permissions::parse_choice;
 use crate::policy::permissions::Choice;
 use crate::policy::permissions::Subject;
 use crate::policy::permissions::WEB_TOOLS;
-use crate::prompts::clip::truncate_chars;
 use crate::store::permissions::add_rule;
 use crate::store::permissions::Scope;
 use crate::task::AnsweredBy;

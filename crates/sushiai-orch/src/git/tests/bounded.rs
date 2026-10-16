@@ -58,3 +58,23 @@ fn a_finished_git_returns_its_output_with_stdin_closed() {
     .unwrap();
     assert!(out.starts_with("git version"), "{out}");
 }
+
+#[test]
+fn a_grandchild_holding_the_output_pipe_does_not_hang_the_caller_after_git_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    // The alias prints, then leaves a background sleep holding stdout and stderr.
+    let began = std::time::Instant::now();
+    let out = run_bounded(
+        dir.path(),
+        &["-c", "alias.bg=!sleep 8 & echo hi", "bg"],
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "hi");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+}

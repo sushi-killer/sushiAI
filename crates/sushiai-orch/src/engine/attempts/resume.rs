@@ -1,11 +1,12 @@
 use super::brief::append_final_verify;
+use crate::clip::tail_chars;
 use crate::engine::attempts::advisor::advisor_block;
 use crate::engine::attempts::brief::{
     append_check_plan, report_format_block, MAX_LATEST_FAILURE_DETAIL,
 };
 use crate::engine::attempts::context::discarded_block;
 use crate::prompts::brief_text;
-use crate::prompts::text::{clip_middle, tail_chars};
+use crate::prompts::text::clip_middle;
 use crate::task::attempt::{Attempt, FailureKind};
 use crate::task::state::Task;
 use crate::verify::evidence::is_held_out;

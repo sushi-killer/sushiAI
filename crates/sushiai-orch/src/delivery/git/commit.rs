@@ -1,8 +1,8 @@
 use crate::delivery::git::carry::wip_ref;
-use crate::git::command::{quiet_git, run, run_bounded};
+use crate::git::command::{quiet_git, run, run_bounded, TempIndex};
 use crate::git::GitError;
+use std::ffi::OsStr;
 use std::path::Path;
-use std::process::Command;
 
 /// How long the final commit may run before it is stopped.
 const COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -73,74 +73,41 @@ pub fn commit_over(
     rev: &str,
     files: &[(String, Vec<u8>)],
 ) -> Result<String, GitError> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    static INDEX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "orchd-over-{}-{}",
-        std::process::id(),
-        INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
-            let mut child = Command::new("git")
-                .args(["-c", "user.name=orchd", "-c", "user.email=orchd@localhost"])
-                .args(args)
-                .current_dir(repo)
-                .env("GIT_INDEX_FILE", &tmp)
-                .env("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z")
-                .env("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z")
-                .stdin(if input.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                })
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
-            if let Some(input) = input {
-                child
-                    .stdin
-                    .take()
-                    .expect("piped stdin")
-                    .write_all(input)
-                    .map_err(|e| GitError(format!("git {} stdin: {e}", args.join(" "))))?;
-            }
-            let out = child
-                .wait_with_output()
-                .map_err(|e| GitError(format!("git {}: {e}", args.join(" "))))?;
-            if !out.status.success() {
-                return Err(GitError(format!(
-                    "git {} failed: {}",
-                    args.join(" "),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        };
-        git(&["read-tree", rev], None)?;
-        for (path, content) in files {
-            let blob = git(&["hash-object", "-w", "--stdin"], Some(content))?;
-            git(
-                &[
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    &format!("100644,{blob},{path}"),
-                ],
-                None,
-            )?;
-        }
-        let tree = git(&["write-tree"], None)?;
-        git(
-            &["commit-tree", &tree, "-p", rev, "-m", "orchd planner tests"],
-            None,
+    let index = TempIndex::new("orchd-over");
+    let git = |args: &[&str], input: Option<&[u8]>| -> Result<String, GitError> {
+        let args = [
+            &["-c", "user.name=orchd", "-c", "user.email=orchd@localhost"][..],
+            args,
+        ]
+        .concat();
+        index.git(
+            repo,
+            &args,
+            input,
+            &[
+                ("GIT_AUTHOR_DATE", OsStr::new("1970-01-01T00:00:00Z")),
+                ("GIT_COMMITTER_DATE", OsStr::new("1970-01-01T00:00:00Z")),
+            ],
         )
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    result
+    };
+    git(&["read-tree", rev], None)?;
+    for (path, content) in files {
+        let blob = git(&["hash-object", "-w", "--stdin"], Some(content))?;
+        git(
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},{path}"),
+            ],
+            None,
+        )?;
+    }
+    let tree = git(&["write-tree"], None)?;
+    git(
+        &["commit-tree", &tree, "-p", rev, "-m", "orchd planner tests"],
+        None,
+    )
 }
 
 /// Saves the worktree's uncommitted work (tracked and untracked, not

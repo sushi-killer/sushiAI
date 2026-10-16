@@ -1,4 +1,4 @@
-use crate::prompts::clip::truncate_chars;
+use crate::clip::truncate_chars;
 use crate::task::questions::Assumption;
 use crate::task::questions::WAIVED;
 use crate::task::questions::WAIVER_BY;

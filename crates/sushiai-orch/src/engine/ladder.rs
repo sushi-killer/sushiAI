@@ -40,6 +40,7 @@ use crate::policy::routing::Tier;
 #[cfg(test)]
 use crate::task::VerifyOutcome;
 
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::decision;
 use crate::engine::decision::implement_attempt_count;
@@ -54,7 +55,6 @@ use crate::engine::test_support::test_app;
 use crate::harness::cancel::CancelToken;
 use crate::policy::routing::Route;
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
 use crate::task::AttemptStatus;
 use crate::task::Blame;
 use crate::task::FailureKind;

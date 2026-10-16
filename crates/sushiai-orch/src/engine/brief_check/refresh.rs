@@ -1,6 +1,7 @@
 use super::judge::{Judge, JudgePurpose, JudgeRun};
 use super::reply::{refresh_brief, reply_list};
 use super::routing::check_route_for;
+use crate::clip::truncate_chars;
 use crate::clock::now_ms;
 use crate::engine::answer_policy::authority::{check_authority, shared_check_amend_refusal};
 use crate::engine::decision::completed_implement_attempts;
@@ -10,7 +11,6 @@ use crate::engine::questions::parking::WaitEnd;
 use crate::engine::state::App;
 use crate::harness::cancel::CancelToken;
 use crate::harness::native::error::RunError;
-use crate::prompts::clip::truncate_chars;
 use crate::task::amendment::Amendment;
 use crate::task::checks::authority::Origin;
 use crate::task::checks::commands::check_targets;

@@ -1,6 +1,6 @@
+use crate::clip::tail_chars;
 use crate::engine::attempts::report::Report;
 use crate::harness::RunOutcome;
-use crate::prompts::text::tail_chars;
 use crate::task::attempts::{self as observations, AttemptReport};
 use crate::task::Task;
 

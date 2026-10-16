@@ -1,7 +1,7 @@
+use crate::clip::tail_chars;
 use crate::engine::verification::base::answers::short7;
 use crate::engine::verification::base::answers::PARENT_CHECK_OPTIONS;
 use crate::engine::verification::base::answers::PRE_EXISTING_OPTIONS;
-use crate::prompts::text::tail_chars;
 use crate::task::attempt::VerifyOutcome;
 use crate::task::questions::AskedBy;
 use crate::task::questions::Question;

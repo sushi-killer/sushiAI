@@ -1,3 +1,4 @@
+use crate::clip::truncate_chars;
 use crate::engine::attempts::ledger::CostTag;
 use crate::engine::attempts::run::{run_harness, RunIdentity, RunInvocation};
 use crate::engine::attempts::tracking::RunTrack;
@@ -16,7 +17,6 @@ use crate::harness::run_files::read_cancelled_fingerprint;
 use crate::policy::routing::Harness;
 use crate::policy::routing::Route;
 use crate::policy::settings::Settings;
-use crate::prompts::clip::truncate_chars;
 use crate::task::AttemptStatus;
 use crate::task::FailureKind;
 use crate::task::Stage;

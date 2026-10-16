@@ -97,6 +97,7 @@ fn task_request_field_is_camel_case_and_omitted_when_absent() {
         base_ref: None,
         fresh_base: None,
         depends_on: vec![],
+        addenda: vec![],
         paths: vec![],
         parent: None,
         status: TaskStatus::Drafting,
@@ -241,6 +242,7 @@ fn task_field_names_are_camel_case() {
         base_ref: None,
         fresh_base: None,
         depends_on: vec![],
+        addenda: vec![],
         paths: vec![],
         parent: None,
         status: TaskStatus::Queued,
@@ -320,6 +322,7 @@ fn task_with_criteria(criteria: &[&str], flagged: &[&str]) -> Task {
         base_ref: None,
         fresh_base: None,
         depends_on: vec![],
+        addenda: vec![],
         paths: vec![],
         parent: None,
         status: TaskStatus::Done,
@@ -425,6 +428,7 @@ fn task_archived_field_is_camel_case_and_defaults_to_false_when_absent() {
         base_ref: None,
         fresh_base: None,
         depends_on: vec![],
+        addenda: vec![],
         paths: vec![],
         parent: None,
         status: TaskStatus::Done,
@@ -533,4 +537,21 @@ fn a_check_serializes_its_baseline_only_once_known() {
         r#""heldout""#
     );
     assert_eq!(FailureKind::Heldout.as_str(), "heldout");
+}
+
+#[test]
+fn addenda_serde_defaults_when_missing_and_is_skipped_when_empty() {
+    let mut task = crate::task::test_support::fixture(crate::task::TaskData {
+        addenda: vec![],
+        ..crate::engine::test_support::task_with_status(TaskStatus::Stopped).data
+    });
+    let mut v = serde_json::to_value(&task).unwrap();
+    assert!(v.get("addenda").is_none(), "{v}");
+    let back: Task = serde_json::from_value(v.clone()).unwrap();
+    assert!(back.addenda.is_empty());
+    task.data.addenda = vec!["note".into()];
+    v = serde_json::to_value(&task).unwrap();
+    assert_eq!(v["addenda"], serde_json::json!(["note"]));
+    let back: Task = serde_json::from_value(v).unwrap();
+    assert_eq!(back.addenda, vec!["note"]);
 }

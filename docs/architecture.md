@@ -386,7 +386,7 @@ attempt on its own worktree, with the failure in its brief (one attempt for a
 failed check, with the failing command and its output tail in the brief,
 `maxAttempts` for a landing), and waits with the
 attempts-exhausted question when that is spent. `task.amend` on a parent with a
-live loop is applied right before its next check. Its
+live loop is applied right before its next check. `task.amend` also takes a free-text `addendum`: it is appended to the task's persisted `addenda`, logged as an `Amended: addendum` decision and rendered in the executor brief as its own section right after the goal; several addenda merged on a live loop all stay, in order. Its
 cost is its plan plus its children. When something a task waits for ends
 `failed`/`stopped`, the task waits with a question: retry the dependency,
 drop it, or stop.

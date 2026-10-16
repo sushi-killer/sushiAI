@@ -4,47 +4,40 @@
 
 ![sushiAI workspace](promo/assets/workspace.png)
 
-**sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, Gemini CLI, and Cursor Agent with your installed tools and accounts. Sessions persist in the `sushiai` daemon, locally and over SSH.
+**sushiAI** brings agent terminals, chats, files, and Git diffs into one macOS window. Run Claude Code, Codex, and other agent CLIs with your installed tools and accounts. Sessions persist in the `sushiai` daemon, locally and over SSH.
 
-[Watch the demo](promo/sushiAI-launch.mp4) · [Download 0.0.6](https://github.com/sushi-killer/sushiAI/releases/tag/v0.0.6) · [Installation guide](docs/INSTALL.md)
+[Watch the demo](promo/sushiAI-launch.mp4) · [Download the latest release](https://github.com/sushi-killer/sushiAI/releases/latest) · [Installation guide](docs/INSTALL.md)
 
 The demo uses fictional projects and sample data.
 
 ## Install
 
-**[Download the Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/download/v0.0.6/sushiAI-0.0.6-arm64.dmg)** — requires an M1 or newer Mac running macOS 13 or later.
+**[Download the latest Apple Silicon DMG](https://github.com/sushi-killer/sushiAI/releases/latest)** from the release assets. It requires an M1 or newer Mac running macOS 13 or later.
 
-Open the DMG, drag sushiAI to Applications, and launch it. This build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source).
-
-**Upgrading from 0.0.1 Alpha:** install this DMG manually once to enable in-app updates for future releases.
+Open the DMG, drag sushiAI to Applications, and launch it. The build is ad-hoc signed and is not Apple-notarized. See the [installation guide](docs/INSTALL.md) for first-launch instructions, checksums, tool setup, and [building from source](docs/INSTALL.md#build-from-source). Once installed, the app updates itself from **Settings → Software updates**.
 
 ## Features
 
-- **Agent terminals:** streaming input and output, resizing, and icons for the running agent.
-- **Flexible workspaces:** draggable split panels, resizable dividers, and tabs that adapt to smaller windows.
-- **Session management:** add shells and agents, search sessions, hide views, or end selected sessions.
+- **Agents:** structured chat works with Claude Code and Codex through their installed CLIs. Other CLIs run as plain terminal sessions. The Agents view also covers Hermes.
+- **Chat:** threads per project with pinning and renaming. Each thread keeps its agent, model, effort and permission mode; attach files and folders by dropping them into the composer. Codex models and reasoning levels are read from the installed CLI.
+- **Workspaces:** draggable split panels, resizable dividers, and tabs that adapt to smaller windows.
 - **Local and remote projects:** connect to a host over SSH using your existing SSH configuration.
-- **Files and previews:** browse directories, read text, view images and PDFs, and preview static HTML with relative assets.
-- **Text editing:** edit UTF-8 files with conflict detection if an agent changes the file before you save.
-- **Git history and diffs:** inspect a compact branch graph, browse any local or origin branch without checkout, and review commit files and diffs alongside working-tree and staged changes.
-- **Skill inventory:** scan local Codex, Claude and other agent skills, group them by harness, review usage and duplicate signals, and edit `SKILL.md` in a VS Code-style pane.
-- **Software updates:** check GitHub Releases automatically and download a verified DMG when an update is available.
-- **Agent chats:** use Claude Code or Codex through their installed CLIs.
-- **Project controls:** open a workspace menu to enable or disable Claude Code MCP servers and plugins without deleting their configuration.
-- **Chat tab:** threads per project with pinning, renaming and a project picker on **+**. Each thread keeps its agent, model, effort and permission mode; attach files and folders with **+** or by dropping them into the composer.
-- **Live model list:** Codex models, their reasoning levels and your configured defaults are read from the installed CLI, so a new release appears without updating sushiAI. Codex turns report progress and real token usage while they run.
+- **Files and Git:** browse directories, preview text, images, PDFs and static HTML, edit UTF-8 files with conflict detection, and inspect branches, commits and diffs without checkout.
+- **Skills:** scan local agent skills, group them by harness, and edit `SKILL.md`.
+- **Project controls:** enable or disable Claude Code MCP servers and plugins per project without deleting their configuration.
+- **Orchestrator (orchd):** the `sushiai` daemon hosts an orchestrator module that plans and runs agent tasks on your hosts. Every setting is documented in [orchestrator settings](docs/orchestrator-settings.md).
+- **Routines:** describe a task once and an agent runs it on a schedule in the background. See [Routines](docs/routines.md).
+- **Projects, Vault and environments:** a project groups its checkouts across hosts and carries environment values for its tasks and sessions. Values can be read from HashiCorp Vault with a read-only token stored in the macOS Keychain, and a project can keep its values off a host.
+- **Model providers:** configure providers and model profiles, including the context window used for each model, and choose them per thread or task.
+- **Extensions:** add pages, panes and cards with a JSON manifest, see below.
 
 ## Workspaces and sessions
 
-Use **+**, **⌘K**, or **⌘T** to add a terminal, agent, browser, Files & Git panel, or chat. Drag a panel header to another panel's center to swap them, or to its edge to split the layout. Drag dividers to resize panels; double-click a header to maximize it. **Tidy** restores and balances the layout.
+Use **+**, **⌘K**, or **⌘T** to add a terminal, agent, browser, Files & Git panel, or chat. Drag a panel header to another panel's center to swap them, or to its edge to split the layout. Drag dividers to resize panels; double-click a header to maximize it. **Tidy** restores and balances the layout. When space is limited, panels switch to tabs and the sidebar collapses.
 
-When space is limited, panels switch to tabs and the sidebar collapses. You can also select tab mode from the toolbar.
+Open the **Inbox** to see what needs you, answer permission requests with **Allow** or **Deny**, and clean up idle sessions. **Hide** removes a view while **End** stops the session.
 
-Open the **Inbox** to see what needs you, answer permission requests with **Allow** or **Deny**, and clean up idle sessions. **Hide** removes a view while **End** stops the session. Use the workspace menu to rename or close a workspace and its sessions.
-
-Use the workspace menu → **Manage workspace controls** to rename a workspace and turn Claude Code MCP connections and plugins on or off for that project. The same compact table has a **Stats** view with recent local project-usage signals, so plugins with no recent use are easy to review. The New workspace form also lets you choose which discovered plugins start disabled. sushiAI writes Claude Code's native per-project choice to `~/.claude.json` and `.claude/settings.local.json` on the selected host; server definitions, plugin settings and credentials stay untouched. The control applies to new Claude Code sessions and is structured to add other harnesses later.
-
-Sessions continue when sushiAI quits and reattach when it opens again. Save file edits before quitting; unsaved drafts are kept only in memory. Use terminal panels when an agent requires interactive approval.
+Sessions continue when sushiAI quits and reattach when it opens again. Save file edits before quitting; unsaved drafts are kept only in memory.
 
 ## Sessions and remote hosts
 
@@ -70,13 +63,7 @@ File previews support files up to 16 MB; text output is limited to 2 MB. Static 
 
 ## Software updates
 
-Open **Settings → Software updates** to check for a new release. Packaged builds check this project's public GitHub Releases shortly after startup and every six hours. Automatic downloads and alpha/beta releases can be enabled or disabled separately. Development builds check only when requested.
-
-When a compatible update is found, an indicator appears in the toolbar and Notifications. Downloads are verified against the release asset's SHA-256 digest. Choose **Install and restart** to apply a downloaded update. The installer verifies the DMG and application signature, prepares a new copy, waits for sushiAI to exit, replaces the app, and reopens it. A recovery copy is kept until the new version loads; replacement failures restore the previous app. Save edits first: terminal sessions keep running in the `sushiai` daemon and reattach when the new version opens. Automatic downloads never trigger installation on their own.
-
-Install sushiAI in a writable Applications folder before updating; an app running directly from a mounted DMG cannot replace itself. Development builds offer **Open installer** for manual installation instead.
-
-Updates use the Mac's architecture, ignore draft releases and older versions, and require a matching uploaded DMG. A failed network request can be retried from Settings. No GitHub account or access token is required.
+Open **Settings → Software updates** to check for a new release. Packaged builds check this project's public GitHub Releases shortly after startup and every six hours; downloads are verified against the release asset's SHA-256 digest, and **Install and restart** applies them. Automatic downloads never install on their own. No GitHub account is required. See the [installation guide](docs/INSTALL.md#update-the-app) for details.
 
 ## Keyboard shortcuts
 
@@ -95,112 +82,9 @@ Updates use the Mac's architecture, ignore draft releases and older versions, an
 
 ## Extensions
 
-Extensions are JSON. A folder with a `manifest.json` declares pages, workspace
-panes, dashboard cards, sidebar entries and toolbar actions; the app renders
-them itself. No code from the folder is ever loaded or executed, so installing
-one is as safe as opening a text file.
+Extension API v1 is JSON. A folder with a `manifest.json` declares pages, workspace panes, dashboard cards, sidebar entries and toolbar actions; the app renders them itself and never loads code from the folder. Drop the folder into `~/Library/Application Support/sushiai-workspace/local-extensions/<your-extension>/`, press **Reload** on the Extensions page, and enable it.
 
-Drop your folder here and press **Reload** on the Extensions page:
-
-```
-~/Library/Application Support/sushiai-workspace/local-extensions/<your-extension>/manifest.json
-```
-
-A new extension arrives disabled — enable it on the Extensions page. Editing
-the manifest and pressing Reload is the whole development loop; the version
-field is yours to bump freely. One broken folder never affects the others: it
-is listed with its error and the rest keep working.
-
-### What a manifest controls
-
-| Field                           | What you decide                                                                                                                                                                                                                        |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `surfaces[].allowedHosts`       | Where the surface may appear: `app.page`, `workspace.pane`, `workspace.tab`, `dashboard.section`, `sessions.section`, `skills.section`, `settings.section`                                                                             |
-| `surfaces[].stateScope`         | Whether its contents are per pane (`instance`), per project (`project`), or one for the machine (`global`)                                                                                                                             |
-| `surfaces[].instancePolicy`     | `singleton` reveals the pane that is already open instead of adding a second; `multiple` opens another. A surface keeping `project` or `global` state must be a singleton — several panes sharing one slice would overwrite each other |
-| `surfaces[].stateVersion`       | Bump it when the shape of what you store changes; older state is kept but no longer read                                                                                                                                               |
-| `surfaces[].stateId`            | Read and write another surface's contents instead of your own — how one list gets two views. The two must agree on `stateScope` and `stateVersion`                                                                                     |
-| `surfaces[].aggregate`          | A read-only page over every project at once. Needs `stateScope: "project"`, and may group by `$project`, which the app fills in with the workspace name                                                                                |
-| `surfaces[].tokens`             | `accent`, `density`, `radius`, `elevation` — the surface is painted in the app's own palette, and these shift it within it. Declare none and it is identical to a built-in view                                                        |
-| `navigation[].defaultPlacement` | `panel.picker` (a card in the add-panel list), `sidebar.primary`, `mode.primary`, `dashboard.navigation`, `sessions.navigation`, `skills.navigation`                                                                                   |
-| `actions[].defaultPlacement`    | `workspace.toolbar.start`, `.before-tidy`, `.after-tidy`, `.end`, or `workspace.folder.actions`                                                                                                                                        |
-| `*.order`                       | Position among other contributions in the same spot. In the sidebar a negative order sits above Dashboard and the other built-in sections, a positive one below them                                                                   |
-| `*.icon`                        | A bundled name, or your own geometry (below)                                                                                                                                                                                           |
-
-Anything the manifest does not ask for does not appear: a surface that lists
-only `workspace.pane` has no page and no sidebar entry. A contributed page
-opens in the working area the way Skills does — the sidebar, the workspace list
-and the toolbar stay exactly where they were. No manifest can take the window.
-
-### What a view describes
-
-A surface holds records; a view says how to read them. Fields are declared once
-under `data.fields` (`text`, `boolean`, `date`, `select`), and each view picks
-from them:
-
-| Field                                      | What you decide                                                                                                                     |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `primary` / `secondary`                    | The line of a row, and a quieter line under it                                                                                      |
-| `toggle`                                   | The boolean a row's checkmark sets                                                                                                  |
-| `meta`                                     | Fields shown on the row. `$project` is allowed on an aggregate                                                                      |
-| `editable`                                 | Of the shown fields, the ones this view may change. Nothing is editable unless listed                                               |
-| `layout`                                   | `list`, `board`, or `table`                                                                                                         |
-| `columns`                                  | For a board: a `select` field whose options are the columns. Every option gets a column, empty or not, so the board keeps its shape |
-| `groupable` / `defaultGroup`               | Fields the reader may group by. The app draws the chooser and remembers the pick                                                    |
-| `filter`                                   | Always applied, invisible: `[{ "field": "done", "op": "ne", "value": true }]`                                                       |
-| `filterable`                               | Offered as a "Hide done" chip the app draws                                                                                         |
-| `sort`                                     | `[{ "field": "due", "dir": "asc" }]`. Blanks sort last                                                                              |
-| `summary`                                  | Counting tiles above the list: `{ label, field, value, tone }`                                                                      |
-| `actions`                                  | Command ids to put in the page heading                                                                                              |
-| `allowAdd` / `allowToggle` / `allowRemove` | What a reader may do. Removal is off unless asked for                                                                               |
-
-A `select` option may carry a `tone` — `neutral`, `info`, `ok`, `warning`,
-`danger`, `muted`. That is a meaning, not a colour: the app decides what
-"blocked" looks like, so two extensions read the same in the same theme. Dates
-render as "in 3 days" or "2 days ago", and an overdue one is flagged, without
-the manifest asking.
-
-Open the Extensions page and expand a card to see exactly what an extension
-contributes and where — in plain words rather than field names.
-
-### Where state is kept
-
-State lives with the app, not in your folder, so editing a manifest never
-touches what a user has typed:
-
-```
-~/Library/Application Support/sushiai-workspace/extensions/state/<extension-id>.json
-```
-
-`project` scope is keyed by the project folder. The same folder over SSH is a
-different project; a local session is not. A project-scoped surface
-opened without a folder renders read-only rather than writing into a shared
-bucket.
-
-### Icons
-
-Use a bundled name (`list-check`, `list-todo`, `layout-grid`, `plug`,
-`sparkles`, `workflow`, `terminal`, `folder`) or ship your own:
-
-```json
-"icon": {
-  "kind": "svg",
-  "viewBox": "0 0 24 24",
-  "paths": ["M4 7h10", { "d": "M17 8l2 2 4-4", "fill": "currentColor" }]
-}
-```
-
-Only path geometry is accepted — up to 12 paths, plain path data, no other
-attributes. The app builds the `<svg>` around it and paints it in the current
-text colour, so an icon can never carry script, styles or a remote reference.
-
-`tests/fixtures/extensions/probe/manifest.json` is the one extension the suite
-tests against. It is deliberately not a product feature: its records are
-"specimens" and mean nothing. It declares every host, placement, layout, field
-type, tone and token the contract allows, and
-`tests/extension-contract-coverage.test.cjs` reads the allowed values straight
-out of the validator and fails when one of them appears nowhere in the fixture.
-Widening the contract means widening the fixture in the same change.
+An extension that needs live data can point a view at a companion: a native program installed outside the folder that serves the view's values. See [companion processes](docs/extensions/companion.md) and [icons](docs/extensions/icons.md). `tests/fixtures/extensions/probe/manifest.json` declares every host, placement, layout and field type the contract allows.
 
 ## Development
 
@@ -218,6 +102,8 @@ npm test              # Unit tests
 npm run build         # Type checking and production build
 npm run test:desktop  # Desktop smoke with a daemon of its own (builds `sushiai` if missing)
 npm run test:terminal # Terminal rendering and input
+npm run lint          # ESLint
+npm run ci:web        # Full web gate used by CI
 ```
 
 For SSH integration tests, set `SUSHIAI_SSH_HOST` to a test host that has `sushiai` installed, then run `npm run test:remote`. Integration tests create temporary workspaces and files and clean them up afterward.

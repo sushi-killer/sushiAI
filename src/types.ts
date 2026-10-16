@@ -460,7 +460,7 @@ export type ChatModel = {
   defaultEffort: string;
   context: number;
 };
-export type SkillProvider = "Codex" | "Claude" | "Agent" | "Other";
+export type SkillProvider = "Codex" | "Claude";
 export type SkillUsage = {
   at: number;
   project?: string;
@@ -472,8 +472,9 @@ export type SkillCatalogItem = {
   path?: string;
   provider?: SkillProvider;
   harness?: string;
-  source?: string;
-  availability?: "active" | "disabled" | "external";
+  source?: "Local" | "Plugin";
+  scope?: "user" | "project";
+  availability?: "active" | "disabled";
   disabledBy?: "provider" | "skill-config" | "skill-override";
   plugin?: string;
   pluginScope?: "user" | "project" | "local";

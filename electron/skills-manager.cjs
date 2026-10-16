@@ -288,27 +288,32 @@ function itemPath(home, item) {
   return path.resolve(value);
 }
 
-function localRootFor(home, item) {
-  const relative =
-    item.provider === "Claude"
-      ? ".claude/skills"
-      : item.provider === "Codex"
-        ? ".codex/skills"
-        : item.provider === "Agent"
-          ? ".agents/skills"
-          : null;
-  return relative ? path.join(home, relative) : null;
+/** The row of the main process's own catalog that `item` names. Everything
+ * the change needs (its root, plugin, provider) comes from that row, never
+ * from what the renderer sent. */
+function catalogRow(catalog, item) {
+  const row = (Array.isArray(catalog) ? catalog : []).find(
+    (entry) =>
+      entry.path === item.path &&
+      entry.provider === item.provider &&
+      entry.source === item.source &&
+      entry.name === item.name,
+  );
+  if (!row)
+    throw new Error("This skill is not in the current catalog; refresh it.");
+  return row;
+}
+
+/** The catalog row's own skill folder, absolute. */
+function rowRoot(row) {
+  return typeof row.root === "string" && path.isAbsolute(row.root)
+    ? path.resolve(row.root)
+    : null;
 }
 
 async function deleteLocalSkill(home, item, shell) {
   const filePath = await validateLocalSkillPath(home, item);
-  const root = localRootFor(home, item);
-  if (
-    !root ||
-    !inside(filePath, root) ||
-    path.basename(filePath).toLowerCase() !== "skill.md"
-  )
-    throw new Error("Only skills from the managed local roots can be deleted.");
+  const root = rowRoot(item);
   const directory = path.dirname(filePath);
   if (path.resolve(directory) === path.resolve(root))
     throw new Error(
@@ -332,7 +337,7 @@ async function deleteLocalSkill(home, item, shell) {
 
 async function validateLocalSkillPath(home, item) {
   const filePath = itemPath(home, item);
-  const root = localRootFor(home, item);
+  const root = rowRoot(item);
   if (
     !root ||
     !inside(filePath, root) ||
@@ -350,12 +355,23 @@ function pluginScope(item) {
     : "user";
 }
 
-async function manageSkill({ home, action, item, shell, executable }) {
+/** Enables, disables or deletes the catalog row `request` names. `catalog` is
+ * the main process's last scan. */
+async function manageSkill({
+  home,
+  action,
+  item: request,
+  catalog,
+  shell,
+  executable,
+}) {
   const resolvedHome = path.resolve(home);
   if (!ACTIONS.has(action)) throw new Error("Unknown skill action.");
-  if (!item || typeof item !== "object") throw new Error("Invalid skill.");
+  if (!request || typeof request !== "object")
+    throw new Error("Invalid skill.");
+  const item = catalogRow(catalog, request);
   if (!["Local", "Plugin"].includes(item.source))
-    throw new Error("External skills are managed by their own harness.");
+    throw new Error("This skill is managed by its own harness.");
 
   if (item.source === "Plugin") {
     if (typeof item.plugin !== "string" || !PLUGIN_KEY.test(item.plugin))
@@ -426,7 +442,7 @@ async function manageSkill({ home, action, item, shell, executable }) {
 
   if (action === "delete") {
     const result = await deleteLocalSkill(resolvedHome, item, shell);
-    if (item.provider === "Codex" || item.provider === "Agent")
+    if (item.provider === "Codex")
       await removeCodexSkillConfig(resolvedHome, itemPath(resolvedHome, item));
     return {
       action,
@@ -441,7 +457,7 @@ async function manageSkill({ home, action, item, shell, executable }) {
       item.name,
       action === "enable",
     );
-  else if (item.provider === "Codex" || item.provider === "Agent")
+  else if (item.provider === "Codex")
     await updateCodexSkillConfig(resolvedHome, filePath, action === "enable");
   else throw new Error("This skill provider is read-only in sushiAI.");
   return {

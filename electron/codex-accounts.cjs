@@ -128,7 +128,7 @@ class CodexAccounts {
       ).slice(0, 80),
     };
     await fs.mkdir(this.homeFor(id), { recursive: true, mode: 0o700 });
-    installBuiltinSkillsInto(this.homeFor(id));
+    void installBuiltinSkillsInto(this.homeFor(id));
     await this.#write(accounts);
     return { ...accounts[id], signedIn: false, mode: "", detail: "" };
   }

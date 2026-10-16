@@ -199,9 +199,7 @@ export function SkillEditorPanel({
   const dirty = draft !== source;
   const isPlugin = item.source === "Plugin";
   const isLocal = item.source === "Local";
-  const isSupportedProvider = ["Codex", "Claude", "Agent"].includes(
-    item.provider || "",
-  );
+  const isSupportedProvider = ["Codex", "Claude"].includes(item.provider || "");
   const pluginAction = isPlugin && item.disabledBy !== "skill-config";
   const systemProtected =
     isLocal && Boolean(item.path?.split("/").includes(".system"));
@@ -389,7 +387,7 @@ export function SkillEditorPanel({
       <div className="skill-editor-meta">
         <span>
           <strong>Agent</strong>
-          {item.provider || "Other"} · {item.source || "Local"}
+          {item.harness || item.provider} · {item.source || "Local"}
         </span>
         <span>
           <strong>Last used</strong>
@@ -467,10 +465,6 @@ export function SkillEditorPanel({
               </button>
             )}
           </div>
-        ) : item.availability === "external" ? (
-          <span className="skill-editor-readonly">
-            Managed by external harness
-          </span>
         ) : null}
         <button
           className="skill-editor-save"

@@ -1,7 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 
 const root = path.join(__dirname, "..");
@@ -91,7 +90,7 @@ test("the skill scopes its example tool grant and protects enabled routines", ()
   assert.match(text, /enabled routine/);
 });
 
-test("the registered skill text equals the file and follows the enabled predicate", () => {
+test("the registered skill text equals the file and follows the enabled predicate", async () => {
   const skills = require("../electron/extensions/builtin-skills.cjs");
   const { configureRoutinesSkill } = require("../electron/routines-skill.cjs");
   let enabled = true;
@@ -99,23 +98,22 @@ test("the registered skill text equals the file and follows the enabled predicat
     extensionId: "builtin.routines",
     isEnabled: () => enabled,
   });
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "routines-skill-"));
-  const target = (tool) =>
-    path.join(home, tool, "skills", "sushiai-routines", "SKILL.md");
-  try {
-    skills.syncLocalBuiltinSkills(home, {}, undefined);
-    for (const tool of [".claude", ".codex", ".agents"])
-      assert.equal(
-        fs.readFileSync(target(tool), "utf8"),
-        fs.readFileSync(SKILL, "utf8"),
-      );
-    enabled = false;
-    skills.syncLocalBuiltinSkills(home, {}, undefined);
-    for (const tool of [".claude", ".codex", ".agents"])
-      assert.equal(fs.existsSync(target(tool)), false);
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
+  const runs = [];
+  skills.configureBuiltinSkillSync({
+    binary: () => "/bin/sushiai",
+    env: {},
+    run: async (binary, args, { input }) => runs.push({ args, input }),
+  });
+  await skills.syncLocalBuiltinSkills();
+  enabled = false;
+  await skills.syncLocalBuiltinSkills();
+  assert.deepEqual(runs, [
+    {
+      args: ["skills", "install", "sushiai-routines"],
+      input: fs.readFileSync(SKILL, "utf8"),
+    },
+    { args: ["skills", "remove", "sushiai-routines"], input: "" },
+  ]);
 });
 
 test("the skill names the same modes and MCP tools as the code", () => {

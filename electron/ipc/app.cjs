@@ -109,14 +109,14 @@ function registerAppIpc({
     if (action === "close") mainWindow.close();
   });
 
-  handle("catalog", async (kind, options = {}) => {
-    if (kind !== "skills") return [];
+  // The main process keeps the last scan: a skill change is checked against
+  // that row, never against what the renderer sends back.
+  const skillsCatalog = (force) => {
     const snapshotFile = path.join(userDataDir(), "skills-catalog.json");
-    const force = Boolean(options?.force);
     if (!force && skillsCatalogCache?.snapshotFile === snapshotFile)
       return skillsCatalogCache.items;
     if (skillsCatalogScan) return skillsCatalogScan;
-    skillsCatalogScan = scanLocalSkills({ snapshotFile })
+    skillsCatalogScan = Promise.resolve(scanLocalSkills({ snapshotFile }))
       .then((items) => {
         skillsCatalogCache = { snapshotFile, items };
         return items;
@@ -125,12 +125,16 @@ function registerAppIpc({
         skillsCatalogScan = undefined;
       });
     return skillsCatalogScan;
-  });
+  };
+  handle("catalog", async (kind, options = {}) =>
+    kind === "skills" ? skillsCatalog(Boolean(options?.force)) : [],
+  );
   handle("skills-manage", async (action, item) => {
     const result = await manageSkill({
       home: os.homedir(),
       action,
       item,
+      catalog: await skillsCatalog(false),
       shell,
       executable,
     });

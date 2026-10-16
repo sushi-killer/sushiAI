@@ -44,7 +44,7 @@ const { createDaemonLaunch } = require("./session-launch.cjs");
 const { registerExtensionIpc } = require("./ipc/extensions.cjs");
 const { registerDaemonIpc, forwardDaemonEvents } = require("./ipc/daemon.cjs");
 const { createDaemonManager } = require("./daemon/manager.cjs");
-const { createLocalConnector } = require("./daemon/local.cjs");
+const { createLocalConnector, resolveBinary } = require("./daemon/local.cjs");
 const { remoteConnectors } = require("./daemon/connectors.cjs");
 const { watchHostTools } = require("./daemon/host-tools.cjs");
 const { registerAttentionIpc } = require("./attention.cjs");
@@ -79,7 +79,10 @@ const { registerRoutines } = require("./routines.cjs");
 const { createHostProbe } = require("./routines-probe.cjs");
 const { chatModels } = require("./agent-models.cjs");
 const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
-const { syncLocalBuiltinSkills } = require("./extensions/builtin-skills.cjs");
+const {
+  configureBuiltinSkillSync,
+  syncLocalBuiltinSkills,
+} = require("./extensions/builtin-skills.cjs");
 const {
   ORCHESTRATOR_MANIFEST,
 } = require("./extensions/builtin-orchestrator.cjs");
@@ -134,28 +137,29 @@ const extensions = new ExtensionManager({
       // be opened in Finder and edited by hand.
       path.join(app.getPath("userData"), "local-extensions"),
 });
+// The bundled sushiai binary owns the skill folders: the skills catalog and
+// the builtin skills run it.
+const sushiaiBinary = () =>
+  resolveBinary({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+configureBuiltinSkillSync({
+  binary: sushiaiBinary,
+  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
+});
 configureArtifactsSkill({
   isEnabled: () => extensions.isEnabled(ARTIFACTS_MANIFEST.id),
   subscribe: (listener) => extensions.onChange(listener),
-  home: os.homedir(),
-  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
 });
 configureRoutinesSkill({
   extensionId: ROUTINES_MANIFEST.id,
   isEnabled: () => extensions.isEnabled(ROUTINES_MANIFEST.id),
   subscribe: (listener) => extensions.onChange(listener),
-  home: os.homedir(),
-  codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
 });
 // After the persisted enabled state is loaded, so a disabled Artifacts
 // extension does not get its skill installed (and a stale one is removed).
-extensions.ready.then(() =>
-  syncLocalBuiltinSkills(
-    os.homedir(),
-    undefined,
-    path.join(app.getPath("userData"), "codex-accounts"),
-  ),
-);
+extensions.ready.then(() => syncLocalBuiltinSkills());
 const surfaceState = new SurfaceStateStore(app.getPath("userData"));
 extensions.ready.then(() =>
   surfaceState.forgetRetired(new Set(extensions.manifests.keys())),
@@ -359,7 +363,8 @@ registerAppIpc({
   modelProviders,
   codexAccounts,
   executable,
-  scanLocalSkills,
+  scanLocalSkills: async (options) =>
+    scanLocalSkills({ ...options, binary: sushiaiBinary() }),
   manageSkill,
   userDataDir: () => app.getPath("userData"),
 });

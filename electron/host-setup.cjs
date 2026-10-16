@@ -169,7 +169,6 @@ async function runSetup(
     return {
       note: "This host connects through a command and has no shell: set up sushiai, Claude Code and Codex on it yourself.",
     };
-  if (remote) void installSkill(connections, endpoint);
   const runScript = (script) =>
     remote
       ? connections.exec(endpoint, "sh -s", { input: script, timeout })
@@ -192,6 +191,9 @@ async function runSetup(
       states.sushiaiError = error.message;
     }
   }
+  // The host's own sushiai binary installs the skills, so this runs after
+  // the binary install above (or on a host that already has it).
+  if (remote) await installSkill(connections, endpoint);
   return states;
 }
 
@@ -268,7 +270,7 @@ async function reconnectUntilReady(
 }
 
 /** The `host-install` handler. A remote host: setupHost with the host manifest
- * (tools, skills, then the bundled sushiai), the old daemon stops
+ * (tools, the bundled sushiai, then the skills through it), the old daemon stops
  * (`daemon.shutdown` when connected; sessions live in their holders and
  * survive), then manager.retry(host) until ready or a state that needs the
  * owner. "local": the "Restart daemon" action, which stops whatever daemon

@@ -12,13 +12,7 @@ const SKILL_PATH = path.join(__dirname, "extensions", "routines-skill.md");
  * is removed from every home while `isEnabled()` is false. `subscribe` (the
  * extension manager's onChange) re-syncs this machine when the extension
  * `extensionId` is turned on or off. */
-function configureRoutinesSkill({
-  extensionId,
-  isEnabled,
-  subscribe,
-  home,
-  codexAccountsDir,
-}) {
+function configureRoutinesSkill({ extensionId, isEnabled, subscribe }) {
   registerBuiltinSkill({
     extensionId,
     name: NAME,
@@ -27,8 +21,7 @@ function configureRoutinesSkill({
   });
   if (typeof subscribe === "function")
     subscribe((id) => {
-      if (id === extensionId)
-        syncLocalBuiltinSkills(home, undefined, codexAccountsDir);
+      if (id === extensionId) return syncLocalBuiltinSkills();
     });
 }
 

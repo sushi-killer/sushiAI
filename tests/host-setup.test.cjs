@@ -176,3 +176,33 @@ test("no sushiai option means no sushiai install", async (t) => {
   });
   assert.equal(states.sushiai, undefined);
 });
+
+// Last in this file: it registers a builtin skill for the rest of the process.
+test("fake ssh: the builtin skills are synced by the host's own sushiai, after it is installed", async (t) => {
+  const {
+    registerBuiltinSkill,
+  } = require("../electron/extensions/builtin-skills.cjs");
+  registerBuiltinSkill({
+    extensionId: "builtin.test",
+    name: "test-host-skill",
+    text: "---\nname: test-host-skill\n---\n",
+  });
+  const host = await makeSetupHost(t, {
+    bin: {
+      ...tools,
+      uname:
+        '#!/bin/sh\n[ "$1" = "-sm" ] && echo "Linux x86_64" || echo Linux\n',
+    },
+  });
+  const dir = await sushiaiDist(t);
+  const sushiai = loadHostManifest(path.join(dir, "manifest.json"));
+  const states = await setupHost(host.connections, host.endpoint, { sushiai });
+  assert.equal(states.sushiai, "installed", states.sushiaiError);
+  assert.equal(
+    await fs.readFile(path.join(host.home, "sushiai.log"), "utf8"),
+    "hooks install\nskills install test-host-skill\n",
+  );
+  // Nothing else writes a skill folder on the host.
+  for (const tool of [".claude", ".codex", ".agents"])
+    await assert.rejects(fs.access(path.join(host.home, tool, "skills")));
+});

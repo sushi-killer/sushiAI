@@ -9,10 +9,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use common::wait_until;
+use common::{holds_for, wait_until, wait_value, ABSENCE_WINDOW};
 use serde_json::{json, Value};
 use sushiai_protocol::{encode, Decoder, Frame, Message, Request};
 
@@ -178,12 +177,10 @@ impl Proxy {
         let stdin = self.stdin.as_mut().expect("stdin open");
         stdin.write_all(&bytes).expect("write");
         stdin.flush().expect("flush");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let frame = match self.frames.recv_timeout(left) {
+        wait_value(&format!("a response to {method}"), || {
+            let frame = match self.frames.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => frame,
-                Err(RecvTimeoutError::Timeout) => panic!("no response to {method}"),
+                Err(RecvTimeoutError::Timeout) => return None,
                 Err(RecvTimeoutError::Disconnected) => panic!("proxy stdout ended in {method}"),
             };
             match frame {
@@ -191,13 +188,14 @@ impl Proxy {
                 Frame::Json(text) => match Message::parse(&text) {
                     Ok(Message::Response(r)) if r.id == json!(id) => {
                         assert!(r.error.is_none(), "{method} failed: {:?}", r.error);
-                        return r.result.unwrap_or_default();
+                        return Some(r.result.unwrap_or_default());
                     }
                     Ok(Message::Notification(n)) => self.notes.push((n.method, n.params)),
                     _ => {}
                 },
             }
-        }
+            None
+        })
     }
 
     fn hello(&mut self) -> Value {
@@ -206,15 +204,17 @@ impl Proxy {
 
     /// Reads frames until the streamed output contains `needle`.
     fn wait_streamed(&mut self, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !String::from_utf8_lossy(&self.output).contains(needle) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.frames.recv_timeout(left) {
-                Ok(Frame::Output { data, .. }) => self.output.extend(data),
-                Ok(_) => {}
-                Err(_) => panic!("never streamed {needle}"),
+        wait_until(&format!("the output {needle:?}"), || {
+            if String::from_utf8_lossy(&self.output).contains(needle) {
+                return true;
             }
-        }
+            match self.frames.recv_timeout(Duration::from_millis(50)) {
+                Ok(Frame::Output { data, .. }) => self.output.extend(data),
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("proxy stdout ended before {needle}"),
+            }
+            false
+        });
     }
 
     fn close_stdin(&mut self) {
@@ -233,14 +233,9 @@ impl Proxy {
     }
 
     fn wait_exit(&mut self) -> std::process::ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
-                return status;
-            }
-            assert!(Instant::now() < deadline, "proxy did not exit");
-            sleep(Duration::from_millis(50));
-        }
+        wait_value("the proxy to exit", || {
+            self.child.try_wait().expect("try_wait")
+        })
     }
 }
 
@@ -363,7 +358,7 @@ fn two_proxies_on_an_empty_home_start_exactly_one_daemon() {
             .count()
     };
     wait_until("the second daemon to give up", || daemons() == 1);
-    sleep(Duration::from_millis(500));
+    holds_for("exactly one daemon", ABSENCE_WINDOW, || daemons() == 1);
     assert_eq!(daemons(), 1);
     assert_eq!(sandbox.daemon_pids().len(), 1);
 }
@@ -382,8 +377,9 @@ fn a_daemon_started_by_a_proxy_outlives_it_in_its_own_session() {
     assert_ne!(daemon_sid, proxy_sid);
     kill(proxy_pid);
     let _ = proxy.child.wait();
-    sleep(Duration::from_millis(300));
-    assert!(alive(daemon));
+    holds_for("the daemon outliving its proxy", ABSENCE_WINDOW, || {
+        alive(daemon)
+    });
     let mut again = sandbox.proxy();
     assert_eq!(again.hello()["protocol"], 1);
 }

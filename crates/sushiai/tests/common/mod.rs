@@ -35,8 +35,16 @@ pub fn deadline() -> Duration {
 
 /// Polls `ok` until it is true; panics naming `what` after the shared deadline.
 pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    wait_value(what, || ok().then_some(()));
+}
+
+/// Polls `check` until it returns `Some`; panics naming `what` after the shared deadline.
+pub fn wait_value<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + self::deadline();
-    while !ok() {
+    loop {
+        if let Some(value) = check() {
+            return value;
+        }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         sleep(Duration::from_millis(50));
     }

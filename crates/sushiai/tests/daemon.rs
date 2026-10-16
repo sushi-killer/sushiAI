@@ -6,7 +6,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -35,7 +34,11 @@ fn sessions_survive_a_killed_daemon() {
     let shell = child_of(holder);
     kill(first_daemon, "-KILL");
     wait_until("daemon to die", || !alive(first_daemon));
-    sleep(Duration::from_millis(300));
+    holds_for(
+        "the holder and shell outliving the daemon",
+        ABSENCE_WINDOW,
+        || alive(holder) && alive(shell),
+    );
     assert!(alive(holder), "holder died with the daemon");
     assert!(alive(shell), "shell died with the daemon");
 
@@ -96,7 +99,14 @@ fn two_daemons_started_together_leave_exactly_one() {
             .count();
         exited >= 1
     });
-    sleep(Duration::from_millis(500));
+    holds_for("exactly one daemon staying up", ABSENCE_WINDOW, || {
+        sandbox
+            .daemons
+            .iter_mut()
+            .filter_map(|d| d.try_wait().expect("try_wait").is_none().then_some(()))
+            .count()
+            == 1
+    });
     let statuses: Vec<_> = sandbox
         .daemons
         .iter_mut()
@@ -163,21 +173,13 @@ fn attach_response_comes_before_any_output() {
     let mut client = sandbox.client();
     // Output flows constantly, so a chunk arrives almost the moment a stream starts.
     let id = sandbox.create(&mut client, "while :; do echo tick; sleep 0.001; done");
-    sleep(Duration::from_millis(300));
+    wait_snapshot_contains(&mut client, &id, "tick");
     for _ in 0..30 {
         let mut fresh = sandbox.client();
         let request = fresh.send("session.attach", json!({"id": id}));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let first = loop {
-            let frames = fresh.frames();
-            if let Some(first) = frames.into_iter().next() {
-                break first;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no frame after the attach request"
-            );
-        };
+        let first = wait_value("a frame after the attach request", || {
+            fresh.frames().into_iter().next()
+        });
         match first {
             Frame::Json(text) => match Message::parse(&text) {
                 Ok(Message::Response(r)) => assert_eq!(r.id, request),
@@ -337,8 +339,12 @@ fn graceful_close_escalates_to_kill_after_the_grace_period() {
     wait_snapshot_contains(&mut client, &id, "armed");
     let closing = Instant::now();
     client.call("session.close", json!({"id": id, "graceful": true}));
-    sleep(TERM_GRACE / 2);
-    assert!(alive(target), "TERM alone ended a process that ignores it");
+    // Half of the daemon's TERM grace: the process that ignores TERM must still be there.
+    holds_for(
+        "a process that ignores TERM surviving half the grace",
+        TERM_GRACE / 2,
+        || alive(target),
+    );
     wait_until("KILL after the grace period", || !alive(target));
     let took = closing.elapsed();
     assert!(took >= TERM_GRACE, "KILL came after {took:?}");
@@ -352,7 +358,13 @@ fn output_written_while_the_daemon_is_dead_appears_after_reattach() {
     let id = sandbox.create(&mut client, "sleep 2; echo late-out; sleep 30");
     kill(daemon, "-KILL");
     wait_until("daemon to die", || !alive(daemon));
-    sleep(Duration::from_secs(3));
+    // The script's `sleep 2` is over once its last `sleep 30` runs: "late-out" is written.
+    let shell = child_of(sandbox.holder_pid(&id));
+    wait_until("the shell to have printed late-out", || {
+        processes()
+            .iter()
+            .any(|(pid, ppid, argv)| (*pid == shell || *ppid == shell) && argv == "sleep 30")
+    });
     sandbox.start_daemon();
     let mut client = sandbox.client();
     wait_listed(&mut client, &id);
@@ -413,25 +425,20 @@ fn a_flooding_session_stays_running_and_its_screen_keeps_up() {
     );
     // An attached client that reads slowly, while the flood runs.
     client.attach(&id);
-    let reading = Instant::now();
-    while reading.elapsed() < Duration::from_secs(8) {
-        sleep(Duration::from_millis(100));
+    let shell = child_of(sandbox.holder_pid(&id));
+    wait_until("the flood to end", || {
         client.frames();
-    }
+        !processes()
+            .iter()
+            .any(|(_, ppid, argv)| *ppid == shell && argv == "yes")
+    });
     // The flood ends; the session is still running and a fresh attach shows the last line.
     let mut fresh = sandbox.client();
-    let deadline = Instant::now() + common::deadline();
-    loop {
-        let status = fresh.call("session.list", Value::Null)[0]["status"].clone();
-        if status == "running" && fresh.attach(&id).contains("marker-end") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "never reached marker-end with status running (last status {status})"
-        );
-        sleep(Duration::from_millis(500));
-    }
+    wait_snapshot_contains(&mut fresh, &id, "marker-end");
+    assert_eq!(
+        fresh.call("session.list", Value::Null)[0]["status"],
+        "running"
+    );
     client.call("session.close", json!({"id": id, "graceful": false}));
 }
 
@@ -458,16 +465,14 @@ fn an_oversize_frame_closes_only_that_connection() {
     let mut bad = Client::connect(&sandbox.socket());
     let header = ((16 * 1024 * 1024 + 1) as u32).to_be_bytes();
     bad.stream.write_all(&header).expect("write header");
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = [0u8; 64];
-    loop {
+    wait_value("the oversize connection to close", || {
         match bad.stream.read(&mut buf) {
-            Ok(0) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
-            _ => {}
+            Ok(0) => Some(()),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => Some(()),
+            _ => None,
         }
-        assert!(Instant::now() < deadline, "the connection stayed open");
-    }
+    });
     let mut good = sandbox.client();
     assert_eq!(good.call("session.list", Value::Null), json!([]));
 }

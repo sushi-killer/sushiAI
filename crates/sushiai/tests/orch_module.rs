@@ -157,15 +157,13 @@ fn fake_orchd(dir: &Path) -> Child {
     std::fs::copy("/bin/sleep", &exe).expect("copy sleep");
     // On Linux a test forking in parallel can briefly inherit the copy's write
     // descriptor, and exec then fails with "Text file busy": try again.
-    for _ in 0..50 {
-        match Command::new(&exe).arg("120").stdout(Stdio::null()).spawn() {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            other => return other.expect("spawn fake orchd"),
-        }
-    }
-    panic!("fake orchd stayed busy");
+    wait_value(
+        "the fake orchd to stop being busy",
+        || match Command::new(&exe).arg("120").stdout(Stdio::null()).spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => None,
+            other => Some(other.expect("spawn fake orchd")),
+        },
+    )
 }
 
 #[test]

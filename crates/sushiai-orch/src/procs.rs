@@ -184,6 +184,21 @@ pub(crate) mod testing {
         }
     }
 
+    /// Waits until process `pid` shows `arg` on its command line; panics at the
+    /// deadline. Right after a spawn macOS can still report the parent's argv,
+    /// and the engine tells a run's group from a stranger's by that argv.
+    pub fn wait_for_argv(pid: i32, arg: &Path) {
+        let arg = arg.to_string_lossy();
+        let end = std::time::Instant::now() + deadline();
+        while !crate::process::argv(pid).is_some_and(|args| args.iter().any(|a| *a == *arg)) {
+            assert!(
+                std::time::Instant::now() < end,
+                "process {pid} never showed {arg} on its command line"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// A shell fragment starting `exe` detached into its own session, its
     /// pid written to `pidfile` and its readiness to [`ready_file`]; it returns at once.
     pub fn detach(exe: &Path, pidfile: &Path) -> String {

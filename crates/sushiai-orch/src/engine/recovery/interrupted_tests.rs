@@ -64,7 +64,9 @@ fn spawn_group(marker: &std::path::Path) -> std::process::Child {
             Ok(())
         });
     }
-    cmd.spawn().unwrap()
+    let child = cmd.spawn().unwrap();
+    crate::procs::testing::wait_for_argv(child.id() as i32, marker);
+    child
 }
 
 /// Waits for `child` to end (reaping it: a zombie's pid still answers

@@ -213,7 +213,8 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script);
-    cmd.arg(if foreign { Path::new("/no-run") } else { exit });
+    let zero = if foreign { Path::new("/no-run") } else { exit };
+    cmd.arg(zero);
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -222,6 +223,7 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     }
     let mut child = cmd.spawn().unwrap();
     let pgid = child.id() as i32;
+    crate::procs::testing::wait_for_argv(pgid, zero);
     std::thread::spawn(move || child.wait());
     // The run is recognised by its arguments: wait until the child has
     // exec'd the shell, which a loaded runner can take a moment to do.

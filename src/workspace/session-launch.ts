@@ -1,6 +1,6 @@
 import { daemonHost, sessionPanelId } from "../daemonSessions.ts";
 import { appendPanel, reopenInSlot } from "./workspace-actions.ts";
-import { leaf } from "../layout.ts";
+import { contains, leaf } from "../layout.ts";
 import { launchTerminalSize } from "../terminal-sizing.ts";
 import type {
   DaemonLaunchRequest,
@@ -140,6 +140,10 @@ export function placeLaunchedPanel(
           panels: target.panels.map((item) =>
             item.id === panel.id ? { ...item, ...panel } : item,
           ),
+          // A panel the session event adopted is not on the canvas yet.
+          layout: contains(target.layout, panel.id)
+            ? target.layout
+            : appendPanel({ ...target, panels: [] }, panel).layout,
         }
       : appendPanel(target, panel);
   return workspaces.map((workspace) =>

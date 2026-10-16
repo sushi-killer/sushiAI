@@ -4,6 +4,7 @@ import { initialWorkspace } from "../workspaceState.ts";
 import {
   LOCAL_ENDPOINT,
   canReopen,
+  closingSessions,
   daemonHost,
   sessionPanelId,
   wakeInPlace,
@@ -71,6 +72,10 @@ async function closeSession(
 ) {
   const request = closeRequest(workspace, panel, endpoint);
   if (!request) return;
+  // The host lists the session as live until it exits; do not adopt it again.
+  closingSessions.add(
+    sessionPanelId(workspace.connection || LOCAL_ENDPOINT, request.id),
+  );
   await window
     .bridge!.sessionClose(request.host, request.id, request.graceful)
     .catch((error) => {

@@ -43,6 +43,8 @@ Sessions continue when sushiAI quits and reattach when it opens again. Save file
 
 Every terminal and agent runs in a session of the `sushiai` daemon, a small background process the app starts for you. Sessions survive an app restart or crash: open the app again and each panel reattaches to its session with the same screen. The daemon lives in `~/.sushiai`; the app and `sushiai status` talk to it over a local socket.
 
+Sessions a host already runs that this app has no panel for, such as ones started on another machine or by the `sushiai` CLI, appear in the sidebar and the Inbox; click one to attach.
+
 For a remote project:
 
 1. Verify that SSH works in Terminal and accept the host key if prompted.

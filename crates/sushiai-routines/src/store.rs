@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::argv::{check_access_tool, check_extra_args};
-use crate::model::{valid_id, Routine};
+use crate::model::{valid_id, Access, Agent, HowItRuns, Limits, Routine, When};
 use crate::validate::MODES;
 
 /// Why a routine whose files do not match what the app saved is refused.
@@ -127,6 +128,22 @@ impl Store {
         self.dir(id).join("worktree")
     }
 
+    /// Where a clone of a project's remote lives when a multi-project routine finds no
+    /// checkout of it on its host.
+    pub fn project_clone_dir(&self, id: &str, project: &str) -> PathBuf {
+        let slug: String = project
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.dir(id).join("projects").join(slug)
+    }
+
     pub fn exists(&self, id: &str) -> bool {
         valid_id(id) && self.dir(id).join("routine.json").is_file()
     }
@@ -176,7 +193,17 @@ impl Store {
         let brief = fs::read_to_string(self.dir(id).join("brief.md")).unwrap_or_default();
         let saved = Self::read_json(&self.state_dir(id).join("saved.json"))
             .and_then(|v| v["hash"].as_str().map(String::from));
-        if saved.as_deref() != Some(Self::hash(&routine, &brief).as_str()) {
+        // A file saved before `where.projects` carries `where.project`: its recorded hash is
+        // over that older form, so it is checked in that form and written in the new one at
+        // the next save.
+        let legacy = serde_json::from_str::<Value>(&text)
+            .is_ok_and(|v| v["where"].get("project").is_some_and(Value::is_string));
+        let expected = if legacy {
+            Self::legacy_hash(&routine, &brief)
+        } else {
+            Self::hash(&routine, &brief)
+        };
+        if saved.as_deref() != Some(expected.as_str()) {
             return Err(format!("routine {id}: {CHANGED_OUTSIDE}"));
         }
         Ok(routine)
@@ -227,8 +254,53 @@ impl Store {
 
     /// The hash the daemon's validated snapshot names: routine plus brief.
     pub fn hash(routine: &Routine, brief: &str) -> String {
+        Self::hash_bytes(serde_json::to_vec(routine).unwrap_or_default(), brief)
+    }
+
+    /// The hash an app that wrote `where.project` recorded, for a routine with at most one
+    /// project.
+    fn legacy_hash(routine: &Routine, brief: &str) -> String {
+        #[derive(Serialize)]
+        struct LegacyWhere<'a> {
+            host: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            project: Option<&'a str>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyRoutine<'a> {
+            id: &'a str,
+            name: &'a str,
+            #[serde(rename = "where")]
+            place: LegacyWhere<'a>,
+            when: &'a When,
+            agent: &'a Agent,
+            how_it_runs: &'a HowItRuns,
+            limits: &'a Limits,
+            #[serde(skip_serializing_if = "<[Access]>::is_empty")]
+            access: &'a [Access],
+            enabled: bool,
+        }
+        let old = LegacyRoutine {
+            id: &routine.id,
+            name: &routine.name,
+            place: LegacyWhere {
+                host: &routine.place.host,
+                project: routine.place.projects.first().map(String::as_str),
+            },
+            when: &routine.when,
+            agent: &routine.agent,
+            how_it_runs: &routine.how_it_runs,
+            limits: &routine.limits,
+            access: &routine.access,
+            enabled: routine.enabled,
+        };
+        Self::hash_bytes(serde_json::to_vec(&old).unwrap_or_default(), brief)
+    }
+
+    fn hash_bytes(routine: Vec<u8>, brief: &str) -> String {
         let mut h = Sha256::new();
-        h.update(serde_json::to_vec(routine).unwrap_or_default());
+        h.update(routine);
         h.update([0]);
         h.update(brief.as_bytes());
         h.finalize().iter().map(|b| format!("{b:02x}")).collect()

@@ -53,6 +53,10 @@ impl FakeDaemon {
             "projects": [{
                 "id": "my-app", "name": "my-app",
                 "folders": [{"host": "build-host", "path": folder.to_string_lossy()}],
+            }, {
+                "id": "docs-site", "name": "docs-site", "purpose": "The public docs",
+                "folders": [{"host": "build-host",
+                             "path": folder.with_file_name("docs-site").to_string_lossy()}],
             }],
             "groups": [],
         });
@@ -283,6 +287,7 @@ fn fixture_with(git: FakeGit) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("my-app");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(dir.path().join("docs-site")).unwrap();
     let daemon = FakeDaemon::new(&project);
     let git = Arc::new(git);
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -320,7 +325,7 @@ fn routine_json(id: &str) -> Value {
     json!({
         "id": id,
         "name": "Commit digest",
-        "where": {"host": "ssh:build-host", "project": "my-app"},
+        "where": {"host": "ssh:build-host", "projects": ["my-app"]},
         "when": {"cron": "0 9 * * 1-5", "tz": "Europe/Berlin"},
         "agent": {"harness": "claude", "model": "sonnet", "effort": "medium",
                   "account": "default",
@@ -390,6 +395,8 @@ fn argv_for_claude_and_codex_is_exact() {
         last_message: Path::new("/r/last.json"),
         dry_run: false,
         granted: &[],
+        read_only: &[],
+        read_dirs: &[],
     };
     let claude = Agent {
         harness: "claude".into(),
@@ -430,6 +437,8 @@ fn argv_for_claude_and_codex_is_exact() {
             last_message: Path::new("/r/last.json"),
             dry_run: false,
             granted: &[],
+            read_only: &[],
+            read_dirs: &[],
         }
     };
     let argv = harness_argv(&claude, &with_grants).unwrap();
@@ -440,20 +449,40 @@ fn argv_for_claude_and_codex_is_exact() {
          Bash(gh issue list:*),mcp__tracker__comment"
     );
     assert_eq!(argv.iter().filter(|a| *a == "--allowedTools").count(), 1);
-    // A dry run never uses a grant.
+    // A dry run uses only the granted tools whose kind is read (`read_only`), never the rest
+    // of the grants.
+    let dry_read = vec!["Bash(gh issue list:*)".to_string()];
     let dry_with_grants = RunSpec {
         dry_run: true,
         granted: &granted,
+        read_only: &dry_read,
         ..RunSpec {
             schema_json: "{}",
             schema_file: Path::new("s"),
             last_message: Path::new("l"),
             dry_run: true,
             granted: &[],
+            read_only: &[],
+            read_dirs: &[],
         }
     };
     let argv = harness_argv(&claude, &dry_with_grants).unwrap();
-    assert!(!argv.join("|").contains("gh issue list"));
+    let i = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    assert_eq!(
+        argv[i + 1],
+        "Read,Grep,Glob,Bash(git status:*),Bash(sushiai ask:*),Bash(sushiai propose:*),\
+         Bash(gh issue list:*)"
+    );
+    assert!(!argv.join("|").contains("tracker__comment"));
+    // Folders to read become one `--add-dir=` each, on a run and on a dry run.
+    let dirs = vec!["/p/one".to_string(), "/p/two".to_string()];
+    let with_dirs = RunSpec {
+        read_dirs: &dirs,
+        ..dry_with_grants
+    };
+    let argv = harness_argv(&claude, &with_dirs).unwrap();
+    let added: Vec<&String> = argv.iter().filter(|a| a.starts_with("--add-dir")).collect();
+    assert_eq!(added, ["--add-dir=/p/one", "--add-dir=/p/two"]);
     let codex = Agent {
         harness: "codex".into(),
         model: Some("gpt-5".into()),
@@ -465,6 +494,7 @@ fn argv_for_claude_and_codex_is_exact() {
         harness_argv(&codex, &spec).unwrap(),
         [
             "exec",
+            "--ignore-user-config",
             "--output-schema",
             "/r/result.schema.json",
             "-o",
@@ -485,6 +515,12 @@ fn argv_for_claude_and_codex_is_exact() {
     let mut c = codex.clone();
     c.effort = Some("xhigh".into());
     assert!(harness_argv(&c, &spec).is_err());
+    // Codex has no extra readable folders to give.
+    let codex_dirs = RunSpec {
+        read_dirs: &dirs,
+        ..spec
+    };
+    assert!(harness_argv(&codex, &codex_dirs).is_err());
     let mut cl = claude.clone();
     cl.effort = Some("max".into());
     assert!(harness_argv(&cl, &spec).is_ok());
@@ -972,8 +1008,8 @@ fn validate_rejects_what_the_daemon_would_stumble_on() {
             .contains(&"where.host".to_string())
     );
     assert!(
-        fields(&check(&|r| r["where"]["project"] = json!("no-such-app")))
-            .contains(&"where.project".to_string())
+        fields(&check(&|r| r["where"]["projects"] = json!(["no-such-app"])))
+            .contains(&"where.projects".to_string())
     );
     assert!(fields(&check(&|r| r["agent"]["harness"] = json!("gemini")))
         .contains(&"agent.harness".to_string()));
@@ -1223,7 +1259,7 @@ fn a_failed_first_clone_is_cleaned_up_and_reported_with_a_fix() {
         ..Default::default()
     });
     let mut r = routine_json("r1");
-    r["where"]["project"] = json!("my-app");
+    r["where"]["projects"] = json!(["my-app"]);
     let catalog = json!({
         "hosts": [{"id": "ssh:build-host"}],
         "projects": [{"id": "my-app", "name": "my-app",
@@ -2016,27 +2052,38 @@ fn a_run_with_ungranted_access_ends_needing_it_and_counts_no_failure() {
 }
 
 #[test]
-fn a_dry_run_never_grants_and_never_uses_a_grant() {
+fn a_dry_run_uses_only_granted_read_access_and_never_grants() {
     let f = fixture();
     install_with(&f, "r1", false, &|r| {
         r["access"] = json!([
             access("Bash(gh issue list:*)", "List issues", "read"),
             access("mcp__tracker__comment", "Comment", "write"),
+            access("mcp__chat__read", "Read chat", "read"),
+            access("mcp__chat__post", "Post to chat", "write"),
         ]);
     });
+    // The owner grants one read and one write; the last read stays ungranted.
     f.svc
         .call(
             "grant",
-            json!({"id": "r1", "tools": ["Bash(gh issue list:*)"]}),
+            json!({"id": "r1", "tools": ["Bash(gh issue list:*)", "mcp__tracker__comment",
+                                         "mcp__chat__post"]}),
         )
         .unwrap();
     f.daemon.answer(&envelope(&good("done")));
     f.svc.call("dry_run", json!({"id": "r1"})).unwrap();
     wait_for_run(&f, "r1");
     let create = f.daemon.created().pop().unwrap();
-    assert!(!allowed_tools(&create)
-        .iter()
-        .any(|t| t.contains("gh issue list") || t.contains("tracker")));
+    let allowed = allowed_tools(&create);
+    assert!(
+        allowed.contains(&"Bash(gh issue list:*)".to_string()),
+        "{allowed:?}"
+    );
+    assert!(
+        !allowed.iter().any(|t| t.contains("tracker")),
+        "{allowed:?}"
+    );
+    assert!(!allowed.iter().any(|t| t.contains("chat")), "{allowed:?}");
     let shown = f.svc.call("show", json!({"id": "r1"})).unwrap();
     let granted: Vec<bool> = shown["access"]
         .as_array()
@@ -2044,9 +2091,235 @@ fn a_dry_run_never_grants_and_never_uses_a_grant() {
         .iter()
         .map(|a| a["granted"].as_bool().unwrap())
         .collect();
-    assert_eq!(granted, [true, false]);
+    assert_eq!(granted, [true, true, false, true]);
     // A dry run is not turned into a needs_you by the missing access.
     assert_eq!(shown["latest"]["status"], "done");
+}
+
+#[test]
+fn a_dry_run_names_the_ungranted_tool_it_was_refused() {
+    let f = fixture();
+    install_with(&f, "r1", false, &|r| {
+        r["access"] = json!([access("mcp__chat__read", "Read chat", "read")]);
+    });
+    let failed = json!({"status": "needs_you", "title": "Cannot read the chat",
+        "summary": "The tool was refused.", "actions": []});
+    let denied = json!({"type": "result", "subtype": "success",
+        "permission_denials": [{"tool_name": "mcp__chat__read", "tool_input": {}}],
+        "structured_output": failed});
+    f.daemon.answer(&denied.to_string());
+    f.svc.call("dry_run", json!({"id": "r1"})).unwrap();
+    let v = wait_for_run(&f, "r1");
+    assert!(
+        v["run"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("mcp__chat__read"),
+        "{v}"
+    );
+    let create = f.daemon.created().pop().unwrap();
+    assert!(!allowed_tools(&create).iter().any(|t| t.contains("chat")));
+}
+
+fn extra_args(create: &Value) -> Vec<String> {
+    create["extraArgs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn one_project_keeps_its_worktree_and_gets_no_add_dir() {
+    let f = fixture();
+    install(&f, "r1");
+    let create = entry(&f, "r1")["create"].clone();
+    assert!(!extra_args(&create)
+        .iter()
+        .any(|a| a.starts_with("--add-dir")));
+    assert_eq!(
+        create["cwd"].as_str().unwrap(),
+        f.svc.store().worktree_dir("r1").to_string_lossy()
+    );
+    assert!(f.svc.store().worktree_dir("r1").join(".git").exists());
+}
+
+#[test]
+fn several_projects_run_in_work_with_one_add_dir_each_and_no_worktree() {
+    let f = fixture();
+    install_with(&f, "r1", true, &|r| {
+        r["where"]["projects"] = json!(["my-app", "docs-site"]);
+    });
+    let create = entry(&f, "r1")["create"].clone();
+    let dirs: Vec<String> = extra_args(&create)
+        .into_iter()
+        .filter(|a| a.starts_with("--add-dir="))
+        .collect();
+    assert_eq!(dirs.len(), 2, "{dirs:?}");
+    assert!(dirs[0].ends_with("my-app"), "{dirs:?}");
+    assert!(dirs[1].ends_with("docs-site"), "{dirs:?}");
+    assert_eq!(
+        create["cwd"].as_str().unwrap(),
+        f.svc.store().work_dir("r1").to_string_lossy()
+    );
+    assert!(!f.svc.store().worktree_dir("r1").exists());
+    assert!(
+        !f.git.words().iter().any(|c| c[1] == "worktree"),
+        "{:?}",
+        f.git.words()
+    );
+    assert!(create.get("project").is_none());
+    let prompt = create["prompt"].as_str().unwrap();
+    assert!(prompt.contains("- docs-site | docs-site | "), "{prompt}");
+    assert!(prompt.contains("The public docs"), "{prompt}");
+    assert!(prompt.contains("- my-app | my-app | "), "{prompt}");
+    // The dry run reads the same folders.
+    f.daemon.answer(&envelope(&good("done")));
+    f.svc.call("dry_run", json!({"id": "r1"})).unwrap();
+    wait_for_run(&f, "r1");
+    let dry = f.daemon.created().pop().unwrap();
+    assert_eq!(
+        extra_args(&dry)
+            .iter()
+            .filter(|a| a.starts_with("--add-dir="))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn several_projects_validate_unique_known_at_most_twenty_and_claude_only() {
+    let f = fixture();
+    let check = |edit: &dyn Fn(&mut Value)| {
+        let mut r = routine_json("r1");
+        edit(&mut r);
+        f.svc
+            .call("validate", json!({"routine": r, "brief": "b"}))
+            .unwrap()
+    };
+    let has = |v: &Value, text: &str| {
+        v["errors"].as_array().unwrap().iter().any(|e| {
+            e["field"] == "where.projects" && e["message"].as_str().unwrap().contains(text)
+        })
+    };
+    assert_eq!(
+        check(&|r| r["where"]["projects"] = json!(["my-app", "docs-site"]))["ok"],
+        true
+    );
+    assert_eq!(check(&|r| r["where"]["projects"] = json!([]))["ok"], true);
+    assert!(has(
+        &check(&|r| r["where"]["projects"] = json!(["my-app", "my-app"])),
+        "listed twice"
+    ));
+    assert!(has(
+        &check(&|r| r["where"]["projects"] = json!(["my-app", "nope"])),
+        "does not exist"
+    ));
+    let many: Vec<String> = (0..21).map(|i| format!("p{i}")).collect();
+    assert!(has(
+        &check(&|r| r["where"]["projects"] = json!(many)),
+        "at most 20"
+    ));
+    let codex = check(&|r| {
+        r["where"]["projects"] = json!(["my-app", "docs-site"]);
+        r["agent"]["harness"] = json!("codex");
+        r["agent"]["model"] = json!("gpt-5");
+        r["agent"]["effort"] = json!("low");
+    });
+    assert!(has(&codex, "claude harness"), "{codex}");
+    // One project with Codex stays valid.
+    let one = check(&|r| {
+        r["agent"]["harness"] = json!("codex");
+        r["agent"]["model"] = json!("gpt-5");
+        r["agent"]["effort"] = json!("low");
+    });
+    assert_eq!(one["ok"], true, "{one}");
+}
+
+#[test]
+fn a_proposal_of_a_routine_with_several_projects_is_refused() {
+    let f = fixture();
+    install_with(&f, "r1", true, &|r| {
+        r["where"]["projects"] = json!(["my-app", "docs-site"]);
+        r["howItRuns"]["mode"] = json!("on-its-own");
+    });
+    queue(
+        &f,
+        "r1",
+        "s1",
+        "1.json",
+        json!({"kind": "commit", "message": "fix typo", "paths": ["a.txt"]}),
+    );
+    f.daemon.answer(&envelope(&good("done")));
+    f.daemon.fire(&f.svc, "r1", 1);
+    let run = latest(&f, "r1")["run"].clone();
+    assert_eq!(run["proposals"][0]["status"], "failed");
+    assert_eq!(run["proposals"][0]["applied"], false);
+    assert!(run["proposals"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("more than one project"));
+    assert!(!f
+        .git
+        .words()
+        .iter()
+        .any(|c| matches!(c[1].as_str(), "add" | "commit" | "push")));
+}
+
+#[test]
+fn an_old_routine_with_one_project_string_loads_and_migrates_on_the_next_save() {
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    install(&f, "r1");
+    let dir = f.svc.store().dir("r1");
+    // Rewrite the files the way an app that wrote `where.project` left them: the recorded
+    // hash is over that older form.
+    let new = f.svc.store().load("r1").unwrap();
+    let new_text = serde_json::to_string(&new).unwrap();
+    assert!(new_text.contains(r#""projects":["my-app"]"#), "{new_text}");
+    let old_text = new_text.replace(r#""projects":["my-app"]"#, r#""project":"my-app""#);
+    let mut h = Sha256::new();
+    h.update(old_text.as_bytes());
+    h.update([0]);
+    h.update(f.svc.store().brief("r1").as_bytes());
+    let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(dir.join("routine.json"), &old_text).unwrap();
+    std::fs::write(
+        dir.join("state").join("saved.json"),
+        json!({ "hash": hash }).to_string(),
+    )
+    .unwrap();
+    let loaded = f.svc.store().load("r1").unwrap();
+    assert_eq!(loaded.place.projects, ["my-app"]);
+    let shown = f.svc.call("show", json!({"id": "r1"})).unwrap();
+    assert_eq!(shown["routine"]["where"]["projects"], json!(["my-app"]));
+    assert!(shown["routine"]["where"].get("project").is_none());
+    // The next save writes the new shape.
+    f.svc
+        .call("set_enabled", json!({"id": "r1", "enabled": false}))
+        .unwrap();
+    let text = std::fs::read_to_string(dir.join("routine.json")).unwrap();
+    assert!(text.contains("\"projects\""), "{text}");
+    assert!(!text.contains("\"project\""), "{text}");
+    assert!(f.svc.store().load("r1").is_ok());
+    // An old file that was edited after its save is still refused.
+    std::fs::write(
+        dir.join("routine.json"),
+        old_text.replace("my-app", "docs-site"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("state").join("saved.json"),
+        json!({ "hash": hash }).to_string(),
+    )
+    .unwrap();
+    assert!(f
+        .svc
+        .store()
+        .load("r1")
+        .unwrap_err()
+        .contains("changed outside the app"));
 }
 
 #[test]
@@ -2367,7 +2640,12 @@ fn the_run_record_keeps_the_spawn_argv_and_env_key_names_only() {
     assert!(argv.contains(&"--permission-mode"));
     assert_eq!(
         run["envKeys"],
-        json!(["PATH", "SUSHIAI_ROUTINE_DIR", "SUSHIAI_ROUTINE_ID"])
+        json!([
+            "PATH",
+            "SUSHIAI_ROUTINE_DIR",
+            "SUSHIAI_ROUTINE_ID",
+            "SUSHIAI_ROUTINE_PROJECTS"
+        ])
     );
     assert!(!run.to_string().contains("\"env\""));
 }
@@ -2531,7 +2809,7 @@ fn a_failed_result_the_agent_reports_itself_becomes_the_runs_reason() {
 }
 
 #[test]
-fn a_dry_run_that_was_denied_a_tool_says_a_dry_run_only_reads_files() {
+fn a_dry_run_that_was_denied_a_tool_names_it_and_says_what_a_dry_run_may_use() {
     let f = fixture();
     install(&f, "r1");
     let failed = json!({"status": "failed", "title": "Not a git repository",
@@ -2544,7 +2822,8 @@ fn a_dry_run_that_was_denied_a_tool_says_a_dry_run_only_reads_files() {
     let v = wait_for_run(&f, "r1");
     assert_eq!(
         v["run"]["reason"],
-        "a dry run only reads files: Bash is not allowed in a dry run"
+        "a dry run uses only tools the owner granted that are read-only: Bash was refused in a dry run \
+         (not granted, or not read-only)"
     );
     // Without denials and without such words the agent's own title stays the reason.
     f.daemon.answer(&envelope(&failed.to_string()));

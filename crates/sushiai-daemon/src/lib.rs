@@ -386,7 +386,15 @@ async fn reattach(
     .await;
     match attached {
         Ok((conn, screen, seq)) => {
-            session::start(registry.clone(), info, conn, screen, seq, sock, false);
+            session::start(
+                registry.clone(),
+                info,
+                conn,
+                screen,
+                seq,
+                sock,
+                session::Spawn::default(),
+            );
             Ok(())
         }
         Err(e) => {

@@ -199,7 +199,7 @@ test("a save reaches the host's daemon with the catalog and the routine named fo
     routine: {
       id: "digest",
       name: "Digest",
-      where: { host: "local", project: "p1" },
+      where: { host: "local", projects: ["p1"] },
       agent: {
         harness: "codex",
         model: "gpt-remote",
@@ -219,6 +219,19 @@ test("a save reaches the host's daemon with the catalog and the routine named fo
     "gpt-remote",
   ]);
 });
+
+const APPROVALS = [
+  "routines_projects",
+  "routines_hosts",
+  "routines_list",
+  "routines_show",
+  "routines_validate",
+  "routines_save",
+  "routines_dry_run",
+].flatMap((tool) => [
+  "-c",
+  `mcp_servers.sushiai.tools.${tool}.approval_mode="approve"`,
+]);
 
 test("the builder session carries the owner's text, the Settings route and runs in the background", async () => {
   const { routines, launched } = world();
@@ -243,10 +256,24 @@ test("the builder session carries the owner's text, the Settings route and runs 
   assert.match(request.prompt, /sushiai-routines/);
   assert.equal(request.headless, true);
   assert.deepEqual(request.extraArgs, [
+    "--ignore-user-config",
     "-c",
     'sandbox_mode="workspace-write"',
     "-c",
+    "sandbox_workspace_write.network_access=false",
+    "-c",
+    "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c",
+    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+    "-c",
     "model_reasoning_effort=high",
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    'mcp_servers.sushiai.command="sushiai"',
+    "-c",
+    'mcp_servers.sushiai.args=["mcp","--routines"]',
+    ...APPROVALS,
   ]);
 });
 
@@ -274,6 +301,7 @@ test("a Claude builder turn runs headless and resumes the previous conversation"
   assert.ok(tools.split(" ").includes("Edit(./**)"));
   assert.doesNotMatch(tools, /\bWrite\b|sushiai ask/);
   assert.match(first.prompt, /non-interactive turn/);
+  assert.match(first.prompt, /sushiai is not available in this session/);
 
   await assert.rejects(
     routines.methods["builder.reply"]({ sessionId: "s1", text: "more" }),
@@ -307,6 +335,59 @@ test("a Claude builder turn runs headless and resumes the previous conversation"
   assert.equal(second.cwd, first.cwd);
   assert.deepEqual(second.extraArgs, first.extraArgs);
   assert.notEqual(second.idempotencyKey, first.idempotencyKey);
+});
+
+test("a session that prints the answer and then refuses reads still settles done", async () => {
+  let served = false;
+  const reads = new Proxy(
+    {},
+    {
+      has: (_t, id) => id === "s1" && !served,
+      get: (_t, id) => {
+        served = true;
+        return id === "s1" ? ANSWER("Saved the draft.", "agent-9") : undefined;
+      },
+    },
+  );
+  const { routines } = world({ reads });
+  await routines.methods["builder.start"]({ text: "digest" });
+  let turn;
+  for (let i = 0; i < 50; i++) {
+    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
+    if (turn.state !== "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(turn, {
+    state: "done",
+    text: "Saved the draft.",
+    agentSession: "agent-9",
+  });
+});
+
+test("the codex builder always uses mcp access and a bare config", async () => {
+  assert.equal(
+    builderSettings({ harness: "codex", access: "cli" }).access,
+    "mcp",
+  );
+  assert.equal(builderSettings({ harness: "codex" }).access, "mcp");
+  assert.equal(
+    builderSettings({ harness: "codex", access: "both" }).access,
+    "both",
+  );
+  assert.equal(
+    builderSettings({ harness: "claude", access: "cli" }).access,
+    "cli",
+  );
+  const { routines, launched } = world();
+  routines.methods["settings.set"]({ harness: "codex", access: "cli" });
+  assert.equal(routines.methods["settings.get"]().access, "mcp");
+  await routines.methods["builder.start"]({ text: "Every day do X" });
+  const args = launched[0].extraArgs;
+  assert.ok(args.includes('mcp_servers.sushiai.command="sushiai"'));
+  assert.ok(
+    args.indexOf("mcp_servers={}") <
+      args.indexOf('mcp_servers.sushiai.command="sushiai"'),
+  );
 });
 
 test("a builder turn that ends without an answer fails with what the session printed", async () => {
@@ -349,7 +430,11 @@ test("a Codex builder turn runs headless and resumes by its thread id", async ()
   assert.equal(started.turn.state, "running");
   assert.equal(launched[0].headless, true);
   assert.ok(launched[0].extraArgs.includes('sandbox_mode="workspace-write"'));
-  assert.ok(!launched[0].extraArgs.some((arg) => /network_access/.test(arg)));
+  assert.ok(
+    launched[0].extraArgs.includes(
+      "sandbox_workspace_write.network_access=false",
+    ),
+  );
   assert.match(launched[0].prompt, /non-interactive turn/);
   // Terminal noise around the events and a wrapped agent message.
   const events = CODEX_EVENTS("A long answer: " + "word ".repeat(30), "t-1");
@@ -401,6 +486,25 @@ test("builder settings repair an effort the harness lacks and a bad host", () =>
     ["--effort", "max"],
   );
   assert.match(builderPrompt("Do X", "tracker-intake"), /tracker-intake/);
+});
+
+test("the builder prompt tells both harnesses to answer in the owner's language", () => {
+  for (const harness of ["claude", "codex"]) {
+    const prompt = builderPrompt("Do X", null, {
+      ...builderSettings({ harness }),
+    });
+    assert.match(prompt, /Reply in the language of the owner's request/);
+  }
+});
+
+test("the builder prompt forbids the run result JSON in its own reply", () => {
+  for (const harness of ["claude", "codex"]) {
+    const prompt = builderPrompt("Do X", null, {
+      ...builderSettings({ harness }),
+    });
+    assert.match(prompt, /plain prose for the owner/);
+    assert.match(prompt, /never print the run result JSON/);
+  }
 });
 
 test("the builder may write only under its own folder", () => {

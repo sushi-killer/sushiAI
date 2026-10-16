@@ -15,7 +15,7 @@ export type RoutineAgent = {
 export type Routine = {
   id: string;
   name: string;
-  where: { host: string; project?: string };
+  where: { host: string; projects?: string[] };
   when: { cron: string; tz: string };
   agent: RoutineAgent;
   howItRuns: {

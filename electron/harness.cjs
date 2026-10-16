@@ -54,24 +54,29 @@ const short = (value, max = 64) => {
 };
 
 /**
- * The JSON objects a terminal screen shows, in order. Every object starts a
- * row with `{"type":` (inside a JSON string quotes are escaped, so a wrapped
- * row never looks like a start); a row the terminal wrapped is joined with the
- * next rows until it parses. Other rows (banners, log noise) are skipped.
+ * The JSON objects a terminal screen shows, in order. An object starts a row
+ * with `{"` (Claude does not put `type` first; inside a JSON string quotes are
+ * escaped, so a wrapped row seldom looks like a start). A row the terminal
+ * wrapped is joined with the next rows until it parses; when a continuation
+ * row also looks like a start, the earlier start keeps growing alongside it.
+ * Other rows (banners, log noise) are skipped.
  */
 function screenObjects(raw) {
   const objects = [];
-  let buffer = "";
+  let buffers = [];
   for (const row of String(raw ?? "").split(/\r?\n/)) {
-    if (row.startsWith('{"type":')) buffer = "";
-    if (!buffer && !row.startsWith('{"type":')) continue;
-    buffer += row;
-    try {
-      objects.push(JSON.parse(buffer));
-    } catch {
-      continue;
-    }
-    buffer = "";
+    if (row.startsWith('{"')) buffers = [...buffers.slice(-7), ""];
+    if (!buffers.length) continue;
+    buffers = buffers.map((buffer) => buffer + row);
+    const at = buffers.findIndex((buffer) => {
+      try {
+        objects.push(JSON.parse(buffer));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (at >= 0) buffers = [];
   }
   return objects;
 }
@@ -227,7 +232,18 @@ const claude = {
   /** `mcp` is {name, command, args, tools} or null. The tools are an allowlist. */
   headlessTurnArgs({ effort, mcp = null }) {
     const tools = [
-      "Bash(sushiai propose:*)",
+      // Only what the builder skill needs: read the catalog, then validate,
+      // save and dry-run a draft. Never `register`, `grant`, `approve`, a run
+      // or the run-only `ask` and `propose`.
+      "Bash(sushiai routines help:*)",
+      "Bash(sushiai routines show:*)",
+      "Bash(sushiai routines --json:*)",
+      "Bash(sushiai routines)",
+      "Bash(sushiai projects:*)",
+      "Bash(sushiai hosts:*)",
+      "Bash(sushiai routine validate:*)",
+      "Bash(sushiai routine save:*)",
+      "Bash(sushiai routine dry-run:*)",
       "Read",
       "Grep",
       "Glob",
@@ -248,6 +264,10 @@ const claude = {
       effort,
       "--allowedTools",
       tools.join(" "),
+      // Deny what the list does not name, whatever default mode the owner's
+      // own settings carry (an "auto" default would let any Bash through).
+      "--permission-mode",
+      "dontAsk",
       ...(mcp ? this.mcpArgs(mcp) : []),
     ];
   },
@@ -299,14 +319,33 @@ const codex = {
     ];
   },
   // `codex exec resume` has no `-s`, so the sandbox is a config value. The
-  // builder's folder is its working root; there is no network access.
+  // builder's folder is its working root; there is no network access and
+  // nothing else is writable (not /tmp, not $TMPDIR). `mcp_servers={}` drops
+  // every server of the owner's config, so only the one passed here returns.
   headlessTurnArgs({ effort, mcp = null }) {
     return [
+      // `-c mcp_servers={}` only merges into the owner's table, so the config
+      // itself is not loaded (auth still comes from CODEX_HOME).
+      "--ignore-user-config",
       "-c",
       'sandbox_mode="workspace-write"',
       "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      "sandbox_workspace_write.exclude_slash_tmp=true",
+      "-c",
+      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "-c",
       `model_reasoning_effort=${effort}`,
+      "-c",
+      "mcp_servers={}",
       ...(mcp ? this.mcpArgs(mcp) : []),
+      // Nobody answers an approval in `codex exec`: the allowlisted tools are
+      // approved up front, every other tool stays refused.
+      ...(mcp?.tools ?? []).flatMap((tool) => [
+        "-c",
+        `mcp_servers.${mcp.name}.tools.${tool}.approval_mode="approve"`,
+      ]),
     ];
   },
   /** JSON lines. The turn ends with `turn.completed` (the last `agent_message`

@@ -699,6 +699,13 @@ fn propose(args: &[String]) -> Result<i32, String> {
     let mut proposal = parse_propose(args)?;
     let dir = std::env::var("SUSHIAI_ROUTINE_DIR")
         .map_err(|_| "not inside a routine run (SUSHIAI_ROUTINE_DIR is not set)")?;
+    let projects = std::env::var("SUSHIAI_ROUTINE_PROJECTS")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0);
+    if projects > 1 {
+        return Err(sushiai_routines::model::MULTI_PROJECT_PROPOSE.to_string());
+    }
     let dry = dry_run();
     proposal["dryRun"] = json!(dry);
     proposal["at"] = json!(SystemTime::now()

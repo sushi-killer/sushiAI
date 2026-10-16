@@ -31,6 +31,8 @@ use crate::holder::{self, HolderConn, SendError};
 use crate::procs;
 use crate::registry::Registry;
 
+/// How long a headless session keeps its final screen readable after it exits.
+const EXIT_HOLD: Duration = Duration::from_secs(120);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_BACKLOG: usize = 256;
@@ -348,6 +350,10 @@ struct Actor {
     removed: bool,
     wake: Option<Wake>,
     wake_due: Option<Instant>,
+    /// A headless session prints its answer and exits with nobody attached: its actor stays
+    /// until this time so a read after the exit still gets the final screen.
+    hold_exit: bool,
+    exit_until: Option<Instant>,
     /// Pid of the holder that ended with the last sleep; a new holder waits for it to be gone.
     dead_holder: Option<u32>,
     tail_saved: Option<Instant>,
@@ -364,9 +370,9 @@ pub fn start(
     screen: Screen,
     seq: u64,
     sock: PathBuf,
-    created: bool,
+    spawn: Spawn,
 ) -> Handle {
-    spawn_actor(registry, info, Some(holder), screen, seq, sock, created)
+    spawn_actor(registry, info, Some(holder), screen, seq, sock, spawn)
 }
 
 /// Starts the actor of a session that has no process: a hibernated record (daemon start, or
@@ -374,7 +380,14 @@ pub fn start(
 pub fn start_hibernated(registry: Arc<Registry>, info: SessionInfo) -> Handle {
     let sock = registry.home.sessions().join(format!("{}.sock", info.id));
     let screen = Screen::new(info.rows, info.cols);
-    spawn_actor(registry, info, None, screen, 0, sock, false)
+    spawn_actor(registry, info, None, screen, 0, sock, Spawn::default())
+}
+
+/// How a session starts: announced as new, and kept readable after an exit.
+#[derive(Default)]
+pub struct Spawn {
+    pub created: bool,
+    pub hold_exit: bool,
 }
 
 fn spawn_actor(
@@ -384,7 +397,7 @@ fn spawn_actor(
     screen: Screen,
     seq: u64,
     sock: PathBuf,
-    created: bool,
+    Spawn { created, hold_exit }: Spawn,
 ) -> Handle {
     let (tx, rx) = mpsc::channel(64);
     let me = tx.downgrade();
@@ -438,6 +451,8 @@ fn spawn_actor(
         wake_asked: false,
         closing: false,
         closed: false,
+        hold_exit,
+        exit_until: None,
         removed: false,
         wake: None,
         wake_due: None,
@@ -510,6 +525,7 @@ impl Actor {
                 }
                 () = until(self.retry.map(|(at, _)| at)) => self.reconnect().await,
                 () = until(self.screen_due) => self.read_screen(),
+                () = until(self.exit_until) => self.exit_until = None,
                 _ = tick.tick() => {
                     self.sweep();
                     self.poll_foreground();
@@ -520,7 +536,10 @@ impl Actor {
                 break;
             }
             // An exited session with nobody attached has nothing left to serve.
-            if self.info.status == SessionStatus::Exited && self.output.receiver_count() == 0 {
+            if self.info.status == SessionStatus::Exited
+                && self.output.receiver_count() == 0
+                && self.exit_until.is_none()
+            {
                 break;
             }
         }
@@ -1321,6 +1340,9 @@ impl Actor {
         self.wake = None;
         self.wake_due = None;
         mark_exited(&mut self.info, code);
+        if self.hold_exit && !self.closing {
+            self.exit_until = Some(Instant::now() + EXIT_HOLD);
+        }
         // An exited session takes no more hooks: its token stops working.
         self.info.agent.token_hash = None;
         // A shell that ended by itself may have been left a moment after its agent quit, before

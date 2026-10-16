@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePageState } from "./pageState.ts";
 import { routinesClient, type BuilderTurn } from "./client.ts";
 import { MarkdownDoc } from "../extensions/preview/MarkdownDoc.tsx";
 import { Breadcrumb, Card, Composer, MetaLine } from "../ui/index.ts";
+import { AskCard } from "./AskCard.tsx";
 import {
   actionCounts,
+  askReplyText,
+  parseAsk,
+  readableTurn,
+  type AskAction,
+  type AskAnswers,
   describeWhen,
   durationText,
   entryKey,
@@ -12,6 +18,7 @@ import {
 } from "./model.ts";
 import { RunView } from "./RunView.tsx";
 import { Scheme } from "./Scheme.tsx";
+import { useAccessGrant } from "./useAccessGrant.tsx";
 import { refreshRoutines } from "./store.ts";
 import type {
   Routine,
@@ -21,7 +28,14 @@ import type {
 } from "./types.ts";
 
 /** One message of the builder conversation. */
-export type BuilderMessage = { role: "you" | "agent"; text: string };
+export type BuilderMessage = {
+  role: "you" | "agent";
+  text: string;
+  /** The answers of an owner card, when this reply came from one. */
+  answers?: AskAnswers;
+  /** The turn failed: shown as an error, not as a reply. */
+  failed?: boolean;
+};
 
 export type Build = {
   /** "local" or "ssh:<profile id>": where the builder runs. */
@@ -72,6 +86,21 @@ export function BuilderView({
     null,
   );
   const [brief, setBrief] = useState("");
+  const transcript = useRef<HTMLDivElement>(null);
+  const agentLast = log[log.length - 1]?.role === "agent";
+
+  // A new message comes into view: the start of the agent's reply (a long one
+  // is read from the top), the end while the next turn works.
+  useEffect(() => {
+    const node = transcript.current;
+    if (!node) return;
+    const replies = node.querySelectorAll(".rt-reply");
+    const reply = replies[replies.length - 1];
+    if (agentLast && !working && reply)
+      node.scrollTop +=
+        reply.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    else node.scrollTop = node.scrollHeight;
+  }, [log.length, agentLast, working]);
 
   const built = useMemo(
     () =>
@@ -100,7 +129,10 @@ export function BuilderView({
         return;
       }
       if (!live || turn.state === "running") return;
-      setLog((items) => [...items, { role: "agent", text: turn.text }]);
+      setLog((items) => [
+        ...items,
+        { role: "agent", text: turn.text, failed: turn.state === "failed" },
+      ]);
       setWorking(false);
     };
     void read();
@@ -138,14 +170,14 @@ export function BuilderView({
     }
   }
 
-  async function send(value: string) {
+  async function send(value: string, answers?: AskAnswers) {
     const text = value.trim();
     if (!text || working) return;
     setReply("");
     setError("");
     try {
       const next = await routinesClient.buildReply(last, text);
-      setLog((items) => [...items, { role: "you", text }]);
+      setLog((items) => [...items, { role: "you", text, answers }]);
       setLast(next.sessionId);
       setWorking(true);
     } catch (reason) {
@@ -155,6 +187,15 @@ export function BuilderView({
   }
 
   const routine: Routine | null = built?.routine ?? null;
+  const access = useAccessGrant({
+    host: built?.host ?? "",
+    id: builtId ?? "",
+    routine,
+    fallback: built?.access,
+    busy,
+    act,
+  });
+  const blocked = access.waiting.length > 0;
   const dryRun =
     dry !== null && built?.lastRun?.n === dry ? built.lastRun : null;
   const startDry = () =>
@@ -164,6 +205,13 @@ export function BuilderView({
       const started = await routinesClient.dryRun(built.host, routine.id);
       setDry(started.run);
     });
+  // The card's buttons map to this fixed list and nothing else.
+  const runAction = (action: AskAction) => {
+    if (action.kind === "dry-run") startDry();
+    else if (action.kind === "open-routine") {
+      if (builtKey) onDone(builtKey);
+    } else void send(action.reply);
+  };
   const heading = routine ? (dry !== null ? "Dry run" : "Draft") : "Draft";
   return (
     <div className="rt-builder">
@@ -173,18 +221,49 @@ export function BuilderView({
       />
       <div className="rt-build">
         <Card as="section" className="rt-chat" label="Builder">
-          <div className="rt-transcript" aria-label="Builder session">
-            {log.map((item, index) =>
-              item.role === "you" ? (
-                <p key={index} className="rt-you">
-                  {item.text}
-                </p>
-              ) : (
+          <div
+            ref={transcript}
+            className="rt-transcript"
+            aria-label="Builder session"
+          >
+            {log.map((item, index) => {
+              if (item.role === "you")
+                return (
+                  <p key={index} className="rt-you">
+                    {item.text}
+                  </p>
+                );
+              if (item.failed)
+                return (
+                  <p key={index} role="alert" className="rt-failed">
+                    {item.text}
+                  </p>
+                );
+              const { body, ask } = parseAsk(item.text);
+              return (
                 <div key={index} className="rt-reply">
-                  <MarkdownDoc body={item.text} />
+                  {body && <MarkdownDoc body={readableTurn(body)} />}
+                  {ask && (
+                    <AskCard
+                      ask={ask}
+                      answered={log[index + 1]?.answers}
+                      active={index === log.length - 1 && !working}
+                      disabledKinds={
+                        !built
+                          ? ["dry-run", "open-routine"]
+                          : blocked
+                            ? ["dry-run"]
+                            : []
+                      }
+                      onAction={runAction}
+                      onSend={(answers) =>
+                        void send(askReplyText(ask, answers), answers)
+                      }
+                    />
+                  )}
                 </div>
-              ),
-            )}
+              );
+            })}
             {working && <p className="rt-status">Working…</p>}
           </div>
           <Composer
@@ -220,10 +299,11 @@ export function BuilderView({
                   <MetaLine single>
                     {dry !== null
                       ? dryStats(dryResult, dryRun)
-                      : `${heading} · ${describeWhen(routine.when.cron, routine.when.tz).toLowerCase()}`}
+                      : `${heading} · ${describeWhen(routine.when.cron, routine.when.tz)}`}
                   </MetaLine>
                 </div>
               </header>
+              {access.notice}
               {dry !== null ? (
                 <RunView
                   host={built.host}
@@ -269,7 +349,8 @@ export function BuilderView({
                   <button
                     type="button"
                     className="ui-button primary"
-                    disabled={busy}
+                    disabled={busy || blocked}
+                    title={blocked ? "Grant the access first" : undefined}
                     onClick={startDry}
                   >
                     Dry run
@@ -305,6 +386,7 @@ export function BuilderView({
               </div>
             </>
           )}
+          {access.sheet}
           {error && (
             <p role="alert" className="rt-error">
               {error}

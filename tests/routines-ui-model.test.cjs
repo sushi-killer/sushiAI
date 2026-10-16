@@ -25,6 +25,11 @@ const {
   ungrantedAccess,
   pendingActions,
   approvalWords,
+  parseAsk,
+  readableTurn,
+  initialAnswers,
+  askReplyText,
+  isAnswered,
 } = require("../src/routines/model.ts");
 const { composerHeight } = require("../src/ui/composerSize.ts");
 const {
@@ -35,7 +40,7 @@ const {
 const routine = (over = {}) => ({
   id: "digest",
   name: "Digest",
-  where: { host: "my-mac", project: "my-app" },
+  where: { host: "my-mac", projects: ["my-app"] },
   when: { cron: "0 9 * * 1-5", tz: "Europe/Berlin" },
   agent: {
     harness: "claude",
@@ -369,7 +374,7 @@ test("the save payload carries the harness, model, effort and extra args the dae
     effort: "high",
     extraArgs: ["--allowedTools", "Read"],
   });
-  assert.equal(payload.routine.where.project, "my-app");
+  assert.deepEqual(payload.routine.where.projects, ["my-app"]);
 });
 
 test("Inbox rows: noop none, needs_you and failed one each, paused one", () => {
@@ -449,4 +454,264 @@ test("result helpers: applied vs would-do counts, and only http links open", () 
     "Weekdays at 09:00 (Europe/Berlin)",
   );
   assert.equal(describeWhen("*/15 * * * *"), "Every 15 min");
+});
+
+// ---- the builder's questions ----
+
+const askBlock = (json) => "```ask\n" + JSON.stringify(json) + "\n```";
+const when = {
+  id: "when",
+  type: "choice",
+  label: "Run time",
+  options: [
+    { value: "09:00", label: "Weekdays 09:00" },
+    { value: "18:00", label: "Weekdays 18:00" },
+  ],
+};
+
+test("parseAsk reads a valid block and keeps the prose", () => {
+  const text = `Which time?\n\n${askBlock({ title: "Schedule", questions: [when] })}`;
+  const { body, ask } = parseAsk(text);
+  assert.equal(body, "Which time?");
+  assert.equal(ask.title, "Schedule");
+  assert.equal(ask.questions[0].options.length, 2);
+  assert.equal(ask.questions[0].allowOther, false);
+});
+
+test("parseAsk keeps the whole text when the card is unusable", () => {
+  const bad = [
+    "```ask\n{not json}\n```",
+    askBlock({ questions: [] }),
+    askBlock({ title: "empty" }),
+    askBlock({
+      actions: [
+        { id: "a", label: "A" },
+        { id: "a", label: "B" },
+      ],
+    }),
+    askBlock({ actions: [{ id: "a", label: 5 }] }),
+    askBlock({
+      actions: Array.from({ length: 5 }, (_, n) => ({
+        id: `a${n}`,
+        label: `A${n}`,
+      })),
+    }),
+    askBlock({ questions: [when, when] }),
+    askBlock({ questions: [{ ...when, type: "radio" }] }),
+    askBlock({ questions: [{ ...when, label: 7 }] }),
+    askBlock({ questions: [{ ...when, options: [] }] }),
+    askBlock({ questions: [{ ...when, options: "09:00" }] }),
+    askBlock({ questions: [{ ...when, allowOther: "yes" }] }),
+    askBlock({
+      questions: [
+        {
+          ...when,
+          options: Array.from({ length: 9 }, (_, n) => ({
+            value: `v${n}`,
+            label: `Option ${n}`,
+          })),
+        },
+      ],
+    }),
+    askBlock({ questions: [{ ...when, label: "x".repeat(500) }] }),
+    askBlock({
+      questions: Array.from({ length: 5 }, (_, n) => ({
+        id: `q${n}`,
+        type: "text",
+        label: `Q${n}`,
+      })),
+    }),
+    "```ask\n[1,2]\n```",
+  ];
+  for (const block of bad) {
+    const text = `Question\n${block}`;
+    assert.deepEqual(parseAsk(text), { body: text, ask: null }, block);
+  }
+  assert.deepEqual(parseAsk("plain A) B) C)"), {
+    body: "plain A) B) C)",
+    ask: null,
+  });
+});
+
+test("parseAsk finds a block in the middle and uses the last of two", () => {
+  const first = askBlock({
+    questions: [{ id: "a", type: "text", label: "First" }],
+  });
+  const second = askBlock({
+    questions: [{ id: "b", type: "text", label: "Second" }],
+  });
+  const middle = parseAsk(`Before\n${first}\nAfter`);
+  assert.equal(middle.ask.questions[0].id, "a");
+  assert.equal(middle.body, "Before\n\nAfter");
+  const two = parseAsk(`${first}\ntext\n${second}`);
+  assert.equal(two.ask.questions[0].id, "b");
+  assert.ok(two.body.includes("First"));
+});
+
+test("askReplyText writes one plain line per answered question", () => {
+  const { ask } = parseAsk(
+    askBlock({
+      questions: [
+        { ...when, default: "09:00", allowOther: true },
+        {
+          id: "days",
+          type: "multi",
+          label: "Days",
+          options: [
+            { value: "mon", label: "Mon" },
+            { value: "tue", label: "Tue" },
+          ],
+        },
+        { id: "note", type: "text", label: "Note" },
+      ],
+    }),
+  );
+  const answers = initialAnswers(ask);
+  assert.equal(askReplyText(ask, answers), "Run time: Weekdays 09:00");
+  assert.equal(isAnswered(ask.questions[1], answers.days), false);
+  answers.days = { picked: ["mon", "tue"], other: "" };
+  answers.note = { picked: [], other: " keep it short " };
+  answers.when = { picked: [], other: "10:30" };
+  assert.equal(
+    askReplyText(ask, answers),
+    "Run time: 10:30\nDays: Mon, Tue\nNote: keep it short",
+  );
+});
+
+test("parseAsk reads actions; an unknown kind is only a reply button", () => {
+  const { ask } = parseAsk(
+    askBlock({
+      actions: [
+        {
+          id: "ok",
+          label: "Looks good",
+          kind: "reply",
+          reply: "Save it",
+          style: "primary",
+        },
+        { id: "dry", label: "Dry run", kind: "dry-run" },
+        { id: "open", label: "Open", kind: "open-routine" },
+        { id: "bad", label: "Wipe it", kind: "rm -rf", reply: "x" },
+      ],
+    }),
+  );
+  assert.equal(ask.questions.length, 0);
+  assert.deepEqual(
+    ask.actions.map((a) => [a.kind, a.reply, a.style]),
+    [
+      ["reply", "Save it", "primary"],
+      ["dry-run", "Dry run", "secondary"],
+      ["open-routine", "Open", "secondary"],
+      ["reply", "Wipe it", "secondary"],
+    ],
+  );
+  const both = parseAsk(
+    askBlock({
+      questions: [{ id: "n", type: "text", label: "N" }],
+      actions: [{ id: "a", label: "A" }],
+    }),
+  );
+  assert.equal(both.ask.questions.length, 1);
+  assert.equal(both.ask.actions.length, 1);
+});
+
+test("readableTurn turns a run-result JSON reply into markdown", () => {
+  const payload = {
+    status: "needs_you",
+    title: "Routine \u201cMorning plan\u201d saved as a draft, access needed",
+    summary: "It reads the channel at 09:00. Grant the access to run it.",
+  };
+  const json = JSON.stringify(payload);
+  const out = readableTurn(json);
+  assert.equal(out, `**${payload.title}**\n\n${payload.summary}`);
+  assert.equal(readableTurn("```json\n" + json + "\n```"), out);
+  assert.equal(readableTurn(`Done.\n\n${json}`), `Done.\n\n${out}`);
+  assert.match(
+    readableTurn(JSON.stringify({ ...payload, next: "Turn it on" })),
+    /\n\nTurn it on$/,
+  );
+});
+
+test("readableTurn leaves everything else untouched and never throws", () => {
+  for (const text of [
+    "",
+    "plain prose",
+    '{"status":"needs_you","title":"x"',
+    'Use {"a": 1} here, then more text',
+    '{"name":"x","value":2}',
+    '{"status":"ok"}',
+    '{"title":"x","summary":"y"}',
+    "[1,2]",
+    "{",
+  ])
+    assert.equal(readableTurn(text), text);
+});
+
+test("where: summary text, toggling and host change", () => {
+  const {
+    describeWhere,
+    toggleProject,
+    keepOnHost,
+    whereProblem,
+    projectsForHost,
+    MAX_PROJECTS,
+  } = require("../src/routines/where.ts");
+  const catalog = {
+    hosts: [],
+    projects: [
+      {
+        id: "p1",
+        name: "my-app",
+        folders: [{ host: "my-mac", path: "/a" }],
+        remote: "",
+      },
+      {
+        id: "p2",
+        name: "my-site",
+        folders: [{ host: "build-host", path: "/b" }],
+        remote: "",
+      },
+      {
+        id: "p3",
+        name: "my-docs",
+        folders: [],
+        remote: "https://example.com/d.git",
+      },
+    ],
+  };
+  assert.equal(describeWhere({}, catalog, "My Mac"), "My Mac");
+  assert.equal(describeWhere({ projects: [] }, catalog, "My Mac"), "My Mac");
+  assert.equal(
+    describeWhere({ projects: ["p1"] }, catalog, "My Mac"),
+    "My Mac · my-app",
+  );
+  assert.equal(
+    describeWhere({ projects: ["my-app"] }, catalog, "My Mac"),
+    "My Mac · my-app",
+  );
+  assert.equal(
+    describeWhere({ projects: ["p1", "p2", "p3"] }, catalog, "My Mac"),
+    "My Mac · 3 projects",
+  );
+
+  assert.deepEqual(toggleProject([], catalog, "p1"), ["p1"]);
+  assert.deepEqual(toggleProject(["p1"], catalog, "p2"), ["p1", "p2"]);
+  assert.deepEqual(toggleProject(["p1", "p2"], catalog, "p1"), ["p2"]);
+  assert.deepEqual(toggleProject(["my-app"], catalog, "p1"), []);
+  const full = Array.from({ length: MAX_PROJECTS }, (_, i) => `x${i}`);
+  assert.equal(toggleProject(full, catalog, "p1").length, MAX_PROJECTS);
+
+  // p2 has no folder on my-mac and no remote: it does not follow the move.
+  assert.deepEqual(
+    projectsForHost(catalog, "my-mac").map((p) => p.id),
+    ["p1", "p3"],
+  );
+  assert.deepEqual(keepOnHost(["p1", "p2", "p3"], catalog, "my-mac"), [
+    "p1",
+    "p3",
+  ]);
+
+  assert.match(whereProblem("codex", ["a", "b"]), /needs Claude/);
+  assert.equal(whereProblem("codex", ["a"]), "");
+  assert.equal(whereProblem("claude", ["a", "b"]), "");
 });

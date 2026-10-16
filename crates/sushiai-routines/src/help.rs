@@ -41,7 +41,9 @@ Build commands
                                        a changed enabled routine switches it off until the
                                        owner enables it again.
   sushiai routine dry-run ID           one run that writes nothing; its result lists what it
-                                       would do (applied=false)
+                                       would do (applied=false). It uses only access the
+                                       owner granted that is read-only; the rest stays
+                                       unavailable and the result names it.
 
 Same tools over MCP
   sushiai mcp --routines               MCP server with routines_projects, routines_hosts,
@@ -66,13 +68,14 @@ Commands used inside a run
                                        routine/<id>/<run>. Every run works in the routine's
                                        own git worktree of the project (reset to the default
                                        branch before each run); your checkout is never
-                                       touched or read by a run. A commit or pr needs --path
+                                       touched or read by a run. Refused when the routine has
+                                       two or more projects (those are read-only). A commit or pr needs --path
                                        for each file. Never applied in a dry run. A dry run
                                        reads history through the worktree's files (git log,
                                        diff and show are not allowed there).
 
 DIR layout
-  routine.json   {"id","name","where":{"host","project"},"when":{"cron","tz"},
+  routine.json   {"id","name","where":{"host","projects":["id"]},"when":{"cron","tz"},
                   "agent":{"harness":"claude|codex","model","effort":"low|medium|high",
                            "account","extraArgs":[]},
                   "howItRuns":{"mode":"ask-every-time|ask-first|on-its-own","promoteAfter":5},
@@ -82,6 +85,10 @@ DIR layout
   brief.md       the instructions; the only source of instructions for the run
 
 Rules
+  - where.projects is zero to 20 project ids, each with a folder on the host or a remote to
+    clone. One project: every run works in the routine's own git worktree of it. Two or
+    more: the run works in its own work/ folder with read access to each project's folder;
+    it is read-only (no propose) and Claude-only (validate refuses Codex).
   - cron has five fields and fires at most every 5 minutes; tz is an IANA zone.
   - extraArgs is an allowlist: --fallback-model, --max-turns, --allowedTools (named tools or
     Bash(<command prefix>:*), never bare Bash or a wildcard), --disallowedTools, --add-dir

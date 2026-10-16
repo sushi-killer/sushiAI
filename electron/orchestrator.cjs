@@ -400,6 +400,20 @@ function createModuleSwitch({
     if (!manager) throw new Error("The sushiai daemon is not running.");
     const name = managerHostOf(host);
     const verb = on ? "register" : "unregister";
+    // Restarting the local daemon stops whatever answers, which may be another
+    // app's. Turning a module on there cannot work from this app.
+    if (
+      on &&
+      host === LOCAL_HOST &&
+      manager.hello?.(name)?.foreign &&
+      !hasModule(
+        manager.states().find((item) => item.host === name),
+        module,
+      )
+    )
+      throw new Error(
+        "another sushiAI build owns the daemon; use Restart daemon to run this build",
+      );
     if (host === LOCAL_HOST) await runLocal([module, verb]);
     else
       await exec(

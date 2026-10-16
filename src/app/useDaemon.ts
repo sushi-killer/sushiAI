@@ -124,14 +124,24 @@ export function useDaemon({
       const entry = hosts.current[state.host] ?? emptyHost();
       if (state.state !== "ready") {
         // Keep what was known: a host that is not ready never ends a panel.
-        hosts.current[state.host] = { ...entry, ready: false, listed: false };
-        setSessions({ ...hosts.current });
+        hosts.current[state.host] = {
+          ...entry,
+          ready: false,
+          listed: false,
+          state: state.state,
+        };
+        reconcile();
         window.clearTimeout(retries.get(state.host));
         retries.delete(state.host);
         return;
       }
       if (entry.ready && state.generation === known) return;
-      hosts.current[state.host] = { ...entry, ready: true, listed: false };
+      hosts.current[state.host] = {
+        ...entry,
+        ready: true,
+        listed: false,
+        state: undefined,
+      };
       // The idle-sleep delay is the app's setting; a host learns it on hello.
       bridge
         .appPreferences()

@@ -36,6 +36,12 @@ export function Sheet({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+  const dialog = useRef<HTMLDivElement>(null);
+  // A host taller than the window (a stacked page) may open the sheet below
+  // the fold: bring it into view.
+  useEffect(() => {
+    if (host) dialog.current?.scrollIntoView?.({ block: "nearest" });
+  }, [host]);
   const sheet = (
     <div
       className="ui-sheet-scrim"
@@ -43,7 +49,13 @@ export function Sheet({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="ui-sheet" role="dialog" aria-modal aria-label={title}>
+      <div
+        ref={dialog}
+        className="ui-sheet"
+        role="dialog"
+        aria-modal
+        aria-label={title}
+      >
         <h2>{title}</h2>
         {hint && <p className="ui-sheet-hint">{hint}</p>}
         {children}

@@ -9,3 +9,5 @@
 - Run modes are real: ask every time (a proposal waits for your answer), ask first (a proposal waits too, until its kind reached `promoteAfter` accepted asks) and on its own. A routine whose files change outside the app is refused and paused until you save it again.
 - The builder can reach the CLI tools through an MCP server (`sushiai mcp --routines`), and Settings choose what it sees and whether it uses the commands, MCP or both.
 - A run that failed on a login records the host and harness, so the app can open a terminal that runs the login there.
+- A routine can work on many projects (zero to 20). With one project it keeps its own git worktree; with two or more it reads each project's folder and is read-only for now (Claude only; `sushiai propose` is refused). A routine saved with one `project` loads as a list of one.
+- A dry run now uses the access you granted when it is read-only, so a routine that reads through connector tools can be dry-run. Write tools and ungranted ones stay unavailable and the result names them.

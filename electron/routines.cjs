@@ -120,6 +120,9 @@ function builderSettings(stored) {
   };
   if (!ACCESS_MODES.includes(value.access))
     value.access = DEFAULT_SETTINGS.access;
+  // Codex's sandbox refuses the daemon socket, so only its MCP server (spawned
+  // outside the sandbox) can reach the daemon. The stored value stays for Claude.
+  if (value.harness === "codex" && value.access === "cli") value.access = "mcp";
   return value;
 }
 
@@ -172,7 +175,16 @@ function builderPrompt(text, routineId, settings = DEFAULT_SETTINGS) {
   const turn =
     "\n\nThis is a non-interactive turn: do not use `sushiai ask`. When you " +
     "need an answer from the owner, end your turn with that one question; " +
-    "the owner replies in the next turn.";
+    "the owner replies in the next turn. Reply in the language of the owner's " +
+    "request: your messages, questions, ask-card labels and options, and the " +
+    "routine name and summary the owner sees; keep routine.json keys, ids, " +
+    "cron and the brief structure as the skill defines. Your own reply is " +
+    "short plain prose for the owner (plus at most one ask block); never " +
+    "print the run result JSON, that is only for the routine's own run. If the tools you need are missing " +
+    "(`sushiai` is not found or the " +
+    `${MCP_SERVER} MCP tools are not available), do not search the disk or ` +
+    "apologise at length: end the turn with the single sentence " +
+    '"sushiai is not available in this session." and nothing else.';
   return `${task}\n\n${String(text).trim()}${rules}${turn}\n\nUse the skill ${SKILL} and follow it.`;
 }
 

@@ -21,6 +21,7 @@ const {
   resolveBinary,
   ensureHome,
   HOOKS_STAMP,
+  REQUIRED_CAPABILITIES,
 } = require("../electron/daemon/local.cjs");
 
 const cleanups = [];
@@ -48,7 +49,12 @@ const until = async (check, ms = 3000, what = "condition") => {
 // the socket like the real daemon does.
 async function fakeDaemon(
   socketPath,
-  { version = "1.0.0", host = "devbox", build } = {},
+  {
+    version = "1.0.0",
+    host = "devbox",
+    build,
+    capabilities = ["sessions", "attach"],
+  } = {},
 ) {
   const conns = [];
   const log = [];
@@ -70,7 +76,7 @@ async function fakeDaemon(
         if (message.method === "hello")
           reply(message.id, {
             protocol: 1,
-            capabilities: ["sessions", "attach"],
+            capabilities,
             daemon: version,
             host,
             ...(build ? { build } : {}),
@@ -393,7 +399,11 @@ function localFixture({ bundled = "1.0.0", appVersion = "app-1" } = {}) {
     ...extra,
   });
   // A daemon of the fixture's binary: same version, same build.
-  const current = { version: bundled, build: sha256(binary) };
+  const current = {
+    version: bundled,
+    build: sha256(binary),
+    capabilities: REQUIRED_CAPABILITIES,
+  };
   return { dir, home, binary, socketPath, spawned, env, options, current };
 }
 
@@ -485,7 +495,9 @@ test("hooks install runs once per app version", async () => {
     }
   };
   for (let i = 0; i < 2; i++) {
-    const client = await createLocalConnector(f.options()).connect();
+    const client = await createLocalConnector(
+      f.options({ defaultHome: f.home }),
+    ).connect();
     client.close();
   }
   assert.deepEqual(hooksLog(), ["hooks install"]);
@@ -494,13 +506,23 @@ test("hooks install runs once per app version", async () => {
     "app-1",
   );
   const next = await createLocalConnector(
-    f.options({ appVersion: "app-2" }),
+    f.options({ appVersion: "app-2", defaultHome: f.home }),
   ).connect();
   next.close();
   assert.equal(hooksLog().length, 2);
 });
 
-test("a daemon of another build is replaced once per app run, then reported incompatible", async () => {
+test("a home other than ~/.sushiai never runs hooks install", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  await fakeDaemon(f.socketPath, f.current);
+  // No defaultHome override: the fixture's throwaway home is not the default.
+  (await createLocalConnector(f.options()).connect()).close();
+  assert.equal(fs.existsSync(path.join(f.dir, "hooks.log")), false);
+  assert.equal(fs.existsSync(path.join(f.home, HOOKS_STAMP)), false);
+});
+
+test("a dev run replaces a daemon of another build once, then shares whatever answers", async () => {
   const f = localFixture();
   fs.mkdirSync(f.home, { mode: 0o700 });
   // Same version, another binary: only hello.build tells them apart.
@@ -522,21 +544,178 @@ test("a daemon of another build is replaced once per app run, then reported inco
   assert.equal(started, 1);
   assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
   client.close();
-  // Another app replaced the daemon with its own binary: no second shutdown.
+  // The installed app replaced the daemon with its own binary: shared, no
+  // second shutdown and no error.
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const other = await fakeDaemon(f.socketPath, { build: "1".repeat(64) });
-  await assert.rejects(
-    connector.connect(),
-    (error) =>
-      error.reason === "incompatible" &&
-      error.retry === false &&
-      /Another sushiAI build owns the daemon/.test(error.message),
-  );
+  const other = await fakeDaemon(f.socketPath, {
+    build: "1".repeat(64),
+    capabilities: REQUIRED_CAPABILITIES,
+  });
+  const shared = await connector.connect();
+  shared.close();
   assert.equal(started, 1);
   assert.equal(
     other.log.some((m) => m.method === "daemon.shutdown"),
     false,
   );
+});
+
+test("a packaged app never replaces a daemon that lacks capabilities: it connects and flags an update", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const other = await fakeDaemon(f.socketPath, {
+    version: "1.0.0",
+    build: "2".repeat(64),
+    capabilities: ["sessions", "attach"],
+  });
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      isPackaged: true,
+      spawn: () => {
+        started++;
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  const manager = startManager(connector);
+  manager.start();
+  await until(() => stateOf(manager).state === "ready", 3000, "ready");
+  assert.equal(stateOf(manager).update, true);
+  assert.equal(manager.hello("local").foreign, true);
+  assert.equal(started, 0);
+  assert.equal(
+    other.log.some((m) => m.method === "daemon.shutdown"),
+    false,
+  );
+});
+
+test("a daemon of another build with every required capability is shared without an update flag, packaged or not", async () => {
+  for (const isPackaged of [true, false]) {
+    const f = localFixture();
+    fs.mkdirSync(f.home, { mode: 0o700 });
+    const other = await fakeDaemon(f.socketPath, {
+      build: "2".repeat(64),
+      capabilities: [...REQUIRED_CAPABILITIES, "orch"],
+    });
+    const client = await createLocalConnector(
+      f.options({ isPackaged }),
+    ).connect();
+    client.close();
+    assert.equal(client.needsUpdate, undefined);
+    assert.equal(client.foreignBuild, true);
+    assert.equal(
+      other.log.some((m) => m.method === "daemon.shutdown"),
+      false,
+    );
+    await other.stop();
+  }
+});
+
+test("a dev run replaces a daemon that lacks capabilities once", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  // Same version and build string, but no schedules / ownerAsk: not shareable.
+  const old = await fakeDaemon(f.socketPath, {
+    version: "1.0.0",
+    build: "5".repeat(64),
+    capabilities: ["sessions", "attach", "resync"],
+  });
+  let started = 0;
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        started++;
+        fakeDaemon(f.socketPath, f.current);
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  const client = await connector.connect();
+  cleanups.push(() => client.close());
+  assert.equal(started, 1);
+  assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
+  assert.equal(client.hello.build, f.current.build);
+  assert.equal(client.needsUpdate, undefined);
+});
+
+test("a started daemon that exits while another one answers connects to the winner at once", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const connector = createLocalConnector(
+    f.options({
+      pollMs: 3000,
+      startTimeoutMs: 15000,
+      spawn: () => {
+        const child = Object.assign(new EventEmitter(), { unref() {} });
+        // The other app's daemon holds the socket; our child loses the lock.
+        fakeDaemon(f.socketPath, {
+          build: "6".repeat(64),
+          capabilities: REQUIRED_CAPABILITIES,
+        }).then(() => child.emit("exit", 1, null));
+        return child;
+      },
+    }),
+  );
+  const started = Date.now();
+  const client = await connector.connect();
+  client.close();
+  assert.ok(
+    Date.now() - started < 2000,
+    "did not wait for the poll or timeout",
+  );
+  assert.equal(client.hello.build, "6".repeat(64));
+  assert.equal(client.foreignBuild, true);
+});
+
+test("a started daemon that exits with nothing answering fails fast with a clear error", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const lines = [];
+  const connector = createLocalConnector(
+    f.options({
+      pollMs: 3000,
+      startTimeoutMs: 15000,
+      log: (line) => lines.push(line),
+      spawn: () => {
+        const child = Object.assign(new EventEmitter(), { unref() {} });
+        setTimeout(() => child.emit("exit", 1, null), 20);
+        return child;
+      },
+    }),
+  );
+  const started = Date.now();
+  await assert.rejects(connector.connect(), /exited before it answered/);
+  assert.ok(Date.now() - started < 2000);
+  assert.ok(lines.some((line) => /daemon connect failed/.test(line)));
+});
+
+test("an incompatible local daemon is retried slowly, never given up", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  await fakeDaemon(f.socketPath, { build: "7".repeat(64) });
+  // Already replaced once and the next daemon is again another build.
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        fakeDaemon(f.socketPath, { build: "7".repeat(64) });
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  const delays = [];
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms, ...rest) => {
+    if (ms >= 20000) delays.push(ms);
+    return realSetTimeout(fn, ms >= 20000 ? 1e9 : ms, ...rest);
+  };
+  cleanups.push(() => (global.setTimeout = realSetTimeout));
+  const manager = startManager(connector);
+  manager.start();
+  await until(() => stateOf(manager).state === "failed", 3000, "failed");
+  global.setTimeout = realSetTimeout;
+  assert.equal(stateOf(manager).reason, "incompatible");
+  assert.deepEqual(delays, [30000]);
 });
 
 test("a daemon that reports no build (an older daemon) is not current", async () => {
@@ -558,21 +737,42 @@ test("a daemon that reports no build (an older daemon) is not current", async ()
   assert.ok(old.log.some((m) => m.method === "daemon.shutdown"));
 });
 
-test("a daemon started by this call that is not the bundled build is incompatible, not replaced", async () => {
+test("another app that won the race for the socket with its own build is shared, not an error", async () => {
   const f = localFixture();
   fs.mkdirSync(f.home, { mode: 0o700 });
   // Another app won the race for the socket with its own binary.
   const connector = createLocalConnector(
     f.options({
       spawn: () => {
-        fakeDaemon(f.socketPath, { build: "2".repeat(64) });
+        fakeDaemon(f.socketPath, {
+          build: "2".repeat(64),
+          capabilities: REQUIRED_CAPABILITIES,
+        });
+        return Object.assign(new EventEmitter(), { unref() {} });
+      },
+    }),
+  );
+  const client = await connector.connect();
+  client.close();
+});
+
+test("a daemon of another version is still incompatible", async () => {
+  const f = localFixture();
+  fs.mkdirSync(f.home, { mode: 0o700 });
+  const connector = createLocalConnector(
+    f.options({
+      spawn: () => {
+        fakeDaemon(f.socketPath, { version: "9.9.9", build: "2".repeat(64) });
         return Object.assign(new EventEmitter(), { unref() {} });
       },
     }),
   );
   await assert.rejects(
     connector.connect(),
-    (error) => error.reason === "incompatible" && error.retry === false,
+    (error) =>
+      error.reason === "incompatible" &&
+      error.retry !== false &&
+      error.retryAfterMs === 30000,
   );
 });
 
@@ -590,15 +790,15 @@ test("restart stops the daemon of another build so the next connect starts this 
       },
     }),
   );
-  // The one allowed replacement is used up; the next mismatch is incompatible.
+  // The one allowed replacement is used up; the next other build is shared.
   (await connector.connect()).close();
   assert.ok(first.log.some((m) => m.method === "daemon.shutdown"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const other = await fakeDaemon(f.socketPath, { build: "4".repeat(64) });
-  await assert.rejects(
-    connector.connect(),
-    (error) => error.reason === "incompatible",
-  );
+  const other = await fakeDaemon(f.socketPath, {
+    build: "4".repeat(64),
+    capabilities: REQUIRED_CAPABILITIES,
+  });
+  (await connector.connect()).close();
   await connector.restart();
   assert.ok(other.log.some((m) => m.method === "daemon.shutdown"));
   const client = await connector.connect();

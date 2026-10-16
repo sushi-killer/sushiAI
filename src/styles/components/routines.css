@@ -415,6 +415,7 @@
   background: var(--bg-control);
   font-size: var(--text-md);
   line-height: 19px;
+  white-space: pre-line;
   overflow-wrap: anywhere;
 }
 .rt-reply {
@@ -422,6 +423,117 @@
   font-size: var(--text-md);
   line-height: 19px;
   overflow-wrap: anywhere;
+}
+/* A builder turn that failed: an error line, not a reply */
+.rt-failed {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  color: var(--danger);
+  font-size: var(--text-md);
+  line-height: 19px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+/* The builder's question card under an agent message */
+.rt-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.rt-ask-title {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 18px;
+}
+.rt-ask-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+.rt-ask-label {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 16px;
+}
+.rt-ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+}
+.rt-ask .ui-chip {
+  height: 34px;
+  color: var(--text);
+  gap: 6px;
+  padding: 0 14px;
+}
+.rt-ask .ui-chip.selected {
+  border-color: var(--line-selected);
+  background: var(--bg-selected);
+  color: var(--text);
+}
+.rt-ask .ui-chip.selected::before {
+  content: "\2713";
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+.rt-ask .ui-chip.other {
+  border-style: dashed;
+  background: transparent;
+}
+.rt-ask .ui-chip:disabled:not(.selected) {
+  opacity: 0.6;
+}
+/* The text answer matches the composer: same radius, size and focus ring. */
+.rt-ask-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  resize: none;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  color: var(--text);
+  caret-color: var(--text);
+  font: inherit;
+  font-size: var(--text-md);
+  line-height: 18px;
+  overflow-y: hidden;
+}
+.rt-ask-input::placeholder {
+  color: var(--text-faint);
+}
+.rt-ask-input:focus,
+.rt-ask-input:focus-visible {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: none;
+}
+.rt-ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--gap-md);
+}
+.rt-ask-hint {
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  line-height: 16px;
+}
+.rt-ask-hint.done {
+  margin-right: 0;
 }
 .rt-status {
   margin: 0;
@@ -539,7 +651,7 @@
     overflow-y: auto;
   }
   .rt-page .rt-chat {
-    max-height: 340px;
+    max-height: max(340px, min(560px, 72vh));
   }
   .rt-center {
     padding-bottom: 0;

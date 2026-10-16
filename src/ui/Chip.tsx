@@ -6,6 +6,7 @@ export function Chip({
   radio = false,
   disabled,
   onClick,
+  className,
   children,
 }: {
   selected?: boolean;
@@ -13,12 +14,14 @@ export function Chip({
   radio?: boolean;
   disabled?: boolean;
   onClick?: () => void;
+  /** An extra class for a variant, e.g. a secondary "Other…". */
+  className?: string;
   children: ReactNode;
 }) {
   return (
     <button
       type="button"
-      className={`ui-chip${selected ? " selected" : ""}`}
+      className={`ui-chip${selected ? " selected" : ""}${className ? ` ${className}` : ""}`}
       {...(radio
         ? { role: "radio", "aria-checked": selected }
         : { "aria-pressed": selected })}

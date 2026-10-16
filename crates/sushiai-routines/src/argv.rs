@@ -8,10 +8,11 @@ use std::path::Path;
 
 use crate::model::Agent;
 
-/// What a Claude dry run may use: read tools, `git status`, and the two commands that talk
-/// to the module (`ask` prints "skipped (dry run)" and asks nobody, `propose` only records).
-/// Everything else, including every MCP tool, is not on the list and so is refused: a dry
-/// run is fail-closed, not a list of known writes.
+/// What a Claude dry run may use on its own: read tools, `git status`, and the two commands
+/// that talk to the module (`ask` prints "skipped (dry run)" and asks nobody, `propose` only
+/// records). On top of it a dry run gets the owner's granted `read` entries (`read_only`).
+/// Everything else is not on the list and so is refused: a dry run is fail-closed, not a
+/// list of known writes.
 pub const DRY_RUN_ALLOW: &[&str] = &[
     "Read",
     "Grep",
@@ -22,6 +23,16 @@ pub const DRY_RUN_ALLOW: &[&str] = &[
     "Bash(sushiai ask:*)",
     "Bash(sushiai propose:*)",
 ];
+
+fn dry_run_allow(read_only: &[String]) -> Vec<String> {
+    let mut allow: Vec<String> = DRY_RUN_ALLOW.iter().map(|t| t.to_string()).collect();
+    for tool in read_only {
+        if !allow.contains(tool) {
+            allow.push(tool.clone());
+        }
+    }
+    allow
+}
 
 /// What every Claude run may use besides the owner's grants: read tools and the two commands
 /// that talk to the module. Nothing else is on the list, so nothing else is allowed.
@@ -49,8 +60,13 @@ pub struct RunSpec<'a> {
     pub last_message: &'a Path,
     pub dry_run: bool,
     /// The tools the owner granted. A real Claude run is allowed [`RUN_ALLOW`] plus these and
-    /// nothing else; a dry run never uses them.
+    /// nothing else.
     pub granted: &'a [String],
+    /// The granted tools whose access kind is `read`: the only grants a Claude dry run uses.
+    pub read_only: &'a [String],
+    /// Project checkouts a Claude run may read besides its own folder (`--add-dir`), one per
+    /// project of a multi-project routine.
+    pub read_dirs: &'a [String],
 }
 
 /// The argument list placed after the harness name, before the prompt.
@@ -97,13 +113,21 @@ pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String
                     "--tools".into(),
                     DRY_RUN_TOOLS.into(),
                     "--allowedTools".into(),
-                    DRY_RUN_ALLOW.join(","),
+                    dry_run_allow(spec.read_only).join(","),
                     "--disallowedTools".into(),
                     DRY_RUN_DENY.join(","),
                 ]);
             }
+            // `--add-dir` takes a list: the `=` form keeps the next argument from being read
+            // as one more folder.
+            for dir in spec.read_dirs {
+                argv.push(format!("--add-dir={dir}"));
+            }
         }
         "codex" => {
+            if !spec.read_dirs.is_empty() {
+                return Err("Codex cannot be given read access to project folders".into());
+            }
             if let Some(e) = effort {
                 if !["low", "medium", "high"].contains(&e) {
                     return Err(format!("effort {e} is not offered for Codex"));
@@ -111,6 +135,9 @@ pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String
             }
             argv.extend([
                 "exec".into(),
+                // `-c mcp_servers={}` only merges into the owner's table, so the owner's
+                // own config is left out altogether (auth and the model stay explicit).
+                "--ignore-user-config".into(),
                 "--output-schema".into(),
                 spec.schema_file.to_string_lossy().into_owned(),
                 "-o".into(),

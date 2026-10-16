@@ -553,3 +553,247 @@ export function durationText(run: {
   if (total < 60) return `${total} s`;
   return `${Math.floor(total / 60)} min ${total % 60} s`;
 }
+
+// ---- the builder's questions ----
+
+export type AskOption = { value: string; label: string };
+export type AskQuestion = {
+  id: string;
+  type: "choice" | "multi" | "text";
+  label: string;
+  options: AskOption[];
+  /** Values (or, for text, the one string) selected at the start. */
+  default: string[];
+  allowOther: boolean;
+  placeholder: string;
+};
+/** A button of the card. The kinds are a fixed whitelist the UI maps to its
+ * own handlers; an unknown kind becomes a plain reply with the label. */
+export type AskAction = {
+  id: string;
+  label: string;
+  kind: "reply" | "dry-run" | "open-routine";
+  reply: string;
+  style: "primary" | "secondary";
+};
+export type Ask = {
+  title: string;
+  questions: AskQuestion[];
+  actions: AskAction[];
+};
+/** What the owner picked (`picked`) and typed (`other`) for one question. */
+export type AskAnswer = { picked: string[]; other: string };
+export type AskAnswers = Record<string, AskAnswer>;
+
+const ASK_MAX_JSON = 4000;
+const ASK_MAX_QUESTIONS = 4;
+const ASK_MAX_ACTIONS = 4;
+const ASK_MAX_OPTIONS = 8;
+const ASK_MAX_TEXT = 120;
+const ASK_BLOCK = /```ask[ \t]*\r?\n([\s\S]*?)\r?\n?```/g;
+
+const askText = (value: unknown, required: boolean): string | null => {
+  if (value === undefined && !required) return "";
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (text.length > ASK_MAX_TEXT || (required && !text)) return null;
+  return text;
+};
+
+function readQuestion(raw: unknown): AskQuestion | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const id = askText(item.id, true);
+  const label = askText(item.label, true);
+  const placeholder = askText(item.placeholder, false);
+  const type = item.type;
+  if (id === null || label === null || placeholder === null) return null;
+  if (!/^[A-Za-z][\w-]{0,31}$/.test(id)) return null;
+  if (type !== "choice" && type !== "multi" && type !== "text") return null;
+  if (item.allowOther !== undefined && typeof item.allowOther !== "boolean")
+    return null;
+  const options: AskOption[] = [];
+  if (type !== "text") {
+    if (!Array.isArray(item.options)) return null;
+    if (item.options.length < 1 || item.options.length > ASK_MAX_OPTIONS)
+      return null;
+    for (const entry of item.options) {
+      const option = entry as Record<string, unknown> | null;
+      const value = askText(option?.value, true);
+      const text = askText(option?.label, true);
+      if (value === null || text === null) return null;
+      if (options.some((seen) => seen.value === value)) return null;
+      options.push({ value, label: text });
+    }
+  }
+  const raw_default = item.default;
+  const wanted =
+    typeof raw_default === "string"
+      ? [raw_default]
+      : Array.isArray(raw_default) &&
+          raw_default.every((one) => typeof one === "string")
+        ? (raw_default as string[])
+        : [];
+  const chosen =
+    type === "text"
+      ? wanted.slice(0, 1).map((one) => one.slice(0, ASK_MAX_TEXT))
+      : wanted.filter((one) => options.some((seen) => seen.value === one));
+  return {
+    id,
+    type,
+    label,
+    options,
+    default: type === "choice" ? chosen.slice(0, 1) : chosen,
+    allowOther: type !== "text" && item.allowOther === true,
+    placeholder,
+  };
+}
+
+const ASK_KINDS = ["reply", "dry-run", "open-routine"];
+
+function readAction(raw: unknown): AskAction | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const id = askText(item.id, true);
+  const label = askText(item.label, true);
+  const reply = askText(item.reply, false);
+  if (id === null || label === null || reply === null) return null;
+  if (!/^[A-Za-z][\w-]{0,31}$/.test(id)) return null;
+  const known = typeof item.kind === "string" && ASK_KINDS.includes(item.kind);
+  return {
+    id,
+    label,
+    kind: known ? (item.kind as AskAction["kind"]) : "reply",
+    reply: known && reply ? reply : label,
+    style: item.style === "primary" ? "primary" : "secondary",
+  };
+}
+
+/** Splits an agent message into its prose and the owner card it asks for.
+ * The card is the last ```ask block holding valid JSON of 1-4 questions;
+ * anything else (bad JSON, too long, wrong types) gives no card and the whole
+ * text back unchanged. Never throws. */
+export function parseAsk(text: string): { body: string; ask: Ask | null } {
+  const blocks = [...text.matchAll(ASK_BLOCK)];
+  const found = blocks[blocks.length - 1];
+  const none = { body: text, ask: null };
+  if (!found || found[1].length > ASK_MAX_JSON) return none;
+  let data: unknown;
+  try {
+    data = JSON.parse(found[1]);
+  } catch {
+    return none;
+  }
+  if (!data || typeof data !== "object") return none;
+  const {
+    title,
+    questions = [],
+    actions = [],
+  } = data as Record<string, unknown>;
+  const heading = askText(title, false);
+  if (heading === null) return none;
+  if (!Array.isArray(questions) || !Array.isArray(actions)) return none;
+  if (questions.length > ASK_MAX_QUESTIONS) return none;
+  if (actions.length > ASK_MAX_ACTIONS) return none;
+  if (questions.length + actions.length < 1) return none;
+  const read = questions.map(readQuestion);
+  const buttons = actions.map(readAction);
+  if (read.some((one) => one === null)) return none;
+  if (buttons.some((one) => one === null)) return none;
+  const list = read as AskQuestion[];
+  const acts = buttons as AskAction[];
+  if (new Set(list.map((one) => one.id)).size !== list.length) return none;
+  if (new Set(acts.map((one) => one.id)).size !== acts.length) return none;
+  const start = found.index ?? 0;
+  const body = (
+    text.slice(0, start) + text.slice(start + found[0].length)
+  ).trim();
+  return { body, ask: { title: heading, questions: list, actions: acts } };
+}
+
+/** The answer a question starts with: its defaults. */
+export function initialAnswers(ask: Ask): AskAnswers {
+  const answers: AskAnswers = {};
+  for (const question of ask.questions)
+    answers[question.id] =
+      question.type === "text"
+        ? { picked: [], other: question.default[0] ?? "" }
+        : { picked: [...question.default], other: "" };
+  return answers;
+}
+
+/** The words of one answer: option labels, then the typed text. */
+export function answerLabels(
+  question: AskQuestion,
+  answer: AskAnswer | undefined,
+): string[] {
+  if (!answer) return [];
+  const labels = answer.picked.flatMap((value) => {
+    const option = question.options.find((one) => one.value === value);
+    return option ? [option.label] : [];
+  });
+  const typed = answer.other.trim();
+  if (typed) labels.push(typed);
+  return question.type === "choice" && typed ? [typed] : labels;
+}
+
+export const isAnswered = (
+  question: AskQuestion,
+  answer: AskAnswer | undefined,
+) => answerLabels(question, answer).length > 0;
+
+/** The reply turn: one plain `Label: answer` line per question. */
+export function askReplyText(ask: Ask, answers: AskAnswers): string {
+  return ask.questions
+    .filter((question) => isAnswered(question, answers[question.id]))
+    .map((question) => {
+      // A label that already ends a sentence ("When?") takes no extra colon.
+      const label = question.label.replace(/[\s:]+$/, "");
+      const colon = /[?!.…]$/.test(label) ? "" : ":";
+      return `${label}${colon} ${answerLabels(question, answers[question.id]).join(", ")}`;
+    })
+    .join("\n");
+}
+
+/** A builder message in readable form. The builder should reply in prose, but
+ * when a message is (or ends with) the run-result JSON (a `status` with a
+ * `title` and/or `summary`), show the title in bold and the summary as normal
+ * markdown instead of raw JSON. Any other text, including other JSON, comes
+ * back unchanged. Never throws. */
+export function readableTurn(text: string): string {
+  try {
+    const source = text.trim();
+    for (
+      let at = source.indexOf("{");
+      at >= 0;
+      at = source.indexOf("{", at + 1)
+    ) {
+      let data: unknown;
+      try {
+        data = JSON.parse(source.slice(at).replace(/\s*```\s*$/, ""));
+      } catch {
+        continue;
+      }
+      if (!data || typeof data !== "object" || Array.isArray(data)) return text;
+      const one = data as Record<string, unknown>;
+      const line = (key: string) =>
+        typeof one[key] === "string" ? (one[key] as string).trim() : "";
+      const title = line("title");
+      const summary = line("summary");
+      if (typeof one.status !== "string" || (!title && !summary)) return text;
+      const lead = source
+        .slice(0, at)
+        .replace(/```(?:json)?\s*$/, "")
+        .trim();
+      const extra = ["next", "needs", "needs_you", "missing_tool"]
+        .map(line)
+        .filter(Boolean);
+      return [lead, title && `**${title}**`, summary, ...extra]
+        .filter(Boolean)
+        .join("\n\n");
+    }
+  } catch {
+    // fall through to the unchanged text
+  }
+  return text;
+}

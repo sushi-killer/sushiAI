@@ -317,30 +317,38 @@ pub fn envelope(text: &str) -> Option<Envelope> {
 }
 
 /// Why a dry run that reports a failure or a need probably could not read what it wanted: a
-/// dry run only reads files, so a refused tool is not the repository's fault. The harness's
-/// own `permission_denials` decide; without them the words of the answer do.
+/// dry run uses only the tools the owner granted that are read-only, so a refused tool is
+/// not granted or not read-only, not the repository's fault. The harness's own
+/// `permission_denials` decide (all of them are named); without them the words of the
+/// answer do.
 pub fn dry_denial(envelope: Option<&Envelope>, result: &Value) -> Option<String> {
     if !matches!(result["status"].as_str(), Some("failed" | "needs_you")) {
         return None;
     }
-    let tool = match envelope.and_then(|e| e.denied.first()) {
-        Some(tool) => tool.clone(),
-        None => {
-            let said = format!(
-                "{} {}",
-                result["title"].as_str().unwrap_or_default(),
-                result["summary"].as_str().unwrap_or_default()
-            )
-            .to_lowercase();
-            let refused = ["permission", "not allowed", "denied", "not permitted"];
-            if !refused.iter().any(|w| said.contains(w)) {
-                return None;
-            }
-            "a tool".to_string()
+    let mut tools: Vec<&str> = Vec::new();
+    for t in envelope.into_iter().flat_map(|e| e.denied.iter()) {
+        if !tools.contains(&t.as_str()) {
+            tools.push(t);
         }
+    }
+    let tool = if tools.is_empty() {
+        let said = format!(
+            "{} {}",
+            result["title"].as_str().unwrap_or_default(),
+            result["summary"].as_str().unwrap_or_default()
+        )
+        .to_lowercase();
+        let refused = ["permission", "not allowed", "denied", "not permitted"];
+        if !refused.iter().any(|w| said.contains(w)) {
+            return None;
+        }
+        "a tool".to_string()
+    } else {
+        tools.join(", ")
     };
     Some(format!(
-        "a dry run only reads files: {tool} is not allowed in a dry run"
+        "a dry run uses only tools the owner granted that are read-only: {tool} \
+         was refused in a dry run (not granted, or not read-only)"
     ))
 }
 

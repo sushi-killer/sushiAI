@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::argv::{harness_argv, RunSpec};
-use crate::model::{routine_of_schedule, schedule_id, Routine};
+use crate::model::{routine_of_schedule, schedule_id, Routine, MULTI_PROJECT_PROPOSE};
 use crate::result;
 use crate::store::Store;
-use crate::validate::{same_host, validate, Catalog, HostInfo, Report};
+use crate::validate::{check_multi_project, same_host, validate, Catalog, HostInfo, Report};
 
 mod asks;
 
@@ -766,20 +766,45 @@ impl Routines {
         self.conn().schedule_set(set)
     }
 
-    /// A routine with a project works in its own git worktree, `worktree/`, never in the
+    /// A routine with one project works in its own git worktree, `worktree/`, never in the
     /// owner's checkout: a worktree of the project's folder on this host, or a clone of the
     /// remote when the host has no copy. It is created once and reset to the default
-    /// branch head between runs. A failed setup is removed and reported with the fix.
+    /// branch head between runs. A routine with several projects reads each project's folder
+    /// on this host in place; a project with no folder is cloned into `projects/<id>`. A
+    /// failed setup is removed and reported with the fix.
     fn prepare_workdir(&self, routine: &Routine, catalog: &Catalog) -> Result<(), String> {
         let store = &self.inner.store;
         let _ = std::fs::create_dir_all(store.work_dir(&routine.id));
-        let Some(project) = &routine.place.project else {
-            return Ok(());
-        };
-        let tree = store.worktree_dir(&routine.id);
+        let projects = &routine.place.projects;
+        for project in projects {
+            let many = projects.len() > 1;
+            let tree = if many {
+                let Some(info) = catalog.project(project) else {
+                    continue;
+                };
+                store.project_clone_dir(&routine.id, &info.id)
+            } else {
+                store.worktree_dir(&routine.id)
+            };
+            self.prepare_tree(routine, catalog, project, &tree, many)?;
+        }
+        Ok(())
+    }
+
+    /// One project's tree: a worktree of its folder (one-project routine), or a clone of its
+    /// remote when the host has no folder. With `read_in_place` a folder needs no tree.
+    fn prepare_tree(
+        &self,
+        routine: &Routine,
+        catalog: &Catalog,
+        project: &str,
+        tree: &Path,
+        read_in_place: bool,
+    ) -> Result<(), String> {
+        let store = &self.inner.store;
         if tree.join(".git").exists() {
             if !self.any_running(&routine.id) {
-                if let Err(e) = self.reset_worktree(routine, catalog) {
+                if let Err(e) = self.reset_tree(tree) {
                     store.log(&routine.id, self.now(), "worktree", &e);
                 }
             }
@@ -789,6 +814,9 @@ impl Routines {
             .folder(project, &routine.place.host)
             .filter(|f| Path::new(f).is_dir())
             .map(PathBuf::from);
+        if read_in_place && folder.is_some() {
+            return Ok(());
+        }
         let remote = catalog.project(project).and_then(|p| p.remote.clone());
         let (argv, cwd, what) = match (&folder, &remote) {
             (Some(folder), _) => (
@@ -803,25 +831,30 @@ impl Routines {
                 folder.clone(),
                 format!("Creating a worktree of {}", folder.display()),
             ),
-            (None, Some(remote)) => (
-                vec![
-                    "git".to_string(),
-                    "clone".into(),
-                    remote.clone(),
-                    tree.to_string_lossy().into_owned(),
-                ],
-                store.dir(&routine.id),
-                format!("Cloning {remote}"),
-            ),
+            (None, Some(remote)) => {
+                if let Some(parent) = tree.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                (
+                    vec![
+                        "git".to_string(),
+                        "clone".into(),
+                        remote.clone(),
+                        tree.to_string_lossy().into_owned(),
+                    ],
+                    store.dir(&routine.id),
+                    format!("Cloning {remote}"),
+                )
+            }
             (None, None) => return Ok(()),
         };
         match self.inner.cfg.git.run(&argv, &cwd) {
             Ok(_) => {
-                let _ = self.reset_worktree(routine, catalog);
+                let _ = self.reset_tree(tree);
                 Ok(())
             }
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&tree);
+                let _ = std::fs::remove_dir_all(tree);
                 let fix = format!(
                     "{what} on {} failed: {}. Fix: check that the project folder is a git \
                      repository, or the remote and the git login on that host.",
@@ -847,6 +880,69 @@ impl Routines {
         }
     }
 
+    /// The trees of the routine that hold a copy of a project: the worktree of a one-project
+    /// routine, the clones of a multi-project one.
+    fn trees(&self, routine: &Routine) -> Vec<PathBuf> {
+        let store = &self.inner.store;
+        match routine.place.projects.len() {
+            0 => Vec::new(),
+            1 => vec![store.worktree_dir(&routine.id)],
+            _ => routine
+                .place
+                .projects
+                .iter()
+                .map(|p| store.project_clone_dir(&routine.id, p))
+                .collect(),
+        }
+    }
+
+    /// The projects of a multi-project routine as the run sees them: id, name, purpose and a
+    /// folder on this host (the owner's checkout, else the routine's own clone). A project
+    /// with no copy here is left out. Empty for a routine with fewer than two projects.
+    fn multi_projects(
+        &self,
+        routine: &Routine,
+        catalog: &Catalog,
+    ) -> Vec<(String, String, String, Option<String>)> {
+        if routine.place.projects.len() < 2 {
+            return Vec::new();
+        }
+        let store = &self.inner.store;
+        routine
+            .place
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let info = catalog.project(p)?;
+                let clone = store.project_clone_dir(&routine.id, &info.id);
+                let folder = catalog
+                    .folder(p, &routine.place.host)
+                    .filter(|f| Path::new(f).is_dir())
+                    .map(String::from)
+                    .or_else(|| {
+                        clone
+                            .join(".git")
+                            .exists()
+                            .then(|| clone.to_string_lossy().into_owned())
+                    })?;
+                let name = if info.name.is_empty() {
+                    &info.id
+                } else {
+                    &info.name
+                };
+                Some((info.id.clone(), name.clone(), folder, info.purpose.clone()))
+            })
+            .collect()
+    }
+
+    /// The `RunSpec` folders of `multi_projects`.
+    fn read_dirs(&self, routine: &Routine, catalog: &Catalog) -> Vec<String> {
+        self.multi_projects(routine, catalog)
+            .into_iter()
+            .map(|(_, _, folder, _)| folder)
+            .collect()
+    }
+
     /// Whether a run of the routine is live (its worktree is in use).
     fn any_running(&self, id: &str) -> bool {
         let store = &self.inner.store;
@@ -857,13 +953,11 @@ impl Routines {
             .any(|n| store.run(id, n).is_some_and(|r| r["status"] == "running"))
     }
 
-    /// Puts the routine's worktree on the default branch head with no local changes.
-    fn reset_worktree(&self, routine: &Routine, catalog: &Catalog) -> Result<(), String> {
+    /// Puts a tree on the default branch head with no local changes.
+    fn reset_tree(&self, tree: &Path) -> Result<(), String> {
         let git = &self.inner.cfg.git;
-        let tree = self.inner.store.worktree_dir(&routine.id);
         // Refs are shared with the project's repository, so every name resolves from the
         // worktree itself: the owner's checkout is not consulted.
-        let _ = catalog;
         let _ = git.run(
             &[
                 "git".into(),
@@ -871,7 +965,7 @@ impl Routines {
                 "--quiet".into(),
                 "origin".into(),
             ],
-            &tree,
+            tree,
         );
         let resolve = |name: &str| {
             git.run(
@@ -882,7 +976,7 @@ impl Routines {
                     "--quiet".into(),
                     format!("{name}^{{commit}}"),
                 ],
-                &tree,
+                tree,
             )
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -899,9 +993,9 @@ impl Routines {
                 "--force".into(),
                 rev.trim().to_string(),
             ],
-            &tree,
+            tree,
         )?;
-        git.run(&["git".into(), "clean".into(), "-fdq".into()], &tree)?;
+        git.run(&["git".into(), "clean".into(), "-fdq".into()], tree)?;
         Ok(())
     }
 
@@ -912,7 +1006,7 @@ impl Routines {
         if routine.agent.harness == "codex" {
             return store.work_dir(&routine.id);
         }
-        if routine.place.project.is_some() && store.worktree_dir(&routine.id).is_dir() {
+        if routine.place.projects.len() == 1 && store.worktree_dir(&routine.id).is_dir() {
             return store.worktree_dir(&routine.id);
         }
         store.work_dir(&routine.id)
@@ -935,7 +1029,11 @@ impl Routines {
             store.schema_file(&routine.id),
             result::schema_for(&routine.agent.harness),
         );
+        check_multi_project(routine)?;
         let granted = routine.granted_tools();
+        let read_only = routine.granted_read_tools();
+        let projects = self.multi_projects(routine, catalog);
+        let read_dirs: Vec<String> = projects.iter().map(|p| p.2.clone()).collect();
         let extra = harness_argv(
             &routine.agent,
             &RunSpec {
@@ -944,11 +1042,13 @@ impl Routines {
                 last_message,
                 dry_run,
                 granted: &granted,
+                read_only: &read_only,
+                read_dirs: &read_dirs,
             },
         )?;
         let cwd = self.cwd(routine, catalog);
         // The project as the run sees it: the routine's own worktree, never the checkout.
-        let project_path = (routine.place.project.is_some()
+        let project_path = (routine.place.projects.len() == 1
             && store.worktree_dir(&routine.id).is_dir())
         .then(|| {
             store
@@ -957,7 +1057,14 @@ impl Routines {
                 .into_owned()
         });
         let promoted = store.promoted(&routine.id);
-        let mut prompt = wrap_brief(routine, brief, dry_run, project_path.as_deref(), &promoted);
+        let mut prompt = wrap_brief(
+            routine,
+            brief,
+            dry_run,
+            project_path.as_deref(),
+            &projects,
+            &promoted,
+        );
         let mut resume = None;
         if let Some((error, agent_session)) = retry {
             prompt = retry_prompt(error, &prompt, agent_session.is_some());
@@ -979,7 +1086,7 @@ impl Routines {
         if let Some(r) = resume {
             create["resume"] = json!(r);
         }
-        if let Some(p) = &routine.place.project {
+        if let [p] = routine.place.projects.as_slice() {
             if let Some(info) = catalog.project(p) {
                 create["project"] = json!(info.id);
             }
@@ -990,6 +1097,10 @@ impl Routines {
     /// The variables a run gets on top of the daemon's own.
     fn spawn_vars(&self, routine: &Routine, dry_run: bool) -> serde_json::Map<String, Value> {
         let mut vars = serde_json::Map::new();
+        vars.insert(
+            "SUSHIAI_ROUTINE_PROJECTS".into(),
+            json!(routine.place.projects.len().to_string()),
+        );
         vars.insert("SUSHIAI_ROUTINE_ID".into(), json!(routine.id));
         vars.insert(
             "SUSHIAI_ROUTINE_DIR".into(),
@@ -1008,6 +1119,8 @@ impl Routines {
     fn spawn_record(&self, routine: &Routine, n: u64, dry: bool) -> Value {
         let store = &self.inner.store;
         let granted = routine.granted_tools();
+        let read_only = routine.granted_read_tools();
+        let read_dirs = self.read_dirs(routine, &self.catalog(&json!({})));
         let schema = result::schema_compact(&routine.agent.harness);
         let extra = harness_argv(
             &routine.agent,
@@ -1017,6 +1130,8 @@ impl Routines {
                 last_message: &store.run_last_message(&routine.id, n, false),
                 dry_run: dry,
                 granted: &granted,
+                read_only: &read_only,
+                read_dirs: &read_dirs,
             },
         )
         .unwrap_or_default();
@@ -1756,9 +1871,12 @@ impl Routines {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&(routine.id.clone(), n));
         // The next run starts from a clean default branch, unless another run is live.
-        if routine.place.project.is_some() && !self.any_running(&routine.id) {
-            let catalog = self.catalog(&json!({}));
-            let _ = self.reset_worktree(routine, &catalog);
+        if !self.any_running(&routine.id) {
+            for tree in self.trees(routine) {
+                if tree.join(".git").exists() {
+                    let _ = self.reset_tree(&tree);
+                }
+            }
         }
         let title = result_value["title"].clone();
         let counted = !dry && !cancelled;
@@ -1841,6 +1959,9 @@ impl Routines {
             let mut entry = json!({"proposal": p, "applied": false});
             if settle == Settle::Discard {
                 entry["status"] = json!("discarded");
+            } else if routine.place.projects.len() > 1 {
+                entry["status"] = json!("failed");
+                entry["detail"] = json!(MULTI_PROJECT_PROPOSE);
             } else if settle == Settle::Record || p["dryRun"] == true {
                 entry["status"] = json!("would_do");
             } else if !proposal_is_free(routine, &promoted, p["kind"].as_str().unwrap_or_default())
@@ -2049,7 +2170,7 @@ impl Routines {
     /// owner's checkout is never used. `None` when the routine has none.
     fn repo_dir(&self, routine: &Routine, _catalog: &Catalog) -> Option<PathBuf> {
         let tree = self.inner.store.worktree_dir(&routine.id);
-        (routine.place.project.is_some() && tree.join(".git").exists()).then_some(tree)
+        (routine.place.projects.len() == 1 && tree.join(".git").exists()).then_some(tree)
     }
 
     /// Applies one proposal without touching the owner's checkout: the files are copied from
@@ -2357,6 +2478,7 @@ fn wrap_brief(
     brief: &str,
     dry_run: bool,
     project_path: Option<&str>,
+    projects: &[(String, String, String, Option<String>)],
     promoted: &[String],
 ) -> String {
     let mut p = String::new();
@@ -2370,6 +2492,17 @@ fn wrap_brief(
     );
     if let Some(path) = project_path {
         p.push_str(&format!("The project folder on this host is {path}.\n"));
+    }
+    if !projects.is_empty() {
+        p.push_str(
+            "This routine watches several projects. You may read their folders on this host \
+             and must not change them; `sushiai propose` is refused. The projects, as data \
+             (id, name, folder, purpose):\n",
+        );
+        for (id, name, folder, purpose) in projects {
+            let purpose = purpose.as_deref().map(|t| clip(t, 200)).unwrap_or_default();
+            p.push_str(&format!("- {id} | {name} | {folder} | {purpose}\n"));
+        }
     }
     const ASK: &str = "`sushiai ask \"<what you will do>\" --kind <kind> --option yes \
                        --option no` (kind: the sort of write, one lowercase word such as pr, \

@@ -50,7 +50,7 @@ fn tools() -> Value {
         ),
         tool(
             "routines_validate",
-            "Check a routine folder (routine.json + brief.md); returns every error and warning.",
+            "Check a routine folder (routine.json + brief.md); returns every error and warning. where.projects lists zero to 20 project ids; two or more make the routine read-only and Claude-only.",
             json!({"dir": string("absolute path of the routine folder")}),
             json!(["dir"]),
         ),
@@ -63,7 +63,7 @@ fn tools() -> Value {
         ),
         tool(
             "routines_dry_run",
-            "One run of a saved routine that writes nothing; returns its result. It can take minutes.",
+            "One run of a saved routine that writes nothing; returns its result. It uses only access the owner granted and that is read-only. It can take minutes.",
             json!({"id": string("the routine id"),
                    "wait": {"type": "boolean", "description": "wait for the result (default true)"}}),
             json!(["id"]),

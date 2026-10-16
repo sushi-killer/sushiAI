@@ -179,6 +179,9 @@ type PanelState = {
   /** A session that is gone from its host: the slot stays in the layout
    * with a Reopen button until the user reopens or closes it. */
   ended?: boolean;
+  /** The state of the panel's host while it is not ready (failed, offline,
+   * connecting); absent when the host is ready. */
+  hostState?: ConnectorState["state"];
   /** The daemon session this panel is bound to. */
   sessionId?: string;
   /** The agent CLI's own session id, kept so Reopen can resume it. */

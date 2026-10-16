@@ -7,7 +7,7 @@ runs on a schedule, in the background, on a host the owner picks.
 
 A routine is a folder on its host, `~/.sushiai/routines/<id>/`:
 
-- `routine.json`: where it runs (host and project), when (cron and time
+- `routine.json`: where it runs (host and zero to 20 projects), when (cron and time
   zone), which agent, how it runs, and limits.
 - `brief.md`: what each run does. It is the only source of instructions for
   the run.
@@ -25,14 +25,20 @@ A routine is a folder on its host, `~/.sushiai/routines/<id>/`:
    turn works in the build's own folder, and your next message resumes the same
    conversation. A turn cannot wait for an answer, so the builder ends it with
    its question and never uses `sushiai ask`. The Codex builder runs with the
-   `workspace-write` sandbox and no network access.
+   `workspace-write` sandbox, no network access and no `/tmp` or `$TMPDIR`
+   write access: it writes only its own folder. It ignores the MCP servers of
+   your Codex config; the sushiai MCP server is the only one it gets. The
+   sandbox cannot reach the daemon socket, so a Codex builder always uses
+   `mcp` access.
+   The Claude builder may run only `sushiai routines help|show`, `projects`,
+   `hosts`, `routine validate|save|dry-run`, and read and edit inside its folder.
 3. The builder checks the routine, saves it as a draft (not enabled) and runs
    a dry run. It shows what the routine would do.
 4. You read the dry run, grant the access it proposes and turn the routine on.
 
 In Settings, Routines you choose what the builder sees (projects, connections)
 and how it reaches sushiai: the commands (`cli`), the MCP server (`mcp`) or
-`both`. With `mcp` or `both` the builder session gets the server
+`both` (Codex: `mcp` only). With `mcp` or `both` the builder session gets the server
 `sushiai mcp --routines`: `routines_projects`, `routines_hosts`,
 `routines_list`, `routines_show`, `routines_validate`, `routines_save` and
 `routines_dry_run`, with the same checks and host rules as the commands.
@@ -44,8 +50,12 @@ outside the routine folder.
 ## Dry run
 
 A dry run is one run that writes nothing. Git changes and outside writes are
-listed as actions with `applied` false, and `sushiai ask` is skipped. Use it
-to check a brief before the first real run.
+listed as actions with `applied` false, and `sushiai ask` is skipped. A dry run
+uses only tools you granted and that are read-only (access `kind` `read`), so a
+routine that reads a chat or a tracker through connector tools can be dry-run
+after you grant those reads. Write tools and tools you did not grant stay
+unavailable; the result names the ones the run needed. Use it to check a brief
+before the first real run.
 
 ## How it runs
 
@@ -58,7 +68,15 @@ to check a brief before the first real run.
   the default branch head before each run. Your checkout is never touched.
   Scheduled and retry Claude runs use `--permission-mode dontAsk`: a tool the
   routine did not allow is refused, whatever your default mode is.
-- A dry run may read files, run `git status`, and call `sushiai ask` and
+- A routine with two or more projects (at most 20, Claude only) works in its
+  own `work/` folder and gets read access to each project's folder on the host
+  (`--add-dir`); a project with no folder there is cloned into
+  `projects/<id>` and reset before each run. It is read-only for now:
+  `sushiai propose` is refused. Validate refuses Codex with two or more
+  projects, because Codex has no extra readable folders to give it. An old
+  `where.project` string loads as a one-item `projects` list.
+- A dry run may read files, run `git status`, use the granted read-only
+  access entries, and call `sushiai ask` and
   `sushiai propose pr`, `commit` and `branch`. It reads history through the worktree's files only;
   `git log`, `diff` and `show` are not allowed because they can write a file.
 - Git writes go through `sushiai propose pr`, `sushiai propose commit` and
@@ -100,8 +118,8 @@ the granted tools, plus the read tools and `sushiai ask` and `sushiai propose`.
   granted tools only and ends `needs_you` ("needs access to ..."); that is not a
   failure and the routine stays on.
 - Claude gets the granted tools as its `--allowedTools`. Codex gets the same
-  list in its prompt and keeps its sandbox. A dry run never uses a grant and
-  never makes one. Codex runs and dry runs start with `mcp_servers={}`, so the
+  list in its prompt and keeps its sandbox. A dry run uses only granted
+  `read` entries and never makes a grant. Codex runs and dry runs start with `mcp_servers={}`, so the
   owner's MCP servers are not reachable.
 - A routine's `extraArgs` `--allowedTools` is ignored; use `access`.
 

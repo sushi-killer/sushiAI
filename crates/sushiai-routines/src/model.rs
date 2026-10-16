@@ -32,6 +32,15 @@ impl Routine {
             .collect()
     }
 
+    /// The granted tools whose kind is `read`: all a dry run may use besides its own commands.
+    pub fn granted_read_tools(&self) -> Vec<String> {
+        self.access
+            .iter()
+            .filter(|a| a.granted && a.kind == "read")
+            .map(|a| a.tool.clone())
+            .collect()
+    }
+
     /// The access entries still waiting for the owner.
     pub fn ungranted(&self) -> Vec<&Access> {
         self.access.iter().filter(|a| !a.granted).collect()
@@ -53,11 +62,46 @@ pub struct Access {
     pub granted: bool,
 }
 
+/// Why `sushiai propose` is refused in a routine with two or more projects.
+pub const MULTI_PROJECT_PROPOSE: &str = "this routine has more than one project, so it is \
+    read-only: `sushiai propose` is refused. Describe the change in the result instead";
+
+/// Most projects one routine may watch.
+pub const MAX_PROJECTS: usize = 20;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "WhereFile")]
 pub struct Where {
     pub host: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
+    /// Zero, one or many project ids. One project means a git worktree of it; two or more
+    /// mean a read-only routine that works in its own `work/` folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+}
+
+/// What `where` may look like on disk: the old files carry one `project` string.
+#[derive(Deserialize)]
+struct WhereFile {
+    host: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    projects: Vec<String>,
+}
+
+impl From<WhereFile> for Where {
+    fn from(w: WhereFile) -> Where {
+        let mut projects = w.projects;
+        if let Some(p) = w.project {
+            if !projects.contains(&p) {
+                projects.insert(0, p);
+            }
+        }
+        Where {
+            host: w.host,
+            projects,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

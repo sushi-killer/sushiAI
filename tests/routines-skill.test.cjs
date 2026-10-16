@@ -145,3 +145,11 @@ test("the skill names the same modes and MCP tools as the code", () => {
   assert.doesNotMatch(mcp, /"routines_(ask|propose)/);
   assert.match(text, /## Access/);
 });
+
+test("the skill says a project is optional", () => {
+  const text = fs.readFileSync(SKILL, "utf8");
+  assert.match(text, /optional\s+`?projects/);
+  assert.match(text, /NO\s+project: omit `where\.projects`/);
+  assert.match(text, /zero to 20/);
+  assert.doesNotMatch(text, /where\.project\b(?!s)/);
+});

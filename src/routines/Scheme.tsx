@@ -25,6 +25,12 @@ import {
   withAgent,
   withRunMode,
 } from "./model.ts";
+import {
+  describeWhere,
+  projectsForHost,
+  toggleProject,
+  whereProblem,
+} from "./where.ts";
 import type { Harness, Routine, RoutinesCatalog } from "./types.ts";
 
 export const sessionHostOf = (host: string) =>
@@ -57,42 +63,23 @@ export function Scheme({
   const hosts = (catalog?.hosts ?? []).filter(
     (item) => item.state === "ready" || item.id === host,
   );
-  const projects = (catalog?.projects ?? []).filter(
-    (project) =>
-      project.id === routine.where.project ||
-      project.name === routine.where.project ||
-      project.folders.some((folder) => folder.host === host) ||
-      project.remote,
-  );
-  const project =
-    projects.find(
-      (item) =>
-        item.id === routine.where.project ||
-        item.name === routine.where.project,
-    )?.name ??
-    routine.where.project ??
-    "";
+  const selected = routine.where.projects ?? [];
+  const projects = projectsForHost(catalog, host, selected);
+  const isSelected = (id: string, name: string) =>
+    selected.includes(id) || selected.includes(name);
   const hostName = hostOf(catalog, host)?.name ?? host;
-  const hostChoices = hosts.flatMap((item) => {
-    const installed = (Object.keys(item.harnesses) as Harness[])
-      .filter((id) => item.harnesses[id].installed)
-      .map((id) => HARNESSES.find((entry) => entry.id === id)?.label ?? id);
-    const note = [
+  const hostChoices = hosts.map((item) => ({
+    host: item,
+    note: [
       item.id === "local" ? "Runs only while the Mac is awake" : "Always on",
-      installed.join(", "),
+      (Object.keys(item.harnesses) as Harness[])
+        .filter((id) => item.harnesses[id].installed)
+        .map((id) => HARNESSES.find((entry) => entry.id === id)?.label ?? id)
+        .join(", "),
     ]
       .filter(Boolean)
-      .join(" · ");
-    const own = projects.filter((entry) =>
-      entry.folders.some((folder) => folder.host === item.id),
-    );
-    return (own.length ? own : [{ id: "", name: "" }]).map((entry) => ({
-      host: item,
-      project: entry.name,
-      projectId: entry.id,
-      note,
-    }));
-  });
+      .join(" · "),
+  }));
   const harness = routine.agent.harness;
   const harnessLabel =
     HARNESSES.find((item) => item.id === harness)?.label ?? harness;
@@ -103,6 +90,7 @@ export function Scheme({
     "default";
   const effort = routine.agent.effort ?? "medium";
   const problem = harnessProblem(catalog, host, harness);
+  const whereIssue = whereProblem(harness, selected);
   const rows = briefRows(brief);
   const mode = runModeOf(routine);
   const agent = (patch: Parameters<typeof withAgent>[1]) =>
@@ -115,44 +103,62 @@ export function Scheme({
           <KeyValueRow label="When">
             {describeWhen(routine.when.cron, routine.when.tz)}
           </KeyValueRow>
-          <KeyValueRow label="Where">
+          <KeyValueRow label="Where" note={whereIssue || undefined}>
             <Popover
               label="Where"
-              text={project ? `${hostName} · ${project}` : hostName}
+              text={describeWhere(routine.where, catalog, hostName)}
               disabled={busy}
             >
               {(close) => (
                 <div className="ui-menu">
-                  {hostChoices.map((choice) => {
-                    const on =
-                      choice.host.id === host && choice.project === project;
-                    return (
-                      <MenuItem
-                        key={`${choice.host.id}:${choice.project}`}
-                        title={
-                          choice.project
-                            ? `${choice.host.name} · ${choice.project}`
-                            : choice.host.name
-                        }
-                        detail={choice.note}
-                        on={on}
-                        onClick={() => {
-                          close();
-                          if (choice.host.id !== host) onMove(choice.host.id);
-                          else if (choice.project !== project)
+                  <MenuHead>Host</MenuHead>
+                  {hostChoices.map((choice) => (
+                    <MenuItem
+                      key={choice.host.id}
+                      title={choice.host.name}
+                      detail={choice.note}
+                      on={choice.host.id === host}
+                      onClick={() => {
+                        close();
+                        if (choice.host.id !== host) onMove(choice.host.id);
+                      }}
+                    />
+                  ))}
+                  {projects.length > 0 && (
+                    <>
+                      <hr className="ui-menu-sep" />
+                      <MenuHead>Projects (optional)</MenuHead>
+                      {projects.map((entry) => (
+                        <MenuItem
+                          key={entry.id}
+                          title={entry.name}
+                          detail={
+                            entry.folders.some((folder) => folder.host === host)
+                              ? undefined
+                              : "Not on this host yet, it is cloned"
+                          }
+                          on={isSelected(entry.id, entry.name)}
+                          onClick={() =>
                             onChange({
                               ...routine,
                               where: {
                                 host: routine.where.host,
-                                ...(choice.projectId
-                                  ? { project: choice.projectId }
-                                  : {}),
+                                projects: toggleProject(
+                                  selected,
+                                  catalog,
+                                  entry.id,
+                                ),
                               },
-                            });
-                        }}
-                      />
-                    );
-                  })}
+                            })
+                          }
+                        />
+                      ))}
+                      <p className="ui-menu-note">
+                        {whereIssue ||
+                          "None: runs in the work folder. One: its own worktree. Several: read only."}
+                      </p>
+                    </>
+                  )}
                   <hr className="ui-menu-sep" />
                   <MenuItem
                     title="Add a host…"

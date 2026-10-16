@@ -439,3 +439,28 @@ test("an exited terminal takes what the host still records, else keeps its own c
     ["claude", "old", "/x"],
   );
 });
+
+test("a host that leaves ready shows its state on its panels, and ready clears it", async () => {
+  const { reconcileSessions } = await library;
+  const before = [workspace([panel("p1", "s1"), panel("p2", null)])];
+  const down = reconcileSessions(before, {
+    local: {
+      ready: false,
+      listed: false,
+      state: "failed",
+      sessions: { s1: session("s1", { status: "detached" }) },
+    },
+  });
+  assert.equal(down[0].panels[0].hostState, "failed");
+  assert.equal(down[0].panels[0].ended, undefined, "nothing ends");
+  assert.equal(down[0].panels[1].hostState, undefined, "no session, no state");
+  // The same state again changes nothing.
+  assert.equal(
+    reconcileSessions(down, {
+      local: { ready: false, listed: false, state: "failed", sessions: {} },
+    }),
+    down,
+  );
+  const up = reconcileSessions(down, { local: ready([session("s1")]) });
+  assert.equal(up[0].panels[0].hostState, undefined);
+});

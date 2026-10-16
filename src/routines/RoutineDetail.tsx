@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { CoreViewProps } from "../extensions/coreViews.ts";
 import { Card, Dot, Eyebrow, MetaLine, Notice, Toggle } from "../ui/index.ts";
-import { AccessSheet } from "./AccessSheet.tsx";
 import { routinesClient } from "./client.ts";
 import {
   describeWhen,
@@ -12,11 +11,11 @@ import {
   savePayload,
   STATUS_LABELS,
   statusTone,
-  ungrantedAccess,
 } from "./model.ts";
 import { LoginButton } from "./LoginButton.tsx";
 import { RunView } from "./RunView.tsx";
 import { Scheme } from "./Scheme.tsx";
+import { useAccessGrant } from "./useAccessGrant.tsx";
 import type {
   Routine,
   RoutineDetail as Detail,
@@ -51,7 +50,6 @@ export function RoutineDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [openRun, setOpenRun] = useState<number | null>(null);
-  const [sheet, setSheet] = useState(false);
   const last = entry.lastRun;
   const revision = `${last?.n ?? 0}:${last?.status ?? ""}:${entry.routine.enabled}`;
 
@@ -81,13 +79,14 @@ export function RoutineDetail({
   }
 
   const routine: Routine = detail?.routine ?? entry.routine;
-  const waiting = useMemo(
-    () => ungrantedAccess(routine, detail?.access ?? entry.access),
-    [routine, detail?.access, entry.access],
-  );
-  // The sheet opens by itself once for each list of tools that waits.
-  const waitingKey = waiting.map((item) => item.tool).join("\n");
-  useEffect(() => setSheet(waitingKey !== ""), [id, waitingKey]);
+  const { notice, sheet } = useAccessGrant({
+    host,
+    id,
+    routine,
+    fallback: detail?.access ?? entry.access,
+    busy,
+    act,
+  });
 
   const state = routineState({ ...entry, routine });
   const runs: RunSummary[] = detail?.runs ?? [];
@@ -152,21 +151,7 @@ export function RoutineDetail({
               {error}
             </p>
           )}
-          {waiting.length > 0 && (
-            <Notice
-              title={`Needs access to ${waiting.map((item) => item.label).join(", ")}`}
-              detail="Granted to this routine only."
-              action={
-                <button
-                  type="button"
-                  className="ui-button ghost"
-                  onClick={() => setSheet(true)}
-                >
-                  Review access
-                </button>
-              }
-            />
-          )}
+          {notice}
           {needsNotice && (
             <Notice
               tone={state === "needs_you" ? "warning" : "danger"}
@@ -281,24 +266,7 @@ export function RoutineDetail({
           </div>
         </>
       )}
-      {sheet && waiting.length > 0 && (
-        <AccessSheet
-          name={routine.name}
-          items={waiting}
-          busy={busy}
-          onCancel={() => setSheet(false)}
-          onAllow={() =>
-            void act(async () => {
-              await routinesClient.grant(
-                host,
-                id,
-                waiting.map((item) => item.tool),
-              );
-              setSheet(false);
-            })
-          }
-        />
-      )}
+      {sheet}
     </Card>
   );
 }

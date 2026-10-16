@@ -45,6 +45,22 @@ test("screenObjects rejoins wrapped rows and skips noise", () => {
   assert.deepEqual(screenObjects('{"type":"half'), []);
 });
 
+test("screenObjects accepts an object whose first key is not type, even wrapped at a nested start", () => {
+  const object = {
+    cost: 1,
+    nested: [{ k: "v" }],
+    type: "result",
+    result: "ok",
+  };
+  const raw = JSON.stringify(object);
+  assert.deepEqual(screenObjects(raw), [object]);
+  // The terminal breaks the line just before a nested `{"`.
+  const cut = raw.indexOf('{"k"');
+  assert.deepEqual(screenObjects(`${raw.slice(0, cut)}\r\n${raw.slice(cut)}`), [
+    object,
+  ]);
+});
+
 test("Claude parseTurn reads the result object, wrapped or not", () => {
   const claude = harnessFor("claude");
   const answer = JSON.stringify({
@@ -135,10 +151,53 @@ test("mcp flags and headless args follow each harness shape", () => {
     "-c",
     'mcp_servers.srv.args=["a"]',
   ]);
-  assert.deepEqual(codex.headlessTurnArgs({ effort: "high" }), [
+  const bare = codex.headlessTurnArgs({ effort: "high" });
+  assert.deepEqual(bare, [
+    "--ignore-user-config",
     "-c",
     'sandbox_mode="workspace-write"',
     "-c",
+    "sandbox_workspace_write.network_access=false",
+    "-c",
+    "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c",
+    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+    "-c",
     "model_reasoning_effort=high",
+    "-c",
+    "mcp_servers={}",
   ]);
+  // The owner's own MCP servers are cleared before the sushiai one is added.
+  const withMcp = codex.headlessTurnArgs({ effort: "high", mcp: server });
+  assert.ok(
+    withMcp.indexOf("mcp_servers={}") <
+      withMcp.indexOf('mcp_servers.srv.command="cmd"'),
+  );
+  assert.deepEqual(withMcp.slice(-6, -2), codex.mcpArgs(server));
+  assert.deepEqual(withMcp.slice(-2), [
+    "-c",
+    'mcp_servers.srv.tools.t1.approval_mode="approve"',
+  ]);
+});
+
+test("the claude builder allowlist holds only the build commands", () => {
+  const args = harnessFor("claude").headlessTurnArgs({ effort: "low" });
+  const tools = args[args.indexOf("--allowedTools") + 1].split(" ");
+  const bash = [];
+  // Entries are space separated, so re-read the Bash ones whole.
+  const joined = args[args.indexOf("--allowedTools") + 1];
+  for (const m of joined.matchAll(/Bash\(([^)]*)\)/g)) bash.push(m[1]);
+  assert.deepEqual(bash.sort(), [
+    "sushiai hosts:*",
+    "sushiai projects:*",
+    "sushiai routine dry-run:*",
+    "sushiai routine save:*",
+    "sushiai routine validate:*",
+    "sushiai routines",
+    "sushiai routines --json:*",
+    "sushiai routines help:*",
+    "sushiai routines show:*",
+  ]);
+  assert.ok(tools.includes("Edit(./**)"));
+  assert.doesNotMatch(joined, /propose|sushiai:\*|register|grant|approve/);
 });

@@ -874,7 +874,18 @@ async fn create_new(
         }
     };
     // Announced inside `start`, before the actor can broadcast anything about the session.
-    session::start(registry.clone(), info, conn, screen, seq, sock, true);
+    session::start(
+        registry.clone(),
+        info,
+        conn,
+        screen,
+        seq,
+        sock,
+        session::Spawn {
+            created: true,
+            hold_exit: p.headless,
+        },
+    );
     // The answer promises a session that outlives a daemon crash: its state is on disk first.
     let flushing = registry.clone();
     let _ = tokio::task::spawn_blocking(move || flushing.flush()).await;
@@ -961,7 +972,7 @@ mod tests {
             Screen::new(24, 80),
             0,
             sock,
-            false,
+            Default::default(),
         );
 
         let (out, _queue) = mpsc::channel(8);
@@ -987,5 +998,82 @@ mod tests {
         );
         conn.start_stream();
         assert_eq!(conn.streams.len(), 1);
+    }
+
+    /// Starts a session on a fake holder, then makes the holder report an exit.
+    async fn exited_session(id: &str, hold_exit: bool) -> (Arc<Registry>, tempfile::TempDir) {
+        use std::io::Write as _;
+        let dir = tempfile::Builder::new()
+            .prefix("sx")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let registry = Arc::new(Registry::new(Home::new(dir.path().to_path_buf())));
+        let sock = dir.path().join("h.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let holder = HolderConn::connect(&sock).await.expect("connect");
+        let (mut peer, _) = listener.accept().expect("accept");
+        let info = SessionInfo {
+            id: id.into(),
+            cmd: vec![],
+            cwd: String::new(),
+            title: None,
+            status: SessionStatus::Running,
+            exit_code: None,
+            holder_pid: None,
+            cols: 80,
+            rows: 24,
+            project: None,
+            group: None,
+            background: true,
+            agent: Default::default(),
+        };
+        let mut screen = Screen::new(24, 80);
+        screen.feed(b"final answer");
+        session::start(
+            registry.clone(),
+            info,
+            holder,
+            screen,
+            0,
+            sock,
+            session::Spawn {
+                created: false,
+                hold_exit,
+            },
+        );
+        let exit = Notification::new(
+            method::HOLD_EXITED,
+            sushiai_protocol::HoldExited { code: Some(0) },
+        );
+        peer.write_all(&sushiai_protocol::encode(&exit.frame()))
+            .expect("send exit");
+        for _ in 0..100 {
+            if registry
+                .list()
+                .iter()
+                .any(|s| s.status == SessionStatus::Exited)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The actor looks at the exit once; give it a beat to end or to stay.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        (registry, dir)
+    }
+
+    #[tokio::test]
+    async fn a_headless_session_stays_readable_after_it_exits() {
+        let (registry, _dir) = exited_session("h1", true).await;
+        let handle = registry.handle("h1").expect("actor kept after the exit");
+        let text = handle.read(0).await.expect("final screen");
+        assert!(text.text.contains("final answer"), "{}", text.text);
+    }
+
+    #[tokio::test]
+    async fn an_exited_session_without_the_hold_is_dropped() {
+        let (registry, _dir) = exited_session("h2", false).await;
+        assert!(registry.handle("h2").is_none());
+        assert!(registry.known("h2"));
     }
 }

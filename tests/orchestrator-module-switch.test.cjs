@@ -206,3 +206,14 @@ test("a toggle never fails because the module could not be switched", async () =
     "orchestrator disable on local: no binary",
   ]);
 });
+
+test("enabling a module on a local daemon of another sushiAI build does not restart it", async () => {
+  const w = world();
+  w.manager.setState("local", { capabilities: [] });
+  w.manager.hello = () => ({ host: "local", capabilities: [], foreign: true });
+  await assert.rejects(
+    w.moduleSwitch.enable("local"),
+    /another sushiAI build owns the daemon; use Restart daemon/,
+  );
+  assert.deepEqual(w.log, []);
+});

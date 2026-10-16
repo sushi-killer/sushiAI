@@ -81,7 +81,9 @@ export function RoutinesSettings() {
   }
 
   const sees = settings.sees ?? { projects: true, connections: true };
-  const access = settings.access ?? "cli";
+  // Codex's sandbox cannot reach the daemon socket, so its builder uses MCP only.
+  const codex = settings.harness === "codex";
+  const access = codex ? "mcp" : (settings.access ?? "cli");
   const models = modelsFor(catalog, settings.host, settings.harness);
   const problem = harnessProblem(catalog, settings.host, settings.harness);
   const hosts = (catalog?.hosts ?? []).filter(
@@ -210,16 +212,24 @@ export function RoutinesSettings() {
         </SettingRow>
         <SettingRow
           title="Access through"
-          detail="The sushiai CLI works with any harness. MCP gives the same tools to agents that prefer it."
+          detail={
+            codex
+              ? "Codex runs in a sandbox that cannot reach the daemon, so it uses the sushiai MCP server."
+              : "The sushiai CLI works with any harness. MCP gives the same tools to agents that prefer it."
+          }
         >
           <Segmented
             label="Access through"
             value={access}
-            options={[
-              { id: "cli", label: "CLI" },
-              { id: "mcp", label: "MCP" },
-              { id: "both", label: "Both" },
-            ]}
+            options={
+              codex
+                ? [{ id: "mcp", label: "MCP" }]
+                : [
+                    { id: "cli", label: "CLI" },
+                    { id: "mcp", label: "MCP" },
+                    { id: "both", label: "Both" },
+                  ]
+            }
             onChange={(next) => void change({ access: next })}
           />
         </SettingRow>

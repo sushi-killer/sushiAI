@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::argv::{check_access_tool, check_extra_args, harness_argv, RunSpec};
-use crate::model::{valid_id, Routine};
+use crate::model::{valid_id, Routine, MAX_PROJECTS};
 use crate::{cron, store::Store};
 
 /// What the caller knows about hosts and projects. The desktop sends the full picture; a
@@ -167,6 +167,19 @@ impl Report {
 pub const MODES: &[&str] = &["ask-every-time", "ask-first", "on-its-own"];
 const MAX_ACCESS: usize = 40;
 
+/// A routine with two or more projects is read-only and Claude-only: Codex's sandbox has no
+/// extra readable folders to give it.
+pub fn check_multi_project(routine: &Routine) -> Result<(), String> {
+    if routine.place.projects.len() > 1 && routine.agent.harness == "codex" {
+        return Err(
+            "more than one project needs the claude harness: Codex cannot be given read access \
+             to several project folders"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Validates `routine` and `brief`. `routine_dir` is the folder the routine lives (or will
 /// live) in; `--add-dir` may point only inside its `work/` folder.
 pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: &Path) -> Report {
@@ -197,16 +210,34 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
             format!("host {} is not known", routine.place.host),
         );
     }
-    if let Some(project) = &routine.place.project {
+    let projects = &routine.place.projects;
+    if projects.len() > MAX_PROJECTS {
+        err(
+            "where.projects",
+            format!("a routine works on at most {MAX_PROJECTS} projects"),
+        );
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for project in projects {
         match catalog.project(project) {
-            None => err("where.project", format!("project {project} does not exist")),
+            None => err(
+                "where.projects",
+                format!("project {project} does not exist"),
+            ),
             Some(p) => {
+                if seen.contains(&p.id.as_str()) {
+                    err(
+                        "where.projects",
+                        format!("project {project} is listed twice"),
+                    );
+                }
+                seen.push(&p.id);
                 if !p.folders.is_empty()
                     && catalog.folder(project, &routine.place.host).is_none()
                     && p.remote.is_none()
                 {
                     err(
-                        "where.project",
+                        "where.projects",
                         format!(
                             "project {project} has no folder on {} and no remote to clone",
                             routine.place.host
@@ -215,6 +246,9 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
                 }
             }
         }
+    }
+    if let Err(m) = check_multi_project(routine) {
+        err("where.projects", m);
     }
     if let Err(m) = cron::check(&routine.when.cron) {
         err("when.cron", m);
@@ -235,6 +269,8 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
             last_message: Path::new("last.json"),
             dry_run: false,
             granted: &[],
+            read_only: &[],
+            read_dirs: &[],
         };
         if let Err(m) = harness_argv(&routine.agent, &probe) {
             err("agent.effort", m);

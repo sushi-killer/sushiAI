@@ -19,27 +19,53 @@ fn read_lines(data_dir: &Path) -> Vec<Entry> {
         .collect()
 }
 
-/// Appends `entry`, trims to the last `MAX_LINES` and rewrites the file atomically.
+/// Appends `entry` as one line. The file is rewritten only when it passes twice
+/// `MAX_LINES`, down to the last `MAX_LINES`, so an append costs one write.
 pub fn append(data_dir: &Path, entry: &Entry) -> std::io::Result<()> {
     let _guard = APPEND.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = read_lines(data_dir);
-    entries.push(entry.clone());
-    write_entries(data_dir, &entries)
+    append_line(data_dir, entry)
 }
 
 /// Appends a task's terminal entry once, even if loop finalization is retried.
 pub fn append_task_once(data_dir: &Path, entry: &Entry) -> std::io::Result<bool> {
     let _guard = APPEND.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = read_lines(data_dir);
-    if entries
+    if read_lines(data_dir)
         .iter()
         .any(|existing| existing.kind == entry.kind && existing.task_id == entry.task_id)
     {
         return Ok(false);
     }
-    entries.push(entry.clone());
-    write_entries(data_dir, &entries)?;
+    append_line(data_dir, entry)?;
     Ok(true)
+}
+
+/// Lines in each log file as this process last counted them. Another writer
+/// only delays a trim; the trim itself reads the file again.
+static LINES: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
+
+fn append_line(data_dir: &Path, entry: &Entry) -> std::io::Result<()> {
+    let file = path(data_dir);
+    let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+    line.push('\n');
+    let mut counts = LINES.lock().unwrap_or_else(|e| e.into_inner());
+    let at = match counts.iter().position(|(p, _)| *p == file) {
+        Some(at) => at,
+        None => {
+            let lines = std::fs::read(&file)
+                .map(|bytes| bytes.iter().filter(|b| **b == b'\n').count())
+                .unwrap_or(0);
+            counts.push((file.clone(), lines));
+            counts.len() - 1
+        }
+    };
+    store::files::append_text_private(&file, &line)?;
+    counts[at].1 += 1;
+    if counts[at].1 > 2 * MAX_LINES {
+        let entries = read_lines(data_dir);
+        write_entries(data_dir, &entries)?;
+        counts[at].1 = entries.len().min(MAX_LINES);
+    }
+    Ok(())
 }
 
 fn write_entries(data_dir: &Path, entries: &[Entry]) -> std::io::Result<()> {

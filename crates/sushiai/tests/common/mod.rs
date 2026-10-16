@@ -77,8 +77,15 @@ pub fn shutdown_home(home: &Path) {
     } else {
         None
     };
+    // A recovery daemon that exits (a home it refuses, such as a newer state
+    // schema) never opens the socket: stop waiting for it then.
     let deadline = Instant::now() + self::deadline();
     while UnixStream::connect(home.join("daemon.sock")).is_err() && Instant::now() < deadline {
+        if let Some(child) = recovery.as_mut() {
+            if !matches!(child.try_wait(), Ok(None)) {
+                return;
+            }
+        }
         sleep(Duration::from_millis(25));
     }
     let _ = Command::new(BIN)

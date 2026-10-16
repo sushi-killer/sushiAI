@@ -29,6 +29,9 @@ pub struct Sources<'a> {
     pub shared_used: BTreeSet<PathBuf>,
     pub raw: BTreeMap<PathBuf, Vec<u8>>,
     pub entries: BTreeSet<PathBuf>,
+    /// rustfmt output for the tree's own files, produced in parallel up front:
+    /// one rustfmt process per file in a row took most of the test's time.
+    prefetched: BTreeMap<PathBuf, Result<String, String>>,
 }
 
 pub fn relative(root: &Path, path: &Path) -> String {
@@ -111,6 +114,29 @@ fn formatted(path: &Path, text: &str, edition: &str) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| e.to_string())
 }
 
+fn read_formatted(path: &Path, edition: &str) -> Result<String, String> {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
+    formatted(path, text, edition)
+}
+
+fn format_all(paths: &[PathBuf], edition: &str) -> BTreeMap<PathBuf, Result<String, String>> {
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::Mutex::new(BTreeMap::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(path) = paths.get(i) else { break };
+                let text = read_formatted(path, edition);
+                done.lock().unwrap().insert(path.clone(), text);
+            });
+        }
+    });
+    done.into_inner().unwrap()
+}
+
 fn walk(path: &Path, root: &Path, files: &mut BTreeSet<PathBuf>) -> Result<(), String> {
     if path.is_symlink() {
         return Err(format!(
@@ -150,9 +176,16 @@ impl<'a> Sources<'a> {
             shared_used: BTreeSet::new(),
             raw: BTreeMap::new(),
             entries: BTreeSet::new(),
+            prefetched: BTreeMap::new(),
         };
         let mut files = BTreeSet::new();
         walk(&found.root, &found.root, &mut files)?;
+        let code: Vec<_> = files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rs") && !found.is_data(p))
+            .cloned()
+            .collect();
+        found.prefetched = format_all(&code, &found.edition);
         let manifest_path = found.root.join("Cargo.toml");
         let manifest = std::fs::read_to_string(&manifest_path)
             .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
@@ -267,8 +300,10 @@ impl<'a> Sources<'a> {
         self.active.insert(path.clone());
         if !self.code.contains_key(&path) {
             let raw = std::fs::read(&path).map_err(|e| e.to_string())?;
-            let text = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
-            let text = formatted(&path, text, &self.edition)?;
+            let text = match self.prefetched.remove(&path) {
+                Some(text) => text?,
+                None => read_formatted(&path, &self.edition)?,
+            };
             let tree =
                 syn::parse_file(&text).map_err(|e| format!("AST {}: {e}", path.display()))?;
             self.raw.insert(path.clone(), raw);

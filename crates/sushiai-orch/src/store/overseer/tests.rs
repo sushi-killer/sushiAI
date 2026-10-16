@@ -96,13 +96,38 @@ fn an_old_line_without_a_decision_loads_and_has_no_keys() {
 #[test]
 fn the_file_keeps_the_last_2000_lines() {
     let dir = temp();
-    for i in 0..MAX_LINES + 5 {
+    let lines = || std::fs::read_to_string(path(&dir)).unwrap().lines().count();
+    let total = 2 * MAX_LINES + 5;
+    for i in 0..total {
         append(&dir, &Entry::new("woke", "/r", None, &format!("n{i}"), 0)).unwrap();
+        if i == MAX_LINES + 4 {
+            // Reads stop at the newest `MAX_LINES` before the file is trimmed.
+            let all = read(&dir, None, Some(MAX_LINES * 2));
+            assert_eq!(all.len(), MAX_LINES);
+            assert_eq!(all.last().unwrap().text, "n5");
+        }
     }
+    assert!(lines() <= 2 * MAX_LINES, "trimmed: {}", lines());
     let all = read(&dir, None, Some(MAX_LINES * 2));
     assert_eq!(all.len(), MAX_LINES);
-    assert_eq!(all[0].text, format!("n{}", MAX_LINES + 4));
-    assert_eq!(all.last().unwrap().text, "n5");
+    assert_eq!(all[0].text, format!("n{}", total - 1));
+    assert_eq!(all.last().unwrap().text, format!("n{}", total - MAX_LINES));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_task_entry_is_appended_once_and_the_log_stays_private() {
+    let dir = temp();
+    let entry = Entry::new("done", "/r", Some("t1"), "a", 0);
+    assert!(append_task_once(&dir, &entry).unwrap());
+    assert!(!append_task_once(&dir, &entry).unwrap());
+    assert_eq!(read(&dir, None, None).len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path(&dir)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

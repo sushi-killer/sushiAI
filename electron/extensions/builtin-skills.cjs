@@ -1,26 +1,47 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { quote } = require("../connections.cjs");
+const { REMOTE_BIN } = require("../host-install.cjs");
+const { runSushiai } = require("../sushiai-run.cjs");
 
 // One generic hook for skills a built-in extension ships. Core modules call
 // only this file; each extension registers its own skill and says whether it
 // is switched on. A disabled extension has its skill removed, never kept.
-// Claude Code reads ~/.claude/skills, Codex ~/.codex/skills; ~/.agents/skills
-// is the shared folder other harnesses (and Codex) read too.
-const TOOLS = [".claude", ".codex", ".agents"];
+// The sushiai binary owns the skill folders (`sushiai skills install|remove`):
+// this file only says which skill, with what text, on which home.
 const skills = new Map();
+const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// This machine: set by configureBuiltinSkillSync from the main process.
+let local = {
+  binary: () => null,
+  codexAccountsDir: null,
+  env: process.env,
+  run: runSushiai,
+};
+let queue = Promise.resolve();
 let warned = false;
 
 /** Registers a skill (`<name>/SKILL.md` text) owned by a built-in extension. */
 function registerBuiltinSkill({ extensionId, name, text, isEnabled }) {
-  if (!extensionId || !name || typeof text !== "string")
-    throw new Error("A builtin skill needs extensionId, name and text");
+  if (!extensionId || !NAME.test(name || "") || typeof text !== "string")
+    throw new Error("A builtin skill needs extensionId, a plain name and text");
   skills.set(name, {
     extensionId,
     name,
     text,
     isEnabled: typeof isEnabled === "function" ? isEnabled : () => true,
   });
+}
+
+/** Where this machine's syncs go: `binary()` names the sushiai binary,
+ * `codexAccountsDir` holds the Codex account homes (each gets its own run with
+ * CODEX_HOME set). `run(binary, args, { input, env })` is replaceable in tests. */
+function configureBuiltinSkillSync({
+  binary,
+  codexAccountsDir = null,
+  env = process.env,
+  run = runSushiai,
+}) {
+  local = { binary, codexAccountsDir, env, run };
 }
 
 function warnOnce(error) {
@@ -46,154 +67,90 @@ function codexAccountHomes(dir) {
   }
 }
 
-function declares(name, content) {
-  return new RegExp(`^name:\\s*${name.replace(/\W/g, "\\$&")}\\s*$`, "m").test(
-    content,
-  );
+/** The argv and stdin that bring one skill in line with its extension. */
+function skillCommand(skill, install = skill.isEnabled()) {
+  return install
+    ? { args: ["skills", "install", skill.name], input: skill.text }
+    : { args: ["skills", "remove", skill.name], input: "" };
 }
 
-/** Writes the skill into each tool home, creating folders; skips a file that
- * already has the content. Returns the files written. */
-function writeSkill(name, homes, text) {
-  const written = [];
-  for (const dir of homes) {
-    const file = path.join(dir, "skills", name, "SKILL.md");
-    try {
-      if (fs.existsSync(file)) {
-        const current = fs.readFileSync(file, "utf8");
-        // Same content, or a file that is not ours: leave it.
-        if (current === text || !declares(name, current)) continue;
-      }
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, text);
-      written.push(file);
-    } catch (error) {
-      warnOnce(error);
-    }
+/** Runs `commands` on this machine, once per home: the default one and each
+ * `codexHomes` entry as CODEX_HOME. Never throws; resolves the changed lines. */
+async function runLocal(commands, codexHomes) {
+  if (!active(local.env) || !commands.length) return [];
+  let binary;
+  try {
+    binary = local.binary();
+  } catch (error) {
+    warnOnce(error);
+    return [];
   }
-  return written;
-}
-
-/** Removes `<home>/skills/<name>` only when its SKILL.md declares this name;
- * any other folder or file stays. Returns the files removed. */
-function removeSkill(name, homes) {
-  const removed = [];
-  for (const dir of homes) {
-    const folder = path.join(dir, "skills", name);
-    const file = path.join(folder, "SKILL.md");
-    try {
-      if (!declares(name, fs.readFileSync(file, "utf8"))) continue;
-      fs.rmSync(file);
-      removed.push(file);
+  if (!binary) return [];
+  const changed = [];
+  for (const codexHome of codexHomes)
+    for (const { args, input } of commands) {
+      const env = codexHome
+        ? { ...local.env, CODEX_HOME: codexHome }
+        : local.env;
       try {
-        fs.rmdirSync(folder);
-      } catch {
-        // Not empty: someone else's files stay.
+        const out = await local.run(binary, args, { input, env });
+        changed.push(...String(out).split("\n").filter(Boolean));
+      } catch (error) {
+        warnOnce(error);
       }
-    } catch (error) {
-      if (error?.code !== "ENOENT") warnOnce(error);
     }
-  }
-  return removed;
+  return changed;
 }
 
-// The host's skill folders: ~/.claude and ~/.codex, or the folders the host's
-// own CLAUDE_CONFIG_DIR and CODEX_HOME name.
-const REMOTE_BASES =
-  '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${CODEX_HOME:-$HOME/.codex}" "$HOME/.agents"';
-
-// Claude Code and Codex read skills from these folders when they are set,
-// instead of ~/.claude and ~/.codex.
-const CONFIG_VARS = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
-
-function localHomes(home, codexAccountsDir, vars = process.env) {
-  const custom = CONFIG_VARS.map((name) => vars[name]).filter(
-    (dir) => typeof dir === "string" && path.isAbsolute(dir),
-  );
-  return [
-    ...new Set([
-      ...TOOLS.map((tool) => path.join(home, tool)),
-      ...custom,
-      ...(codexAccountsDir ? codexAccountHomes(codexAccountsDir) : []),
-    ]),
-  ];
+/** One sync at a time, in call order. */
+function serialized(work) {
+  const next = queue.then(work);
+  queue = next.catch(() => {});
+  return next;
 }
 
 /** Brings this machine's homes in line with the registry: installs the skill
  * of every enabled extension, removes that of every disabled one. */
-function syncLocalBuiltinSkills(home, env, codexAccountsDir) {
-  if (!active(env)) return [];
-  const homes = localHomes(home, codexAccountsDir, env || process.env);
-  const changed = [];
-  for (const skill of skills.values()) {
-    try {
-      changed.push(
-        ...(skill.isEnabled()
-          ? writeSkill(skill.name, homes, skill.text)
-          : removeSkill(skill.name, homes)),
-      );
-    } catch (error) {
-      warnOnce(error);
-    }
-  }
-  return changed;
+function syncLocalBuiltinSkills() {
+  return serialized(() =>
+    runLocal(
+      [...skills.values()].map((skill) => skillCommand(skill)),
+      [
+        null,
+        ...(local.codexAccountsDir
+          ? codexAccountHomes(local.codexAccountsDir)
+          : []),
+      ],
+    ),
+  );
 }
 
 /** Installs the enabled skills into one new Codex account home. */
-function installBuiltinSkillsInto(codexHome, env) {
-  if (!active(env)) return [];
-  const written = [];
-  for (const skill of skills.values())
-    if (skill.isEnabled())
-      written.push(...writeSkill(skill.name, [codexHome], skill.text));
-  return written;
+function installBuiltinSkillsInto(codexHome) {
+  return serialized(() =>
+    runLocal(
+      [...skills.values()]
+        .filter((skill) => skill.isEnabled())
+        .map((skill) => skillCommand(skill, true)),
+      [codexHome],
+    ),
+  );
 }
 
-/** A POSIX shell script that installs the skill on a host; the content
- * travels as base64 so quotes, `$` and backticks need no escaping. */
-function remoteInstallScript(name, text) {
-  const encoded = Buffer.from(text, "utf8").toString("base64");
-  return `set -u
-tmp="$(mktemp)" || exit 0
-trap 'rm -f "$tmp"' EXIT
-printf %s ${quote(encoded)} | { base64 -d 2>/dev/null || base64 -D; } > "$tmp" || exit 0
-for base in ${REMOTE_BASES}; do
-  d="$base/skills/${name}"
-  cmp -s "$tmp" "$d/SKILL.md" 2>/dev/null && continue
-  [ -f "$d/SKILL.md" ] && ! grep -qx ${quote(`name: ${name}`)} "$d/SKILL.md" && continue
-  mkdir -p "$d" && cp "$tmp" "$d/SKILL.md"
-done
-exit 0
-`;
-}
-
-/** A POSIX shell script that removes the skill from a host, only where its
- * SKILL.md declares this name. */
-function remoteRemoveScript(name) {
-  return `set -u
-for base in ${REMOTE_BASES}; do
-  d="$base/skills/${name}"
-  grep -qx ${quote(`name: ${name}`)} "$d/SKILL.md" 2>/dev/null || continue
-  rm -f "$d/SKILL.md"
-  rmdir "$d" 2>/dev/null
-done
-exit 0
-`;
-}
-
-/** Installs or removes every registered skill on an SSH host through the
- * connection's own exec. Never throws; true when every script ran. */
+/** Installs or removes every registered skill on an SSH host with the host's
+ * own sushiai binary, so it runs after that binary is installed. Never throws;
+ * true when every command ran. */
 async function syncBuiltinSkillsOnHost(connections, endpoint, env) {
   if (!active(env)) return false;
   let ok = true;
   for (const skill of skills.values()) {
+    const { args, input } = skillCommand(skill);
     try {
-      await connections.exec(endpoint, "sh -s", {
-        input: skill.isEnabled()
-          ? remoteInstallScript(skill.name, skill.text)
-          : remoteRemoveScript(skill.name),
-        timeout: 30000,
-      });
+      await connections.exec(
+        endpoint,
+        `"${REMOTE_BIN}/sushiai" ${args.join(" ")}`,
+        { input, timeout: 30000 },
+      );
     } catch (error) {
       ok = false;
       warnOnce(error);
@@ -204,12 +161,9 @@ async function syncBuiltinSkillsOnHost(connections, endpoint, env) {
 
 module.exports = {
   registerBuiltinSkill,
+  configureBuiltinSkillSync,
   installBuiltinSkillsInto,
   syncBuiltinSkillsOnHost,
   syncLocalBuiltinSkills,
-  writeSkill,
-  removeSkill,
   codexAccountHomes,
-  remoteInstallScript,
-  remoteRemoveScript,
 };

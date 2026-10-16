@@ -19,14 +19,17 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   shorter screen would drop (above the cursor) into scrollback, as a terminal does; vt100
   alone drops the bottom rows, the newest output.
 - `sushiai-agents`: pure agent logic: hook payload parsing, the status state
-  machine, launch specs, Codex `hooks.json` merging, screen heuristics. No
-  tokio; the only IO is `codex_hooks::install`/`uninstall`.
+  machine, launch specs, Codex `hooks.json` merging, screen heuristics, and
+  `skills`: the one table of Claude Code and Codex skill folders, their scan
+  (catalog rows, realpath dedupe, duplicates per harness) and the install and
+  removal of a skill sushiAI ships. It reads no environment. No tokio; the only
+  IO is `codex_hooks::install`/`uninstall` and `skills`.
 - `sushiai-daemon`: tokio shell. Socket server, one actor per session, holder
   client, state file IO, holder spawning.
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
   Threads, no async runtime.
 - `sushiai`: the binary. Parses arguments and calls the libraries.
-  Subcommands: `daemon`, `status`, `projects`, `hosts`, `routines`, `routine`, `ask`, `propose` (routines module), `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
+  Subcommands: `daemon`, `status`, `projects`, `hosts`, `routines`, `routine`, `ask`, `propose` (routines module), `skills [--project DIR] [--json] [--catalog]` and `skills install|remove NAME` (`skills_cli.rs`, which resolves `CLAUDE_CONFIG_DIR`/`CODEX_HOME` for `sushiai_agents::skills`), `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
   `hold` (internal, started by the daemon).
 
 `scripts/check-crate-deps.mjs` enforces the arrows above in CI.

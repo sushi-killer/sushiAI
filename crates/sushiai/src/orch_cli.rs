@@ -7,7 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use sushiai_daemon::Home;
 
+use sushiai_agents::skills;
+
 use crate::daemon_client::{orch_caller, Conn};
+use crate::skills_cli;
 
 const SERVER: &str = "sushiai-orchestrator";
 
@@ -114,9 +117,7 @@ fn user_home() -> anyhow::Result<PathBuf> {
 }
 
 fn codex_home(home: &Path) -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .filter(|d| !d.is_empty())
-        .map_or_else(|| home.join(".codex"), PathBuf::from)
+    crate::skills_cli::homes_in(home).codex
 }
 
 /// Writes `text` to `path` through the shared atomic writer (the old file's mode, or 0600),
@@ -219,6 +220,22 @@ fn codex_entry(file: &Path, bin: Option<&str>) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// The report lines for the skill files changed; a file that could not be changed is a note on
+/// stderr.
+fn skill_lines(changes: Vec<skills::Change>) -> Vec<String> {
+    changes
+        .into_iter()
+        .filter_map(|change| match change {
+            skills::Change::Written(p) => Some(format!("skill written to {}", p.display())),
+            skills::Change::Removed(p) => Some(format!("skill removed from {}", p.display())),
+            skills::Change::Failed(p, e) => {
+                eprintln!("sushiai orch: could not change {}: {e}", p.display());
+                None
+            }
+        })
+        .collect()
+}
+
 fn verb(changed: bool, file: &Path, done: &str) -> String {
     if changed {
         format!("{done} in {}", file.display())
@@ -263,10 +280,12 @@ fn register(home: &Home) -> anyhow::Result<Vec<String>> {
     }
     crate::orch_module::set_enabled(home.dir(), true)?;
     lines.push(format!("orchestrator enabled in {}", home.dir().display()));
-    let data = data_dir(home);
-    for written in sushiai_orch::skill::install(&user, Path::new(bin), &data) {
-        lines.push(format!("skill written to {}", written.display()));
-    }
+    let text = sushiai_orch::skill::render(Path::new(bin), &data_dir(home));
+    lines.extend(skill_lines(skills::install(
+        &skills_cli::homes_in(&user),
+        sushiai_orch::skill::NAME,
+        &text,
+    )?));
     Ok(lines)
 }
 
@@ -284,12 +303,9 @@ fn unregister(home: &Home) -> anyhow::Result<Vec<String>> {
     if codex.exists() {
         lines.push(verb(codex_entry(&codex, None)?, &codex, "removed"));
     }
-    for tool in [user.join(".claude"), codex_home(&user)] {
-        let dir = tool.join("skills").join(SERVER);
-        if dir.is_dir() {
-            std::fs::remove_dir_all(&dir)?;
-            lines.push(format!("skill removed from {}", dir.display()));
-        }
-    }
+    lines.extend(skill_lines(skills::remove(
+        &skills_cli::homes_in(&user),
+        sushiai_orch::skill::NAME,
+    )?));
     Ok(lines)
 }

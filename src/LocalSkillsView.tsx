@@ -6,7 +6,6 @@ import {
   Clock3,
   Copy,
   FileText,
-  Globe2,
   PowerOff,
   RefreshCw,
   Search,
@@ -27,24 +26,16 @@ type StatusFilter =
   | "duplicates"
   | "unused"
   | "stale";
-type ScopeFilter = "all" | SkillProvider | "Other agents";
-type OwnerFilter = "Codex" | "Claude" | "Other agents";
-type AvailabilityFilter = "all" | "active" | "disabled" | "external";
+type ScopeFilter = "all" | SkillProvider;
+type AvailabilityFilter = "all" | "active" | "disabled";
 
 const skillGroups: {
-  id: string;
+  id: SkillProvider;
   label: string;
-  providers: SkillProvider[];
   dot: string;
 }[] = [
-  { id: "Codex", label: "Codex", providers: ["Codex"], dot: "codex" },
-  { id: "Claude", label: "Claude", providers: ["Claude"], dot: "claude" },
-  {
-    id: "Other agents",
-    label: "Other agents",
-    providers: ["Agent", "Other"],
-    dot: "other",
-  },
+  { id: "Codex", label: "Codex", dot: "codex" },
+  { id: "Claude", label: "Claude", dot: "claude" },
 ];
 
 const statusFilters: { id: StatusFilter; label: string }[] = [
@@ -56,7 +47,7 @@ const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "unused", label: "Unused" },
   { id: "stale", label: "Stale" },
 ];
-const providers: OwnerFilter[] = ["Codex", "Claude", "Other agents"];
+const providers: SkillProvider[] = ["Codex", "Claude"];
 const INITIAL_SKILLS_BATCH = 96;
 const SKILLS_BATCH_SIZE = 96;
 const day = 24 * 60 * 60 * 1000;
@@ -93,11 +84,7 @@ function matchesStatus(item: SkillCatalogItem, filter: StatusFilter) {
 }
 
 function matchesScope(item: SkillCatalogItem, scope: ScopeFilter): boolean {
-  return scope === "all"
-    ? true
-    : scope === "Other agents"
-      ? item.provider === "Agent" || item.provider === "Other"
-      : item.provider === scope;
+  return scope === "all" || item.provider === scope;
 }
 
 function matchesAvailability(
@@ -114,13 +101,11 @@ function itemKey(item: SkillCatalogItem) {
 function recommendation(item: SkillCatalogItem) {
   if (item.availability === "disabled")
     return "Installed but disabled in the harness; it will not enter context.";
-  if (item.availability === "external")
-    return "Owned by another harness; it is not loaded by Claude Code or Codex.";
   if (item.changed) return "Changed since the last scan — review this update.";
   if (item.isDuplicate) {
     return item.duplicateKind === "exact"
       ? `Exact copy found · compare ${item.duplicateCount || 2} copies and keep one.`
-      : `Same name found in another source · choose the copy you want to keep.`;
+      : `${item.harness || item.provider} sees this name more than once · choose the copy you want to keep.`;
   }
   if (item.isUnused)
     return "No usage signal for 180+ days · candidate for cleanup.";
@@ -132,7 +117,7 @@ function recommendation(item: SkillCatalogItem) {
 function statusClass(item: SkillCatalogItem) {
   return `${item.needsReview ? " needs-review" : ""}${
     item.availability === "disabled" ? " disabled" : ""
-  }${item.availability === "external" ? " external" : ""}`;
+  }`;
 }
 
 export function LocalSkillsView({
@@ -217,16 +202,9 @@ export function LocalSkillsView({
     return counts;
   }, [searchable]);
   const scopeCounts = React.useMemo(() => {
-    const counts: Record<"Codex" | "Claude" | "Other agents", number> = {
-      Codex: 0,
-      Claude: 0,
-      "Other agents": 0,
-    };
-    for (const item of queryMatches) {
-      if (item.provider === "Codex") counts.Codex += 1;
-      else if (item.provider === "Claude") counts.Claude += 1;
-      else counts["Other agents"] += 1;
-    }
+    const counts: Record<SkillProvider, number> = { Codex: 0, Claude: 0 };
+    for (const item of queryMatches)
+      if (item.provider) counts[item.provider] += 1;
     return counts;
   }, [queryMatches]);
   const availabilityCounts = React.useMemo(() => {
@@ -237,7 +215,6 @@ export function LocalSkillsView({
       all: scopedItems.length,
       active: 0,
       disabled: 0,
-      external: 0,
     };
     for (const item of scopedItems) {
       if (item.availability) counts[item.availability] += 1;
@@ -245,7 +222,7 @@ export function LocalSkillsView({
     return counts;
   }, [queryMatches, scopeFilter]);
   const count = (filter: StatusFilter) => statusCounts[filter];
-  const scopeCount = (scope: OwnerFilter) => scopeCounts[scope];
+  const scopeCount = (scope: SkillProvider) => scopeCounts[scope];
   const visibleFiltered = React.useMemo(
     () => filtered.slice(0, visibleLimit),
     [filtered, visibleLimit],
@@ -255,11 +232,11 @@ export function LocalSkillsView({
       skillGroups
         .map((groupDefinition) => ({
           ...groupDefinition,
-          allItems: filtered.filter((item) =>
-            groupDefinition.providers.includes(item.provider as SkillProvider),
+          allItems: filtered.filter(
+            (item) => item.provider === groupDefinition.id,
           ),
-          items: visibleFiltered.filter((item) =>
-            groupDefinition.providers.includes(item.provider as SkillProvider),
+          items: visibleFiltered.filter(
+            (item) => item.provider === groupDefinition.id,
           ),
         }))
         .filter((group) => group.items.length > 0),
@@ -359,9 +336,6 @@ export function LocalSkillsView({
                 <option value="disabled">
                   Disabled ({availabilityCounts.disabled})
                 </option>
-                <option value="external">
-                  External harness ({availabilityCounts.external})
-                </option>
               </select>
             </label>
           </div>
@@ -380,11 +354,6 @@ export function LocalSkillsView({
               <PowerOff size={16} />
               <strong>{availabilityCounts.disabled}</strong>
               <span>Disabled</span>
-            </div>
-            <div className="skills-summary-external">
-              <Globe2 size={16} />
-              <strong>{availabilityCounts.external}</strong>
-              <span>External harness</span>
             </div>
           </div>
           <div className="skills-health" aria-label="Cleanup signal summary">
@@ -405,8 +374,9 @@ export function LocalSkillsView({
             available; calls are counted from local events or the usage cache.
             Otherwise the file access time is only a fallback. macOS may not
             update that signal on every read. Active skills are loadable by the
-            owner harness; disabled and external skills are shown for cleanup
-            context. Cache-only plugin files are excluded.
+            owner harness; disabled skills are shown for cleanup context. Only
+            Claude Code and Codex skills are listed, each file once per harness.
+            Cache-only plugin files are excluded.
           </p>
           {filtered.length ? (
             <div className="skills-groups">
@@ -451,13 +421,9 @@ export function LocalSkillsView({
                                 · {formatSize(item.size)}
                               </span>
                             </div>
-                            {item.availability !== "active" && (
-                              <span
-                                className={`skill-state ${item.availability || "external"}`}
-                              >
-                                {item.availability === "disabled"
-                                  ? "Disabled"
-                                  : "External"}
+                            {item.availability === "disabled" && (
+                              <span className="skill-state disabled">
+                                Disabled
                               </span>
                             )}
                           </div>

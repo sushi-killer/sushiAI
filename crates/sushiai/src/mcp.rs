@@ -97,10 +97,9 @@ fn run_tool(call: Call, name: &str, args: &Value) -> Result<Value, String> {
             Ok(json!(cli::hosts_data(&snapshot)))
         }
         "routines_skills" => {
-            let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
             let project = args["project"].as_str().filter(|p| !p.is_empty());
-            Ok(json!(cli::skills_data(
-                std::path::Path::new(&home),
+            Ok(json!(crate::skills_cli::list_data(
+                &crate::skills_cli::homes()?,
                 project.map(std::path::Path::new)
             )))
         }

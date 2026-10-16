@@ -181,10 +181,12 @@ never turns a reviewed routine back into a draft. `routines.show` returns
 `routine.json` may list `skills`: zero to ten names (letters, digits and
 `:_.-`, at most 64, no duplicates; a plugin skill is `plugin:skill`). The brief
 can then stay short and point to the skill. `sushiai skills [--project DIR]`
-(MCP: `routines_skills`) lists what the machine offers: name, harness folder
-(`~/.claude`, `~/.codex`, `~/.agents` and the project's own), path, scripts and
-the first line of the description. It never prints more of a file. Plugin skills
-are not listed; name one by hand.
+(MCP: `routines_skills`) lists what the machine offers: name, harness (`claude`
+or `codex`, from the one table of skill folders in `sushiai_agents::skills`,
+with the project's own), path, scripts and the first line of the description.
+A file linked into several folders of one harness is listed once, and a
+disabled skill is not listed. It never prints more of a file. Plugin skills are
+not listed; name one by hand.
 
 - The run prompt tells the agent to use each listed skill first: `/name` on
   Claude, `$name` on Codex. A brief may also start with its own `/name args`

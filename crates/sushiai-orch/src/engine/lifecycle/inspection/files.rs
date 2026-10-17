@@ -1,13 +1,17 @@
 use crate::engine::lifecycle::changes::record_changed_files;
 use crate::engine::lifecycle::native_result::ObservedRun;
-use crate::engine::protected::restore::guard_protected;
+use crate::engine::protected::restore::{grown_line, guard_protected};
 use crate::task::{attempts, Task};
 
 pub(super) async fn protect(task: &mut Task, observed: &ObservedRun) -> Vec<String> {
     let mut changed = record_changed_files(task, &observed.run).await;
-    let restored = guard_protected(task, &observed.run.worktree, &changed)
-        .await
-        .unwrap_or_default();
+    let guarded = guard_protected(task, &observed.run.worktree, &changed).await;
+    if let Some(line) = grown_line(&guarded.grown) {
+        if !task.decisions.contains(&line) {
+            task.record_decision(line);
+        }
+    }
+    let restored = guarded.restored;
     if !restored.is_empty() {
         task.record_decision(format!(
             "Orchestrator: discarded the attempt's edits to protected files: {}; checks run on the originals",

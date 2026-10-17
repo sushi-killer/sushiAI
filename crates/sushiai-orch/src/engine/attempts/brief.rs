@@ -136,7 +136,11 @@ fn append_plan_context(out: &mut String, task: &Task) {
         out.push_str(brief_text("protected"));
         out.push_str("\n\n");
         for path in files.keys() {
-            out.push_str(&format!("- `{path}`\n"));
+            if task.planner_tests.files.iter().any(|t| t.path == *path) {
+                out.push_str(&format!("- `{path}` (planner)\n"));
+            } else {
+                out.push_str(&format!("- `{path}`\n"));
+            }
         }
         out.push('\n');
     }

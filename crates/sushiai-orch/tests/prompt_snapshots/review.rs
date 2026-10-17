@@ -42,6 +42,7 @@ pub(super) fn renders() -> Vec<(&'static str, String)> {
                 screenshots: &screenshots,
                 evidence_from: Some(3),
                 declines: &declines,
+                grown_protected: "--- a/tests/settings.test.ts\n+++ b/tests/settings.test.ts\n@@ -3,2 +3,5 @@\n test(\"loads\", load);\n+test(\"saves\", save);\n test(\"resets\", reset);",
             },
             diff,
             &some_lenses,

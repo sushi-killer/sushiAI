@@ -23,6 +23,7 @@ fn the_review_brief_numbers_the_criteria_and_carries_the_findings_registry() {
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "d",
         &Lenses::ALL,
@@ -62,6 +63,7 @@ fn the_review_brief_numbers_the_criteria_and_carries_the_findings_registry() {
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "d",
         &Lenses::ALL,
@@ -87,6 +89,7 @@ fn the_review_brief_states_the_rule_and_carries_agent_lines() {
             screenshots: &[("artifacts/a.png".into(), Some(1))],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "diff body",
         &Lenses::ALL,
@@ -124,6 +127,7 @@ fn the_review_brief_lists_ungrounded_checks_and_the_held_out_result_by_criterion
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "",
         &Lenses::ALL,
@@ -140,6 +144,7 @@ fn the_review_brief_lists_ungrounded_checks_and_the_held_out_result_by_criterion
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "",
         &Lenses::ALL,
@@ -170,6 +175,7 @@ fn the_review_brief_keeps_a_held_out_named_result_without_a_variant() {
                 screenshots: &[],
                 evidence_from: None,
                 declines: &[],
+                grown_protected: "",
             },
             "",
             &Lenses::ALL,
@@ -235,6 +241,7 @@ fn a_narrow_re_review_is_briefed_with_the_delta_and_the_prior_report_only() {
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         &narrow,
     );
@@ -262,6 +269,7 @@ fn declined_findings_get_a_review_section_the_reviewer_rules_on() {
             screenshots: &[],
             evidence_from: None,
             declines: &declines,
+            grown_protected: "",
         },
         "d",
         &Lenses::ALL,
@@ -278,9 +286,46 @@ fn declined_findings_get_a_review_section_the_reviewer_rules_on() {
             screenshots: &[],
             evidence_from: None,
             declines: &[],
+            grown_protected: "",
         },
         "d",
         &Lenses::ALL,
     );
     assert!(!none.contains("## Declined findings"));
+}
+
+#[test]
+fn the_review_brief_shows_the_protected_files_that_grew_and_their_added_lines() {
+    let task = sample_task();
+    let grown =
+        "--- a/tests/a.test.cjs\n+++ b/tests/a.test.cjs\n@@ -1,2 +1,3 @@\n one\n+added case\n two";
+    let evidence = |grown_protected| crate::verify::review::brief::ReviewEvidence {
+        implementer_note: "note",
+        agent_decisions: &[],
+        verify_results: &[],
+        screenshots: &[],
+        evidence_from: None,
+        declines: &[],
+        grown_protected,
+    };
+    let full = build_review_brief(&task, &evidence(grown), "d", &Lenses::ALL);
+    assert!(full.contains("## Protected files that grew"), "{full}");
+    assert!(full.contains("tests/a.test.cjs"), "{full}");
+    assert!(full.contains("+added case"), "{full}");
+    assert!(
+        full.contains(brief_text("review_grown_protected").trim()),
+        "{full}"
+    );
+    let narrow = build_narrow_review_brief(
+        &task,
+        &evidence(grown),
+        &NarrowReview {
+            open_criteria: &[],
+            settled_criteria: &[],
+            delta: "",
+        },
+    );
+    assert!(narrow.contains("+added case"), "{narrow}");
+    let none = build_review_brief(&task, &evidence(""), "d", &Lenses::ALL);
+    assert!(!none.contains("## Protected files that grew"), "{none}");
 }

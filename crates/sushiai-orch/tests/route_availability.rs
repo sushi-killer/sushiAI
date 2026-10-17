@@ -6,7 +6,7 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{holds_for, poll_until, ABSENCE_WINDOW};
+use common::polling::{daemon_log_tail, holds_for, poll_until, wait_state, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::init_git_repo;
 
@@ -216,16 +216,37 @@ fn with_no_harness_the_task_waits_with_an_install_question_and_spends_no_attempt
     let text = task["question"]["text"].as_str().unwrap();
     assert!(text.contains("install") && text.contains(MISSING), "{text}");
     assert!(task["attempts"].as_array().unwrap().is_empty());
-    // Answering while nothing is installed asks again; still no attempt.
+    // Answering while nothing is installed asks again; still no attempt. The loop runs
+    // between the answer and the new question, so the status is not "waiting" all along:
+    // wait for the new question (a later askedAt), never seeing an attempt on the way.
+    let first_ask = task["question"]["askedAt"].clone();
     s.daemon
         .request("task.answer", json!({"id": id, "answer": "retry"}));
+    let no_attempt = |t: &serde_json::Value| {
+        assert!(t["attempts"].as_array().unwrap().is_empty(), "{t}");
+        assert!(calls(&s.log).is_empty(), "{t}");
+    };
+    wait_state(
+        "the install question asked again",
+        || {
+            let t = s.daemon.request("task.get", json!({"id": id}));
+            no_attempt(&t);
+            let asked = t["status"] == "waiting"
+                && t["question"]["kind"] == "harness_missing"
+                && t["question"]["askedAt"] != first_ask;
+            if asked {
+                Ok(())
+            } else {
+                Err(format!("{} {}", t["status"], t["question"]))
+            }
+        },
+        || daemon_log_tail(&s.daemon),
+    );
     // Absence check: this window gives a forbidden attempt time to start.
     holds_for("no attempt after the retry answer", ABSENCE_WINDOW, || {
         let t = s.daemon.request("task.get", json!({"id": id}));
-        t["status"] == "waiting"
-            && t["question"]["kind"] == "harness_missing"
-            && t["attempts"].as_array().unwrap().is_empty()
-            && calls(&s.log).is_empty()
+        no_attempt(&t);
+        t["status"] == "waiting" && t["question"]["kind"] == "harness_missing"
     });
     let again = s.daemon.request("task.get", json!({"id": id}));
     assert_eq!(again["status"], "waiting", "{again}");

@@ -164,6 +164,42 @@ test("a change runs the checks that can see it, and the setup runs everything", 
     assert.equal(pick([file]).all, true, file);
 });
 
+test("the required check is a job that waits for every other job", () => {
+  // Branch protection names these checks; renaming or dropping the job, or
+  // a job outside its `needs`, would let a red job merge.
+  const required = JSON.parse(
+    fs.readFileSync(path.join(root, ".github/required-checks.json"), "utf8"),
+  );
+  const yml = fs.readFileSync(
+    path.join(root, ".github/workflows/ci.yml"),
+    "utf8",
+  );
+  const body = yml.slice(yml.indexOf("\njobs:\n"));
+  const jobs = [...body.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]);
+  const block = (job) => {
+    const start = body.indexOf(`\n  ${job}:`);
+    const next = body.slice(start + 1).search(/\n {2}[\w-]+:\s*\n/);
+    return body.slice(start, next < 0 ? undefined : start + 1 + next);
+  };
+  assert.deepEqual(required, ["deterministic"]);
+  for (const name of required) {
+    assert.ok(jobs.includes(name), `no job ${name}`);
+    const text = block(name);
+    assert.doesNotMatch(text, /^ {4}name:/m, "a name: would rename the check");
+    assert.match(text, /if: always\(\)/);
+    assert.match(text, /\.result == "skipped"/);
+    const needs = (/needs:\s*\[([^\]]*)\]/s.exec(text)?.[1] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    assert.deepEqual(
+      needs.sort(),
+      jobs.filter((j) => j !== name).sort(),
+      "every other job",
+    );
+  }
+});
+
 test("every Rust test binary has a dependency set, and the binary's tests a mapping", async () => {
   const { testBinaries, readTestMap } = await import(
     pathToFileURL(path.join(root, "scripts/lib/rust-graph.mjs")).href

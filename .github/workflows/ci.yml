@@ -179,11 +179,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The required check: green only when every split job passed or was not
-  # needed for this change. A skipped job (docs only, no Rust, no platform
-  # change) counts as passed.
+  # The one required check (.github/required-checks.json): green only when
+  # every other job passed or was not needed for this change. A skipped job
+  # (docs only, no Rust, no platform change) counts as passed.
+  # tests/ci-pipeline.test.cjs keeps every job in this list.
   deterministic:
-    needs: [changes, static, web, rust-lint, rust-build, rust-test]
+    needs:
+      [
+        changes,
+        static,
+        web,
+        rust-lint,
+        rust-build,
+        rust-test,
+        node-floor,
+        conventions,
+        desktop,
+      ]
     if: always()
     runs-on: ubuntu-latest
     steps:

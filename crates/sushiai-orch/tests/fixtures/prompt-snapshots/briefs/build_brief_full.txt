@@ -28,7 +28,7 @@ These commands fail on the current code. The orchestrator runs them after the ve
 
 ## Protected files
 
-These files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: orchd discards any change to them and the checks run on the originals. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.
+These files are the task's tests and the files its checks name. They are already committed. Do not move or delete them and do not change or remove any line of them: orchd discards such a change and the checks run on the originals. A file marked (planner) is the planner's test: do not edit it at all. You may add new lines, such as new test cases, to any other file here; the review checks that the additions do not weaken an existing test. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.
 
 - `tests/save.test.ts`
 - `tests/settings.test.ts`

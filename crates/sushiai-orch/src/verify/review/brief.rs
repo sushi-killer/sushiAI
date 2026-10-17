@@ -40,6 +40,19 @@ fn declines_block(declines: &[Decline]) -> String {
     out
 }
 
+/// The review brief's section for the protected files the attempt grew, with
+/// their added lines.
+fn grown_block(diff: &str) -> String {
+    if diff.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n{}\n\n```diff\n{}\n```\n",
+        brief_text("review_grown_protected"),
+        diff.trim_end()
+    )
+}
+
 /// Implementer output and recorded evidence shared by full and retry reviews.
 /// Screenshot paths are relative to the worktree and name their source attempt.
 pub struct ReviewEvidence<'a> {
@@ -49,6 +62,8 @@ pub struct ReviewEvidence<'a> {
     pub screenshots: &'a [(String, Option<u32>)],
     pub evidence_from: Option<u32>,
     pub declines: &'a [Decline],
+    /// `git diff` of the protected files the attempt grew; empty when none.
+    pub grown_protected: &'a str,
 }
 
 pub fn build_review_brief(
@@ -148,6 +163,7 @@ fn review_brief(task: &Task, evidence: &ReviewEvidence<'_>, body: ReviewBody<'_>
         out.push('\n');
     }
     out.push_str(&declines_block(declines));
+    out.push_str(&grown_block(evidence.grown_protected));
     match &body {
         ReviewBody::Full { diff, .. } => {
             out.push_str("\n## Diff\n\n```diff\n");

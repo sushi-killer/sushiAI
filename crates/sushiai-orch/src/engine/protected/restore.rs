@@ -112,21 +112,89 @@ pub(super) fn refresh_protected(
     }
 }
 
+/// What [`guard_protected`] did: the protected files it put back, and the
+/// protected files it kept because they only grew.
+#[derive(Debug, Default)]
+pub(in crate::engine) struct Guarded {
+    pub(in crate::engine) restored: Vec<String>,
+    pub(in crate::engine) grown: Vec<String>,
+}
+
+/// The lines of `bytes`, without the empty piece after a final newline.
+fn lines(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    body.split(|b| *b == b'\n').collect()
+}
+
+/// Whether `new` keeps every line of `old`, unchanged and in order, and adds
+/// at least one byte.
+fn only_grew(old: &[u8], new: &[u8]) -> bool {
+    if old == new {
+        return false;
+    }
+    let mut kept = lines(new).into_iter();
+    lines(old).into_iter().all(|line| kept.any(|n| n == line))
+}
+
+/// Whether the protected `path`, not one of the planner's files, only grew:
+/// it exists in the base with the stored hash and the worktree copy keeps
+/// every base line in order.
+fn grew_from_base(worktree: &Path, base: &str, path: &str, hash: &str) -> bool {
+    let Some(old) = crate::git::history::blob_at(worktree, base, path) else {
+        return false;
+    };
+    sha256_hex(&old) == hash
+        && std::fs::read(worktree.join(path)).is_ok_and(|new| only_grew(&old, &new))
+}
+
+/// The protected files the worktree holds grown: every file of the store that
+/// is not one of the planner's files and only grew from the base. The review
+/// is shown their added lines.
+pub(in crate::engine) fn grown_paths(task: &Task, worktree: &Path) -> Vec<String> {
+    let Some(hashes) = task.planner_tests.protected.as_ref() else {
+        return Vec::new();
+    };
+    hashes
+        .iter()
+        .filter(|(path, _)| !task.planner_tests.files.iter().any(|t| t.path == **path))
+        .filter(|(path, hash)| grew_from_base(worktree, &task.base_sha, path, hash))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// The decision line for protected files kept because they only grew.
+pub(in crate::engine) fn grown_line(grown: &[String]) -> Option<String> {
+    (!grown.is_empty()).then(|| {
+        format!(
+            "Orchestrator: kept the attempt's additions to protected files: {}; every existing line is unchanged and the review checks that the additions do not weaken a test",
+            grown.join(", ")
+        )
+    })
+}
+
 /// After an attempt (and after a carry, before the checks and the landing
 /// commit): the protected files that changed or no longer match their stored
-/// hash are put back. The planner's files are written from the store, the
-/// others restored from the base. Returns the files it restored; `None` when
-/// nothing protected was touched.
+/// hash are put back, unless the change only added lines. The planner's
+/// files are strict: any change is undone and they are written from the
+/// store. Any other protected file that exists in the base may grow: when
+/// every base line is still there, in order, the file is kept and reported
+/// as grown; a changed or removed line restores it from the base.
 pub(in crate::engine) async fn guard_protected(
     task: &Task,
     worktree: &Path,
     changed: &[String],
-) -> Option<Vec<String>> {
-    let hashes = task
+) -> Guarded {
+    let Some(hashes) = task
         .planner_tests
         .protected
         .clone()
-        .filter(|m| !m.is_empty())?;
+        .filter(|m| !m.is_empty())
+    else {
+        return Guarded::default();
+    };
     let (wt, base, changed, planned) = (
         worktree.to_path_buf(),
         task.base_sha.clone(),
@@ -134,20 +202,25 @@ pub(in crate::engine) async fn guard_protected(
         task.planner_tests.files.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        let mut bad: Vec<String> = hashes
-            .iter()
+        let touched: Vec<(String, String)> = hashes
+            .into_iter()
             .filter(|(path, hash)| {
                 let current = std::fs::read(wt.join(path)).ok();
-                changed.iter().any(|c| c == *path)
-                    || current.as_ref().is_none_or(|b| sha256_hex(b) != **hash)
+                changed.iter().any(|c| c == path)
+                    || current.as_ref().is_none_or(|b| sha256_hex(b) != *hash)
             })
-            .map(|(path, _)| path.clone())
             .collect();
-        if bad.is_empty() {
-            return None;
+        let mut guarded = Guarded::default();
+        for (path, hash) in touched {
+            let mine = planned.iter().any(|t| t.path == path);
+            if !mine && grew_from_base(&wt, &base, &path, &hash) {
+                guarded.grown.push(path);
+            } else {
+                guarded.restored.push(path);
+            }
         }
-        bad.sort();
-        let (mine, others): (Vec<String>, Vec<String>) = bad
+        let (mine, others): (Vec<String>, Vec<String>) = guarded
+            .restored
             .iter()
             .cloned()
             .partition(|p| planned.iter().any(|t| t.path == *p));
@@ -159,8 +232,8 @@ pub(in crate::engine) async fn guard_protected(
             .filter(|t| mine.contains(&t.path))
             .collect();
         let _ = write_files(&wt, &files);
-        Some(bad)
+        guarded
     })
     .await
-    .unwrap_or(None)
+    .unwrap_or_default()
 }

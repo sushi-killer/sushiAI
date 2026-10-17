@@ -110,7 +110,10 @@ mod cases {
         );
         let changed = task.own_diff().changed_files(&wt).unwrap();
         assert_eq!(changed, vec!["implementation.txt"]);
-        assert!(guard_protected(&task, &wt, &changed).await.is_none());
+        assert!(guard_protected(&task, &wt, &changed)
+            .await
+            .restored
+            .is_empty());
         assert!(wt.join("FIXED.txt").exists());
 
         task.fixture_data().verify.clear();
@@ -227,7 +230,7 @@ mod cases {
         task.fixture_data().planner_tests.protected = Some(protected_hashes(&repo, "HEAD", &task));
         std::fs::write(repo.join("t/a.test"), "edited\n").unwrap();
         std::fs::remove_file(repo.join("t/b.test")).unwrap();
-        let restored = guard_protected(&task, &repo, &[]).await.unwrap();
+        let restored = guard_protected(&task, &repo, &[]).await.restored;
         assert_eq!(restored, vec!["t/a.test", "t/b.test"]);
         assert_eq!(
             std::fs::read_to_string(repo.join("t/a.test")).unwrap(),
@@ -237,7 +240,7 @@ mod cases {
             std::fs::read_to_string(repo.join("t/b.test")).unwrap(),
             "two\n"
         );
-        assert!(guard_protected(&task, &repo, &[]).await.is_none());
+        assert!(guard_protected(&task, &repo, &[]).await.restored.is_empty());
     }
 
     #[tokio::test]
@@ -292,7 +295,10 @@ mod cases {
             task.fixture_data().base_sha = new_sha;
         }
         let changed = task.own_diff().changed_files(&wt).unwrap();
-        assert!(guard_protected(&task, &wt, &changed).await.is_none());
+        assert!(guard_protected(&task, &wt, &changed)
+            .await
+            .restored
+            .is_empty());
         assert_eq!(
             std::fs::read_to_string(wt.join("check.sh")).unwrap(),
             "new\n"
@@ -575,7 +581,7 @@ mod cases {
         );
         // The guard writes the files over whatever the agent did to them.
         std::fs::write(w.wt.join("tests/planner.txt"), "weakened\n").unwrap();
-        let restored = guard_protected(&w.task, &w.wt, &own).await.unwrap();
+        let restored = guard_protected(&w.task, &w.wt, &own).await.restored;
         assert_eq!(restored, vec!["tests/planner.txt"]);
         assert_eq!(
             std::fs::read_to_string(w.wt.join("tests/planner.txt")).unwrap(),
@@ -621,7 +627,10 @@ mod cases {
             "work\n"
         );
         let changed = w.task.own_diff().changed_files(&w.wt).unwrap();
-        assert!(guard_protected(&w.task, &w.wt, &changed).await.is_none());
+        assert!(guard_protected(&w.task, &w.wt, &changed)
+            .await
+            .restored
+            .is_empty());
     }
 
     #[tokio::test]
@@ -713,5 +722,74 @@ mod cases {
             over
         );
         assert_eq!(crate::git::history::head_sha(&repo).unwrap(), base);
+    }
+
+    /// A repo with a test file a positive check names, and a task that
+    /// protects it, based on the repo's head.
+    fn task_naming(path: &str, base: &str) -> (tempfile::TempDir, PathBuf, Task) {
+        let (dir, repo) = repo_with(&[(path, base)]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.fixture_data().base_sha = crate::git::history::head_sha(&repo).unwrap();
+        task.fixture_data().checks = vec![check(&format!("grep -qF -- 'marker' {path}"))];
+        task.fixture_data().planner_tests.protected = Some(protected_hashes(&repo, "HEAD", &task));
+        (dir, repo, task)
+    }
+
+    #[tokio::test]
+    async fn a_test_file_a_check_names_may_grow_and_a_decision_names_it() {
+        let path = "tests/manager.test.cjs";
+        let (_dir, repo, mut task) = task_naming(path, "one\ntwo\n");
+        let grown = "head\none\nmarker case\ntwo\ntail\n";
+        std::fs::write(repo.join(path), grown).unwrap();
+        let guarded = guard_protected(&task, &repo, &[path.to_string()]).await;
+        assert!(guarded.restored.is_empty(), "{guarded:?}");
+        assert_eq!(guarded.grown, vec![path]);
+        assert_eq!(std::fs::read_to_string(repo.join(path)).unwrap(), grown);
+        assert_eq!(grown_paths(&task, &repo), vec![path]);
+        let line = grown_line(&guarded.grown).unwrap();
+        task.record_decision(line.clone());
+        assert!(
+            task.decisions.iter().any(|d| d.contains(path)),
+            "{:?}",
+            task.decisions
+        );
+        assert!(line.starts_with("Orchestrator: "), "{line}");
+        assert!(grown_line(&[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_test_file_a_check_names_with_a_changed_or_removed_line_is_restored() {
+        let path = "tests/manager.test.cjs";
+        for edited in ["one\nTWO\nthree\n", "two\nthree\n", "two\none\n", ""] {
+            let (_dir, repo, task) = task_naming(path, "one\ntwo\n");
+            std::fs::write(repo.join(path), edited).unwrap();
+            let guarded = guard_protected(&task, &repo, &[path.to_string()]).await;
+            assert_eq!(guarded.restored, vec![path], "{edited:?}");
+            assert!(guarded.grown.is_empty(), "{edited:?}");
+            assert_eq!(
+                std::fs::read_to_string(repo.join(path)).unwrap(),
+                "one\ntwo\n",
+                "{edited:?}"
+            );
+            assert!(grown_paths(&task, &repo).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_planner_file_that_only_grew_is_still_restored() {
+        let (_dir, repo) = repo_with(&[("a.txt", "a\n")]);
+        let mut task = task_with_status(TaskStatus::Running);
+        task.fixture_data().base_sha = crate::git::history::head_sha(&repo).unwrap();
+        task.fixture_data().planner_tests.files = vec![test("t/p.test", "one\n")];
+        task.fixture_data().planner_tests.protected = Some(protected_hashes(&repo, "HEAD", &task));
+        std::fs::create_dir_all(repo.join("t")).unwrap();
+        std::fs::write(repo.join("t/p.test"), "one\nmore\n").unwrap();
+        let guarded = guard_protected(&task, &repo, &[]).await;
+        assert_eq!(guarded.restored, vec!["t/p.test"]);
+        assert!(guarded.grown.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("t/p.test")).unwrap(),
+            "one\n"
+        );
     }
 }

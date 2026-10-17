@@ -43,6 +43,7 @@ pub(super) fn renders() -> Vec<(&'static str, String)> {
                 screenshots: &screenshots,
                 evidence_from: None,
                 declines: &declines,
+                grown_protected: "",
             },
             &narrow,
         ),

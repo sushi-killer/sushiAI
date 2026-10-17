@@ -4,6 +4,7 @@ use super::native::head_chars;
 use super::run::ReviewSession;
 use super::types::{ReviewFailure, ReviewSaw};
 use crate::engine::lifecycle::report::ImplementerReport;
+use crate::engine::protected::restore::grown_paths;
 use crate::harness::RunOutcome;
 use crate::task::{Decline, ReviewResult, ReviewScope, Stage, Task, VerifyOutcome};
 use crate::verify::review::brief::{
@@ -21,6 +22,7 @@ pub(super) struct PreparedReview {
     shown: Vec<(String, Option<u32>)>,
     evidence_from: Option<u32>,
     declines: Vec<Decline>,
+    grown: String,
 }
 
 impl PreparedReview {
@@ -46,6 +48,19 @@ impl PreparedReview {
             let (wt, base) = (session.worktree.clone(), session.base_sha.clone());
             tokio::task::spawn_blocking(move || {
                 crate::git::changes::diff_full(&wt, &base, 60_000).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        };
+        let grown = {
+            let (wt, base, task) = (
+                session.worktree.clone(),
+                session.base_sha.clone(),
+                task.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                let paths = grown_paths(&task, &wt);
+                crate::git::changes::diff_paths(&wt, &base, &paths, 20_000).unwrap_or_default()
             })
             .await
             .unwrap_or_default()
@@ -92,6 +107,7 @@ impl PreparedReview {
             shown,
             evidence_from,
             declines: this_attempt.map(|a| a.declines.clone()).unwrap_or_default(),
+            grown,
         }
     }
 
@@ -109,6 +125,7 @@ impl PreparedReview {
             screenshots: &self.shown,
             evidence_from: self.evidence_from,
             declines: &self.declines,
+            grown_protected: &self.grown,
         };
         match &self.narrow {
             Some(narrow) => build_narrow_review_brief(

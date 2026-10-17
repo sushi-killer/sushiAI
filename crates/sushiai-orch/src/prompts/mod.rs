@@ -10,4 +10,4 @@ pub(crate) use loader::assert_engine_snapshot;
 
 /// Bump when any brief template or fixed instruction block changes: it is
 /// part of every run's `promptHash`.
-pub const BRIEF_TEMPLATE_VERSION: u32 = 20;
+pub const BRIEF_TEMPLATE_VERSION: u32 = 21;

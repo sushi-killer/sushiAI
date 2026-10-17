@@ -84,6 +84,19 @@ F-4d5e6f (wrong): src/dialog.tsx:12; artifacts/dialog.png
 </untrusted-data>
 
 
+## Protected files that grew
+
+orchd protects these files (the task's checks name them) and kept the attempt's changes because every existing line is unchanged and only lines were added. Confirm the additions do not weaken an existing test, for example with an early return, a skip, ignore or only marker, or changed setup; a weakened test is a P1 finding.
+
+```diff
+--- a/tests/settings.test.ts
++++ b/tests/settings.test.ts
+@@ -3,2 +3,5 @@
+ test("loads", load);
++test("saves", save);
+ test("resets", reset);
+```
+
 ## Diff
 
 ```diff

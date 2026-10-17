@@ -33,12 +33,21 @@ fn assert_no_cache_env(command: &tokio::process::Command) {
     }
 }
 
+/// The target directory orchd gives cargo in `wt`: its own `target` when the runner's cargo
+/// setup (a `CARGO_TARGET_DIR` such as `npm run ci` exports, a host `build.target-dir`) points
+/// outside it, else none. The compiler cache never adds one of its own.
+fn expected_target(wt: &Path) -> Option<std::path::PathBuf> {
+    sushiai_orch::cargo_target::outside_target_dir(wt).map(|_| wt.join("target"))
+}
+
 async fn verify(wt: &Path, env: &VerifyEnvironment, script: &str) {
     let command = env.build_command(wt, script, None, "");
-    assert!(!command
+    let target = command
         .as_std()
         .get_envs()
-        .any(|(k, _)| k == "CARGO_TARGET_DIR"));
+        .find(|(k, _)| *k == "CARGO_TARGET_DIR")
+        .and_then(|(_, v)| v.map(std::path::PathBuf::from));
+    assert_eq!(target, expected_target(wt));
     let result = run_verify_command(
         wt,
         script,
@@ -377,8 +386,9 @@ fn setup_keeps_per_worktree_build_outputs_with_the_shared_wrapper() {
         )
         .unwrap();
     let wrapper = std::env::var("RUSTC_WRAPPER").unwrap_or_else(|_| "sccache".into());
+    let target = expected_target(&wt).map_or(String::new(), |t| t.display().to_string());
     assert_eq!(
         std::fs::read_to_string(wt.join("out.txt")).unwrap().trim(),
-        format!("[{wrapper}][]")
+        format!("[{wrapper}][{target}]")
     );
 }

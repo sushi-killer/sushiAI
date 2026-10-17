@@ -181,7 +181,15 @@ mod tests {
                 (ok, task)
             })
         };
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        crate::engine::test_support::wait_async("the pause to be saved and its slot freed", || {
+            app.slots.available_permits() == before + 1
+                && app
+                    .store
+                    .load_task(&paused_id(&app))
+                    .unwrap()
+                    .is_some_and(|task| task.queue.paused_until.is_some())
+        })
+        .await;
         assert_eq!(app.slots.available_permits(), before + 1);
         let mid = app.store.load_task(&paused_id(&app)).unwrap().unwrap();
         assert!(mid.queue.paused_until.is_some());
@@ -227,7 +235,13 @@ mod tests {
                 (ok, task)
             })
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        crate::engine::test_support::wait_async("the pause to be saved", || {
+            app.store
+                .load_task(&paused_id(&app))
+                .unwrap()
+                .is_some_and(|task| task.queue.paused_until.is_some())
+        })
+        .await;
         app.shutting_down.store(true, Ordering::SeqCst);
         cancel.cancel();
         let (resumed, task) = waiter.await.unwrap();

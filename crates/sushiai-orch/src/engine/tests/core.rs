@@ -94,13 +94,10 @@ async fn helpers_folder_implement_attempt_keeps_a_unique_number_after_planning()
     })
     .await;
     app.handle_task_stop(json!({"id":task.id})).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while app.controls.lock().unwrap().contains_key(&task.id) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    crate::engine::test_support::wait_async("the fixture loop to finish after stopping", || {
+        !app.controls.lock().unwrap().contains_key(&task.id)
     })
-    .await
-    .expect("the fixture loop must finish after stopping");
+    .await;
     let started = started.expect("the implement attempt must start");
     assert_eq!(started.attempts[0].n, 1);
     assert_eq!(started.attempts[1].n, 2);
@@ -122,7 +119,7 @@ async fn concurrent_task_updates_preserve_every_decision() {
             std::thread::spawn(move || {
                 barrier.wait();
                 app.update_task(&id, |task| {
-                    std::thread::sleep(Duration::from_millis(5));
+                    std::thread::sleep(Duration::from_millis(5)); // wait-allow: widens the read-modify-write window the test races twelve writers through
                     task.fixture_data().decisions.push(i.to_string());
                 })
                 .unwrap();

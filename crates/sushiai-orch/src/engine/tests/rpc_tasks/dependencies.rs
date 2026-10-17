@@ -370,31 +370,31 @@ async fn task_amend_depends_on_during_parent_preflight_starts_no_child() {
     let pending = Arc::new(StdMutex::new(None));
     let answers: Arc<StdMutex<Option<oneshot::Sender<Reply>>>> = Arc::new(StdMutex::new(None));
     let deliver = async {
-        loop {
-            let tx = answers.lock().unwrap().take();
-            if let Some(tx) = tx {
-                *pending.lock().unwrap() = Some(PendingAmendment::capture(
-                    &parent,
-                    Amendment {
-                        depends_on: Some(vec![dependency.id.clone()]),
-                        dependency_titles: vec![dependency.title.clone()],
-                        ..Default::default()
-                    },
-                    Origin::Owner,
-                ));
-                let mut queued = app.store.load_task(&parent.id).unwrap().unwrap();
-                queued.fixture_data().pending_amendment = pending.lock().unwrap().clone();
-                app.store.save_task_with_pending(&queued, None).unwrap();
-                tx.send(Reply {
-                    text: KEEP_ALL.into(),
-                    default_evidence: None,
-                    like: None,
-                })
-                .unwrap();
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let mut asked = None;
+        crate::engine::test_support::wait_async("the question to be asked", || {
+            asked = answers.lock().unwrap().take();
+            asked.is_some()
+        })
+        .await;
+        let tx = asked.unwrap();
+        *pending.lock().unwrap() = Some(PendingAmendment::capture(
+            &parent,
+            Amendment {
+                depends_on: Some(vec![dependency.id.clone()]),
+                dependency_titles: vec![dependency.title.clone()],
+                ..Default::default()
+            },
+            Origin::Owner,
+        ));
+        let mut queued = app.store.load_task(&parent.id).unwrap().unwrap();
+        queued.fixture_data().pending_amendment = pending.lock().unwrap().clone();
+        app.store.save_task_with_pending(&queued, None).unwrap();
+        tx.send(Reply {
+            text: KEEP_ALL.into(),
+            default_evidence: None,
+            like: None,
+        })
+        .unwrap();
     };
     let cancel = CancelToken::new();
     let signals = crate::engine::run_control::TaskSignals {

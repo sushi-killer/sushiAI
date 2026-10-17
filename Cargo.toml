@@ -39,3 +39,10 @@ incremental = false
 # Hashing the daemon binary for `hello.build` takes about a second unoptimized.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The rust_standards test parses every workspace source with syn; optimized,
+# its parse takes 2.8 s instead of 4.5 s on an M-series Mac.
+[profile.dev.package.syn]
+opt-level = 3
+[profile.dev.package.proc-macro2]
+opt-level = 3

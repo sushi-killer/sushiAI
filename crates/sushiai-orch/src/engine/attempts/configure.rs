@@ -26,6 +26,11 @@ pub(super) fn configure_command(
         .env("ORCHD_TASK", task_id)
         .env("SUSHIAI_HOME", &app.home)
         .envs(project_env);
+    // Before the first attempt builds anything: one target directory per
+    // worktree, recorded once in the task's decisions.
+    if let Some(line) = crate::cargo_target::isolate(cmd.as_std_mut(), &worktree) {
+        record_once(app, task_id, line);
+    }
     let task_policy = req
         .task_sandbox
         .filter(|_| cfg!(target_os = "macos") && req.task_run && !req.review);
@@ -40,18 +45,23 @@ pub(super) fn configure_command(
             app.settings.read().unwrap().sandbox
         };
         if let Some(line) = apply_agent_cache(cmd, cache.as_ref(), req, sandbox) {
-            // Best-of candidates can discover the same skip concurrently.
-            static CACHE_DECISIONS: StdMutex<()> = StdMutex::new(());
-            let _write = CACHE_DECISIONS.lock().unwrap();
-            let recorded = app
-                .store
-                .load_task(task_id)
-                .ok()
-                .flatten()
-                .is_some_and(|task| task.decisions.contains(&line));
-            if !recorded {
-                app.append_decision(task_id, line);
-            }
+            record_once(app, task_id, line);
         }
+    }
+}
+
+/// Appends a decision line unless the task already has it.
+fn record_once(app: &App, task_id: &str, line: String) {
+    // Best-of candidates can discover the same decision concurrently.
+    static DECISIONS: StdMutex<()> = StdMutex::new(());
+    let _write = DECISIONS.lock().unwrap();
+    let recorded = app
+        .store
+        .load_task(task_id)
+        .ok()
+        .flatten()
+        .is_some_and(|task| task.decisions.contains(&line));
+    if !recorded {
+        app.append_decision(task_id, line);
     }
 }

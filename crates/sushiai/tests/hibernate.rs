@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Session hibernation and wake end to end: a real daemon and holders in a temp home, with fake
 //! `claude` and `codex` node scripts on `PATH`. They send their hooks through `sushiai hook` like
 //! the real CLIs (see `agents.rs`), log their argv, variables and keystrokes to a file, and stay
@@ -139,10 +140,16 @@ fn pinned_and_focused_sessions_and_shells_stay_awake() {
     let control = rig.create(&mut client);
 
     wait_status(&mut client, &control, "hibernated");
-    std::thread::sleep(Duration::from_millis(2500));
-    for id in [&pinned, &focused, &gone, &shell] {
-        assert_eq!(status_of(&mut client, id), "running", "{id} went to sleep");
-    }
+    // The window outlasts the rig's 1500 ms idle time: the control already slept.
+    holds_for(
+        "pinned, focused and shell sessions staying awake",
+        Duration::from_millis(2500),
+        || {
+            [&pinned, &focused, &gone, &shell]
+                .iter()
+                .all(|id| status_of(&mut client, id) == "running")
+        },
+    );
     // The viewer leaves: its focus goes with it.
     drop(viewer);
     wait_status(&mut client, &gone, "hibernated");
@@ -401,8 +408,12 @@ fn configure_saves_the_setting_and_a_state_file_of_schema_one_loads() {
     client.call("daemon.configure", json!({"hibernateAfterSecs": 0}));
     client.call("session.wake", json!({"id": id}));
     wait_status(&mut client, &id, "running");
-    std::thread::sleep(Duration::from_millis(3000));
-    assert_eq!(status_of(&mut client, &id), "running");
+    // Three times the 1 s idle time set above: a woken session would sleep again by then.
+    holds_for(
+        "a woken session staying up with hibernation off",
+        Duration::from_millis(3000),
+        || status_of(&mut client, &id) == "running",
+    );
 }
 
 #[test]

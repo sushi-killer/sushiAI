@@ -45,24 +45,35 @@ pub(super) async fn redirected(
     redirects: &[Task],
 ) {
     for redirected in redirects.iter().filter(|done| done.landed_sha.is_none()) {
+        let landed = |done: &mut Task, at: i64| {
+            done.record_base_ref(Some(branch.to_string()));
+            done.record_landed(Some(sha.to_string()));
+            done.stamp_landing(at);
+            done.record_unlanded(None);
+            done.record_decision(format!(
+                "Land: task {} ({}) landed this work at {}",
+                task.title,
+                task.id,
+                short_sha(sha)
+            ));
+        };
         let Ok(Some(mut done)) = app.store.load_task(&redirected.id) else {
             continue;
         };
-        done.record_base_ref(Some(branch.to_string()));
-        done.record_landed(Some(sha.to_string()));
-        done.stamp_landing(now_ms());
-        done.record_unlanded(None);
-        done.record_decision(format!(
-            "Land: task {} ({}) landed this work at {}",
-            task.title,
-            task.id,
-            short_sha(sha)
-        ));
+        let at = now_ms();
+        landed(&mut done, at);
+        let decisions = done.decisions.len();
         crate::engine::reports::refresh_diff_stat(&mut done).await;
         app.write_report(&mut done).await;
-        done.touch(now_ms());
-        let _ = app.store.save_task(&done);
-        app.broadcast_task(&done);
+        // The report took a while: the landing goes onto the task as stored now, under its
+        // lock, never as the copy read before it.
+        app.update_task_if(&done.id, |fresh| {
+            landed(fresh, at);
+            fresh.record_task_diff_stat(done.diff_stat);
+            crate::engine::reports::keep_report(fresh, &done, decisions);
+            fresh.touch(now_ms());
+            true
+        });
     }
 }
 

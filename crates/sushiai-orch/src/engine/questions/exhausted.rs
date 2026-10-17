@@ -132,28 +132,54 @@ impl App {
                 (Some(true), _) => return false,
                 // A loop between two waits: its own copy decides next.
                 (Some(false), _) => {
-                    task.release_question_hold(false);
-                    self.save_task_logged(task);
-                    self.broadcast_task(task);
+                    self.write_exhausted_step(task, |fresh| {
+                        fresh.release_question_hold(false);
+                    });
                     return false;
                 }
                 (None, Some(n)) => {
                     let settings = self.settings.read().unwrap().clone();
-                    ladder::change_approach(task, &settings, n);
-                    task.clear_question();
-                    task.resume_phase(TaskStatus::Queued, now_ms());
-                    self.save_task_logged(task);
-                    self.broadcast_task(task);
-                    return true;
+                    return self.write_exhausted_step(task, |fresh| {
+                        ladder::change_approach(fresh, &settings, n);
+                        fresh.clear_question();
+                        fresh.resume_phase(TaskStatus::Queued, now_ms());
+                    });
                 }
                 (None, None) => {}
             }
         }
-        ladder::end_ladder(self, task);
-        self.notify_task_failed(task);
-        if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
-            control.signals.cancel.cancel();
+        if self.write_exhausted_step(task, ladder::end_ladder_on) {
+            self.notify_task_failed(task);
+            if let Some(control) = self.controls.lock().unwrap().get(&task.id) {
+                control.signals.cancel.cancel();
+            }
         }
         false
+    }
+
+    /// Applies one rung to the task as stored now, under its lock, while it still holds the
+    /// question `task` was read with; `task` becomes the saved copy. `false` when another
+    /// writer settled the question first: nothing is written.
+    fn write_exhausted_step(&self, task: &mut Task, step: impl FnOnce(&mut Task)) -> bool {
+        let key = |t: &Task| {
+            t.question
+                .as_ref()
+                .map(|q| (q.kind, q.text.clone(), q.asked_at))
+        };
+        let asked = key(task);
+        let saved = self.update_task_if(&task.id, |fresh| {
+            let same = asked.is_some() && key(fresh) == asked;
+            if same {
+                step(fresh);
+            }
+            same
+        });
+        match saved {
+            Some(saved) => {
+                *task = saved;
+                true
+            }
+            None => false,
+        }
     }
 }

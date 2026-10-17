@@ -11,7 +11,6 @@ use common::repository::{git_out, init_git_repo};
 
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::Duration;
 
 /// Logs the start of every implement run to `$ORDER_LOG`, writes a marker and
 /// answers the reviewer with a plain PASS.
@@ -119,19 +118,14 @@ fn a_slow_final_check_that_fails_on_the_base_still_gates_landing() {
     let head_before = git_out(repo.path(), &["rev-parse", "HEAD"]);
     let id = start(&daemon, repo.path(), "true", check);
 
-    let start_at = std::time::Instant::now();
-    let task: Value = loop {
+    let task: Value = wait_until("the task to wait after one attempt", || {
         let t = daemon.request("task.get", json!({"id": id}));
         assert!(
             !matches!(t["status"].as_str(), Some("done" | "failed")),
             "the task must not land: {t}"
         );
-        if t["status"] == "waiting" && t["attempts"].as_array().unwrap().len() == 1 {
-            break t;
-        }
-        assert!(start_at.elapsed() < common::polling::deadline(), "{t}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+        (t["status"] == "waiting" && t["attempts"].as_array().unwrap().len() == 1).then_some(t)
+    });
     assert!(
         task["question"]["text"]
             .as_str()

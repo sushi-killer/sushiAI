@@ -22,6 +22,21 @@ pub fn write_text_private(path: &Path, text: &str) -> io::Result<()> {
     write_atomic(path, text.as_bytes(), Some(0o600))
 }
 
+/// Appends `text` to a file the owner alone reads, created with mode 0600.
+pub fn append_text_private(path: &Path, text: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
+}
+
 /// As `write_json_atomic`, for JSON that carries a secret: mode 0600 from the
 /// first byte (a run's settings embed its hook token).
 pub fn write_json_private<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {

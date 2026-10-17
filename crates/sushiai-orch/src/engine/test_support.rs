@@ -283,3 +283,30 @@ pub(super) fn assert_helper_timeout(task: &Task, helper: &str) {
     // what matters is that a timed-out helper is never started again.
     assert!(crate::engine::chat::test_support::fake_overseer_calls(Path::new(&task.worktree)) <= 1);
 }
+
+/// Polls `ok` on the runtime until it holds, so tasks on the same runtime keep running; panics
+/// naming `what` at the end of the test's shared budget (the async twin of
+/// `procs::testing::wait_until`).
+pub(crate) async fn wait_async(what: &str, mut ok: impl FnMut() -> bool) {
+    let end = crate::procs::testing::expiry();
+    while !ok() {
+        assert!(
+            std::time::Instant::now() < end,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await; // wait-allow: the poll interval of the shared wait
+    }
+}
+
+/// An absence check on the runtime: polls `still` for `window`; panics naming `what` as soon as
+/// it stops holding (the async twin of `procs::testing::holds_for`).
+pub(crate) async fn holds_for_async(what: &str, window: Duration, mut still: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + window;
+    loop {
+        assert!(still(), "{what} stopped holding");
+        if std::time::Instant::now() >= end {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await; // wait-allow: the poll interval of the shared absence check
+    }
+}

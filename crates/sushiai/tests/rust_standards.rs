@@ -1,3 +1,4 @@
+//! ci-crates: crates-with:rust-standards.json
 //! Generic crate-local Rust standards. Configuration lives beside each opted-in Cargo.toml.
 #[path = "rust_standards/checker.rs"]
 mod checker;

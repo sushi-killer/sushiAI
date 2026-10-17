@@ -315,7 +315,23 @@ fn answering_stop_after_a_daemon_restart_stops_the_parent_and_its_subtasks() {
     poll_until(&daemon, &parent_id, |s| s == "stopped");
     // Absence check: this window gives a wrongly relaunched loop time to run its
     // preflight again.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for(
+        "no relaunched loop after the stop answer",
+        ABSENCE_WINDOW,
+        || {
+            let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+            parent["status"] == "stopped"
+                && parent["question"].is_null()
+                && children_of(&daemon, &parent)
+                    .iter()
+                    .zip(&before)
+                    .all(|(c, before)| {
+                        implement_attempts(c).len() == *before
+                            && c["status"] != "running"
+                            && c["status"] != "done"
+                    })
+        },
+    );
     let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(parent["status"], "stopped", "task JSON: {parent}");
     assert!(parent["question"].is_null(), "{parent}");
@@ -357,7 +373,16 @@ fn a_parent_in_the_backlog_starts_no_child_until_it_leaves() {
     let child_id = child["id"].as_str().unwrap().to_string();
 
     // Absence check: this window gives a forbidden child start time to happen.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for(
+        "a backlog parent's child staying unstarted",
+        ABSENCE_WINDOW,
+        || {
+            let t = daemon.request("task.get", serde_json::json!({"id": child_id}));
+            t["status"] == "queued"
+                && t["attempts"] == serde_json::json!([])
+                && !log.path().join("slept").exists()
+        },
+    );
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
     assert_eq!(child_now["attempts"], serde_json::json!([]), "{child_now}");

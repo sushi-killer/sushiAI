@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Agent sessions end to end. The fake `claude` and `codex` are node scripts that run the hook
 //! commands they find where the real CLIs would: in the `--settings` argument (claude) and in
 //! `$CODEX_HOME/hooks.json` written by `sushiai hooks install` (codex). Fixtures supply the
@@ -1018,7 +1019,9 @@ stay();
     fs::write(fake.out("go"), "x").expect("open the gate");
     // Once the hooks speak, they win: the later "Allow command?" text changes nothing.
     wait_file(&fake.out("done"), "x");
-    std::thread::sleep(Duration::from_millis(1200));
+    holds_for("the hook keeping the status", ABSENCE_WINDOW, || {
+        agent_status(&mut client, &id) == ("idle".to_string(), "hook".to_string())
+    });
     let (status, source) = agent_status(&mut client, &id);
     assert_eq!(source, "hook", "hooks took over");
     assert_eq!(status, "idle", "the screen text did not override the hook");

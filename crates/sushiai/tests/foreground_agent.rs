@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! An agent started by hand in a shell session is detected from the PTY's foreground process.
 //! The fake `claude` is a node script (a real one runs the same way): it writes the session
 //! file Claude keeps under `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` and exits on any input.
@@ -160,7 +161,11 @@ fn a_shell_that_exits_by_itself_right_after_its_agent_leaves_no_agent_to_reopen(
     });
     // The agent quits and the shell is left before the next poll could notice.
     client.type_text(&id, "\n");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The agent has quit when its process is gone (the daemon polls every 2 s).
+    let agent = w.dir.path().join("bin/claude").display().to_string();
+    wait_until("the fake agent to quit", || {
+        !processes().iter().any(|(_, _, argv)| argv.contains(&agent))
+    });
     client.type_text(&id, "exit\n");
     client.wait_note("session.exited");
     let listed = client.call("session.list", Value::Null);

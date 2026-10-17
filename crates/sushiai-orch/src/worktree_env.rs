@@ -275,6 +275,7 @@ impl WorktreeEnvironment<'_> {
                 cache.apply(&mut cmd);
             }
         }
+        crate::cargo_target::isolate(cmd.as_std_mut(), self.worktree);
         cmd.env("PATH", self.path)
             .env("ORCHD_ROOT_PATH", self.main_root)
             .env("ORCHD_WORKTREE_PATH", self.worktree)

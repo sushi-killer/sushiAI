@@ -7,13 +7,26 @@ mod common;
 use common::repository::git_out;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_task_status, poll_until, remove_dir_retrying, wait_until};
+use common::polling::{
+    holds_for, poll_task_status, poll_until, remove_dir_retrying, wait_until, ABSENCE_WINDOW,
+};
 use common::process::Daemon;
 use common::repository::init_git_repo;
 
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
+
+/// Absence check: a task given time to start a forbidden attempt stays queued with none.
+fn stays_queued_without_attempts(daemon: &Daemon, id: &serde_json::Value) {
+    holds_for(
+        "a task staying queued without an attempt",
+        ABSENCE_WINDOW,
+        || {
+            let t = daemon.request("task.get", json!({"id": id}));
+            t["status"] == "queued" && t["attempts"].as_array().unwrap().is_empty()
+        },
+    );
+}
 
 fn dependency_daemon(scripts: &Path) -> Daemon {
     let script = fake_harness_script(
@@ -157,7 +170,7 @@ fn depends_on_amend_queued_task_waits_for_a_running_dependency_then_starts_itsel
     );
     assert_eq!(amended["pending"], false, "{amended}");
 
-    std::thread::sleep(Duration::from_millis(500));
+    stays_queued_without_attempts(&daemon, &task["id"]);
     let waiting = daemon.request("task.get", json!({"id": task["id"]}));
     assert_eq!(waiting["status"], "queued", "{waiting}");
     assert!(
@@ -239,7 +252,19 @@ fn depends_on_amend_failed_task_waits_for_a_dependency_then_starts_itself() {
     );
     assert_eq!(amended["pending"], false, "{amended}");
 
-    std::thread::sleep(Duration::from_millis(500));
+    holds_for(
+        "the amended task staying queued with no running attempt",
+        ABSENCE_WINDOW,
+        || {
+            let t = daemon.request("task.get", json!({"id": failing["id"]}));
+            t["status"] == "queued"
+                && t["attempts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|a| a["status"] != "running")
+        },
+    );
     let waiting = daemon.request("task.get", json!({"id": failing["id"]}));
     assert_eq!(waiting["status"], "queued", "{waiting}");
     assert_eq!(waiting["dependsOn"], json!([dependency["id"]]), "{waiting}");
@@ -302,7 +327,7 @@ fn depends_on_amend_empty_list_starts_without_waiting_for_the_old_dependency() {
             "verify": ["test -f CHANGED_MARKER.txt"], "dependsOn": [dependency["id"]],
         }),
     );
-    std::thread::sleep(Duration::from_millis(500));
+    stays_queued_without_attempts(&daemon, &task["id"]);
     let waiting = daemon.request("task.get", json!({"id": task["id"]}));
     assert_eq!(waiting["status"], "queued", "{waiting}");
     assert!(
@@ -361,7 +386,7 @@ fn depends_on_amend_live_loop_rechecks_the_graph_before_its_first_attempt() {
         "Make a change",
         true,
     );
-    std::thread::sleep(Duration::from_millis(500));
+    stays_queued_without_attempts(&daemon, &task["id"]);
     let queued = daemon.request("task.get", json!({"id": task["id"]}));
     assert_eq!(queued["status"], "queued", "{queued}");
     assert!(
@@ -383,7 +408,7 @@ fn depends_on_amend_live_loop_rechecks_the_graph_before_its_first_attempt() {
         (t["dependsOn"] == json!([dependency["id"]]) && t["status"] == "queued").then_some(t)
     });
     assert_dependency_decisions(&applied, "Dependencies: waits for \"Live dependency\"");
-    std::thread::sleep(Duration::from_millis(500));
+    stays_queued_without_attempts(&daemon, &task["id"]);
     let waiting = daemon.request("task.get", json!({"id": task["id"]}));
     assert_eq!(waiting["status"], "queued", "{waiting}");
     assert!(

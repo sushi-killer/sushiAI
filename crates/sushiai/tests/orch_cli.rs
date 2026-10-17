@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-orch
 //! `sushiai mcp`, `sushiai orch hook` and `sushiai orch register` in the real binary.
 //!
 //! The mcp tests run against a real daemon with the orchestration module enabled. The hook

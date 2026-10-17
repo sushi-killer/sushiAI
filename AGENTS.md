@@ -278,9 +278,16 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   `docs/**/*.md` to assert its wording (`scripts/check-conventions.mjs`;
   the one exception is `tests/docs-map.test.cjs`, which keeps `docs/MAP.md`
   a complete and valid map of the repository).
-- A change to documents alone skips the builds and tests, and the Rust tests
-  and lint run only when Rust can be affected, in CI and in `npm run ci`
-  alike (`scripts/ci-changes.mjs`; `CI_ALL=1 npm run ci` runs everything).
+- One selector picks the checks a change needs, in CI, in `npm run ci` and in
+  `node scripts/test-rust.mjs --affected` alike (`scripts/ci-changes.mjs`):
+  documents alone run only the static checks; a crate change runs the Rust
+  test binaries that can see it (crate graph from the manifests,
+  `scripts/lib/rust-graph.mjs`) and the node tests that drive the Rust side;
+  any other code change runs every node test. The build and test setup
+  (lockfiles, toolchain, `.config/`, test helpers, the CI scripts) and a push
+  to `main` run everything; `CI_ALL=1 npm run ci` does too. A new test of the
+  `sushiai` binary starts with a `//! ci-crates: <crates it drives>` line
+  (`tests/ci-pipeline.test.cjs` fails otherwise); scripts never name a module.
 - Tests are `node --test` `.cjs` files importing `.ts` sources directly via
   Node's type-stripping (Node ≥22.18) — no type-checking happens at test
   time, so test assertions have to catch real behavior, not just satisfy the

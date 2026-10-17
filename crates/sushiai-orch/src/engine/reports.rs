@@ -212,7 +212,7 @@ fn auto_touch_note(task: &Task) -> Option<String> {
 
 /// Puts the mark and what `write_report` set on `from` (a copy loaded with
 /// `decisions_before` decisions) onto `t`, the task as stored now.
-fn keep_report(t: &mut Task, from: &Task, decisions_before: usize) {
+pub(super) fn keep_report(t: &mut Task, from: &Task, decisions_before: usize) {
     t.adopt_report(from);
     for line in from.decisions.iter().skip(decisions_before) {
         if !t.decisions.contains(line) {
@@ -312,8 +312,27 @@ impl App {
             return Err("the task is not done".to_string());
         }
         let before = (task.lead_touch.clone(), task.unlanded.clone());
+        let decisions = task.decisions.len();
         self.write_report(&mut task).await;
-        self.store.save_task(&task).map_err(|e| e.to_string())?;
+        // Put onto the task as stored now, under its lock: the report took a while, and a copy
+        // read before it would write back over whatever was saved meanwhile.
+        let task = {
+            let lock = self.task_lock(id);
+            let _guard = lock.lock().unwrap();
+            let mut fresh = self
+                .store
+                .load_task(id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "task not found".to_string())?;
+            let mark = fresh.lead_touch.clone();
+            keep_report(&mut fresh, &task, decisions);
+            // A mark set while the report was written stays.
+            if mark != before.0 {
+                fresh.record_lead_touch(mark);
+            }
+            self.store.save_task(&fresh).map_err(|e| e.to_string())?;
+            fresh
+        };
         if (task.lead_touch.clone(), task.unlanded.clone()) != before {
             self.broadcast_task(&task);
         }
@@ -572,7 +591,7 @@ mod tests {
             let (app, id) = (app.clone(), id.clone());
             std::thread::spawn(move || app.record_task_metrics(&id))
         };
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(500)); // wait-allow: the recorder must sit inside its blocked FIFO read; the test measures the owner mark landing in that gap and nothing signals the block
         app.handle_task_lead_touch(json!({"id": id, "touched": true, "note": "fix it"}))
             .await
             .unwrap();
@@ -611,7 +630,7 @@ mod tests {
                 let _guard = lock.lock().unwrap();
                 let mut stale = app.store.load_task(&id).unwrap().unwrap();
                 loaded_tx.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(300)); // wait-allow: the lock is held while the owner mark blocks on it; the blocked state has no observable signal
                 stale
                     .fixture_data()
                     .decisions

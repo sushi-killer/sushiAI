@@ -115,7 +115,7 @@ fn task_land_on_a_done_tasks_branch_lands_on_its_base() {
     let next_id = next["id"].as_str().unwrap().to_string();
     daemon.request("task.start", serde_json::json!({"id": next_id}));
     until_done(&daemon, &next_id);
-    daemon.request("task.land", serde_json::json!({"id": next_id}));
+    assert_eq!(land(&daemon, &next_id), "null");
     let next = poll_until(&daemon, &next_id, |s| matches!(s, "done" | "failed"));
     let landed = git_out(root, &["rev-parse", "work"]);
     assert_eq!(next["landedSha"], landed, "{next}");
@@ -158,7 +158,7 @@ fn a_repo_allowed_per_repo_lands_on_its_default_branch_others_are_refused_with_t
     assert!(lines.contains("Settings > Orchestration"), "{lines}");
     assert!(!lines.contains("settings.landOnDefault"), "{lines}");
     // The explicit Land action gives the same readable reason.
-    let err = daemon.request_error("task.land", serde_json::json!({"id": id}));
+    let err = land(&daemon, &id);
     assert!(err.contains("Settings > Orchestration"), "{err}");
     daemon.shutdown_and_wait();
 }

@@ -6,7 +6,7 @@ fn a_restart_resumes_the_pull_request_of_a_done_task() {
     let mut s = setup_with(reply, true, true, false);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
-    wait_for(&s.tools.path().join("draft-started"));
+    wait_for(&s, "draft-started");
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(task["prPending"], true, "{task}");
     let branch = task["branch"].as_str().unwrap().to_string();

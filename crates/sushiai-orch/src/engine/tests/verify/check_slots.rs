@@ -8,14 +8,8 @@ async fn check_slots_settings(app: &App, parallel: u32, heavy: Option<u32>) {
         .unwrap();
 }
 
-async fn check_slots_wait_for(mut ready: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !ready() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("condition became ready");
+async fn check_slots_wait_for(ready: impl FnMut() -> bool) {
+    crate::engine::test_support::wait_async("the condition to become ready", ready).await;
 }
 
 fn check_slots_spawn(
@@ -86,8 +80,13 @@ async fn check_slots_two_checks_run_and_third_waits_with_a_saved_broadcast_decis
         std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
         Event::Task { task } if task.id == tasks[2].id && task.decisions.contains(&line)))
     );
-    // Waiting is deliberately longer than the third check's eventual run.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The window is deliberately longer than the third check's eventual run.
+    crate::engine::test_support::holds_for_async(
+        "the third check stays unstarted",
+        Duration::from_millis(150),
+        || !paths[2].join("started").exists(),
+    )
+    .await;
     *app.check_load.write().unwrap() = || (0.5, 4);
     std::fs::write(paths[0].join("release"), "").unwrap();
     assert_eq!(first.await.unwrap().code, Some(0));
@@ -228,11 +227,12 @@ async fn check_slots_settings_set_raises_parallel_and_starts_a_waiting_task_loop
     app.store.save_task(&task).unwrap();
     let held = app.slots.clone().try_acquire_owned().unwrap();
     app.spawn_task_loop(task.id.clone(), true);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        app.store.load_task(&task.id).unwrap().unwrap().status,
-        TaskStatus::Queued
-    );
+    crate::engine::test_support::holds_for_async(
+        "the task stays queued while the slot is held",
+        Duration::from_millis(100),
+        || app.store.load_task(&task.id).unwrap().unwrap().status == TaskStatus::Queued,
+    )
+    .await;
     check_slots_settings(&app, 2, Some(2)).await;
     check_slots_wait_for(|| {
         app.store

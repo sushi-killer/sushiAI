@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! `sushiai skills` against fixture homes: the catalog, install and remove.
 
 use std::io::Write;

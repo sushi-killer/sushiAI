@@ -1371,6 +1371,7 @@ impl Actor {
             SessionExited {
                 id: self.info.id.clone(),
                 code,
+                seq: Some(self.seq),
             },
         );
         let _ = self.registry.events.send(note);

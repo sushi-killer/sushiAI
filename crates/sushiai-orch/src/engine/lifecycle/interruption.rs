@@ -25,13 +25,16 @@ pub(in crate::engine) fn interrupt_attempt(app: &Arc<App>, task: &mut Task, idx:
 }
 
 pub(in crate::engine) async fn mark_stopped_if_not_already(app: &Arc<App>, task_id: &str) {
-    if let Ok(Some(mut task)) = app.store.load_task(task_id) {
-        if !matches!(task.status, TaskStatus::Done | TaskStatus::Failed) {
-            app.apply_cancellation(&mut task);
-            task.touch(now_ms());
-            app.save_task_logged(&task);
-            app.broadcast_task(&task);
-        }
+    if let Ok(Some(task)) = app.store.load_task(task_id) {
+        // Decided and written on the current copy, under the task lock.
+        app.update_task_if(task_id, |task| {
+            let live = !matches!(task.status, TaskStatus::Done | TaskStatus::Failed);
+            if live {
+                app.apply_cancellation(task);
+                task.touch(now_ms());
+            }
+            live
+        });
         app.advance_queue(&task.repo);
     }
 }

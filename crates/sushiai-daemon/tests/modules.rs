@@ -5,7 +5,11 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[path = "../../test_wait.rs"]
+mod test_wait;
+use test_wait::wait_until;
 
 use serde_json::{json, Value};
 use sushiai_daemon::{BoxFuture, Home, Module, ModuleNotify, ModuleSlot, Reply};
@@ -67,11 +71,9 @@ impl Running {
             dir,
             thread: Some(thread),
         };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while UnixStream::connect(running.socket()).is_err() {
-            assert!(Instant::now() < deadline, "daemon socket");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_until("daemon socket", || {
+            UnixStream::connect(running.socket()).ok().map(|_| ())
+        });
         running
     }
 
@@ -120,11 +122,10 @@ impl Client {
         self.next += 1;
         let frame = Request::new(id, method, params).frame();
         self.stream.write_all(&encode(&frame)).expect("write");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
+        wait_until(&format!("a response to {method}"), || {
             let mut buf = [0u8; 8192];
             let Ok(n) = self.stream.read(&mut buf) else {
-                continue;
+                return None;
             };
             assert!(n > 0, "daemon closed the connection");
             let mut answer = None;
@@ -136,14 +137,11 @@ impl Client {
                     _ => {}
                 }
             }
-            if let Some(r) = answer {
-                return match r.error {
-                    Some(e) => Err((e.code, e.message)),
-                    None => Ok(r.result.unwrap_or_default()),
-                };
-            }
-        }
-        panic!("no response to {method}");
+            answer.map(|r| match r.error {
+                Some(e) => Err((e.code, e.message)),
+                None => Ok(r.result.unwrap_or_default()),
+            })
+        })
     }
 }
 
@@ -163,11 +161,13 @@ fn a_module_call_is_routed_and_its_notification_arrives() {
     assert!(capabilities(&hello).contains(&"probing"));
     let reply = client.call("probe.echo", json!({"n": 1})).expect("echo");
     assert_eq!(reply, json!({"n": 1}));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !client.notes.iter().any(|(m, _)| m == "probe.event") {
-        assert!(Instant::now() < deadline, "no probe.event");
+    wait_until("the probe.event notification", || {
+        if client.notes.iter().any(|(m, _)| m == "probe.event") {
+            return Some(());
+        }
         let _ = client.call("ping", Value::Null);
-    }
+        None
+    });
     let err = client.call("probe.nope", Value::Null).expect_err("unknown");
     assert_eq!(err.0, code::METHOD_NOT_FOUND);
 }

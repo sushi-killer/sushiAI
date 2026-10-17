@@ -11,14 +11,15 @@ use common::harness::{
     fake_harness_script, FAKE_CLAUDE_HOOK_SCRIPT, FAKE_CLAUDE_PASS, FAKE_RETRY_SCRIPT,
 };
 use common::native_sandbox::fit_sandbox;
-use common::polling::{poll_task_status, poll_until, remove_dir_retrying, wait_until};
+use common::polling::{
+    holds_for, poll_task_status, poll_until, remove_dir_retrying, wait_until, ABSENCE_WINDOW,
+};
 use common::process::{is_alive, socket_of, spawn_daemon, wait_for_exit};
 use common::protocol::{request_on, stop_daemon, wait_for_socket};
 use common::repository::init_git_repo;
 
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 /// Like [`FAKE_PLANNER_SCRIPT`] but the draft's own `verify` always fails,
 /// for exercising the implement loop's own attempt budget on top of a
@@ -108,14 +109,10 @@ fn hang_shutdown_and_restart(stop_first: bool) -> serde_json::Value {
     let call = |m: &str, p: serde_json::Value| request_on(&socket2, m, p);
     let settled = if stop_first {
         // Absence check: this window gives a wrongly resumed run time to finish.
-        let start = Instant::now();
-        loop {
-            let t = call("task.get", serde_json::json!({"id": id}));
-            if t["status"] == "done" || start.elapsed() > Duration::from_secs(3) {
-                break t;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        holds_for("a stopped task staying unresumed", ABSENCE_WINDOW, || {
+            call("task.get", serde_json::json!({"id": id}))["status"] != "done"
+        });
+        call("task.get", serde_json::json!({"id": id}))
     } else {
         wait_until("the task to resume and finish after the restart", || {
             let t = call("task.get", serde_json::json!({"id": id}));

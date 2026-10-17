@@ -33,7 +33,10 @@ fn a_task_with_depends_on_is_not_started_until_its_dependency_is_done() {
     // Created with a dependency, the second task starts on its own, but its
     // loop must not run an attempt while the first is not done.
     // Absence check: this window gives a forbidden start time to happen.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for("a dependent task staying queued", ABSENCE_WINDOW, || {
+        let t = daemon.request("task.get", serde_json::json!({"id": second_id}));
+        t["status"] == "queued" && t["attempts"].as_array().unwrap().is_empty()
+    });
     let waiting = daemon.request("task.get", serde_json::json!({"id": second_id}));
     assert_eq!(waiting["status"], "queued", "task JSON: {waiting}");
     assert!(waiting["attempts"].as_array().unwrap().is_empty());
@@ -288,7 +291,17 @@ fn a_parent_waiting_for_a_stopped_dependency_starts_no_child() {
         "{asked}"
     );
     // Absence check: this window gives a forbidden child start time to happen.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for(
+        "the child and its parent staying unstarted",
+        ABSENCE_WINDOW,
+        || {
+            let child = daemon.request("task.get", serde_json::json!({"id": child_id}));
+            let parent = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+            child["status"] == "queued"
+                && child["attempts"] == serde_json::json!([])
+                && parent["attempts"] == serde_json::json!([])
+        },
+    );
     let child_now = daemon.request("task.get", serde_json::json!({"id": child_id}));
     assert_eq!(child_now["status"], "queued", "{child_now}");
     assert_eq!(child_now["attempts"], serde_json::json!([]), "{child_now}");
@@ -370,7 +383,14 @@ fn dropping_the_only_subtask_stops_the_parent_instead_of_implementing_it() {
     );
     poll_until(&daemon, &parent_id, |s| s == "stopped");
     // Absence check: this window gives a forbidden attempt time to start.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for(
+        "a stopped parent starting no attempt",
+        ABSENCE_WINDOW,
+        || {
+            let t = daemon.request("task.get", serde_json::json!({"id": parent_id}));
+            t["status"] == "stopped" && t["attempts"] == serde_json::json!([])
+        },
+    );
     let after = daemon.request("task.get", serde_json::json!({"id": parent_id}));
     assert_eq!(after["status"], "stopped", "{after}");
     assert_eq!(after["attempts"], serde_json::json!([]), "{after}");

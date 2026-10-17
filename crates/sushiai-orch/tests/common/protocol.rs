@@ -12,7 +12,7 @@ fn no_answer(socket: &Path, method: &str) -> String {
     )
 }
 
-fn log_tail(socket: &Path) -> String {
+pub(super) fn log_tail(socket: &Path) -> String {
     let log = std::fs::read_to_string(socket.with_file_name(DAEMON_LOG)).unwrap_or_default();
     let tail: Vec<&str> = log.lines().rev().take(40).collect();
     let tail: Vec<&str> = tail.into_iter().rev().collect();

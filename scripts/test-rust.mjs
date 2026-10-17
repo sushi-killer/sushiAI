@@ -1,6 +1,17 @@
 // Runs the Rust workspace tests. With cargo-nextest installed every test binary runs in
 // parallel (CI installs it); without it, plain `cargo test` runs them one after another.
+// `--affected` runs only the test binaries this checkout's change can affect
+// (scripts/ci-changes.mjs); CI_ALL=1 or a missing nextest runs them all.
 import { spawnSync } from "node:child_process";
+import {
+  classify,
+  describe,
+  localChanges,
+  ownTargetDir,
+  rustFilter,
+} from "./ci-changes.mjs";
+
+ownTargetDir();
 
 const run = (args) =>
   spawnSync("cargo", args, { stdio: "inherit" }).status ?? 1;
@@ -11,7 +22,16 @@ const hasNextest =
 if (!hasNextest) process.exit(run(["test", "--workspace", "--no-fail-fast"]));
 
 // The nextest setup script (.config/nextest.toml) builds the daemon binary once and hands
-// it to the tests as SUSHIAI_BIN.
-const tests = run(["nextest", "run", "--workspace", "--no-fail-fast"]);
-const docs = run(["test", "--workspace", "--doc"]);
-process.exit(tests || docs);
+// it to the tests as SUSHIAI_BIN. nextest does not run doc tests; the workspace has none
+// (tests/ci-pipeline.test.cjs keeps it so), so no `cargo test --doc` pass follows.
+const args = ["nextest", "run", "--workspace", "--no-fail-fast"];
+let scope = classify([]);
+if (process.argv.includes("--affected") && process.env.CI_ALL !== "1") {
+  const change = localChanges();
+  scope = classify(change.files, change);
+  console.log(`test-rust: ${describe(scope, change.files.length)}`);
+  if (scope.rustTests?.length === 0) process.exit(0);
+}
+const filter = rustFilter(scope);
+if (filter) args.push("-E", filter);
+process.exit(run(args));

@@ -250,13 +250,11 @@ async fn stopping_during_a_branch_commit_keeps_the_owner_stop_after_the_commit_f
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the branch commit must reach its filter barrier");
+    crate::engine::test_support::wait_async(
+        "the branch commit to reach its filter barrier",
+        || entered.exists(),
+    )
+    .await;
     app.dispatch("task.stop", json!({"id": id})).await.unwrap();
     let stopped = app.store.load_task(&id).unwrap().unwrap();
     assert_eq!(stopped.status, TaskStatus::Stopped);

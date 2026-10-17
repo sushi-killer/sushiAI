@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-orch
 //! The orchestrator module's relay: a client that wants another host's orchestrator asks the
 //! daemon, the daemon passes the request to the listening desktop app as an `orch.relay`
 //! notification, and the app's `orch.relay.reply` is the answer.

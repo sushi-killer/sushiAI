@@ -165,9 +165,12 @@ mod cases {
                 .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!waiter.is_finished(), "it waits for the job");
-        assert_eq!(app.base_jobs.lock().unwrap().len(), 1, "no second job");
+        crate::engine::test_support::holds_for_async(
+            "the waiter waits for the one job",
+            Duration::from_millis(100),
+            || !waiter.is_finished() && app.base_jobs.lock().unwrap().len() == 1,
+        )
+        .await;
         // The job ends: its result is cached first, then it leaves the registry.
         app.base_runs
             .lock()
@@ -220,7 +223,7 @@ mod cases {
         let cancel = CancelToken::new();
         let stopper = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await; // wait-allow: the repo lock is held for a measured window; the test asserts the waiter stayed blocked that long
             stopper.cancel();
         });
         let started = std::time::Instant::now();
@@ -275,23 +278,24 @@ mod cases {
         // An agent's "drop all" that got past the RPC gate (the
         // setting changed in between, say) is still refused by the loop.
         let deliver = async {
-            loop {
-                let tx = pending.lock().unwrap().take();
-                if let Some(tx) = tx {
-                    app.agent_answers
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), AnsweredBy::Orchestrator);
-                    tx.send(Reply {
-                        text: PRE_EXISTING_DROP.to_string(),
-                        default_evidence: None,
-                        like: None,
-                    })
-                    .ok();
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let mut asked = None;
+            crate::engine::test_support::wait_async("the question to be asked", || {
+                asked = pending.lock().unwrap().take();
+                asked.is_some()
+            })
+            .await;
+            app.agent_answers
+                .lock()
+                .unwrap()
+                .insert(id.clone(), AnsweredBy::Orchestrator);
+            asked
+                .unwrap()
+                .send(Reply {
+                    text: PRE_EXISTING_DROP.to_string(),
+                    default_evidence: None,
+                    like: None,
+                })
+                .ok();
         };
         let (end, ()) = tokio::time::timeout(Duration::from_secs(10), async {
             let mut slot = QuestionSlot::new(&signals, &mut permit);

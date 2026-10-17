@@ -7,7 +7,7 @@ mod common;
 use common::process::Daemon;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_task_status, poll_until, remove_dir_retrying};
+use common::polling::{poll_task_status, poll_until, remove_dir_retrying, wait_until};
 use common::repository::init_git_repo;
 
 /// A task with no planner tier has no tier to route by: it runs on the
@@ -94,15 +94,8 @@ const COMPLETE_REPORT: &str = r#"```sushi-report\n{\"outcome\":\"complete\",\"su
 const TAGGED_REPORT: &str = r#"```sushi-report\n{\"outcome\":\"blocked\",\"summary\":\"need input\",\"decisions\":[],\"question\":\"Which auth approach?\",\"risk\":[\"security\"]}\n```"#;
 
 /// Waits until `path` exists, for a run that starts in the background.
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let start = std::time::Instant::now();
-    while !path.exists() {
-        if start.elapsed() > std::time::Duration::from_secs(10) {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    true
+fn wait_for_file(what: &str, path: &std::path::Path) {
+    wait_until(what, || path.exists().then_some(()));
 }
 
 #[test]
@@ -141,9 +134,9 @@ fn a_blocked_question_goes_to_the_overseer_with_no_triage_turn() {
         "the overseer sees the question as the agent asked it: {waiting}"
     );
     let worktree = std::path::PathBuf::from(task["worktree"].as_str().unwrap());
-    assert!(
-        wait_for_file(&repo.path().join("overseer-ran.txt")),
-        "the overseer should be woken for the waiting task"
+    wait_for_file(
+        "the overseer to be woken for the waiting task",
+        &repo.path().join("overseer-ran.txt"),
     );
     assert!(
         !worktree.join("triage-ran.txt").exists(),
@@ -291,9 +284,9 @@ fn attempts_keep_failing_waits_for_the_overseer_with_no_triage_turn() {
         "{ended}"
     );
     let worktree = std::path::PathBuf::from(task["worktree"].as_str().unwrap());
-    assert!(
-        wait_for_file(&repo.path().join("overseer-ran.txt")),
-        "the overseer should be woken for the exhausted task"
+    wait_for_file(
+        "the overseer to be woken for the exhausted task",
+        &repo.path().join("overseer-ran.txt"),
     );
     assert!(!worktree.join("triage-ran.txt").exists());
 

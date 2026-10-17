@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Catalog wiring, lifecycle notifications, daemon control and recovery, against real
 //! daemon and holder processes under a temporary `SUSHIAI_HOME`.
 
@@ -354,7 +355,9 @@ fn shutdown_stops_the_daemon_and_keeps_holders_and_sessions() {
     assert!(alive(holder), "the holder died with the daemon");
     assert!(!sandbox.socket().exists(), "the socket was left behind");
     // Nobody restarts it: the next client starts a daemon, which finds the session again.
-    sleep(Duration::from_secs(1));
+    holds_for("the daemon staying stopped", ABSENCE_WINDOW, || {
+        !sandbox.socket().exists()
+    });
     assert!(!sandbox.socket().exists(), "the daemon restarted itself");
     sandbox.start_daemon();
     let mut client = sandbox.client();
@@ -404,8 +407,11 @@ fn a_hook_connection_cannot_shut_the_daemon_down() {
         .try_call("daemon.shutdown", json!({}))
         .expect_err("must be refused");
     assert_eq!(err.code, code::UNAUTHORIZED);
-    sleep(Duration::from_millis(500));
-    assert!(alive(daemon));
+    holds_for(
+        "the daemon surviving a hook's shutdown",
+        ABSENCE_WINDOW,
+        || alive(daemon),
+    );
     assert!(sandbox.client().call("$/ping", Value::Null).is_object());
 }
 
@@ -553,35 +559,37 @@ fn responses_queued_before_the_clients_eof_are_still_delivered() {
         .stream
         .shutdown(std::net::Shutdown::Write)
         .expect("half-close");
-    sleep(Duration::from_millis(500));
+    // The daemon must see EOF with its answers queued behind the full socket: nothing of that is observable.
+    sleep(Duration::from_millis(500)); // wait-allow: lets the daemon reach EOF before the client reads
     let mut decoder = Decoder::new();
     let mut answered = 0;
-    let deadline = Instant::now() + Duration::from_secs(15);
     let mut buf = [0u8; 64 * 1024];
-    loop {
-        match client.stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                for frame in decoder.push(&buf[..n]).expect("decode") {
-                    if let Frame::Json(text) = frame {
-                        if matches!(Message::parse(&text), Ok(Message::Response(_))) {
-                            answered += 1;
+    wait_value("the daemon to close the connection", || {
+        // Drain without pausing while data flows: a reader that stalls is not the case here.
+        loop {
+            match client.stream.read(&mut buf) {
+                Ok(0) => return Some(()),
+                Ok(n) => {
+                    for frame in decoder.push(&buf[..n]).expect("decode") {
+                        if let Frame::Json(text) = frame {
+                            if matches!(Message::parse(&text), Ok(Message::Response(_))) {
+                                answered += 1;
+                            }
                         }
                     }
                 }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return None;
+                }
+                Err(e) => panic!("read failed: {e}"),
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(e) => panic!("read failed: {e}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never closed; {answered} answers"
-        );
-    }
+    });
     assert_eq!(answered, 1 + requests, "answers were dropped at EOF");
 }
 
@@ -610,7 +618,11 @@ fn the_daemon_logs_at_warn_by_default() {
     let mut quiet = Sandbox::new();
     let log = daemon_with_log(&mut quiet, None);
     Client::connect(&quiet.socket()).call("hello", json!({"protocol": 1, "client": "test"}));
-    sleep(Duration::from_millis(300));
+    holds_for("the default log staying quiet", ABSENCE_WINDOW, || {
+        !fs::read_to_string(&log)
+            .expect("log")
+            .contains("daemon listening")
+    });
     let text = fs::read_to_string(&log).expect("log");
     assert!(
         !text.contains("daemon listening"),
@@ -800,7 +812,7 @@ fn a_daemon_started_while_the_lock_is_still_held_waits_for_it() {
     );
     drop(lock);
     // Once the lock is free the daemon starts and answers; only a bound for a hung test.
-    let answered = rx.recv_timeout(Duration::from_secs(60));
+    let answered = rx.recv_timeout(common::deadline());
     drop(stdin);
     let _ = proxy.kill();
     let _ = proxy.wait();
@@ -834,7 +846,7 @@ fn a_proxy_started_right_after_shutdown_reaches_the_new_daemon() {
             let _ = tx.send(buf[..n].to_vec());
         }
     });
-    let answered = rx.recv_timeout(Duration::from_secs(16));
+    let answered = rx.recv_timeout(common::deadline());
     drop(stdin);
     let _ = proxy.kill();
     let _ = proxy.wait();
@@ -849,19 +861,16 @@ fn an_attach_snapshot_carries_the_bytes_the_daemon_still_holds() {
     let mut client = sandbox.client();
     let id = sandbox.create(&mut client, "printf 'abc\\033[3'; sleep 60");
     let wait = |client: &mut Client, scrollback: u64| {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
+        wait_value("the session output", || {
             let result = client.call(
                 "session.attach",
                 json!({"id": id, "scrollback": scrollback}),
             );
             let snapshot = base64_decode(result["snapshot"].as_str().expect("snapshot"));
-            if String::from_utf8_lossy(&snapshot).contains("abc") {
-                return snapshot;
-            }
-            assert!(Instant::now() < deadline, "no output");
-            sleep(Duration::from_millis(100));
-        }
+            String::from_utf8_lossy(&snapshot)
+                .contains("abc")
+                .then_some(snapshot)
+        })
     };
     // Plain attach, and attach with history: both end in the unfinished sequence.
     assert!(wait(&mut client, 0).ends_with(b"\x1b[3"));
@@ -922,13 +931,27 @@ fn a_reattach_at_the_same_size_does_not_resize_the_child() {
     wait_until("the session to come back", || {
         info_of(&mut sandbox.client(), &id)["status"] == "running"
     });
-    let after = client.attach_result(&id);
+    // "running" comes back before the holder's ring is replayed into the screen: wait for the
+    // replay, not for the status.
+    let after = wait_state(
+        "the recovered screen to match the one before",
+        || {
+            let after = client.attach_result(&id);
+            if after["snapshot"] == before["snapshot"] {
+                Ok(after)
+            } else {
+                Err(format!("{after}"))
+            }
+        },
+        String::new,
+    );
     assert_eq!(
         (after["cols"].as_u64(), after["rows"].as_u64()),
         (Some(45), Some(24))
     );
-    assert_eq!(after["snapshot"], before["snapshot"]);
-    sleep(Duration::from_millis(500));
+    holds_for("the child getting no SIGWINCH", ABSENCE_WINDOW, || {
+        !marks.exists()
+    });
     assert!(!marks.exists(), "the child got a SIGWINCH");
     client.call("session.close", json!({"id": id, "graceful": false}));
 }

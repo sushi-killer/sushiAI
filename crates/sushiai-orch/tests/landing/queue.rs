@@ -102,7 +102,10 @@ fn a_dirty_base_checkout_makes_the_task_wait_landing_and_is_left_alone() {
     // A retry with the checkout still dirty changes nothing.
     daemon.request("task.start", serde_json::json!({"id": id}));
     // Absence check: this window gives a forbidden landing time to happen.
-    std::thread::sleep(Duration::from_millis(1500));
+    holds_for("a dirty landing staying put", ABSENCE_WINDOW, || {
+        let t = daemon.request("task.get", serde_json::json!({"id": id}));
+        t["status"] == "landing" && t["dirtySince"] == dirty_since
+    });
     let still = daemon.request("task.get", serde_json::json!({"id": id}));
     assert_eq!(still["status"], "landing", "{still}");
     assert_eq!(still["dirtySince"], dirty_since, "{still}");
@@ -182,13 +185,7 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert!(done.get("landedSha").is_none(), "{done}");
     assert!(!root.join("one.txt").exists());
 
-    // The task's control is dropped a moment after `done` shows.
-    wait_until("the task's control to be dropped", || {
-        (!daemon
-            .request_error("task.land", serde_json::json!({"id": id}))
-            .contains("busy"))
-        .then_some(())
-    });
+    assert_eq!(land(&daemon, &id), "null");
     // The task shows `done` the whole time, so wait for the land itself.
     let landed = wait_until("the land to record its sha", || {
         let task = daemon.request("task.get", serde_json::json!({"id": id}));

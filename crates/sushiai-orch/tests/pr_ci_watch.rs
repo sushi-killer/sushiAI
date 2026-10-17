@@ -7,10 +7,9 @@
 mod common;
 
 use common::harness::{cheap_route_on_claude, fake_harness_script};
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
-use std::time::Duration;
 
 const URL: &str = "https://github.example/acme/app/pull/7";
 
@@ -254,8 +253,9 @@ fn a_check_that_passes_on_a_rerun_is_told_once_and_the_task_is_left_alone() {
             .next()
     });
     assert!(note.to_lowercase().contains("rerun"), "{note}");
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(s.notes_naming(&id, "routines::flaky_case").len(), 1);
+    holds_for("one owner note", ABSENCE_WINDOW, || {
+        s.notes_naming(&id, "routines::flaky_case").len() == 1
+    });
     assert_eq!(s.read("reruns").trim(), "1", "{}", s.read("gh.log"));
     assert!(
         s.read("gh.log").contains("run rerun 555"),
@@ -280,8 +280,9 @@ fn a_test_that_also_fails_on_the_base_branch_is_told_once_and_the_task_is_left_a
             .next()
     });
     assert!(note.contains("main"), "{note}");
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(s.notes_naming(&id, "routines::flaky_case").len(), 1);
+    holds_for("one owner note", ABSENCE_WINDOW, || {
+        s.notes_naming(&id, "routines::flaky_case").len() == 1
+    });
     assert!(s.read("reruns").trim().parse::<u32>().unwrap_or(0) <= 1);
     let task = s.task(&id);
     assert_eq!(task["status"], "done", "{task}");
@@ -317,7 +318,8 @@ fn a_failure_of_the_tasks_own_change_is_repaired_and_pushed_to_the_same_pull_req
     );
     assert!(s.tools.path().join("attribution.log").exists());
     assert_eq!(s.read("reruns").trim(), "1", "{}", s.read("gh.log"));
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(s.notes_naming(&id, "routines::own_case").is_empty());
+    holds_for("no owner note", ABSENCE_WINDOW, || {
+        s.notes_naming(&id, "routines::own_case").is_empty()
+    });
     s.daemon.shutdown_and_wait();
 }

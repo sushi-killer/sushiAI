@@ -3,6 +3,7 @@
 //! every value passed to the `emit` callback to its clients as `orch.event`.
 
 pub mod ab;
+pub mod cargo_target;
 pub mod costs;
 pub mod delivery;
 pub mod engine;

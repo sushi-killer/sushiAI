@@ -135,6 +135,7 @@ fn a_task_that_breaks_a_later_test_binary_is_an_ordinary_failure() {
     finish(daemon, &task);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38931522638)
 #[test]
 fn a_task_that_breaks_nothing_new_is_waived_after_the_full_rerun() {
     let Some((daemon, task)) = run("Write the marker") else {

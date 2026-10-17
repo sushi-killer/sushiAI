@@ -2,7 +2,11 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[path = "../../test_wait.rs"]
+mod test_wait;
+use test_wait::{holds_for, wait_state, wait_until};
 
 use serde_json::{json, Value};
 use sushiai_hold::{start, Config};
@@ -16,20 +20,18 @@ struct Conn {
 
 impl Conn {
     fn connect(sock: &Path) -> Conn {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(stream) = UnixStream::connect(sock) {
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(200)))
-                    .expect("timeout");
-                return Conn {
-                    stream,
-                    decoder: Decoder::new(),
-                    next_id: 1,
-                };
-            }
-            assert!(Instant::now() < deadline, "holder socket never appeared");
-            thread::sleep(Duration::from_millis(50));
+        let stream = wait_until("the holder socket", || UnixStream::connect(sock).ok());
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("timeout");
+        // A send that cannot finish fails the test instead of blocking it.
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("write timeout");
+        Conn {
+            stream,
+            decoder: Decoder::new(),
+            next_id: 1,
         }
     }
 
@@ -50,9 +52,8 @@ impl Conn {
 
     /// Collects output bytes until they contain `needle`; returns them and any exit code seen.
     fn output_until(&mut self, needle: &str) -> (String, Option<i64>) {
-        let deadline = Instant::now() + Duration::from_secs(10);
         let (mut text, mut exit) = (String::new(), None);
-        while Instant::now() < deadline && !text.contains(needle) {
+        wait_until(&format!("the output {needle:?} or the exit"), || {
             for frame in self.read() {
                 match frame {
                     Frame::Output { data, .. } => text.push_str(&String::from_utf8_lossy(&data)),
@@ -65,10 +66,8 @@ impl Conn {
                     }
                 }
             }
-            if exit.is_some() {
-                break;
-            }
-        }
+            (text.contains(needle) || exit.is_some()).then_some(())
+        });
         (text, exit)
     }
 }
@@ -176,16 +175,22 @@ fn input_to_a_child_that_does_not_read_is_refused_and_close_still_works() {
     // `ready` is printed after the tty is raw: before it the child still reads input.
     let (_, early_exit) = conn.output_until("ready");
     assert!(early_exit.is_none(), "child exited before it was ready");
-    let chunk = "QUFB".repeat(16 * 1024); // 48 KiB of "AAA..." per request
-    let mut refused = None;
-    for _ in 0..40 {
-        conn.send("hold.input", json!({"data": chunk}));
-        refused = refused.or(response_error_code(conn.read()));
-    }
-    for _ in 0..20 {
-        refused = refused.or(response_error_code(conn.read()));
-    }
-    assert_eq!(refused, Some(sushiai_protocol::code::INPUT_BACKPRESSURE));
+    // 48 KiB of "AAA..." per request
+    let chunk = "QUFB".repeat(16 * 1024);
+    // Input keeps coming until the holder refuses one request; 40 requests (about 2 MiB)
+    // without a refusal is a failure, not a reason to keep sending.
+    let mut sent = 0;
+    let refused = wait_state(
+        "a refused hold.input",
+        || {
+            assert!(sent < 40, "{sent} hold.input requests were not refused");
+            sent += 1;
+            conn.send("hold.input", json!({"data": chunk}));
+            response_error_code(conn.read()).ok_or_else(|| format!("{sent} requests, none refused"))
+        },
+        String::new,
+    );
+    assert_eq!(refused, sushiai_protocol::code::INPUT_BACKPRESSURE);
     conn.send("hold.close", json!({"signal": "KILL"}));
     let (_, exit) = conn.output_until("never-appears");
     assert!(exit.is_some(), "child did not exit after KILL");
@@ -215,20 +220,16 @@ fn a_holder_exits_when_its_session_directory_disappears() {
         .expect("tempdir");
     let running = start(config(dir.path(), &["/bin/sh", "-c", "sleep 60"])).expect("start");
     let served = thread::spawn(move || running.serve_checking(Duration::from_millis(100)));
-    thread::sleep(Duration::from_millis(400));
-    assert!(
-        !served.is_finished(),
-        "the holder left while its directory was there"
+    // The window spans four of the holder's 100 ms directory checks.
+    holds_for(
+        "the holder staying while its directory is there",
+        Duration::from_millis(400),
+        || !served.is_finished(),
     );
     std::fs::remove_dir_all(dir.path()).expect("remove the directory");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !served.is_finished() {
-        assert!(
-            Instant::now() < deadline,
-            "the holder kept running without its directory"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the holder to exit without its directory", || {
+        served.is_finished().then_some(())
+    });
     served.join().expect("thread").expect("a clean exit");
     // TempDir drop tolerates the missing directory.
 }

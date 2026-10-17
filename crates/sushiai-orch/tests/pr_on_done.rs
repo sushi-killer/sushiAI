@@ -5,11 +5,9 @@
 mod common;
 
 use common::harness::{cheap_route_on_claude, fake_harness_script};
-use common::polling::poll_until;
+use common::polling::{holds_for, poll_until, wait_state, wait_task, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
-
-use std::time::{Duration, Instant};
 
 const URL: &str = "https://github.example/acme/app/pull/7";
 
@@ -103,21 +101,12 @@ impl Setup {
     }
 
     fn pr_url(&self, id: &str) -> Option<String> {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while Instant::now() < deadline {
-            let task = self
-                .daemon
-                .request("task.get", serde_json::json!({"id": id}));
-            if let Some(url) = task["prUrl"].as_str() {
-                return Some(url.to_string());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!(
-            "no pull request: {}",
-            self.daemon
-                .request("task.get", serde_json::json!({"id": id}))
-        )
+        Some(wait_task(
+            &self.daemon,
+            id,
+            "the pull request url",
+            |task| task["prUrl"].as_str().map(str::to_string),
+        ))
     }
 }
 
@@ -200,32 +189,49 @@ fn done(s: &Setup, id: &str) -> serde_json::Value {
     task
 }
 
-fn settle() {
-    std::thread::sleep(Duration::from_secs(2));
+/// Absence check: gives a forbidden pull request, draft or second notice time to happen.
+fn stays(what: &str, still: impl FnMut() -> bool) {
+    holds_for(what, ABSENCE_WINDOW, still);
 }
 
-fn wait_for(path: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "{} never appeared",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+/// Waits until the helper script wrote `name` into the tools directory.
+fn wait_for(s: &Setup, name: &str) {
+    let path = s.tools.path().join(name);
+    wait_state(
+        &format!("{} to appear", path.display()),
+        || {
+            if path.exists() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{name} missing; tools: {:?}",
+                    dir_names(s.tools.path())
+                ))
+            }
+        },
+        || common::polling::daemon_log_tail(&s.daemon),
+    );
+}
+
+fn dir_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 fn wait_decision(s: &Setup, id: &str, text: &str) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
-        if task["decisions"].to_string().contains(text) {
-            return task;
-        }
-        assert!(Instant::now() < deadline, "no decision {text}: {task}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_task(&s.daemon, id, &format!("the decision {text:?}"), |task| {
+        task["decisions"]
+            .to_string()
+            .contains(text)
+            .then(|| task.clone())
+    })
 }
 
 /// Restarts the daemon after `plan` was written into the held task's file,
@@ -247,7 +253,7 @@ fn restart_with_plan(s: &mut Setup, id: &str, plan: serde_json::Value, reply: &s
 fn held_task(s: &Setup) -> (String, String) {
     let id = s.create(serde_json::json!({}));
     done(s, &id);
-    wait_for(&s.tools.path().join("draft-started"));
+    wait_for(s, "draft-started");
     let task = s.daemon.request("task.get", serde_json::json!({"id": id}));
     let branch = task["branch"].as_str().unwrap().to_string();
     (id, branch)
@@ -320,11 +326,14 @@ fn note_texts(s: &Setup, id: &str) -> Vec<String> {
 }
 
 fn wait_notice(s: &Setup, id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while notices(s, id) == 0 {
-        assert!(Instant::now() < deadline, "no owner notice");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_state(
+        "the owner notice",
+        || match note_texts(s, id) {
+            notes if !notes.is_empty() => Ok(()),
+            _ => Err("no pull request note in the repo chat".to_string()),
+        },
+        || common::polling::daemon_log_tail(&s.daemon),
+    );
 }
 
 /// Commits a worktree setup to main and origin, moves origin's main on, and

@@ -6,13 +6,14 @@ mod common;
 use common::attempts::{plan_file, run_file};
 use common::harness::{cheap_route_on_claude, fake_harness_script};
 use common::native_sandbox::fit_sandbox;
-use common::polling::{deadline, poll_until, remove_dir_retrying, settle, wait_until};
+use common::polling::{
+    deadline, holds_for, poll_until, remove_dir_retrying, settle, wait_until, ABSENCE_WINDOW,
+};
 use common::process::{socket_of, spawn_daemon, wait_for_exit, Daemon};
 use common::protocol::{raw_request_with_params, request_on, stop_daemon, wait_for_socket};
 use common::repository::{git_out, init_git_repo};
 
 use std::path::Path;
-use std::time::Duration;
 
 fn review_off(daemon: &Daemon) {
     let mut settings = daemon.request("settings.get", serde_json::json!({}));

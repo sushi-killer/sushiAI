@@ -1,3 +1,4 @@
+//! ci-crates: host
 //! Load run for session hibernation: 10 claude, 10 codex and 10 shell sessions, each printing
 //! 2000 lines of 200 columns, in a real daemon under a temp home. It measures the daemon and
 //! the holders awake, after the agents went to sleep, and after a hard restart, and checks the
@@ -70,7 +71,7 @@ fn measure(phase: &str, sandbox: &Sandbox, daemon: u32) -> Row {
     let holders = sandbox.holders();
     let sizes: Vec<u64> = holders.iter().map(|pid| rss_kb(*pid)).collect();
     let before = cpu_secs(daemon);
-    sleep(Duration::from_secs(IDLE_SECS));
+    sleep(Duration::from_secs(IDLE_SECS)); // wait-allow: the daemon's CPU is sampled over a fixed idle window
     let used = cpu_secs(daemon) - before;
     Row {
         phase: phase.to_string(),

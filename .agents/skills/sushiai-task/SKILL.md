@@ -89,7 +89,8 @@ retro (`artifacts/RETRO-project-environments.md`).
   build a second mechanism for a decision the owner already made.
 - **Two gate tiers.** Inner loop: targeted tests and only the affected screens.
   Final gate once: `prettier`, build, `npm run ci`, `npm run test:desktop`, the
-  full screen pass. Revert-red checks run once at the end, only for tests that
+  full screen pass. `npm run ci` already selects the checks the diff needs;
+  do not add whole suites by hand. Revert-red checks run once at the end, only for tests that
   guard security or data.
 - **Review budget.** One full `reviewer` pass and one delta pass. The second
   reports P0/P1 only; P2 goes to the report's "Left open" unless it is a

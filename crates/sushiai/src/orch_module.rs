@@ -327,7 +327,7 @@ mod tests {
             if let Some(note) = notes.lock().unwrap().first().cloned() {
                 return note;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await; // wait-allow: the poll interval of an async wait on the first note; crates/test_wait.rs has only a blocking wait, which would stall this runtime
         }
     }
 
@@ -379,7 +379,7 @@ mod tests {
                 .clone()
                 .call(json!({"host": "local", "method": "task.pr"})),
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await; // wait-allow: absence window; the call must stay pending past it (no async holds_for in crates/test_wait.rs)
         assert!(!pr.is_finished());
         let id = notes.lock().unwrap()[1]["id"].clone();
         relay

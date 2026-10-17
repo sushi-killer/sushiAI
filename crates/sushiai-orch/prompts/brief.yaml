@@ -235,7 +235,7 @@ plan_search_rule: |
   Search the code with `rg`: it skips .gitignore'd paths such as build output. If `rg` is missing, use `git grep`.
 
 plan_final_verify: |
-  Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs alongside review, after the fast gates pass and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask.
+  Split the checks by cost. `verify` holds the fast, targeted commands that run after every attempt (a unit test file, the type checker, a linter on the touched paths). `finalVerify` holds the slow whole-repo checks (the full CI script, a desktop smoke) that the orchestrator runs alongside review, after the fast gates pass and before the commit. A subtask's whole-repo checks run at its parent, not in the subtask. Name only commands the repository defines today: read the script names in its package.json (or Makefile, task runner) before you use one, never a script you remember from elsewhere. When the repository's CI script already picks the checks a change needs from its diff, put that script in `finalVerify` and do not add the whole suites it would skip.
 
 # What the planner's `checks`, `heldOut` and `tests` are.
 plan_checks: |

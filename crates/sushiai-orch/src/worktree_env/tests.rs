@@ -244,13 +244,10 @@ fn a_setup_stops_at_the_timeout() {
 }
 
 fn gone(pid: i32) -> bool {
-    for _ in 0..200 {
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
+    crate::procs::testing::wait_until("the process to be gone", || unsafe {
+        libc::kill(pid, 0) != 0
+    });
+    true
 }
 
 fn stop_detached_grandchild(timeout: Duration, cancel: Duration) {
@@ -275,7 +272,7 @@ fn stop_detached_grandchild(timeout: Duration, cancel: Duration) {
     let err = rt
         .block_on(
             WorktreeEnvironment::new(tmp.path(), &wt, "/usr/bin:/bin", timeout)
-                .setup(sh, async move { tokio::time::sleep(cancel).await }),
+                .setup(sh, async move { tokio::time::sleep(cancel).await }), // wait-allow: the cancellation is a timer whose length is the test input
         )
         .unwrap_err();
     assert!(

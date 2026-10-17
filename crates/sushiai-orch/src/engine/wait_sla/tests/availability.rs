@@ -121,17 +121,15 @@ async fn a_pause_that_outlives_the_loop_is_served_after_a_restart_and_then_clear
     // The property is that the pause is served in full and then cleared. A wall-clock
     // sample of "still paused" would race the loop on a loaded machine: check the
     // moment of clearing against the pause's own end instead.
-    let end = std::time::Instant::now() + crate::procs::testing::deadline();
-    loop {
-        let t = app.store.load_task(&task.id).unwrap().unwrap();
-        if t.queue.paused_until.is_none() {
-            assert!(now_ms() >= until, "the pause was cleared before it ended");
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < end,
-            "the pause was never cleared"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    crate::engine::test_support::wait_async("the pause to be cleared", || {
+        app.store
+            .load_task(&task.id)
+            .unwrap()
+            .unwrap()
+            .queue
+            .paused_until
+            .is_none()
+    })
+    .await;
+    assert!(now_ms() >= until, "the pause was cleared before it ended");
 }

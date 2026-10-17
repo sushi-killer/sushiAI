@@ -16,7 +16,6 @@ use crate::task::TaskStatus;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Duration;
 use tokio::sync::broadcast;
 
 pub(super) const T0: i64 = 1_800_000_000_000;
@@ -39,13 +38,10 @@ pub(super) fn waiting_in(repo: &Path, kind: QuestionKind, options: &[&str]) -> T
 }
 
 pub(super) async fn calls_reach(repo: &Path, n: usize) {
-    for _ in 0..400 {
-        if crate::engine::chat::test_support::fake_overseer_calls(repo) >= n {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("overseer calls never reached {n}");
+    crate::engine::test_support::wait_async(&format!("overseer calls to reach {n}"), || {
+        crate::engine::chat::test_support::fake_overseer_calls(repo) >= n
+    })
+    .await;
 }
 
 pub(super) async fn park_live(
@@ -73,12 +69,10 @@ pub(super) async fn park_live(
             (answer, task)
         })
     };
-    for _ in 0..200 {
-        if pending.lock().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::engine::test_support::wait_async("the question to park", || {
+        pending.lock().unwrap().is_some()
+    })
+    .await;
     app.controls.lock().unwrap().insert(
         id,
         TaskControl {

@@ -132,6 +132,12 @@ fn stop_under(dir: &Path, keep: impl Fn(i32) -> bool) {
     }
 }
 
+// The one implementation of every wait of the Rust tests (a budget shared by all the waits
+// of a test, one poll interval, absence checks).
+#[cfg(test)]
+#[path = "../../test_wait.rs"]
+mod test_wait;
+
 /// Test helpers: a long-lived process whose executable lives in a directory
 /// the test picks. A copy of `/bin/sleep` does not do: on Apple silicon a
 /// copied system binary is killed at exec, so the copy is of the running
@@ -160,28 +166,28 @@ pub(crate) mod testing {
         PathBuf::from(name)
     }
 
-    /// The one wall-clock budget of a positive wait: 180 s, or
-    /// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (the contract of
-    /// `tests/common` and `tests/helpers/deadline.cjs`).
-    pub fn deadline() -> std::time::Duration {
-        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0);
-        std::time::Duration::from_secs(secs.unwrap_or(180))
+    use super::test_wait;
+    pub use super::test_wait::{expiry, holds_for};
+
+    /// Polls `ok` until it holds; panics naming `what` at the end of the shared budget.
+    pub fn wait_until(what: &str, ok: impl FnMut() -> bool) {
+        test_wait::wait_flag(what, ok);
     }
 
     /// Waits until `path` exists; panics naming it at the deadline.
     pub fn wait_for_file(path: &Path) {
-        let end = std::time::Instant::now() + deadline();
-        while !path.exists() {
-            assert!(
-                std::time::Instant::now() < end,
-                "{} never appeared",
-                path.display()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(&format!("{} to appear", path.display()), || path.exists());
+    }
+
+    /// Waits until process `pid` shows `arg` on its command line; panics at the
+    /// deadline. Right after a spawn macOS can still report the parent's argv,
+    /// and the engine tells a run's group from a stranger's by that argv.
+    pub fn wait_for_argv(pid: i32, arg: &Path) {
+        let arg = arg.to_string_lossy();
+        wait_until(
+            &format!("process {pid} to show {arg} on its command line"),
+            || crate::process::argv(pid).is_some_and(|args| args.iter().any(|a| *a == *arg)),
+        );
     }
 
     /// A shell fragment starting `exe` detached into its own session, its
@@ -213,7 +219,7 @@ mod tests {
             if let Some(ready) = std::env::var_os(testing::READY_ENV) {
                 std::fs::write(ready, "x").unwrap();
             }
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_secs(60)); // wait-allow: keeps the helper process alive for the test
         }
     }
 
@@ -228,7 +234,7 @@ mod tests {
                 .stderr(Stdio::null());
             match cmd.spawn() {
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(Duration::from_millis(20));
+                    std::thread::sleep(Duration::from_millis(20)); // wait-allow: ETXTBSY has no signal to wait on, only a retry
                 }
                 other => return other.unwrap(),
             }

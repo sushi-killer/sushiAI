@@ -174,13 +174,11 @@ struct BaseBarrier {
 
 impl BaseBarrier {
     async fn wait(&self) {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !self.entered.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the actual base command must reach its barrier");
+        crate::engine::test_support::wait_async(
+            "the actual base command to reach its barrier",
+            || self.entered.exists(),
+        )
+        .await;
     }
 
     fn release(&self) {

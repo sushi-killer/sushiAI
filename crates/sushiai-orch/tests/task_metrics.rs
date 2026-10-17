@@ -5,7 +5,7 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_until, remove_dir_retrying, wait_until};
+use common::polling::{holds_for, poll_until, remove_dir_retrying, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
@@ -199,7 +199,10 @@ fn a_backlog_request_is_planned_when_it_starts_on_the_base_as_it_is_then() {
     let created_base = task["baseSha"].as_str().unwrap().to_string();
 
     // Nothing plans while it waits in the backlog.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    holds_for("a backlog task staying unplanned", ABSENCE_WINDOW, || {
+        let t = rig.daemon.request("task.get", json!({"id": id}));
+        t["status"] == "queued" && t["attempts"] == json!([])
+    });
     let parked = rig.daemon.request("task.get", json!({"id": id}));
     assert_eq!(parked["status"], "queued", "{parked}");
     assert_eq!(parked["attempts"], json!([]), "{parked}");

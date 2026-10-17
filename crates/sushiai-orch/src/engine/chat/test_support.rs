@@ -72,13 +72,10 @@ pub(in crate::engine) fn thread_text_count(app: &App, repo: &str, text: &str) ->
 /// Waits until no chat turn runs in `repo`.
 #[cfg(test)]
 pub(in crate::engine) async fn wait_idle(app: &App, repo: &str) {
-    for _ in 0..400 {
-        if !app.chat_turns.lock().unwrap().contains_key(repo) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    panic!("chat turn never ended");
+    crate::engine::test_support::wait_async("the chat turn to end", || {
+        !app.chat_turns.lock().unwrap().contains_key(repo)
+    })
+    .await;
 }
 
 pub(super) fn route(harness: Harness) -> Route {

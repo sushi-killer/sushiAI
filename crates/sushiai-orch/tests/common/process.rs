@@ -7,7 +7,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 pub struct Daemon {
     pub child: DaemonChild,
@@ -123,29 +122,25 @@ pub fn spawn_daemon(home: &Path, extra_env: &[(&str, &str)]) -> DaemonChild {
     // A cargo build in another test process renames its output over the binary for a moment
     // (nothing there), and a binary just written can still be open for writing
     // (`ExecutableFileBusy`): both clear on their own.
-    let start = Instant::now();
-    let child = loop {
-        match cmd.spawn() {
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ExecutableFileBusy
-                ) && start.elapsed() < SPAWN_RETRY =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            spawned => break spawned.expect("failed to spawn sushiai daemon"),
+    let spawned = poll_deadline(|| match cmd.spawn() {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ExecutableFileBusy
+            ) =>
+        {
+            None
         }
-    };
+        spawned => Some(spawned),
+    })
+    .expect("the sushiai binary stayed missing or busy until the deadline");
+    let child = spawned.expect("failed to spawn sushiai daemon");
     spawned_pids()
         .lock()
         .unwrap()
         .insert(socket_of(home), child.id());
     DaemonChild(child)
 }
-
-/// How long a spawn retries while the binary is missing or busy.
-const SPAWN_RETRY: Duration = Duration::from_secs(5);
 
 /// The pid of the daemon last spawned for each socket, so `wait_for_socket` can notice a
 /// daemon that died instead of waiting out the deadline.

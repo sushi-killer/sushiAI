@@ -5,7 +5,7 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::{sushiai_bin, Daemon};
 use common::protocol::raw_request_with_params;
 use common::repository::init_git_repo;
@@ -13,7 +13,6 @@ use common::repository::init_git_repo;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 const EVENTS: &str = "tasks/seed/runs/1/events.jsonl";
 
@@ -340,15 +339,14 @@ fn evolution_run_starts_at_most_max_proposals_and_never_reproposes() {
     let third = daemon.request("evolution.run", json!({}));
     assert!(third["started"].as_array().unwrap().is_empty(), "{third}");
     // Absence check: this window gives a forbidden extra proposal time to happen.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
+    holds_for("no fourth proposal", ABSENCE_WINDOW, || {
         daemon
             .request("evolution.list", json!({}))
             .as_array()
             .unwrap()
-            .len(),
-        3
-    );
+            .len()
+            == 3
+    });
     daemon.shutdown_and_wait();
 }
 

@@ -12,7 +12,8 @@ required gate once. Broaden only for a new change, a failure or an open risk.
 
 | Change                                        | Proof                                                                                       |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Any code change (required gate before commit) | `npm run ci` - build, full `node --test`, conventions, eslint, prettier, `git diff --check` |
+| Any code change (required gate before commit) | `npm run ci` - the checks the change needs (below), conventions, eslint, prettier, `git diff --check` |
+| A Rust crate, inner loop                      | `node scripts/test-rust.mjs --affected` - only the test binaries the change can affect     |
 | Manifest, registry, routes, IPC surface       | `npm run test:contracts`                                                                    |
 | Extension loading or surface state            | `npm run test:extensions`                                                                   |
 | Layout, navigation, workspace or chat state   | `npm run test:core`                                                                         |
@@ -23,6 +24,10 @@ required gate once. Broaden only for a new change, a failure or an open risk.
 | Docs, skills or agent files only              | `npm run check:conventions` and `git diff --check`                                          |
 
 Run a single file with `node --test tests/<name>.test.cjs`.
+
+`npm run ci` prints what it selected and why (`scripts/ci-changes.mjs`, the
+same selector as CI). Do not run a whole suite by hand on top of it; run
+`CI_ALL=1 npm run ci` only when the selection itself is in doubt.
 
 ## Read results honestly
 

@@ -8,6 +8,10 @@ import { appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
+// A run from a nextest archive (the CI test shards) has no build to make: the
+// job names the archived daemon binary in SUSHIAI_BIN, and the tests read it.
+if (process.env.SUSHIAI_BIN) process.exit(0);
+
 const cargo = (args) =>
   spawnSync("cargo", args, {
     encoding: "utf8",

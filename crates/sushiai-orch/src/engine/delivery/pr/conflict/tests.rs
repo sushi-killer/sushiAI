@@ -97,13 +97,11 @@ async fn run_conflict(root: &Path, mode: &str) {
                 .unwrap()
         }
     });
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !root.join("at-boundary").exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the actual conflict caller did not reach its barrier");
+    crate::engine::test_support::wait_async(
+        "the actual conflict caller to reach its barrier",
+        || root.join("at-boundary").exists(),
+    )
+    .await;
     if mode == "setup-stop" {
         app.dispatch("task.stop", serde_json::json!({"id":task.id}))
             .await

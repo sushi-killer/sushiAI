@@ -4,12 +4,11 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::{poll_until, wait_until};
+use common::polling::{holds_for, poll_until, wait_until, ABSENCE_WINDOW};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
 use std::path::Path;
-use std::time::Duration;
 
 /// Writes FILE_<name>.txt for the task whose goal names `FILE_<name>`; a
 /// conflicted `shared.txt` is resolved by keeping both sides.
@@ -60,6 +59,16 @@ fn create(daemon: &Daemon, repo: &Path, name: &str, verify: &str, land: bool) ->
 
 fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
     poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
+}
+
+/// `task.land` once the task's loop has let go of it: `done` shows a moment before the loop
+/// drops its control, and a land in between is refused as busy. Returns the request's `error`
+/// text (`null` when it was taken).
+fn land(daemon: &Daemon, id: &str) -> String {
+    wait_until("the task's loop to let go of it", || {
+        let error = daemon.request_error("task.land", serde_json::json!({"id": id}));
+        (!error.contains("task is busy")).then_some(error)
+    })
 }
 
 fn until_dirty_landing(daemon: &Daemon, id: &str) -> serde_json::Value {

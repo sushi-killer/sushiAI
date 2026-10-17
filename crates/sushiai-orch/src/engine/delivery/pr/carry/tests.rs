@@ -3,7 +3,6 @@ use crate::engine::test_support::{git_in, init_git_repo, task_with_status, test_
 use crate::policy::settings::SandboxMode;
 use crate::task::{Assumption, QuestionKind, TaskStatus, VerifyOutcome};
 use std::path::Path;
-use std::time::Duration;
 
 struct Fixture {
     app: Arc<App>,
@@ -153,13 +152,10 @@ fn shell_path(path: &Path) -> String {
 }
 
 async fn wait_for_file(path: &Path) {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !path.exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    crate::engine::test_support::wait_async("the real carried check to reach its barrier", || {
+        path.exists()
     })
-    .await
-    .expect("the real carried check did not reach its barrier");
+    .await;
 }
 
 #[tokio::test]

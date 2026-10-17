@@ -100,34 +100,22 @@ async fn fo_park(app: &Arc<App>, mut task: Task) -> FoParked {
     // either holds the question, hands it to the owner, or defers it to the
     // morning. A deferring turn holds and releases the question between two
     // polls, so its log entry is the only trace it leaves.
-    let woken = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let installed = pending.lock().unwrap().is_some();
-            let q = app
-                .store
-                .load_task(&id)
-                .ok()
-                .flatten()
-                .and_then(|t| t.question.clone());
-            let deferred = || {
-                crate::store::overseer::read(&app.data_dir, Some(&repo), None)
-                    .iter()
-                    .any(|e| e.text == owner_notice::DEFERRED)
-            };
-            if installed && (q.is_some_and(|q| q.held_for_overseer || q.for_owner) || deferred()) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    crate::engine::test_support::wait_async("the park-time wake to hold or hand over the question", || {
+        let installed = pending.lock().unwrap().is_some();
+        let q = app
+            .store
+            .load_task(&id)
+            .ok()
+            .flatten()
+            .and_then(|t| t.question.clone());
+        let deferred = || {
+            crate::store::overseer::read(&app.data_dir, Some(&repo), None)
+                .iter()
+                .any(|e| e.text == owner_notice::DEFERRED)
+        };
+        installed && (q.is_some_and(|q| q.held_for_overseer || q.for_owner) || deferred())
     })
     .await;
-    if woken.is_err() {
-        let task = app.store.load_task(&id).ok().flatten();
-        panic!(
-            "the park-time wake never held or handed over {id}: {:?}",
-            task.map(|t| (t.status, t.question.clone()))
-        );
-    }
     FoParked { cancel, handle }
 }
 
@@ -141,7 +129,7 @@ async fn fo_until_waiting_broadcast(events: &mut broadcast::Receiver<Event>) -> 
                 seen.push(*task.clone());
                 if waiting {
                     // The park's own broadcast follows the wake's: settle.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await; // wait-allow: no signal marks the end of the broadcasts that follow the wake; the window collects them
                     while let Ok(Event::Task { task }) = events.try_recv() {
                         seen.push(*task);
                     }

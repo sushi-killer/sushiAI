@@ -69,6 +69,61 @@ for (const dir of ["src", "electron", "tests", "scripts"])
       );
   }
 
+// Rust tests wait on a real signal through the shared helpers, on the shared
+// deadline: a bare sleep before an assert was the flaky-test class (a check
+// made before the event, or a deadline of the test's own). Sleeps live in the
+// helper files of each crate's tests/common; anywhere else a line needs
+// `// wait-allow: <reason>` (time itself is what the test measures). Test code
+// is crates/*/tests/**, and under crates/*/src: files in a `tests` directory,
+// `tests.rs`, `*_tests.rs`, `test_support*.rs`, `test_fixtures.rs` and the body
+// of a `#[cfg(test)]` module. Production code in src may sleep.
+const SLEEP_CALL =
+  /\b(?:thread::sleep|tokio::time::sleep)\s*\(|(?<![.\w])sleep\s*\(/;
+const WAIT_HELPERS =
+  /^crates\/[^/]+\/tests\/common\/(polling|mod|process|rig)\.rs$/;
+const TEST_FILE =
+  /^crates\/[^/]+\/(?:tests\/.*|src\/(?:.*\/)?(?:tests\/.*|tests|[^/]*_tests|test_support[^/]*|test_fixtures))\.rs$/;
+// Brace balance of one line of Rust, with string and char literals blanked.
+function braceDelta(line) {
+  const code = line
+    .replace(/\/\/.*$/, "")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)'/g, "''");
+  return (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length;
+}
+const waitRoot = process.env.WAIT_RULE_ROOT_OVERRIDE || root;
+for await (const file of walk("crates", waitRoot)) {
+  const posix = file.split(path.sep).join("/");
+  if (!/^crates\/[^/]+\/(?:tests|src)\/.*\.rs$/.test(posix)) continue;
+  if (WAIT_HELPERS.test(posix)) continue;
+  const wholeFile = TEST_FILE.test(posix);
+  const lines = (await readFile(path.join(waitRoot, file), "utf8")).split("\n");
+  let armed = false; // saw `#[cfg(test)]`, waiting for its module's `{`
+  let depth = 0; // brace depth inside a cfg(test) module body, 0 = outside
+  lines.forEach((line, i) => {
+    const code = line.replace(/\/\/.*$/, "");
+    let inTest = wholeFile || depth > 0;
+    if (depth === 0 && /#\[cfg\(test\)\]/.test(code)) armed = true;
+    if (depth === 0 && armed && /\bmod\s+\w+\s*\{/.test(code)) {
+      armed = false;
+      inTest = true;
+      depth = braceDelta(line);
+    } else if (depth > 0) {
+      depth += braceDelta(line);
+    } else if (armed && /;\s*$/.test(code) && !/#\[/.test(code)) {
+      armed = false;
+    }
+    if (
+      inTest &&
+      SLEEP_CALL.test(code) &&
+      !/\/\/\s*wait-allow:\s*\S/.test(line)
+    )
+      problems.push(
+        `${posix}:${i + 1} sleeps in a test; wait on the signal with wait_until/holds_for (tests/common, or crate::procs::testing) or mark the line \`// wait-allow: <reason>\``,
+      );
+  });
+}
+
 // The retired session backend is gone: its name appears nowhere in shipped
 // code, scripts, tests or agent files (release notes under docs/ keep history).
 // Allowed: this file (it holds the pattern) and the one test that proves a

@@ -4,13 +4,12 @@
 mod common;
 
 use common::harness::fake_harness_script;
-use common::polling::settle;
+use common::polling::{settle, wait_until};
 use common::process::Daemon;
 use common::repository::init_git_repo;
 
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
-use std::time::{Duration, Instant};
 
 /// Numbers its calls and logs each call's argv and prompt. An implement run
 /// replies with a report, every other run with `Reply <n>`.
@@ -44,11 +43,7 @@ impl Env {
     }
 
     fn until(&self, what: &str, done: impl Fn(&Env) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < Duration::from_secs(30), "{what}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_until(what, || done(self).then_some(()));
     }
 
     fn state_file(&self) -> Option<std::path::PathBuf> {

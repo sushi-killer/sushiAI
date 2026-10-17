@@ -213,7 +213,8 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script);
-    cmd.arg(if foreign { Path::new("/no-run") } else { exit });
+    let zero = if foreign { Path::new("/no-run") } else { exit };
+    cmd.arg(zero);
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -222,16 +223,8 @@ fn spawn_group_running(script: &str, exit: &Path, foreign: bool) -> i32 {
     }
     let mut child = cmd.spawn().unwrap();
     let pgid = child.id() as i32;
+    crate::procs::testing::wait_for_argv(pgid, zero);
     std::thread::spawn(move || child.wait());
-    // The run is recognised by its arguments: wait until the child has
-    // exec'd the shell, which a loaded runner can take a moment to do.
-    let marker = if foreign { Path::new("/no-run") } else { exit };
-    for _ in 0..100 {
-        if crate::harness::process::group_started_with(pgid, marker) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
     pgid
 }
 
@@ -267,6 +260,7 @@ async fn a_live_group_that_is_not_the_run_is_treated_as_dead_and_left_alone() {
     kill_group(stranger);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38965681305)
 #[tokio::test]
 async fn a_live_group_of_the_run_is_resumed() {
     let (app, dir) = test_app();
@@ -310,6 +304,7 @@ async fn follow_within(app: &App, task: &Task, guard: Guard) -> harness::RunOutc
     .expect("outcome")
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38976570724)
 #[tokio::test]
 async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
     let (app, dir) = test_app();
@@ -324,11 +319,9 @@ async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
 
     assert!(outcome.stalled, "{:?}", outcome.error);
     // The kill is sent at once; a loaded machine takes a moment to tear the group down.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while group_alive(pgid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!group_alive(pgid), "the adopted run must be stopped");
+    crate::procs::testing::wait_until("the adopted run to be stopped", || {
+        !group_alive(pgid)
+    });
 }
 
 #[tokio::test]
@@ -354,15 +347,10 @@ async fn a_stalled_adopted_run_whose_member_traps_sigterm_is_still_killed() {
     assert!(outcome.stalled, "{:?}", outcome.error);
     // Any member, not just the leader. The leader is this test's own child: reap it, or
     // its zombie still counts as a member; teardown after SIGKILL also takes a moment.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while unsafe { libc::kill(-pgid, 0) } == 0 && std::time::Instant::now() < deadline {
+    crate::procs::testing::wait_until("a member that traps SIGTERM to be killed", || {
         unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) };
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(
-        unsafe { libc::kill(-pgid, 0) } != 0,
-        "a member that traps SIGTERM must still be killed"
-    );
+        (unsafe { libc::kill(-pgid, 0) }) != 0
+    });
 }
 
 #[tokio::test]
@@ -389,6 +377,7 @@ async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
     kill_group(pgid);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI runs 38801285521, 38937455006; run 38801285521)
 #[tokio::test]
 async fn an_over_budget_adopted_run_is_killed() {
     let (app, dir) = test_app();
@@ -403,11 +392,9 @@ async fn an_over_budget_adopted_run_is_killed() {
 
     assert!(outcome.over_budget, "{:?}", outcome.error);
     // The kill is sent at once; a loaded machine takes a moment to tear the group down.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while group_alive(pgid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!group_alive(pgid), "the adopted run must be stopped");
+    crate::procs::testing::wait_until("the adopted run to be stopped", || {
+        !group_alive(pgid)
+    });
 }
 
 #[test]

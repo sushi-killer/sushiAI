@@ -6,7 +6,7 @@ use common::process::Daemon;
 
 use common::harness::fake_harness_script;
 use common::polling::poll_task_status;
-use common::repository::{git_out, init_git_repo, pin_cargo_target};
+use common::repository::{git_out, init_git_repo};
 use common::sandbox::{native_sandbox_unavailable, sandbox_toolchain_homes};
 
 use serde_json::json;
@@ -380,7 +380,6 @@ fn write_check_project(repo: &Path) {
     .unwrap();
     fs::write(repo.join("Cargo.toml"), "[package]\nname = \"sandbox-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
     fs::write(repo.join(".gitignore"), "target/\n").unwrap();
-    pin_cargo_target(repo);
     fs::create_dir(repo.join("src")).unwrap();
     fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(repo.join("policy.test.cjs"), r#"const fs = require('node:fs');
@@ -458,6 +457,18 @@ fn daemon_task(native: bool) {
     let harness = fake_harness_script(fixtures.path(), "codex.sh", CODEX);
     let user = fixtures.path().join("user");
     let (cargo, rustup) = sandbox_toolchain_homes(&user);
+    // A host-wide cargo config that points every checkout at one shared,
+    // non-writable target directory and a compiler cache: orchd must still
+    // build each worktree in its own target and say so.
+    let shared_target = fixtures.path().join("shared-target");
+    fs::write(
+        cargo.join("config.toml"),
+        format!(
+            "[build]\nrustc-wrapper = \"sccache\"\ntarget-dir = \"{}\"\n",
+            shared_target.display()
+        ),
+    )
+    .unwrap();
     let repo = init_git_repo();
     let sibling = create_sibling(fixtures.path());
     let sibling_secret = sibling.join(".env");
@@ -525,6 +536,9 @@ fn daemon_task(native: bool) {
     }));
     let done = poll_task_status(&daemon, task["id"].as_str().unwrap());
     assert_sandbox_task(&daemon, repo.path(), &done, native);
+    assert!(!shared_target.exists(), "a build went to the shared target");
+    let decisions = done["decisions"].to_string();
+    assert!(decisions.contains("cargo target directory"), "{decisions}");
 }
 
 #[test]

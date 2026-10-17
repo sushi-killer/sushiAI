@@ -118,11 +118,9 @@ pub(crate) fn migrate_check_sources(task: &mut Task) {
 }
 
 /// Whether `command` runs a whole repository's suite: `npm run ci`, `cargo
-/// test --workspace`, `cargo nextest run` without a scope, `make test`, a bare
-/// `pytest`, `go test ./...`, or an `npm|pnpm|yarn run <script>` whose
-/// `<cwd>/package.json` script body is one of these or, for a `test:`/`ci:`/
-/// `check:` script, starts a runner file (one level, no further script
-/// expansion). Such a check is
+/// test --workspace`, `make test`, a bare `pytest`, `go test ./...`, or an
+/// `npm|pnpm|yarn run <script>` whose `<cwd>/package.json` script body is one
+/// of these (one level, no further script expansion). Such a check is
 /// finalVerify's job, not a per-attempt verify command. The command is split
 /// on `&&`, `||` and `;`; one such segment is enough.
 pub(crate) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
@@ -156,7 +154,7 @@ pub(crate) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
                     && rest.iter().all(|a| *a == "./..." || a.starts_with('-'))
                     && !rest.contains(&"-run")
             }
-            ["cargo", "test", rest @ ..] | ["cargo", "nextest", "run", rest @ ..] => {
+            ["cargo", "test", rest @ ..] => {
                 if rest.contains(&"--workspace") {
                     return true;
                 }
@@ -164,16 +162,8 @@ pub(crate) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
                 let mut scoped_or_filtered = false;
                 for a in before_args {
                     let flag = a.split('=').next().unwrap_or(a);
-                    if matches!(
-                        flag,
-                        "-p" | "--package"
-                            | "--test"
-                            | "--lib"
-                            | "--bin"
-                            | "-E"
-                            | "--filterset"
-                            | "--filter-expr"
-                    ) || !a.starts_with('-')
+                    if matches!(flag, "-p" | "--package" | "--test" | "--lib" | "--bin")
+                        || !a.starts_with('-')
                     {
                         scoped_or_filtered = true;
                     }
@@ -199,27 +189,10 @@ pub(crate) fn whole_repo_suite(cwd: &Path, command: &str) -> bool {
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
             return false;
         };
-        // A suite script (`test:<x>`, `ci:<x>`) that hands off to a runner
-        // file of the repo (`node scripts/x.mjs`, not `node --test <files>`)
-        // runs that runner's whole suite.
-        let suite_script = script
-            .split_once(':')
-            .is_some_and(|(family, _)| matches!(family, "ci" | "test" | "check"));
-        let runner = |words: &[String]| {
-            matches!(
-                words.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
-                ["node" | "bash" | "sh" | "python" | "python3", file, ..] if !file.starts_with('-')
-            )
-        };
         json.get("scripts")
             .and_then(|s| s.get(script))
             .and_then(|b| b.as_str())
-            .is_some_and(|body| {
-                segments(body).iter().any(|s| {
-                    let words = words_of(s);
-                    direct(&words) || (suite_script && runner(&words))
-                })
-            })
+            .is_some_and(|body| segments(body).iter().any(|s| direct(&words_of(s))))
     })
 }
 

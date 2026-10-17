@@ -145,3 +145,17 @@ fn read_filters_by_repo_newest_first_and_limits() {
     assert_eq!(read(&dir, None, Some(1)).len(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn an_entry_after_a_cut_short_last_line_is_kept() {
+    let dir = temp();
+    append(&dir, &Entry::new("woke", "/r", None, "first", 0)).unwrap();
+    // A crash mid-write leaves a last line with no newline.
+    let mut text = std::fs::read_to_string(path(&dir)).unwrap();
+    text.push_str("{\"kind\":\"wo");
+    std::fs::write(path(&dir), text).unwrap();
+    append(&dir, &Entry::new("woke", "/r", None, "after the cut", 0)).unwrap();
+    let texts: Vec<String> = read(&dir, None, None).into_iter().map(|e| e.text).collect();
+    assert_eq!(texts, ["after the cut", "first"]);
+    std::fs::remove_dir_all(&dir).ok();
+}

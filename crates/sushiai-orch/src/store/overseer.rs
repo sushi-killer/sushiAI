@@ -40,6 +40,19 @@ pub fn append_task_once(data_dir: &Path, entry: &Entry) -> std::io::Result<bool>
     Ok(true)
 }
 
+/// Whether the file is missing, empty or ends with a newline.
+fn ends_with_newline(file: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(file) else {
+        return true;
+    };
+    if f.seek(SeekFrom::End(-1)).is_err() {
+        return true;
+    }
+    let mut last = [0u8];
+    f.read_exact(&mut last).map_or(true, |_| last[0] == b'\n')
+}
+
 /// Lines in each log file as this process last counted them. Another writer
 /// only delays a trim; the trim itself reads the file again.
 static LINES: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
@@ -68,6 +81,10 @@ fn append_line(data_dir: &Path, entry: &Entry, read: Option<Vec<Entry>>) -> std:
             counts.len() - 1
         }
     };
+    // A last line cut short (a crash mid-write) must not swallow this entry.
+    if !ends_with_newline(&file) {
+        line.insert(0, '\n');
+    }
     store::files::append_text_private(&file, &line)?;
     counts[at].1 += 1;
     if counts[at].1 > 2 * MAX_LINES {

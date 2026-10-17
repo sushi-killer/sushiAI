@@ -129,6 +129,7 @@ fn build_verify_command_in(
     } else if let Some(cache) = &environment.compiler_cache {
         cache.apply(&mut command);
     }
+    crate::cargo_target::isolate(command.as_std_mut(), cwd);
     command
         .current_dir(cwd)
         .env("PATH", &environment.path)

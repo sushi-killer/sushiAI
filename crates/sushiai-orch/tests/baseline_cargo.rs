@@ -8,7 +8,7 @@ mod common;
 use common::harness::fake_harness_script;
 use common::polling::{poll_until, remove_dir_retrying};
 use common::process::Daemon;
-use common::repository::{git_out, init_git_repo, pin_cargo_target};
+use common::repository::{git_out, init_git_repo};
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -60,7 +60,6 @@ fn cargo_repo() -> tempfile::TempDir {
     .unwrap();
     std::fs::write(dir.join("tests/b.rs"), "#[test]\nfn bt() {}\n").unwrap();
     std::fs::write(dir.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
-    pin_cargo_target(dir);
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", "tiny cargo project"]);
     repo

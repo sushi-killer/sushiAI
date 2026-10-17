@@ -5,7 +5,7 @@ use common::process::Daemon;
 
 use common::harness::fake_harness_script;
 use common::polling::{remove_dir_retrying, settle};
-use common::repository::{git_out, init_git_repo};
+use common::repository::{git_out, init_git_repo, pin_cargo_target};
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -91,6 +91,7 @@ fn fixture() -> tempfile::TempDir {
         "Cargo.toml",
         "[workspace]\nmembers = ['a', 'b']\n",
     );
+    pin_cargo_target(repo.path());
     for (dir, name) in [("a", "package-a"), ("b", "package-b")] {
         write(
             repo.path(),

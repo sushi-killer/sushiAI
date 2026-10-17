@@ -6,7 +6,7 @@ use common::process::Daemon;
 
 use common::harness::fake_harness_script;
 use common::polling::poll_task_status;
-use common::repository::{git_out, init_git_repo};
+use common::repository::{git_out, init_git_repo, pin_cargo_target};
 use common::sandbox::{native_sandbox_unavailable, sandbox_toolchain_homes};
 
 use serde_json::json;
@@ -380,6 +380,7 @@ fn write_check_project(repo: &Path) {
     .unwrap();
     fs::write(repo.join("Cargo.toml"), "[package]\nname = \"sandbox-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
     fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    pin_cargo_target(repo);
     fs::create_dir(repo.join("src")).unwrap();
     fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(repo.join("policy.test.cjs"), r#"const fs = require('node:fs');

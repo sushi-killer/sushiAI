@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[allow(dead_code)]
+#[path = "common/repository.rs"]
+mod repository;
+use repository::pin_cargo_target;
 use sushiai_orch::harness::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
 use sushiai_orch::verify::command::run_verify_command;
 use sushiai_orch::verify::command::VerifyEnvironment;
@@ -275,6 +279,7 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
             "pub fn answer() -> u32 { orch_cache_lib::answer() }\n",
         )
         .unwrap();
+        pin_cargo_target(wt);
         assert!(!wt.join("target").exists());
     }
     let env =

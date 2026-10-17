@@ -22,6 +22,19 @@ pub fn init_git_repo() -> tempfile::TempDir {
     dir
 }
 
+/// Keeps a fixture cargo project's build output in its own `target/`, whatever
+/// the host's `~/.cargo/config.toml` says: a shared `build.target-dir` there
+/// made two checkouts one build (no second compile) and pointed a sandboxed
+/// check at a directory it may not write.
+pub fn pin_cargo_target(dir: &Path) {
+    std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+    std::fs::write(
+        dir.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"target\"\n",
+    )
+    .unwrap();
+}
+
 pub fn git_out(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

@@ -224,11 +224,14 @@ fn task_prose(task: &Task) -> String {
     prose
 }
 
-/// The files that are unchangeable for this task: the planner's files and
-/// every file a visible check command names, except a document a check only
-/// probes and a file the task's own words name as the thing to change (never
-/// a test file, whatever the words say). The held-out command is not read,
-/// so its files stay unnamed.
+/// The files this task may not rewrite: the planner's files and every file a
+/// visible check command names, except a document a check only probes and a
+/// file the task's own words name as the thing to change (never a test file,
+/// whatever the words say). The planner's files may not change at all; any
+/// other protected file that exists in the base may grow: new lines are kept,
+/// a changed or removed line is restored
+/// ([`guard_protected`](super::restore::guard_protected)). The held-out
+/// command is not read, so its files stay unnamed.
 pub(in crate::engine) fn protected_paths(task: &Task) -> Vec<String> {
     let mut paths: Vec<String> = task
         .planner_tests

@@ -2,7 +2,7 @@ use crate::engine::attempts::best_of::candidate::{
     CandidateEvidence, CompletedCandidates, EvaluatedCandidates,
 };
 use crate::engine::attempts::best_of::evaluate::{disqualify_restored, evaluate};
-use crate::engine::protected::restore::guard_protected;
+use crate::engine::protected::restore::{grown_line, guard_protected};
 use crate::engine::state::App;
 use crate::engine::verification::scoping::scoped_checks_for;
 use crate::harness::cancel::CancelToken;
@@ -16,20 +16,22 @@ pub(super) async fn evaluate_pair(
     settings: &Settings,
     cancel: &CancelToken,
 ) -> EvaluatedCandidates {
-    let (restored_a, restored_b) = tokio::join!(
+    let (guarded_a, guarded_b) = tokio::join!(
         guard_protected(task, &candidates.a.worktree, &[]),
         guard_protected(task, &candidates.b.worktree, &[])
     );
-    let (restored_a, restored_b) = (
-        restored_a.unwrap_or_default(),
-        restored_b.unwrap_or_default(),
-    );
+    let mut decisions = Vec::new();
+    for (label, guarded) in [("a", &guarded_a), ("b", &guarded_b)] {
+        if let Some(line) = grown_line(&guarded.grown) {
+            decisions.push(format!("Best-of: candidate {label}: {line}"));
+        }
+    }
+    let (restored_a, restored_b) = (guarded_a.restored, guarded_b.restored);
     let scoped = scoped_checks_for(settings, task);
     let (mut eval_a, mut eval_b) = tokio::join!(
         evaluate(app, task, &candidates.a, &scoped, cancel),
         evaluate(app, task, &candidates.b, &scoped, cancel),
     );
-    let mut decisions = Vec::new();
     disqualify_restored(&mut eval_a, &restored_a, "a", &mut decisions);
     disqualify_restored(&mut eval_b, &restored_b, "b", &mut decisions);
     decisions.extend(

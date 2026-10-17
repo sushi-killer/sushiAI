@@ -203,6 +203,22 @@ pub fn diff_trees(
     Ok(truncate_diff(out, max_chars))
 }
 
+/// `git diff <base> -- <paths>`, truncated like [`diff_full`]. No paths, no
+/// diff.
+pub fn diff_paths(
+    cwd: &Path,
+    base: &str,
+    paths: &[String],
+    max_chars: usize,
+) -> Result<String, GitError> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args = vec!["diff", base, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(truncate_diff(run(cwd, &args)?, max_chars))
+}
+
 /// [`diff_full`] without `exclude` (paths).
 pub fn diff_full_without(
     cwd: &Path,

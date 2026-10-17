@@ -47,7 +47,7 @@ targeted_check: |
 protected: |
   ## Protected files
 
-  These files are the task's tests and the files its checks name. They are already committed. Do not edit, move or delete them: orchd discards any change to them and the checks run on the originals. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.
+  These files are the task's tests and the files its checks name. They are already committed. Do not move or delete them and do not change or remove any line of them: orchd discards such a change and the checks run on the originals. A file marked (planner) is the planner's test: do not edit it at all. You may add new lines, such as new test cases, to any other file here; the review checks that the additions do not weaken an existing test. If a test is wrong, say so in your report (`testClaims`) with the reason instead of editing it.
 
 # After an attempt whose edits to protected files were discarded (discarded_block).
 discarded: |
@@ -435,6 +435,12 @@ review_narrow_changes: |
   ## Changes since the last review
 
   This is a narrow review. Rule only on the open findings above, the criteria to rule on now, and anything new in these changes. Files the task did not change since the last review are not shown and were reviewed before.
+
+# The protected files an attempt grew (only added lines), shown with their added hunks.
+review_grown_protected: |
+  ## Protected files that grew
+
+  orchd protects these files (the task's checks name them) and kept the attempt's changes because every existing line is unchanged and only lines were added. Confirm the additions do not weaken an existing test, for example with an early return, a skip, ignore or only marker, or changed setup; a weakened test is a P1 finding.
 
 review_report_example: |
   {"verdict":"PASS|FAIL","findings":[{"finding":"P2: path:line - issue","id":"<registered id or null>","causedByDiff":true,"kind":"correctness|requirement|style|nit","scenario":{"run":"<shell command or test>","fails":"<the failure it shows>"}}],"criteria":[{"criterion":0,"met":true,"evidence":"..."}]}

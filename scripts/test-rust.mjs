@@ -3,7 +3,15 @@
 // `--affected` runs only the test binaries this checkout's change can affect
 // (scripts/ci-changes.mjs); CI_ALL=1 or a missing nextest runs them all.
 import { spawnSync } from "node:child_process";
-import { classify, describe, localChanges, rustFilter } from "./ci-changes.mjs";
+import {
+  classify,
+  describe,
+  localChanges,
+  ownTargetDir,
+  rustFilter,
+} from "./ci-changes.mjs";
+
+ownTargetDir();
 
 const run = (args) =>
   spawnSync("cargo", args, { stdio: "inherit" }).status ?? 1;

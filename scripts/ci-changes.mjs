@@ -290,6 +290,16 @@ export function rustFilter(scope, quarantine = readQuarantine()) {
   return parts.join(" & ");
 }
 
+/**
+ * Builds of this checkout go to its own `target/` unless CARGO_TARGET_DIR is
+ * set: a host-wide `build.target-dir` would share one build lock and one
+ * `target/debug/sushiai` between checkouts, and the real-daemon node tests
+ * look for the binary here.
+ */
+export function ownTargetDir() {
+  process.env.CARGO_TARGET_DIR ||= path.join(root, "target");
+}
+
 /** The scope as `key=value` lines for $GITHUB_OUTPUT. */
 export function outputs(scope) {
   const { build, test } = matrices(scope);

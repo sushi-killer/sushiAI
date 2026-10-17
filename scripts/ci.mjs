@@ -2,7 +2,12 @@
 // (the nextest Rust test build) may overlap `npm test`, so the Rust tests close the
 // build lane instead of getting a lane of their own.
 import { fileURLToPath } from "node:url";
-import { classify, describe, localChanges } from "./ci-changes.mjs";
+import {
+  classify,
+  describe,
+  localChanges,
+  ownTargetDir,
+} from "./ci-changes.mjs";
 import { runLanes } from "./lib/run-lanes.mjs";
 
 export const lanes = [
@@ -51,6 +56,7 @@ export function lanesFor(scope) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  ownTargetDir();
   // CI_ALL=1 runs every lane whatever changed.
   const change = localChanges();
   const scope =

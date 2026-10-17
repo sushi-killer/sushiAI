@@ -61,6 +61,16 @@ fn until_done(daemon: &Daemon, id: &str) -> serde_json::Value {
     poll_until(daemon, id, |s| matches!(s, "done" | "failed" | "stopped"))
 }
 
+/// `task.land` once the task's loop has let go of it: `done` shows a moment before the loop
+/// drops its control, and a land in between is refused as busy. Returns the request's `error`
+/// text (`null` when it was taken).
+fn land(daemon: &Daemon, id: &str) -> String {
+    wait_until("the task's loop to let go of it", || {
+        let error = daemon.request_error("task.land", serde_json::json!({"id": id}));
+        (!error.contains("task is busy")).then_some(error)
+    })
+}
+
 fn until_dirty_landing(daemon: &Daemon, id: &str) -> serde_json::Value {
     wait_until("the dirty checkout landing wait", || {
         let task = daemon.request("task.get", serde_json::json!({"id": id}));

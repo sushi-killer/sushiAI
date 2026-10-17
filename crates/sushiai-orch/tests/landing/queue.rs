@@ -185,13 +185,7 @@ fn task_land_lands_a_done_unlanded_task_and_source_is_counted() {
     assert!(done.get("landedSha").is_none(), "{done}");
     assert!(!root.join("one.txt").exists());
 
-    // The task's control is dropped a moment after `done` shows.
-    wait_until("the task's control to be dropped", || {
-        (!daemon
-            .request_error("task.land", serde_json::json!({"id": id}))
-            .contains("busy"))
-        .then_some(())
-    });
+    assert_eq!(land(&daemon, &id), "null");
     // The task shows `done` the whole time, so wait for the land itself.
     let landed = wait_until("the land to record its sha", || {
         let task = daemon.request("task.get", serde_json::json!({"id": id}));

@@ -99,8 +99,13 @@ async fn run_one_verify_command_kills_the_group_on_cancellation_too() {
     let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
     let cancel = CancelToken::new();
     let cancel2 = cancel.clone();
+    // Cancel once the command has started its background child.
+    let started = pidfile.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        crate::engine::test_support::wait_async("the command to start its child", || {
+            std::fs::read_to_string(&started).is_ok_and(|pid| !pid.trim().is_empty())
+        })
+        .await;
         cancel2.cancel();
     });
     let (app, _app_dir) = test_app();

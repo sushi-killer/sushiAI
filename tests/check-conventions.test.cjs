@@ -134,7 +134,7 @@ test("a private network address in source fails, a documentation example does no
   fs.rmSync(clean, { recursive: true, force: true });
 });
 
-test("a bare sleep in a Rust integration test fails; helpers and wait-allow pass", () => {
+test("a bare sleep in Rust test code fails; helpers, wait-allow and production code pass", () => {
   const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
@@ -157,7 +157,20 @@ test("a bare sleep in a Rust integration test fails; helpers and wait-allow pass
         "",
       ].join("\n"),
     );
-    write("crates/x/src/lib.rs", "fn f() { std::thread::sleep(D); }\n");
+    // Production code in src may sleep, also next to a test module.
+    write(
+      "crates/x/src/lib.rs",
+      [
+        "fn f() { std::thread::sleep(D); }",
+        "#[cfg(test)]",
+        "mod tests {",
+        '    fn s() -> &\'static str { "{" }',
+        "    fn ok() { std::thread::sleep(D); } // wait-allow: measures the grace",
+        "}",
+        "fn g() { std::thread::sleep(D); }",
+        "",
+      ].join("\n"),
+    );
     const clean = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
     assert.equal(clean.status, 0, clean.stderr);
 
@@ -178,6 +191,29 @@ test("a bare sleep in a Rust integration test fails; helpers and wait-allow pass
       assert.match(
         failed.stderr,
         new RegExp(`${file.replace(/\./g, "\\.")}:2 sleeps in a test`),
+      );
+      fs.rmSync(path.join(tree, file));
+    }
+
+    // Test code under src: a cfg(test) module body and the test-named files.
+    for (const [file, text, line] of [
+      [
+        "crates/x/src/engine.rs",
+        "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() {\n        std::thread::sleep(D);\n    }\n}\n",
+        5,
+      ],
+      ["crates/x/src/a/tests/b.rs", "fn t() {\n    sleep(D);\n}\n", 2],
+      ["crates/x/src/a/tests.rs", "fn t() {\n    sleep(D);\n}\n", 2],
+      ["crates/x/src/a_tests.rs", "fn t() {\n    sleep(D);\n}\n", 2],
+      ["crates/x/src/test_support.rs", "fn t() {\n    sleep(D);\n}\n", 2],
+      ["crates/x/src/test_fixtures.rs", "fn t() {\n    sleep(D);\n}\n", 2],
+    ]) {
+      write(file, text);
+      const failed = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+      assert.equal(failed.status, 1, file);
+      assert.match(
+        failed.stderr,
+        new RegExp(`${file.replace(/\./g, "\\.")}:${line} sleeps in a test`),
       );
       fs.rmSync(path.join(tree, file));
     }

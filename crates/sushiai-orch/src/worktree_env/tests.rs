@@ -272,7 +272,7 @@ fn stop_detached_grandchild(timeout: Duration, cancel: Duration) {
     let err = rt
         .block_on(
             WorktreeEnvironment::new(tmp.path(), &wt, "/usr/bin:/bin", timeout)
-                .setup(sh, async move { tokio::time::sleep(cancel).await }),
+                .setup(sh, async move { tokio::time::sleep(cancel).await }), // wait-allow: the cancellation is a timer whose length is the test input
         )
         .unwrap_err();
     assert!(

@@ -63,9 +63,10 @@ async fn waiting_wakes(auto_answer: bool, kind: QuestionKind) -> usize {
             .await;
         })
     };
-    while pending.lock().unwrap().is_none() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    crate::engine::test_support::wait_async("the question to park", || {
+        pending.lock().unwrap().is_some()
+    })
+    .await;
     cancel.cancel();
     parked.await.unwrap();
     crate::engine::chat::test_support::wait_idle(&app, repo.to_str().unwrap()).await;
@@ -165,12 +166,13 @@ async fn an_agent_sourced_answer_is_an_orchestrator_line_and_never_the_owners() 
             (answered, task)
         })
     };
-    let tx = loop {
-        if let Some(tx) = pending.lock().unwrap().take() {
-            break tx;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    };
+    let mut parked_tx = None;
+    crate::engine::test_support::wait_async("the question to park", || {
+        parked_tx = pending.lock().unwrap().take();
+        parked_tx.is_some()
+    })
+    .await;
+    let tx = parked_tx.unwrap();
     app.agent_answers
         .lock()
         .unwrap()
@@ -275,9 +277,10 @@ async fn the_overseer_wake_carries_the_typed_question_and_its_allowed_answers() 
             .await;
         })
     };
-    while pending.lock().unwrap().is_none() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    crate::engine::test_support::wait_async("the question to park", || {
+        pending.lock().unwrap().is_some()
+    })
+    .await;
     cancel.cancel();
     parked.await.unwrap();
     crate::engine::chat::test_support::wait_idle(&app, repo.to_str().unwrap()).await;
@@ -332,22 +335,17 @@ async fn an_exhausted_failure_goes_to_the_overseer_with_no_extra_turn() {
             (matches!(signal, LoopSignal::Stop), task)
         })
     };
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while pending.lock().unwrap().is_none() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    crate::engine::test_support::wait_async("the failure to park for the overseer", || {
+        pending.lock().unwrap().is_some()
     })
-    .await
-    .expect("the failure never parked for the overseer");
+    .await;
     // Parked: the only agent run was the overseer's, in the repository.
     assert!(!worktree.join(".overseer-calls").exists());
     // Woken once for the question; the turn is left to end on its own.
-    for _ in 0..400 {
-        if crate::engine::chat::test_support::fake_overseer_calls(&repo) == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    crate::engine::test_support::wait_async("the overseer's wake", || {
+        crate::engine::chat::test_support::fake_overseer_calls(&repo) == 1
+    })
+    .await;
     assert_eq!(
         crate::engine::chat::test_support::fake_overseer_calls(&repo),
         1
@@ -445,13 +443,10 @@ async fn an_exhausted_question_the_overseer_leaves_open_ends_the_ladder() {
             (matches!(signal, LoopSignal::Stop), task)
         })
     };
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while pending.lock().unwrap().is_none() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    crate::engine::test_support::wait_async("the failure to park for the overseer", || {
+        pending.lock().unwrap().is_some()
     })
-    .await
-    .expect("the failure never parked for the overseer");
+    .await;
     // The overseer's turn ends without an answer.
     crate::engine::chat::test_support::wait_idle(&app, repo.to_str().unwrap()).await;
     let (stopped, _) = tokio::time::timeout(Duration::from_secs(10), waiter)

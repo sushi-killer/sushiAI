@@ -571,7 +571,12 @@ pub fn pgrp_of(pid: u32) -> Option<u32> {
 }
 
 #[cfg(test)]
+#[path = "../../test_wait.rs"]
+mod test_wait;
+
+#[cfg(test)]
 mod tests {
+    use super::test_wait;
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -804,15 +809,7 @@ mod tests {
             .args(["-c", "sleep 5 & wait"])
             .spawn()
             .expect("spawn");
-        let mut kid = None;
-        for _ in 0..40 {
-            kid = only_child(parent.id());
-            if kid.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let kid = kid.expect("child of the shell");
+        let kid = test_wait::wait_until("the shell's child", || only_child(parent.id()));
         assert_eq!(pgrp_of(kid), pgrp_of(parent.id()));
         assert_eq!(child_pid(Some(7), Some(parent.id())), Some(7));
         let _ = std::process::Command::new("kill")

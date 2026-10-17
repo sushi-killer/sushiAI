@@ -37,17 +37,10 @@ async fn an_owner_rpc_amendment_rejects_its_stale_baseline_after_a_new_owner_pla
     let first = tokio::spawn(async move {
         first_app.dispatch("task.amend", json!({"id": first_id, "criteria": ["captured meaning"], "checks": [{"criterion": 0, "run": command}]})).await
     });
-    let reached = tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    crate::engine::test_support::wait_async("the baseline to reach its barrier", || {
+        entered.exists()
     })
     .await;
-    if reached.is_err() {
-        std::fs::write(&released, "release").unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(10), first).await;
-        panic!("baseline did not reach its barrier: {result:?}");
-    }
     let amended = tokio::time::timeout(Duration::from_secs(5), app.dispatch("task.amend", json!({
         "id": task.id, "criteria": ["current owner meaning"], "verify": ["true"], "finalVerify": ["true"],
         "checks": [{"criterion": 0, "run": "true", "baseline": "pass"}]
@@ -231,17 +224,10 @@ async fn an_owner_edit_received_during_parent_checks_is_checked_before_delivery(
     let running_app = app.clone();
     let parent_id = parent.id.clone();
     let running = tokio::spawn(async move { run_parent(&running_app, &parent_id, &signals).await });
-    let reached = tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    crate::engine::test_support::wait_async("the parent check to reach its barrier", || {
+        entered.exists()
     })
     .await;
-    if reached.is_err() {
-        std::fs::write(&released, "release").unwrap();
-        let _ = tokio::time::timeout(Duration::from_secs(10), running).await;
-        panic!("parent check did not reach its barrier");
-    }
     let amended = app
         .dispatch(
             "task.amend",

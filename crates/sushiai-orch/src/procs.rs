@@ -167,7 +167,7 @@ pub(crate) mod testing {
     }
 
     use super::test_wait;
-    pub use super::test_wait::{deadline, holds_for};
+    pub use super::test_wait::{expiry, holds_for};
 
     /// Polls `ok` until it holds; panics naming `what` at the end of the shared budget.
     pub fn wait_until(what: &str, ok: impl FnMut() -> bool) {

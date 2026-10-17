@@ -75,18 +75,15 @@ mod tests {
         for _ in 0..50 {
             match Command::new(&exe).arg("60").spawn() {
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(std::time::Duration::from_millis(20)); // wait-allow: the retry pause of an exec that failed with "Text file busy"
                 }
                 other => {
                     let child = other.unwrap();
                     // The spawn can return before the fork has exec'd into `orchd`; until
                     // then the pid still shows this test binary.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    while !looks_like_orchd(child.id() as i32)
-                        && std::time::Instant::now() < deadline
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
+                    crate::procs::testing::wait_until("the child to exec into orchd", || {
+                        looks_like_orchd(child.id() as i32)
+                    });
                     return child;
                 }
             }

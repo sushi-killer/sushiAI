@@ -4,7 +4,6 @@ use crate::policy::settings::SandboxMode;
 use crate::task::{Assumption, QuestionKind, Task, TaskStatus, VerifyOutcome};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[test]
 fn an_owner_revocation_before_the_final_prepare_cannot_use_the_old_carry_admission() {
@@ -131,13 +130,11 @@ async fn run_window(root: &Path) {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !root.join("at-boundary").exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("open_pr did not reach its post-carry publication barrier");
+    crate::engine::test_support::wait_async(
+        "open_pr to reach its post-carry publication barrier",
+        || root.join("at-boundary").exists(),
+    )
+    .await;
     app.dispatch(
         "task.overturn",
         serde_json::json!({

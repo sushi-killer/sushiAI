@@ -219,7 +219,7 @@ mod tests {
         let sender = app.clone();
         let repo = task.repo.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await; // wait-allow: the owner's values arrive late, after the run began to wait; the wait has no observable "started" signal
             sender
                 .handle_secrets_set(json!({
                     "projects": {"mine": {"KEY": "invented-value"}},

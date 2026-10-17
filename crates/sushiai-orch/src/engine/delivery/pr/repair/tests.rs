@@ -160,13 +160,10 @@ async fn an_owner_overturn_during_repair_setup_keeps_a_live_task_loop() {
         .await
         .unwrap()
     });
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while !dir.path().join("setup-started").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+    crate::engine::test_support::wait_async("the real repair setup to reach its barrier", || {
+        dir.path().join("setup-started").exists()
     })
-    .await
-    .expect("the real repair setup did not reach its barrier");
+    .await;
     app.dispatch(
         "task.overturn",
         serde_json::json!({

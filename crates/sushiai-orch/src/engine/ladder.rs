@@ -931,13 +931,8 @@ mod tests {
         };
 
         app.notify_task_failed(&task);
-        for _ in 0..200 {
-            if restarts(&app) == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert_eq!(restarts(&app), 1);
+        crate::engine::test_support::wait_async("the environment restart", || restarts(&app) == 1)
+            .await;
 
         // Failed again: no second restart, the owner is told.
         let mut again = app.store.load_task(&task.id).unwrap().unwrap();
@@ -945,8 +940,12 @@ mod tests {
         app.store.save_task(&again).unwrap();
         assert!(!restartable_on_environment(&again));
         app.notify_task_failed(&again);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(restarts(&app), 1);
+        crate::engine::test_support::holds_for_async(
+            "no second restart",
+            Duration::from_millis(200),
+            || restarts(&app) == 1,
+        )
+        .await;
         app.shutdown();
     }
 }

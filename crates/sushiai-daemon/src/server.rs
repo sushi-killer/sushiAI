@@ -1055,10 +1055,10 @@ mod tests {
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await; // wait-allow: the poll interval of an async wait on the Exited status; crates/test_wait.rs has only a blocking wait, which would stall this runtime
         }
         // The actor looks at the exit once; give it a beat to end or to stay.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await; // wait-allow: the actor emits no signal after it looked at the exit; the callers check whether it ended or stayed
         (registry, dir)
     }
 

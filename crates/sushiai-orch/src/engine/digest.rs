@@ -335,12 +335,10 @@ mod tests {
             crate::engine::chat::wake::WakeRequest::new("p".into(), false, "done", Some("t1"))
         ));
         // The skipped wake is queued and fires when the digest turn ends.
-        for _ in 0..400 {
-            if crate::engine::chat::test_support::fake_overseer_calls(&repo) >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        crate::engine::test_support::wait_async("the queued wake to fire", || {
+            crate::engine::chat::test_support::fake_overseer_calls(&repo) >= 2
+        })
+        .await;
         crate::engine::chat::test_support::wait_idle(&app, &repo_path).await;
         let log = overseer::read(&app.data_dir, Some(&repo_path), None);
         let kinds: Vec<_> = log.iter().map(|e| e.kind.as_str()).collect();
@@ -391,9 +389,15 @@ mod tests {
             &repo_path,
             crate::engine::chat::wake::WakeRequest::new("p".into(), false, "done", Some("t2"))
         ));
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(crate::engine::chat::test_support::fake_overseer_calls(&repo) <= 1);
-        assert!(!app.chat_turns.lock().unwrap().contains_key(&repo_path));
+        crate::engine::test_support::holds_for_async(
+            "no overseer turn after shutdown",
+            Duration::from_millis(200),
+            || {
+                crate::engine::chat::test_support::fake_overseer_calls(&repo) <= 1
+                    && !app.chat_turns.lock().unwrap().contains_key(&repo_path)
+            },
+        )
+        .await;
     }
 
     #[test]

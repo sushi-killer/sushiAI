@@ -163,13 +163,10 @@ mod final_check_tests {
             fixture(vec!["touch STARTED; sleep 30; touch DONE".into()]);
         let parent = CancelToken::new();
         let finals = BackgroundFinal::start(&app, &task, repo.path(), &settings, &parent);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !repo.path().join("STARTED").exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        crate::engine::test_support::wait_async("the final command to start", || {
+            repo.path().join("STARTED").exists()
         })
-        .await
-        .unwrap();
+        .await;
         finals.cancel.cancel();
         let result = tokio::time::timeout(Duration::from_secs(10), finals.finish())
             .await

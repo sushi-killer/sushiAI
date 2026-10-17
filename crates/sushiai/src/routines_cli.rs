@@ -731,7 +731,12 @@ fn propose(args: &[String]) -> Result<i32, String> {
 }
 
 #[cfg(test)]
+#[path = "../../test_wait.rs"]
+mod test_wait;
+
+#[cfg(test)]
 mod tests {
+    use super::test_wait;
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -846,19 +851,18 @@ mod tests {
     fn fake_daemon(dir: std::path::PathBuf, answer: Value) -> std::thread::JoinHandle<Value> {
         std::thread::spawn(move || {
             let inbox = ask_inbox(&dir);
-            loop {
-                for e in std::fs::read_dir(&inbox).into_iter().flatten().flatten() {
-                    let p = e.path();
-                    if p.extension().is_some_and(|x| x == "req") {
-                        let req: Value =
-                            serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-                        std::fs::write(p.with_extension("ans"), answer.to_string()).unwrap();
-                        std::fs::remove_file(&p).unwrap();
-                        return req;
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            let p = test_wait::wait_until("a request file in the inbox", || {
+                std::fs::read_dir(&inbox)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.extension().is_some_and(|x| x == "req"))
+            });
+            let req: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            std::fs::write(p.with_extension("ans"), answer.to_string()).unwrap();
+            std::fs::remove_file(&p).unwrap();
+            req
         })
     }
 

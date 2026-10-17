@@ -103,17 +103,11 @@ async fn retiring_a_loop_keeps_both_owner_edits_accepted_around_live_amendment_b
         .unwrap();
         task
     });
-    let reached = tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    crate::engine::test_support::wait_async(
+        "the live amendment baseline to reach its barrier",
+        || entered.exists(),
+    )
     .await;
-    if reached.is_err() {
-        std::fs::write(&released, "release").unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(10), running).await;
-        panic!("live amendment baseline did not reach its barrier: {result:?}");
-    }
     let id = app.store.list_tasks().unwrap()[0].id.clone();
     let second = tokio::time::timeout(Duration::from_secs(5), app.dispatch("task.amend", json!({
         "id": id, "verify": ["second-owner-current-command"], "finalVerify": ["second-owner-final-command"]
@@ -160,13 +154,11 @@ async fn an_idle_amendment_that_meets_a_new_loop_is_queued_without_overwriting_i
             "verify": ["accepted-owner-command"], "checks": [{"criterion": 0, "run": command}]
         })).await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the idle amendment baseline must reach its barrier");
+    crate::engine::test_support::wait_async(
+        "the idle amendment baseline to reach its barrier",
+        || entered.exists(),
+    )
+    .await;
     let signals = TaskSignals::new();
     {
         let lock = app.task_lock(&id);
@@ -248,13 +240,11 @@ async fn a_screenshot_only_owner_edit_invalidates_an_older_idle_baseline_publica
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the first owner baseline must reach its barrier");
+    crate::engine::test_support::wait_async(
+        "the first owner baseline to reach its barrier",
+        || entered.exists(),
+    )
+    .await;
     let response = app
         .dispatch(
             "task.amend",

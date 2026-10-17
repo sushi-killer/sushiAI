@@ -72,9 +72,10 @@ async fn cancelling_the_codex_version_probe_stops_its_process() {
             codex_version(bin.to_str().unwrap(), &cancel, &mut guard),
             async {
                 // The shell creates the file before it writes the pid.
-                while std::fs::read_to_string(&pidfile).map_or(true, |p| p.trim().is_empty()) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                crate::engine::test_support::wait_async("the probe to write its pid", || {
+                    std::fs::read_to_string(&pidfile).is_ok_and(|p| !p.trim().is_empty())
+                })
+                .await;
                 cancel.cancel();
             }
         )

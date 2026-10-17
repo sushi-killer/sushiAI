@@ -931,12 +931,24 @@ fn a_reattach_at_the_same_size_does_not_resize_the_child() {
     wait_until("the session to come back", || {
         info_of(&mut sandbox.client(), &id)["status"] == "running"
     });
-    let after = client.attach_result(&id);
+    // "running" comes back before the holder's ring is replayed into the screen: wait for the
+    // replay, not for the status.
+    let after = wait_state(
+        "the recovered screen to match the one before",
+        || {
+            let after = client.attach_result(&id);
+            if after["snapshot"] == before["snapshot"] {
+                Ok(after)
+            } else {
+                Err(format!("{after}"))
+            }
+        },
+        String::new,
+    );
     assert_eq!(
         (after["cols"].as_u64(), after["rows"].as_u64()),
         (Some(45), Some(24))
     );
-    assert_eq!(after["snapshot"], before["snapshot"]);
     holds_for("the child getting no SIGWINCH", ABSENCE_WINDOW, || {
         !marks.exists()
     });

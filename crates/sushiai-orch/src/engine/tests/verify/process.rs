@@ -8,14 +8,10 @@ fn detached_sleep_command(dir: &Path, pidfile: &Path) -> String {
 /// Waits until the process is gone (a killed process may stay a zombie until its parent
 /// reaps it).
 async fn assert_pid_gone_within(pid: i32) {
-    let start = std::time::Instant::now();
-    while unsafe { libc::kill(pid, 0) == 0 } {
-        assert!(
-            start.elapsed() < crate::procs::testing::deadline(),
-            "process {pid} is still alive"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    crate::engine::test_support::wait_async(&format!("process {pid} to be gone"), || unsafe {
+        libc::kill(pid, 0) != 0
+    })
+    .await;
 }
 
 async fn assert_pid_gone(pidfile: &Path) {
@@ -73,9 +69,8 @@ async fn verify_detached_grandchild_inside_the_directory_is_stopped_on_cancel() 
     // Cancel once the detached helper runs from the directory.
     let ready = crate::procs::testing::ready_file(&pidfile);
     tokio::spawn(async move {
-        while !ready.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        crate::engine::test_support::wait_async("the detached helper to run", || ready.exists())
+            .await;
         cancel2.cancel();
     });
     let (app, _app_dir) = test_app();

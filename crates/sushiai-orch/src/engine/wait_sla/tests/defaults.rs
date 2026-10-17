@@ -51,12 +51,10 @@ async fn the_default_answers_a_waiting_question_with_its_cautious_option_as_an_a
         })
     };
     // The parked loop's control, as `spawn_task_loop` registers it.
-    for _ in 0..200 {
-        if pending.lock().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::engine::test_support::wait_async("the question to park", || {
+        pending.lock().unwrap().is_some()
+    })
+    .await;
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {
@@ -123,12 +121,10 @@ async fn the_default_option_the_agent_named_is_taken_without_a_cautious_word() {
             (answer, task)
         })
     };
-    for _ in 0..200 {
-        if pending.lock().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::engine::test_support::wait_async("the question to park", || {
+        pending.lock().unwrap().is_some()
+    })
+    .await;
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {
@@ -209,17 +205,13 @@ async fn a_default_answer_to_a_planner_question_is_a_policy_assumption_and_leave
             .await
         })
     };
-    for _ in 0..200 {
-        if app
-            .store
+    crate::engine::test_support::wait_async("the question to be saved", || {
+        app.store
             .load_task(&id)
             .unwrap()
             .is_some_and(|t| t.question.is_some())
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await;
     app.controls.lock().unwrap().insert(
         id.clone(),
         TaskControl {

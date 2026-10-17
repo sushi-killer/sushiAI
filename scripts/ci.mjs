@@ -2,7 +2,7 @@
 // (the nextest Rust test build) may overlap `npm test`, so the Rust tests close the
 // build lane instead of getting a lane of their own.
 import { fileURLToPath } from "node:url";
-import { classify, localChanges } from "./ci-changes.mjs";
+import { classify, describe, localChanges } from "./ci-changes.mjs";
 import { runLanes } from "./lib/run-lanes.mjs";
 
 export const lanes = [
@@ -28,32 +28,36 @@ export const lanes = [
   { name: "rust lint", commands: ["npm run lint:rust"] },
 ];
 
-// The lanes a change needs, as in CI (scripts/ci-changes.mjs): docs alone run
-// the static checks, and the Rust tests and lint run only when Rust can be affected.
-export function lanesFor({ code, rust }) {
-  if (!code)
-    return lanes.filter((l) => ["static", "conventions"].includes(l.name));
-  if (rust) return lanes;
-  return lanes
-    .filter((l) => l.name !== "rust lint")
-    .map((l) => ({
-      ...l,
-      commands: l.commands.filter((c) => c !== "node scripts/test-rust.mjs"),
-    }));
+// The lanes and commands a change needs, chosen as in CI (scripts/ci-changes.mjs).
+// The static checks and the conventions always run.
+export function lanesFor(scope) {
+  const tests = [];
+  if (scope.web)
+    tests.push("npm run build", "node scripts/build-once.mjs --stamp");
+  const node = scope.nodeTests;
+  if (node === null || node.length > 0) {
+    tests.push("cargo build -p sushiai");
+    tests.push(node === null ? "npm test" : `node --test ${node.join(" ")}`);
+  }
+  if (scope.rustTests === null) tests.push("node scripts/test-rust.mjs");
+  else if (scope.rustTests.length > 0)
+    tests.push("node scripts/test-rust.mjs --affected");
+  return lanes.flatMap((lane) => {
+    if (lane.name === "build and tests")
+      return tests.length ? [{ ...lane, commands: tests }] : [];
+    if (lane.name === "rust lint") return scope.rust ? [lane] : [];
+    return [lane];
+  });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // CI_ALL=1 runs every lane whatever changed.
   const change = localChanges();
   const scope =
-    process.env.CI_ALL === "1"
-      ? { code: true, rust: true, platform: true }
-      : classify(change.files, change);
-  const chosen = lanesFor(scope);
-  const skipped = lanes.length - chosen.length;
+    process.env.CI_ALL === "1" ? classify([]) : classify(change.files, change);
   console.log(
-    `ci: code=${scope.code} rust=${scope.rust} platform=${scope.platform}` +
-      (skipped || !scope.rust ? " (CI_ALL=1 runs everything)" : ""),
+    `ci: ${process.env.CI_ALL === "1" ? "CI_ALL=1: everything runs" : describe(scope, change.files.length)}` +
+      (scope.all ? "" : " (CI_ALL=1 runs everything)"),
   );
   // The Rust tests here run on this host's OS only. CI adds the other one
   // (macOS) only for platform changes; say so where that is not this host.
@@ -61,5 +65,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(
       `ci: a platform change (${scope.reason}); the macOS Rust tests run in CI`,
     );
-  process.exit(await runLanes(chosen));
+  process.exit(await runLanes(lanesFor(scope)));
 }

@@ -1,0 +1,18 @@
+{
+  "host": ["sushiai-daemon", "sushiai-hold"],
+  "binTests": {
+    "orch_cli": ["sushiai-orch"],
+    "orch_module": ["sushiai-orch"],
+    "orch_relay": ["sushiai-orch"],
+    "routines_module": ["sushiai-routines"],
+    "rust_standards": ["sushiai-orch"],
+    "agents": ["sushiai-agents"],
+    "daemon": [],
+    "foreground_agent": ["sushiai-agents"],
+    "hibernate": ["sushiai-agents"],
+    "launch_options_attach_read_and_open": ["sushiai-agents"],
+    "lifecycle": ["sushiai-agents"],
+    "proxy": [],
+    "scale": []
+  }
+}

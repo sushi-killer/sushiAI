@@ -69,13 +69,115 @@ test("a pull request with docs alone skips the builds; Rust jobs need Rust", asy
   ]) {
     assert.deepEqual(scope([file]), { code: true, rust: true }, file);
   }
-  // No diff to read (a push, a schedule, a new branch): everything runs.
-  assert.deepEqual(classify([]), {
-    code: true,
-    rust: true,
-    platform: true,
-    reason: "no diff",
+  // No diff to read (a push, a new branch): everything runs, macOS included.
+  const push = classify([]);
+  assert.equal(push.all, "no diff");
+  assert.equal(push.platform, true);
+  assert.equal(push.rustTests, null);
+  assert.equal(push.nodeTests, null);
+  assert.ok(push.web && push.desktop);
+});
+
+test("a change runs the checks that can see it, and the setup runs everything", async () => {
+  const { classify } = await ciChanges();
+  const pick = (files) => {
+    const s = classify(files);
+    return {
+      all: Boolean(s.all),
+      rust: s.rustTests === null ? "all" : s.rustTests,
+      node: s.nodeTests === null ? "all" : s.nodeTests,
+      web: s.web,
+      desktop: s.desktop,
+    };
+  };
+  // A module change: its own tests and the binary's tests that drive it, the
+  // node tests that start a real daemon; no daemon, web or desktop runs.
+  const orch = pick(["crates/sushiai-orch/src/engine/mod.rs"]);
+  assert.equal(orch.all, false);
+  assert.ok(orch.rust.includes("sushiai-orch"));
+  assert.ok(orch.rust.includes("sushiai-orch::queue"));
+  assert.ok(orch.rust.includes("sushiai::orch_module"));
+  assert.ok(!orch.rust.includes("sushiai-daemon"));
+  assert.ok(!orch.rust.includes("sushiai::lifecycle"));
+  assert.ok(!orch.rust.includes("sushiai-routines"));
+  assert.ok(orch.node.includes("tests/orchestrator-daemon-real.test.cjs"));
+  assert.ok(!orch.node.includes("tests/chat.test.cjs"));
+  assert.equal(orch.web, false);
+  assert.equal(orch.desktop, false);
+  // The protocol reaches every crate that depends on it, and the desktop.
+  const protocol = pick(["crates/sushiai-protocol/src/lib.rs"]);
+  for (const id of [
+    "sushiai-protocol",
+    "sushiai-daemon",
+    "sushiai-core",
+    "sushiai-hold::hold",
+    "sushiai-orch::queue",
+    "sushiai::lifecycle",
+  ])
+    assert.ok(protocol.rust.includes(id), id);
+  assert.equal(protocol.desktop, true);
+  // A file two crates include by #[path] reaches both.
+  const shared = pick(["crates/process.rs"]);
+  assert.ok(shared.rust.includes("sushiai-daemon"));
+  assert.ok(shared.rust.includes("sushiai-orch"));
+  // The binary composes every module: all Rust tests.
+  assert.equal(pick(["crates/sushiai/src/main.rs"]).rust, "all");
+  // A UI change runs no Rust test, every node test, the build and the desktop.
+  assert.deepEqual(pick(["src/App.tsx"]), {
+    all: false,
+    rust: [],
+    node: "all",
+    web: true,
+    desktop: true,
   });
+  // A test-only change: every node test, no build, no desktop.
+  assert.deepEqual(pick(["tests/chat.test.cjs"]), {
+    all: false,
+    rust: [],
+    node: "all",
+    web: false,
+    desktop: false,
+  });
+  // The desktop smoke's own scripts run it.
+  assert.equal(pick(["scripts/smoke.mjs"]).desktop, true);
+  // Docs alone run nothing.
+  assert.deepEqual(pick(["docs/MAP.md"]), {
+    all: false,
+    rust: [],
+    node: [],
+    web: false,
+    desktop: false,
+  });
+  // The build and test setup, and a crates file the graph cannot place, run
+  // everything.
+  for (const file of [
+    "Cargo.lock",
+    "package-lock.json",
+    "rust-toolchain.toml",
+    ".config/nextest.toml",
+    "tsconfig.json",
+    "tests/helpers/real-daemon.cjs",
+    "scripts/ci-test-map.json",
+    "scripts/lib/rust-graph.mjs",
+    "crates/new-thing.txt",
+  ])
+    assert.equal(pick([file]).all, true, file);
+});
+
+test("every Rust test binary has a dependency set, and the binary's tests a mapping", async () => {
+  const { testBinaries, readTestMap } = await import(
+    pathToFileURL(path.join(root, "scripts/lib/rust-graph.mjs")).href
+  );
+  const map = readTestMap();
+  const binTests = fs
+    .readdirSync(path.join(root, "crates/sushiai/tests"))
+    .filter((f) => f.endsWith(".rs"))
+    .map((f) => f.replace(/\.rs$/, ""))
+    .sort();
+  // An unmapped test of the binary would run on every crate change; a new
+  // one gets its line in scripts/ci-test-map.json.
+  assert.deepEqual(Object.keys(map.binTests).sort(), binTests);
+  for (const b of testBinaries()) assert.ok(b.deps.has(b.crate), b.id);
 });
 
 test("the macOS Rust tests run only for a change that can differ on macOS", async () => {
@@ -253,17 +355,25 @@ test("npm run ci runs only the lanes a change needs", async () => {
   const { lanes, lanesFor } = await import(
     pathToFileURL(path.join(root, "scripts/ci.mjs")).href
   );
+  const { classify } = await ciChanges();
   const names = (list) => list.map((l) => l.name);
   const commands = (list) => list.flatMap((l) => l.commands).join(" && ");
-  assert.deepEqual(names(lanesFor({ code: true, rust: true })), names(lanes));
-  assert.deepEqual(names(lanesFor({ code: false, rust: false })), [
+  assert.deepEqual(lanesFor(classify([])), lanes);
+  assert.deepEqual(names(lanesFor(classify(["README.md"]))), [
     "static",
     "conventions",
   ]);
-  const web = lanesFor({ code: true, rust: false });
+  const web = lanesFor(classify(["src/App.tsx"]));
   assert.ok(!names(web).includes("rust lint"));
   assert.doesNotMatch(commands(web), /test-rust/);
-  assert.match(commands(web), /npm test/);
+  assert.match(commands(web), /npm run build && .*npm test/);
+  const orch = commands(
+    lanesFor(classify(["crates/sushiai-orch/src/engine/mod.rs"])),
+  );
+  assert.doesNotMatch(orch, /npm run build|npm test/);
+  assert.match(orch, /node --test tests\/\S+/);
+  assert.match(orch, /test-rust\.mjs --affected/);
+  assert.match(orch, /lint:rust/);
 });
 
 test("runLanes runs lanes side by side and stops a lane at its first failure", async () => {

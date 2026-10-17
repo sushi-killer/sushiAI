@@ -1,28 +1,58 @@
-// Which CI jobs a pull request needs, from the files it changes. Docs alone
-// skip the builds and tests; the Rust jobs run only when Rust can be affected;
-// the macOS Rust tests run only when the platform can be affected (below).
-// Prints `code=`, `rust=`, `platform=` and the Rust job matrices for
-// $GITHUB_OUTPUT. Without a usable base (a push, a schedule, a new branch)
-// everything runs, macOS included.
+// Which checks a change needs, from the files it changes: one selector for
+// the CI workflow, `npm run ci` and `node scripts/test-rust.mjs --affected`.
+// Docs alone skip the builds and tests. A crate change runs the Rust test
+// binaries that can see it (scripts/lib/rust-graph.mjs) and the node tests
+// that drive the Rust side; any other code change runs every node test. The
+// macOS Rust tests run only when the platform can be affected (below).
+// Without a usable base (a push, a new branch) or after a change to the build
+// or test setup, everything runs. Prints the scope for $GITHUB_OUTPUT.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readData } from "./ci-platform.mjs";
+import { hostCrates, nextestFilter, rustSelection } from "./lib/rust-graph.mjs";
 
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Markdown that tests or tools read is code: skills, agents, prompts.
 const CODE_MARKDOWN =
   /^(\.agents|\.claude|crates|src|electron|scripts|tests)\//;
-const RUST = [
-  /^crates\//,
+// The build and test setup: a change here can change what any check does,
+// so everything runs.
+export const EVERYTHING = [
+  /^package(-lock)?\.json$/,
   /^Cargo\.(toml|lock)$/,
   /^rust-toolchain\.toml$/,
+  /^\.nvmrc$/,
   /^\.config\//,
+  /^tsconfig[^/]*\.json$/,
+  /^eslint\.config\.mjs$/,
   /^\.github\/workflows\//,
-  /^scripts\/(test-rust|check-crate-deps|nextest-sushiai-bin|nextest-summary|ci-changes|ci-platform)\.(mjs|json)$/,
+  /^tests\/(helpers|fixtures)\//,
+  /^scripts\/(ci|ci-changes|ci-platform|ci-test-map|test-rust|check-crate-deps|nextest-sushiai-bin|nextest-summary)\.(mjs|json)$/,
+  /^scripts\/lib\/(rust-graph|run-lanes)\.mjs$/,
   // The Rust tests read these fixtures and spawn node fake harnesses.
   /^electron\/test-fixtures\/mcp-home\//,
-  /^\.nvmrc$/,
 ];
+// What `npm run build` (tsc and vite) reads.
+const WEB = [
+  /^src\//,
+  /^public\//,
+  /^(index|mascot)\.html$/,
+  /^vite\.config\.ts$/,
+];
+// What the desktop smoke runs besides the scripts it starts.
+const DESKTOP = [...WEB, /^electron\//];
+const DESKTOP_SCRIPTS = [
+  "scripts/test-desktop.mjs",
+  "scripts/build-once.mjs",
+  "scripts/smoke.mjs",
+  "scripts/smoke-companion.mjs",
+];
+// A node test whose sources name one of these drives the Rust side: a real
+// daemon, the crates' files or cargo. Only these run for a crate change.
+const RUST_MARKERS =
+  /real-daemon|daemonBinary|target\/debug\/sushiai|SUSHIAI_DAEMON_BIN|\bcrates\b|\bcargo\b/;
 // The build itself: a dependency, the toolchain or the CI setup can change
 // what is compiled or run on each OS.
 const PLATFORM_PATHS = [
@@ -109,13 +139,118 @@ export function platformReason(files, { diff = "", read = () => null } = {}) {
   return null;
 }
 
+const SOURCE = /\.[cm]?[jt]sx?$/;
+
+// A file and every file it loads by a relative path or names from the root.
+function closure(file, seen = new Set()) {
+  const full = path.join(root, file);
+  if (seen.has(file) || !fs.existsSync(full) || fs.statSync(full).isDirectory())
+    return seen;
+  seen.add(file);
+  if (!SOURCE.test(file)) return seen;
+  const text = fs.readFileSync(full, "utf8");
+  const dir = path.posix.dirname(file);
+  for (const [, spec] of text.matchAll(
+    /(?:require\(|from\s+|import\()\s*["'](\.{1,2}\/[^"']+)["']/g,
+  )) {
+    const base = path.posix.join(dir, spec);
+    const found = ["", ".ts", ".tsx", ".cjs", ".mjs", ".js", "/index.ts"]
+      .map((ext) => base + ext)
+      .find((f) => fs.existsSync(path.join(root, f)));
+    if (found) closure(found, seen);
+  }
+  for (const [, named] of text.matchAll(
+    /["'`]((?:src|electron|scripts|tests|crates)\/[\w./-]+\.\w+)["'`]/g,
+  ))
+    closure(named, seen);
+  return seen;
+}
+
+let testsCache = null;
+/** Every node test file, the files it loads, and whether it drives the Rust side. */
+export function nodeTestGraph() {
+  testsCache ??= fs
+    .readdirSync(path.join(root, "tests"))
+    .filter((f) => f.endsWith(".test.cjs"))
+    .sort()
+    .map((f) => {
+      const file = `tests/${f}`;
+      // The test's own text: the app code it loads talks to the daemon too,
+      // but only through fakes unless the test itself starts a real one.
+      const text = fs.readFileSync(path.join(root, file), "utf8");
+      return { file, files: closure(file), rust: RUST_MARKERS.test(text) };
+    });
+  return testsCache;
+}
+
+const ALL = {
+  code: true,
+  rust: true,
+  rustTests: null,
+  nodeTests: null,
+  web: true,
+  desktop: true,
+};
+
+/**
+ * The checks a change needs. `rustTests` and `nodeTests` are null for all of
+ * them, otherwise the nextest binary ids and the node test files to run.
+ * `all` says why everything runs; `reason` why the macOS Rust tests run.
+ */
 export function classify(files, change = {}) {
   if (files.length === 0)
-    return { code: true, rust: true, platform: true, reason: "no diff" };
-  const code = !files.every(isDoc);
-  const rust = code && files.some((f) => RUST.some((r) => r.test(f)));
-  const reason = rust ? platformReason(files, change) : null;
-  return { code, rust, platform: Boolean(reason), reason };
+    return { ...ALL, platform: true, reason: "no diff", all: "no diff" };
+  const code = files.filter((f) => !isDoc(f));
+  if (code.length === 0)
+    return {
+      code: false,
+      rust: false,
+      rustTests: [],
+      nodeTests: [],
+      web: false,
+      desktop: false,
+      platform: false,
+      reason: null,
+      all: null,
+    };
+  const crates = code.filter((f) => f.startsWith("crates/"));
+  const other = code.filter((f) => !f.startsWith("crates/"));
+  const setup = other.find((f) => EVERYTHING.some((r) => r.test(f)));
+  const rs = crates.length
+    ? rustSelection(crates)
+    : { all: false, crates: [], binaries: [] };
+  const rust = Boolean(setup) || crates.length > 0;
+  const reason = rust ? platformReason(code, change) : null;
+  const platform = Boolean(reason);
+  const broad = setup
+    ? `${setup}: build or test setup`
+    : rs.unknown && rs.reason;
+  if (broad) return { ...ALL, platform, reason, all: broad };
+
+  const host = hostCrates();
+  const smoke = new Set(DESKTOP_SCRIPTS.flatMap((f) => [...closure(f)]));
+  const changed = new Set(code);
+  return {
+    code: true,
+    rust,
+    rustTests: rs.all ? null : rs.binaries,
+    // Code outside the crates can reach any node test: all of them run.
+    nodeTests: other.length
+      ? null
+      : nodeTestGraph()
+          .filter((t) => t.rust || [...t.files].some((f) => changed.has(f)))
+          .map((t) => t.file),
+    web: other.some((f) => WEB.some((r) => r.test(f))),
+    // The smoke starts the daemon: the host crates count, a module does not
+    // (its own tests start the daemon with it).
+    desktop:
+      other.some((f) => DESKTOP.some((r) => r.test(f)) || smoke.has(f)) ||
+      rs.all ||
+      rs.crates.some((c) => host.has(c)),
+    platform,
+    reason,
+    all: null,
+  };
 }
 
 /** The Rust build and test matrices of the CI workflow for a scope. */
@@ -137,14 +272,50 @@ export function matrices({ platform }) {
   };
 }
 
+/** The scope as `key=value` lines for $GITHUB_OUTPUT. */
+export function outputs(scope) {
+  const { build, test } = matrices(scope);
+  const nodeTests = scope.nodeTests ?? ["tests/*.test.cjs"];
+  return [
+    `code=${scope.code}`,
+    `rust=${scope.rust}`,
+    `platform=${scope.platform}`,
+    `rust_build=${JSON.stringify(build)}`,
+    `rust_test=${JSON.stringify(test)}`,
+    `rust_filter=${scope.rustTests ? nextestFilter(scope.rustTests) : ""}`,
+    `node=${nodeTests.length > 0}`,
+    `node_tests=${nodeTests.join(" ")}`,
+    `web=${scope.web}`,
+    `desktop=${scope.desktop}`,
+  ].join("\n");
+}
+
+/** One line on what runs and why, for a log. */
+export function describe(scope, files) {
+  const count = (list, word) =>
+    list === null ? `all ${word}` : `${list.length} ${word}`;
+  const what = scope.all
+    ? `everything runs (${scope.all})`
+    : [
+        count(scope.rustTests, "Rust test binaries"),
+        count(scope.nodeTests, "node test files"),
+        `web build ${scope.web ? "yes" : "no"}`,
+        `desktop ${scope.desktop ? "yes" : "no"}`,
+      ].join(", ");
+  const mac = scope.platform ? `yes (${scope.reason})` : "no";
+  return `${files} changed file(s): ${what}; macOS Rust ${mac}`;
+}
+
 const git = (...args) =>
   execFileSync("git", args, { encoding: "utf8", maxBuffer: 1 << 28 });
 
-// What this checkout changes against the merge base with origin/main: commits,
-// edits and new files. Empty when it cannot tell, so everything runs.
+// What this checkout changes against the merge base with origin/main (or
+// CI_BASE, for a branch stacked on another): commits, edits and new files.
+// Empty when it cannot tell, so everything runs.
 export function localChanges() {
   try {
-    const base = git("merge-base", "origin/main", "HEAD").trim();
+    const against = process.env.CI_BASE || "origin/main";
+    const base = git("merge-base", against, "HEAD").trim();
     const files = [
       ...new Set([
         ...git("diff", "--name-only", "--no-renames", base)
@@ -186,18 +357,6 @@ function changes(base, head) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const change = changes(process.env.BASE, process.env.HEAD || "HEAD");
   const scope = classify(change.files, change);
-  const { build, test } = matrices(scope);
-  console.log(
-    [
-      `code=${scope.code}`,
-      `rust=${scope.rust}`,
-      `platform=${scope.platform}`,
-      `rust_build=${JSON.stringify(build)}`,
-      `rust_test=${JSON.stringify(test)}`,
-    ].join("\n"),
-  );
-  console.error(
-    `${change.files.length} changed file(s): code=${scope.code} rust=${scope.rust} platform=${scope.platform}` +
-      (scope.reason ? ` (${scope.reason})` : ""),
-  );
+  console.log(outputs(scope));
+  console.error(describe(scope, change.files.length));
 }

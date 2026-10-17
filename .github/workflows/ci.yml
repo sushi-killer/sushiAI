@@ -4,10 +4,6 @@ on:
   push:
     branches: [main, codex/**]
   pull_request:
-  # Every night the whole suite runs on both OSes, macOS included, whatever
-  # the day's pull requests changed.
-  schedule:
-    - cron: "23 2 * * *"
 
 # A new push to a pull request cancels its run that is still going.
 concurrency:
@@ -15,10 +11,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # What a pull request touches: docs alone skip the builds and tests, the
-  # Rust jobs run only when Rust can be affected, and the macOS Rust tests only
-  # when the platform can be affected (scripts/ci-changes.mjs). A push or a
-  # schedule has no diff to read, so everything runs there.
+  # What a pull request needs, from the files it changes
+  # (scripts/ci-changes.mjs): docs alone skip the builds and tests, a crate
+  # change runs the Rust test binaries that can see it and the node tests
+  # that drive the Rust side, and the macOS Rust tests run only when the
+  # platform can be affected. A push has no diff to read, so everything runs.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -28,6 +25,11 @@ jobs:
       platform: ${{ steps.diff.outputs.platform }}
       rust_build: ${{ steps.diff.outputs.rust_build }}
       rust_test: ${{ steps.diff.outputs.rust_test }}
+      rust_filter: ${{ steps.diff.outputs.rust_filter }}
+      node: ${{ steps.diff.outputs.node }}
+      node_tests: ${{ steps.diff.outputs.node_tests }}
+      web: ${{ steps.diff.outputs.web }}
+      desktop: ${{ steps.diff.outputs.desktop }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,11 +56,14 @@ jobs:
       - run: git diff --check
       - run: node --test tests/docs-map.test.cjs
 
+  # The node tests the change needs; the web build only when its sources changed.
   web:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      NODE_TESTS: ${{ needs.changes.outputs.node_tests }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,10 +79,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
-      - run: npm run build
-      - run: node scripts/build-once.mjs --stamp
+      - if: needs.changes.outputs.web == 'true'
+        run: npm run build
+      - if: needs.changes.outputs.web == 'true'
+        run: node scripts/build-once.mjs --stamp
       - run: cargo build -p sushiai
-      - run: npm test
+      # Unquoted: the list is file names, or the glob of every test file.
+      - run: node --test $NODE_TESTS
 
   # fmt, clippy and the crate rule do not depend on the OS, so they run once.
   rust-lint:
@@ -100,8 +108,8 @@ jobs:
       - run: node scripts/check-crate-deps.mjs
 
   # The Rust tests are built once per OS into a nextest archive; the shards
-  # of rust-test download it and each runs a part of the tests. ubuntu always,
-  # macOS only on a platform change, a push and the nightly run.
+  # of rust-test download it and each runs a part of the selected tests.
+  # ubuntu always, macOS only on a platform change and a push.
   rust-build:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -140,6 +148,9 @@ jobs:
       # it (the same path on every runner of an OS), so env!("CARGO_BIN_EXE_*")
       # paths compiled into the tests resolve here too.
       SUSHIAI_BIN: ${{ github.workspace }}/target/debug/sushiai
+      # A nextest filterset of the test binaries the change can affect; empty
+      # runs them all.
+      RUST_FILTER: ${{ needs.changes.outputs.rust_filter }}
     steps:
       - uses: actions/checkout@v4
       # The tests spawn node fake harnesses and run cargo, rustc and rustfmt.
@@ -157,6 +168,7 @@ jobs:
           cargo nextest run --archive-file nextest.tar.zst
           --workspace-remap . --extract-to . --profile ci
           --partition count:${{ matrix.shard }}/${{ matrix.shards }}
+          --no-tests=pass ${RUST_FILTER:+-E "$RUST_FILTER"}
       - if: always()
         run: node scripts/nextest-summary.mjs target/nextest/ci/junit.xml "${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }}"
       - if: always()
@@ -184,9 +196,11 @@ jobs:
   # held only by an unref'd timer stopped the suite there and nowhere else.
   node-floor:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      NODE_TESTS: ${{ needs.changes.outputs.node_tests }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -198,9 +212,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
-      - run: npm run build
       - run: cargo build -p sushiai
-      - run: npm test
+      - run: node --test $NODE_TESTS
 
   # The tests import .ts directly and rely on Node's type stripping, so the
   # floor in package.json engines is worth proving rather than assuming.
@@ -227,7 +240,7 @@ jobs:
   # as readily as a release one and which builds in a fraction of the time.
   desktop:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-latest
     timeout-minutes: 25
     steps:

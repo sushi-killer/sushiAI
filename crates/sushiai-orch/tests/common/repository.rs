@@ -22,19 +22,6 @@ pub fn init_git_repo() -> tempfile::TempDir {
     dir
 }
 
-/// Keeps a fixture cargo project's build output in its own `target/`, whatever
-/// the host's `~/.cargo/config.toml` says. Only a test that runs cargo itself,
-/// outside orchd, needs it: orchd's own runs get their worktree's target
-/// directory from `sushiai_orch::cargo_target`.
-pub fn pin_cargo_target(dir: &Path) {
-    std::fs::create_dir_all(dir.join(".cargo")).unwrap();
-    std::fs::write(
-        dir.join(".cargo/config.toml"),
-        "[build]\ntarget-dir = \"target\"\n",
-    )
-    .unwrap();
-}
-
 pub fn git_out(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

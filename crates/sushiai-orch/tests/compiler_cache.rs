@@ -1,10 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[allow(dead_code)]
-#[path = "common/repository.rs"]
-mod repository;
-use repository::pin_cargo_target;
 use sushiai_orch::harness::compiler_cache::{CacheRun, CompilerCache, SERVER_PORT};
 use sushiai_orch::verify::command::run_verify_command;
 use sushiai_orch::verify::command::VerifyEnvironment;
@@ -196,9 +192,17 @@ esac"#,
     };
     let command = env.build_command(&wt, "true", None, "");
     let values: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
-    assert_eq!(
-        values[std::ffi::OsStr::new("RUSTC_WRAPPER")],
-        Some(std::ffi::OsStr::new("sccache"))
+    let wrapper = values[std::ffi::OsStr::new("RUSTC_WRAPPER")].unwrap();
+    assert_eq!(Path::new(wrapper), cache.rustc_wrapper());
+    assert!(!Path::new(wrapper).starts_with(&cache_dir));
+    let script = std::fs::read_to_string(wrapper).unwrap();
+    assert!(script.contains("unset CARGO_TARGET_DIR"), "{script}");
+    assert!(
+        script.contains(&format!(
+            "exec '{}'",
+            tmp.path().join("sccache").canonicalize().unwrap().display()
+        )),
+        "{script}"
     );
     assert_eq!(
         values[std::ffi::OsStr::new("SCCACHE_DIR")],
@@ -280,6 +284,15 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
         "pub fn answer() -> u32 { 42 }\n",
     )
     .unwrap();
+    // A host-wide target directory above both worktrees, like a `build.target-dir` in
+    // ~/.cargo/config.toml: orchd gives each worktree its own target (`cargo_target`), and the
+    // cache must still hit across them.
+    std::fs::create_dir_all(tmp.path().join(".cargo")).unwrap();
+    std::fs::write(
+        tmp.path().join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"shared\"\n",
+    )
+    .unwrap();
     for wt in [&first, &second] {
         std::fs::create_dir_all(wt.join("src")).unwrap();
         std::fs::write(wt.join("Cargo.toml"), "[package]\nname = \"orch-cache-demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\norch-cache-lib = { path = \"../library\" }\n[workspace]\n[profile.dev]\nincremental = false\ndebug = 0\n").unwrap();
@@ -288,7 +301,7 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
             "pub fn answer() -> u32 { orch_cache_lib::answer() }\n",
         )
         .unwrap();
-        pin_cargo_target(wt);
+        assert!(sushiai_orch::cargo_target::outside_target_dir(wt).is_some());
         assert!(!wt.join("target").exists());
     }
     let env =
@@ -329,6 +342,10 @@ async fn sccache_present_hits_across_two_fresh_verify_builds_with_separate_targe
         "second fresh build must hit the compiler cache: {delta:?}"
     );
     assert!(delta.requests > 0);
+    assert!(
+        !tmp.path().join("shared").exists(),
+        "a build used the shared target"
+    );
     for wt in [&first, &second] {
         assert!(
             wt.join("target/debug/liborch_cache_demo.rlib").is_file(),
@@ -385,10 +402,29 @@ fn setup_keeps_per_worktree_build_outputs_with_the_shared_wrapper() {
             ),
         )
         .unwrap();
-    let wrapper = std::env::var("RUSTC_WRAPPER").unwrap_or_else(|_| "sccache".into());
     let target = expected_target(&wt).map_or(String::new(), |t| t.display().to_string());
-    assert_eq!(
-        std::fs::read_to_string(wt.join("out.txt")).unwrap().trim(),
-        format!("[{wrapper}][{target}]")
-    );
+    let out = std::fs::read_to_string(wt.join("out.txt")).unwrap();
+    let (wrapper, seen_target) = out
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|rest| rest.split_once("]["))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(seen_target, target);
+    match std::env::var("RUSTC_WRAPPER") {
+        // The owner's own wrapper wins and the cache stays off.
+        Ok(owner) => assert_eq!(wrapper, owner),
+        Err(_) => {
+            // The shared wrapper runs the sccache on this PATH, without the target variables.
+            let script = std::fs::read_to_string(wrapper).unwrap();
+            let sccache = bin.join("sccache").canonicalize().unwrap();
+            assert!(script.contains("unset CARGO_TARGET_DIR"), "{script}");
+            assert!(
+                script.contains(&format!("exec '{}'", sccache.display())),
+                "{script}"
+            );
+            // It names this test's sccache, which goes away with the test.
+            std::fs::remove_file(wrapper).unwrap();
+        }
+    }
 }

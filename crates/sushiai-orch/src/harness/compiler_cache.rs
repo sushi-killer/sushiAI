@@ -85,10 +85,41 @@ impl CompilerCache {
     pub fn apply(&self, command: &mut tokio::process::Command) {
         self.start_server();
         command
-            .env("RUSTC_WRAPPER", "sccache")
+            .env("RUSTC_WRAPPER", self.rustc_wrapper())
             .env("SCCACHE_DIR", &self.dir)
             .env("SCCACHE_SERVER_PORT", self.port.to_string())
             .env_remove("SCCACHE_SERVER_UDS");
+    }
+
+    /// The wrapper cargo runs rustc through: sccache, without the target directory variables.
+    /// sccache keys a compile on every `CARGO_*` variable (only a few are exempt), and orchd
+    /// gives each worktree its own absolute `CARGO_TARGET_DIR` (`cargo_target`): left in, the
+    /// cache would never hit across worktrees. Cargo has read the variable already; it is no
+    /// input of the compile. One script per sccache executable, next to the cache directory and
+    /// never in it (sccache evicts files there), so two caches never share one. Falls back to
+    /// plain `sccache` when the script cannot be written.
+    pub fn rustc_wrapper(&self) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.executable.hash(&mut hasher);
+        let path = self
+            .dir
+            .parent()
+            .unwrap_or(&self.dir)
+            .join("rustc-wrappers")
+            .join(format!("{:016x}", hasher.finish()));
+        let quoted = self.executable.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            "#!/bin/sh\n# Written by orchd: the worktree's target directory is no compile input.\n\
+             unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR\nexec '{quoted}' \"$@\"\n"
+        );
+        if std::fs::read_to_string(&path).is_ok_and(|text| text == script)
+            || write_executable(&path, &script).is_ok()
+        {
+            path
+        } else {
+            PathBuf::from("sccache")
+        }
     }
 
     pub async fn snapshot(&self) -> Option<Stats> {
@@ -106,6 +137,23 @@ impl CompilerCache {
         }
         Stats::from_json(&output.stdout)
     }
+}
+
+/// Writes `text` to `path` as an executable file in one rename: a compile never runs a
+/// half-written script.
+fn write_executable(path: &Path, text: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
+    std::fs::write(&temp, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&temp, path)
 }
 
 fn is_executable(path: &Path) -> bool {

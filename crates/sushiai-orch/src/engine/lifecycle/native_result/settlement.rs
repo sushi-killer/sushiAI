@@ -1,10 +1,11 @@
 use super::NativeEnd;
+use crate::engine::decision::failure;
 use crate::engine::lifecycle::execution::ExecutedAttempt;
 use crate::engine::lifecycle::native_settlement::{NativeSettlement, Publication};
 use crate::engine::state::App;
 use crate::engine::verification::context::record_check_decisions;
 use crate::task::attempts::{self, BestOfSelection, RunCompletion};
-use crate::task::{Task, Usage};
+use crate::task::{FailureKind, Task, Usage};
 
 pub(super) fn publish(
     app: &App,
@@ -92,9 +93,20 @@ pub(super) fn publish(
     match settlement.publish(app, task) {
         Ok(publication @ (Publication::Current | Publication::Changed)) => Ok(publication),
         Ok(Publication::Stopped) => Err(NativeEnd::Stopped),
-        Err(error) => {
-            eprintln!("orch: saving native result for {} failed: {error}", task.id);
-            Err(NativeEnd::Stopped)
-        }
+        Err(error) => Err(unsaved(app, task, executed.run.attempt_n, &error)),
     }
+}
+
+/// The run's result could not be saved. A deleted task stays deleted. Any other task would be
+/// left in its stored state with no loop to move it on (the task stayed queued with its attempt
+/// gone): the attempt fails visibly, and the failure path saves the loop's copy, attempt included.
+fn unsaved(app: &App, task: &Task, attempt_n: u32, error: &str) -> NativeEnd {
+    eprintln!("orch: saving native result for {} failed: {error}", task.id);
+    if !matches!(app.store.load_task(&task.id), Ok(Some(_))) {
+        return NativeEnd::Stopped;
+    }
+    NativeEnd::Failed(failure(
+        FailureKind::Error,
+        format!("Orchestrator could not save the result of attempt {attempt_n}: {error}"),
+    ))
 }

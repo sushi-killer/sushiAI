@@ -203,6 +203,58 @@ async fn stopped_native_publication_remains_terminal_and_preserves_paid_facts() 
     assert!(!trace.exists());
 }
 
+/// A writer put back a copy saved before the attempt started (the stale check decision of
+/// CI run 38974451190): the run's result has no attempt to land on. The loop must not end
+/// silently with the task left queued: the attempt fails visibly, and the failure path saves
+/// the loop's copy, attempt included, so the ladder goes on.
+#[tokio::test]
+async fn a_result_whose_stored_attempt_vanished_fails_the_attempt_visibly() {
+    let (app, _home, mut task, executed, trace) = completed_run();
+    let mut stale = task.clone();
+    stale.fixture_data().attempts.clear();
+    stale.resume_phase(TaskStatus::Queued, now_ms());
+    app.store.save_task(&stale).unwrap();
+    let result = Receipt::Native(Box::new(executed))
+        .settle(&app, &mut task, &TaskSignals::new())
+        .await;
+    let Err(end) = result else {
+        panic!("a result without its stored attempt continued")
+    };
+    let CycleEnd::Failed(failure) = end.route(compiled(), TaskStep::Settle) else {
+        panic!("the vanished attempt ended the loop without a failure")
+    };
+    assert_eq!(failure.kind, crate::task::FailureKind::Error);
+    assert!(
+        failure
+            .detail
+            .contains("could not save the result of attempt 1"),
+        "{}",
+        failure.detail
+    );
+    let signals = TaskSignals::new();
+    let mut permit = None;
+    let mut budget = 3;
+    let signal = crate::engine::decision::fail_and_continue(
+        &app,
+        &mut task,
+        failure,
+        &mut budget,
+        &mut crate::engine::questions::parking::QuestionSlot::new(&signals, &mut permit),
+    )
+    .await;
+    assert!(matches!(
+        signal,
+        crate::engine::decision::LoopSignal::Continue
+    ));
+    let saved = app.store.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.attempts.len(), 1, "the attempt is back in the store");
+    assert!(saved.attempts[0]
+        .failure
+        .as_ref()
+        .is_some_and(|f| f.detail.contains("could not save the result")));
+    assert!(!trace.exists());
+}
+
 #[tokio::test]
 async fn pending_owner_edit_keeps_the_actual_timeout_receipt_without_raw_adoption() {
     let (app, _home, mut task, mut executed, trace) = completed_run();

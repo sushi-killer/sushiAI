@@ -24,8 +24,16 @@ pub(super) fn finish(
     };
     let _ = std::fs::remove_file(&executed.key_path);
     let _ = std::fs::remove_file(executed.run.run_dir.join("mcp.json"));
+    // A stored copy without this run's attempt (a writer put back an older copy) is not taken:
+    // the loop's copy keeps the attempt, and the settlement reports the lost save.
     if let Ok(Some(reloaded)) = app.store.load_task(&task.id) {
-        *task = reloaded;
+        if reloaded
+            .attempts
+            .get(executed.run.idx)
+            .is_some_and(|attempt| attempt.n == executed.run.attempt_n)
+        {
+            *task = reloaded;
+        }
     }
     attempts::record_gate_blocks(task, executed.run.idx, blocks);
     task.record_decisions(lines);

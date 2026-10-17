@@ -23,6 +23,7 @@
     ],
     "git": ["policy", "process", "procs", "task"],
     "verify": [
+      "cargo_target",
       "clip",
       "git",
       "harness",
@@ -49,6 +50,7 @@
     "engine": [
       "ab",
       "api",
+      "cargo_target",
       "clip",
       "clock",
       "costs",
@@ -77,7 +79,15 @@
     "process": [],
     "procs": ["process"],
     "sandbox": ["git"],
-    "worktree_env": ["clip", "git", "harness", "policy", "process", "procs"],
+    "worktree_env": [
+      "cargo_target",
+      "clip",
+      "git",
+      "harness",
+      "policy",
+      "process",
+      "procs"
+    ],
     "loop_detect": ["clip", "policy"],
     "report": ["git", "store", "task"],
     "timeline": ["ab", "clock", "policy", "store", "task"],
@@ -89,6 +99,7 @@
     "legacy": ["process"],
     "verify/repository": ["task", "policy", "git"],
     "clock": [],
+    "cargo_target": [],
     "clip": []
   },
   "pureRoots": ["task", "policy"],
@@ -113,7 +124,20 @@
       "path": "../process.rs",
       "reason": "Host modules independently share this process lifecycle IO adapter.",
       "max": 600
+    },
+    {
+      "path": "../test_wait.rs",
+      "reason": "Test code in every crate shares one wait helper on real signals.",
+      "max": 600
     }
   ],
-  "exceptions": []
+  "exceptions": [
+    {
+      "path": "../test_wait.rs",
+      "category": "source_macro",
+      "symbol": "common::polling::test_wait::thread_local!",
+      "reason": "The shared wait helper keeps one deadline per test thread.",
+      "max": 3
+    }
+  ]
 }

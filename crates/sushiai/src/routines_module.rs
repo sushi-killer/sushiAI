@@ -99,10 +99,10 @@ const ATTACH_WAIT: Duration = Duration::from_secs(5);
 
 /// Attaches to the session. `session_watch` waits for this before it returns, so a
 /// session that ends at once is still seen by the attach.
-fn attach(socket: &Path, id: &str, capture: &Capture) -> Result<Conn, String> {
+fn attach(socket: &Path, id: &str, capture: &Capture) -> Result<(Conn, u64), String> {
     Conn::direct(socket, "routines-capture").and_then(|mut conn| {
         let snapshot = conn
-            .call("session.attach", json!({"id": id, "scrollback": 2000}))
+            .call_keeping("session.attach", json!({"id": id, "scrollback": 2000}))
             .map_err(|e| e.message())?;
         let attach: sushiai_protocol::AttachResult =
             serde_json::from_value(snapshot).map_err(|e| e.to_string())?;
@@ -111,16 +111,27 @@ fn attach(socket: &Path, id: &str, capture: &Capture) -> Result<Conn, String> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot = attach.snapshot;
-        Ok(conn)
+        Ok((conn, attach.seq))
     })
 }
 
-/// Collects what an attached session prints until it exits.
-fn collect(attached: Result<Conn, String>, id: &str, capture: &Capture) {
-    if let Ok(mut conn) = attached {
+/// Collects what an attached session prints until it exits. The exit note and the output
+/// frames are written to one connection by two tasks, so the note can overtake the last
+/// output: the capture ends only when the stream offset the note reports has been received.
+fn collect(attached: Result<(Conn, u64), String>, id: &str, capture: &Capture) {
+    if let Ok((mut conn, mut received)) = attached {
+        let mut end: Option<u64> = None;
         while let Ok(incoming) = conn.next_incoming() {
             match incoming {
-                Incoming::Output(data) => {
+                Incoming::Output { seq, mut data } => {
+                    let tail = seq + data.len() as u64;
+                    if tail <= received {
+                        continue;
+                    }
+                    if seq < received {
+                        data.drain(..(received - seq) as usize);
+                    }
+                    received = tail;
                     let mut state = capture.state.lock().unwrap_or_else(|e| e.into_inner());
                     state.live.extend_from_slice(&data);
                     if state.live.len() > CAPTURE_CAP {
@@ -130,9 +141,19 @@ fn collect(attached: Result<Conn, String>, id: &str, capture: &Capture) {
                 }
                 Incoming::Note(method, params) => {
                     if method == "session.exited" && params["id"] == id {
-                        break;
+                        // A note without an offset (an older daemon) is all there is.
+                        end = Some(params["seq"].as_u64().unwrap_or(received));
+                        // The rest is already sent; a stream that stops short of it ends the
+                        // capture instead of holding this thread.
+                        conn.set_read_timeout(CAPTURE_WAIT);
+                    } else if method == "session.snapshot" && params["id"] == id {
+                        // The stream resynced: what it skipped is not coming.
+                        received = params["seq"].as_u64().unwrap_or(received).max(received);
                     }
                 }
+            }
+            if end.is_some_and(|end| received >= end) {
+                break;
             }
         }
     }
@@ -417,6 +438,152 @@ impl Module for RoutinesModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+    use sushiai_protocol::{encode, Decoder, Frame};
+
+    fn json_frame(value: Value) -> Vec<u8> {
+        encode(&Frame::Json(value.to_string()))
+    }
+
+    /// A daemon that answers `hello` and `session.attach`. `early` goes out before the attach
+    /// answer; once `go` fires it sends `tail`: the frames a real daemon writes from two tasks
+    /// (the output stream and the event forwarder) in whatever order they win the connection.
+    /// The connection stays open until the test drops `hold`, as a live daemon keeps it.
+    fn fake_daemon(
+        socket: &Path,
+        early: Vec<Vec<u8>>,
+        go: mpsc::Receiver<()>,
+        tail: Vec<Vec<u8>>,
+        hold: mpsc::Receiver<()>,
+    ) {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut decoder = Decoder::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "the client closed before it attached");
+                for frame in decoder.push(&buf[..n]).unwrap() {
+                    let Frame::Json(text) = frame else { continue };
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let attach = request["method"] == "session.attach";
+                    let result = if attach {
+                        for frame in &early {
+                            stream.write_all(frame).unwrap();
+                        }
+                        json!({"snapshot": "", "seq": 0, "cols": 80, "rows": 24})
+                    } else {
+                        json!({"protocol": 1, "capabilities": [], "daemon": "t", "host": "t"})
+                    };
+                    let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+                    stream.write_all(&json_frame(reply)).unwrap();
+                    if attach {
+                        go.recv().unwrap();
+                        for frame in &tail {
+                            stream.write_all(frame).unwrap();
+                        }
+                        stream.flush().unwrap();
+                        let _ = hold.recv();
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    fn exited(id: &str, end: u64) -> Vec<u8> {
+        json_frame(json!({"jsonrpc": "2.0", "method": "session.exited",
+                          "params": {"id": id, "code": 0, "seq": end}}))
+    }
+
+    fn output(id: &str, seq: u64, data: &[u8]) -> Vec<u8> {
+        encode(&Frame::Output {
+            id: id.into(),
+            seq,
+            data: data.to_vec(),
+        })
+    }
+
+    /// What the capture of session `s1` holds once it finished, and how long that took.
+    fn collected(early: Vec<Vec<u8>>, tail: Vec<Vec<u8>>) -> (String, Duration) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let (go, wait) = mpsc::channel();
+        let (_hold, held) = mpsc::channel();
+        fake_daemon(&socket, early, wait, tail, held);
+        let capture = Arc::new(Capture {
+            state: Mutex::new(CaptureState::default()),
+            done: Condvar::new(),
+        });
+        let attached = attach(&socket, "s1", &capture);
+        go.send(()).unwrap();
+        let started = std::time::Instant::now();
+        let (done, finished) = mpsc::channel();
+        let collector = capture.clone();
+        std::thread::spawn(move || {
+            collect(attached, "s1", &collector);
+            let _ = done.send(());
+        });
+        // Bounded so a capture that never ends fails instead of hanging the test.
+        finished
+            .recv_timeout(CAPTURE_WAIT * 4)
+            .expect("the capture never finished");
+        let took = started.elapsed();
+        let state = capture.state.lock().unwrap();
+        assert!(state.finished);
+        (String::from_utf8_lossy(&state.live).into_owned(), took)
+    }
+
+    #[test]
+    fn output_that_arrives_after_the_exit_note_is_still_collected() {
+        let (live, took) = collected(
+            vec![],
+            vec![
+                output("s1", 0, b"first "),
+                exited("s1", 10),
+                output("s1", 6, b"last"),
+            ],
+        );
+        assert_eq!(live, "first last");
+        assert!(took < CAPTURE_WAIT, "it waited for nothing: {took:?}");
+    }
+
+    #[test]
+    fn an_exit_note_ahead_of_all_output_does_not_end_the_capture_empty() {
+        let (live, took) = collected(vec![], vec![exited("s1", 4), output("s1", 0, b"done")]);
+        assert_eq!(live, "done");
+        assert!(took < CAPTURE_WAIT, "it waited for nothing: {took:?}");
+    }
+
+    #[test]
+    fn output_and_exit_sent_before_the_attach_answer_are_kept() {
+        let (live, took) = collected(vec![output("s1", 0, b"quick"), exited("s1", 5)], vec![]);
+        assert_eq!(live, "quick");
+        assert!(took < CAPTURE_WAIT, "it waited for nothing: {took:?}");
+    }
+
+    #[test]
+    fn overlapping_output_frames_are_collected_once() {
+        let (live, _) = collected(
+            vec![],
+            vec![
+                output("s1", 0, b"ab"),
+                output("s1", 1, b"bc"),
+                exited("s1", 3),
+            ],
+        );
+        assert_eq!(live, "abc");
+    }
+
+    #[test]
+    fn a_stream_that_stops_short_of_the_exit_ends_the_capture_with_what_came() {
+        let (live, took) = collected(vec![], vec![output("s1", 0, b"part"), exited("s1", 9)]);
+        assert_eq!(live, "part");
+        assert!(took >= CAPTURE_WAIT, "it ended before the bound: {took:?}");
+    }
 
     #[test]
     fn a_run_finds_sushiai_through_the_executables_folder_then_the_daemons_path() {

@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use sushiai_orch::api::mcp::Caller;
@@ -34,8 +35,11 @@ impl CallError {
 /// What a listening connection receives besides responses.
 pub enum Incoming {
     Note(String, Value),
-    /// Raw output of a session this connection attached to.
-    Output(Vec<u8>),
+    /// Raw output of a session this connection attached to, at offset `seq` of its stream.
+    Output {
+        seq: u64,
+        data: Vec<u8>,
+    },
 }
 
 pub struct Conn {
@@ -44,6 +48,8 @@ pub struct Conn {
     decoder: Decoder,
     next_id: u64,
     child: Option<Child>,
+    /// The socket of a direct connection, to bound its reads.
+    socket: Option<UnixStream>,
     /// Frames read while waiting, oldest first.
     queue: std::collections::VecDeque<Incoming>,
 }
@@ -69,7 +75,18 @@ impl Conn {
     pub fn direct(socket: &Path, client: &str) -> Result<Conn, String> {
         let stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
         let reader = stream.try_clone().map_err(|e| e.to_string())?;
-        Conn::hello(Box::new(reader), Box::new(stream), None, client)
+        let socket = stream.try_clone().map_err(|e| e.to_string())?;
+        let mut conn = Conn::hello(Box::new(reader), Box::new(stream), None, client)?;
+        conn.socket = Some(socket);
+        Ok(conn)
+    }
+
+    /// Bounds each later read of a direct connection: a read that waits longer fails. A
+    /// connection through the proxy keeps blocking reads.
+    pub fn set_read_timeout(&self, timeout: Duration) {
+        if let Some(socket) = &self.socket {
+            let _ = socket.set_read_timeout(Some(timeout));
+        }
     }
 
     fn hello(
@@ -84,6 +101,7 @@ impl Conn {
             decoder: Decoder::new(),
             next_id: 1,
             child,
+            socket: None,
             queue: std::collections::VecDeque::new(),
         };
         let params = json!({"protocol": PROTOCOL_VERSION, "client": client});
@@ -110,7 +128,9 @@ impl Conn {
                 .map_err(|e| format!("bad frame from the daemon: {e}"))?;
             for frame in frames {
                 match frame {
-                    Frame::Output { data, .. } => self.queue.push_back(Incoming::Output(data)),
+                    Frame::Output { seq, data, .. } => {
+                        self.queue.push_back(Incoming::Output { seq, data })
+                    }
                     Frame::Json(text) => {
                         if let Ok(Message::Notification(note)) = Message::parse(&text) {
                             self.queue
@@ -132,6 +152,16 @@ impl Conn {
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        self.request(method, params, false)
+    }
+
+    /// Like [`Conn::call`], but notifications and output that arrive before or with the answer
+    /// are kept for `next_incoming` instead of dropped. For a call that starts a stream.
+    pub fn call_keeping(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        self.request(method, params, true)
+    }
+
+    fn request(&mut self, method: &str, params: Value, keep: bool) -> Result<Value, CallError> {
         let id = self.next_id;
         self.next_id += 1;
         let frame = Request::new(id, method, params).frame();
@@ -151,17 +181,28 @@ impl Conn {
                 .decoder
                 .push(&buf[..n])
                 .map_err(|e| CallError::Closed(format!("bad frame from the daemon: {e}")))?;
+            let mut answer = None;
             for frame in frames {
-                // Notifications and output frames are not answers.
-                let Frame::Json(text) = frame else { continue };
-                if let Ok(Message::Response(r)) = Message::parse(&text) {
-                    if r.id == json!(id) {
-                        return match r.error {
-                            Some(e) => Err(CallError::Rpc(e.message)),
-                            None => Ok(r.result.unwrap_or(Value::Null)),
-                        };
+                match frame {
+                    Frame::Output { seq, data, .. } if keep => {
+                        self.queue.push_back(Incoming::Output { seq, data })
                     }
+                    // Notifications and output frames are not answers.
+                    Frame::Output { .. } => {}
+                    Frame::Json(text) => match Message::parse(&text) {
+                        Ok(Message::Response(r)) if r.id == json!(id) => answer = Some(r),
+                        Ok(Message::Notification(note)) if keep => self
+                            .queue
+                            .push_back(Incoming::Note(note.method, note.params)),
+                        _ => {}
+                    },
                 }
+            }
+            if let Some(r) = answer {
+                return match r.error {
+                    Some(e) => Err(CallError::Rpc(e.message)),
+                    None => Ok(r.result.unwrap_or(Value::Null)),
+                };
             }
         }
     }
@@ -247,6 +288,7 @@ mod tests {
             decoder: Decoder::new(),
             next_id: 1,
             child: None,
+            socket: None,
             queue: std::collections::VecDeque::new(),
         }
     }

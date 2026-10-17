@@ -463,6 +463,10 @@ pub struct SessionSnapshot {
 pub struct SessionExited {
     pub id: String,
     pub code: Option<i32>,
+    /// Length of the session's output stream at the exit: every output frame with a lower
+    /// offset precedes the exit, though it may reach a client after this note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

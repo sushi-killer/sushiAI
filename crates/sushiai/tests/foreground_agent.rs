@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! An agent started by hand in a shell session is detected from the PTY's foreground process.
 //! The fake `claude` is a node script (a real one runs the same way): it writes the session
 //! file Claude keeps under `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` and exits on any input.

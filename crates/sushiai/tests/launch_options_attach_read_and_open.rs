@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Launch options and reads: `claudeSettings`, `idempotencyKey`, an account `CODEX_HOME`,
 //! attach/read with scrollback, and the `sushiai open` signal. Real daemon and holders; the
 //! fake agents are shell scripts first on `PATH`. Temporary homes only.

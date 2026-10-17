@@ -260,6 +260,7 @@ async fn a_live_group_that_is_not_the_run_is_treated_as_dead_and_left_alone() {
     kill_group(stranger);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38965681305)
 #[tokio::test]
 async fn a_live_group_of_the_run_is_resumed() {
     let (app, dir) = test_app();
@@ -303,6 +304,7 @@ async fn follow_within(app: &App, task: &Task, guard: Guard) -> harness::RunOutc
     .expect("outcome")
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38976570724)
 #[tokio::test]
 async fn a_stalled_adopted_run_is_killed_after_the_stall_timeout() {
     let (app, dir) = test_app();
@@ -375,6 +377,7 @@ async fn an_adopted_run_that_only_writes_stderr_is_not_stalled() {
     kill_group(pgid);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI runs 38801285521, 38937455006; run 38801285521)
 #[tokio::test]
 async fn an_over_budget_adopted_run_is_killed() {
     let (app, dir) = test_app();

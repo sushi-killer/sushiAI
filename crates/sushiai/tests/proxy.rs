@@ -1,3 +1,4 @@
+//! ci-crates: host
 //! `sushiai proxy` against real daemons under a temporary `SUSHIAI_HOME`.
 
 mod common;

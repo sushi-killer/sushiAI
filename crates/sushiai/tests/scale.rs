@@ -1,3 +1,4 @@
+//! ci-crates: host
 //! Load run for session hibernation: 10 claude, 10 codex and 10 shell sessions, each printing
 //! 2000 lines of 200 columns, in a real daemon under a temp home. It measures the daemon and
 //! the holders awake, after the agents went to sleep, and after a hard restart, and checks the

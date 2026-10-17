@@ -163,6 +163,7 @@ fn a_failed_setup_is_retried_fresh_before_a_plain_base_failure_is_quoted() {
     remove_dir_retrying(wt);
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI run 38959930467)
 #[test]
 fn a_persistent_setup_failure_runs_exactly_twice_and_remains_unknown() {
     let scripts = tempfile::tempdir().unwrap();

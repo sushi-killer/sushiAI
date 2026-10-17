@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-orch
 //! The orchestration module in the real daemon binary.
 
 mod common;

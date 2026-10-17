@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Agent sessions end to end. The fake `claude` and `codex` are node scripts that run the hook
 //! commands they find where the real CLIs would: in the `--settings` argument (claude) and in
 //! `$CODEX_HOME/hooks.json` written by `sushiai hooks install` (codex). Fixtures supply the

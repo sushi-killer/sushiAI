@@ -29,7 +29,7 @@ export const EVERYTHING = [
   /^eslint\.config\.mjs$/,
   /^\.github\/workflows\//,
   /^tests\/(helpers|fixtures)\//,
-  /^scripts\/(ci|ci-changes|ci-platform|ci-test-map|test-rust|check-crate-deps|nextest-sushiai-bin|nextest-summary)\.(mjs|json)$/,
+  /^scripts\/(ci|ci-changes|ci-platform|ci-test-map|test-rust|check-crate-deps|check-test-binaries|flaky-report|nextest-sushiai-bin|nextest-summary)\.(mjs|json)$/,
   /^scripts\/lib\/(rust-graph|run-lanes)\.mjs$/,
   // The Rust tests read these fixtures and spawn node fake harnesses.
   /^electron\/test-fixtures\/mcp-home\//,
@@ -87,8 +87,9 @@ export const PLATFORM_CODE = new RegExp(
     String.raw`\b(?:sed -i|date -d|stat -c|readlink -f|grep -P|xargs -r|base64 -w)\b`,
   ].join("|"),
 );
-// Shards per OS for the Rust tests (artifacts/PLAN-ci-parallel.md has the
-// measurements behind the numbers).
+// Shards per OS for the Rust tests: with the test durations of 140 CI runs,
+// ubuntu's slowest of 2 shards and macOS's of 3 each finish in under 4
+// minutes, and a third ubuntu shard saved less than its setup cost.
 export const SHARDS = { "ubuntu-latest": 2, "macos-latest": 3 };
 
 export function isDoc(file) {
@@ -127,8 +128,8 @@ export function platformReason(files, { diff = "", read = () => null } = {}) {
     if (PLATFORM_PATHS.some((r) => r.test(file))) return `${file}: build setup`;
     const crate = data.crates.find((c) => file.startsWith(`${c}/`));
     if (crate) return `${file}: ${crate} has platform-only dependencies`;
-    const history = data.macosOnly.find((e) => e.files.includes(file));
-    if (history) return `${file}: ${history.test} failed only on macOS`;
+    if (data.macosOnly.includes(file))
+      return `${file}: a test here failed only on macOS`;
     if (!/^crates\/.*\.rs$/.test(file)) continue;
     const changed = (hunks.get(file) ?? []).find((l) => PLATFORM_CODE.test(l));
     if (changed) return `${file}: changes platform code: ${changed.trim()}`;

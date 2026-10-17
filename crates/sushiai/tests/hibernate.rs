@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Session hibernation and wake end to end: a real daemon and holders in a temp home, with fake
 //! `claude` and `codex` node scripts on `PATH`. They send their hooks through `sushiai hook` like
 //! the real CLIs (see `agents.rs`), log their argv, variables and keystrokes to a file, and stay

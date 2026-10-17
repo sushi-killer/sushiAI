@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-routines
 //! The routines module in the real daemon binary, with a fake `claude` on PATH: a routine is
 //! saved and enabled, the daemon's scheduler runs it, the fake prints a valid result and
 //! `routines.show` returns it.

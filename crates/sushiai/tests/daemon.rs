@@ -1,3 +1,4 @@
+//! ci-crates: host
 //! Real daemon and holder processes under a temporary `SUSHIAI_HOME`.
 
 mod common;

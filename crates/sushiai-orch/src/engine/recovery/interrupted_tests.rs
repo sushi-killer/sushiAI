@@ -69,6 +69,7 @@ fn spawn_group(marker: &std::path::Path) -> std::process::Child {
     child
 }
 
+// ci-platform: macos-only (failed on macOS while ubuntu passed, CI runs 38931522638, 38959930467; run 38931522638)
 #[test]
 fn recover_interrupted_kills_a_stale_process_group_if_still_alive() {
     let dir = tempfile::tempdir().unwrap();

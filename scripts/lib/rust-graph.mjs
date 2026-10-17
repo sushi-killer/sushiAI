@@ -1,10 +1,10 @@
 // The Rust half of the check selector (scripts/ci-changes.mjs), read from the
 // workspace itself: crate dependencies from each crates/*/Cargo.toml, files a
 // crate includes from outside its folder through #[path], and the test
-// binaries with the crates they depend on. One mapping file,
-// scripts/ci-test-map.json, adds what the manifests cannot say: which crates
-// the `sushiai` binary's own integration tests exercise, and which crates a
-// test that starts that binary also runs (the host).
+// binaries with the crates they depend on. What the manifests cannot say
+// comes from two places: scripts/ci-test-map.json names the core crates a
+// test that starts the `sushiai` binary also runs (the host), and each test
+// of that binary names the modules it drives in a `ci-crates:` header.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,10 +101,72 @@ export function hostCrates(base = root, map = readTestMap()) {
   return new Set([BIN, ...map.host.flatMap((h) => [...forward(all, h)])]);
 }
 
+// A test of the `sushiai` binary names what it exercises in a header line,
+// at the composition point and not in this script:
+//   //! ci-crates: <crate> ...          the module crates it drives
+//   //! ci-crates: host                 only the host crates
+//   //! ci-crates: crates-with:<file>   every crate whose folder holds <file>
+// The host crates are always implied. A test without the line depends on
+// every crate (tests/ci-pipeline.test.cjs requires the line).
+export const CI_CRATES = /^\/\/! ci-crates:(.*)$/m;
+
+/** The crates a `ci-crates:` header names, or null when the file has none. */
+export function headerCrates(text, all, base = root) {
+  const line = CI_CRATES.exec(text);
+  if (!line) return null;
+  return line[1]
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w && w !== "host")
+    .flatMap((w) => {
+      if (!w.startsWith("crates-with:")) return [w];
+      const file = w.slice("crates-with:".length);
+      return all
+        .filter((c) => fs.existsSync(path.join(base, c.dir, file)))
+        .map((c) => c.name);
+    });
+}
+
+// The names of a manifest's [[bin]] or [[test]] tables.
+function tableNames(manifest, kind) {
+  return manifest
+    .split(/^\[/m)
+    .filter((s) => s.startsWith(`[${kind}]]`))
+    .map((s) => /^name\s*=\s*"([^"]+)"/m.exec(s)?.[1])
+    .filter(Boolean);
+}
+
+/** A crate's test targets: [nextest id suffix, integration test source or null]. */
+function crateTargets(base, c) {
+  const dir = path.join(base, c.dir);
+  const manifest = fs.readFileSync(path.join(dir, "Cargo.toml"), "utf8");
+  const out = [];
+  if (fs.existsSync(path.join(dir, "src", "lib.rs"))) out.push(["", null]);
+  const bins = new Set(tableNames(manifest, "bin"));
+  if (!bins.size && fs.existsSync(path.join(dir, "src", "main.rs")))
+    bins.add(c.name);
+  const binDir = path.join(dir, "src", "bin");
+  if (fs.existsSync(binDir))
+    for (const f of fs.readdirSync(binDir)) bins.add(f.replace(/\.rs$/, ""));
+  for (const b of bins) out.push([`::bin/${b}`, null]);
+  const tests = new Map(tableNames(manifest, "test").map((t) => [t, null]));
+  const testsDir = path.join(dir, "tests");
+  if (fs.existsSync(testsDir))
+    for (const e of fs.readdirSync(testsDir, { withFileTypes: true })) {
+      const main = path.join(testsDir, e.name, "main.rs");
+      if (e.isFile() && e.name.endsWith(".rs"))
+        tests.set(e.name.slice(0, -3), path.join(testsDir, e.name));
+      else if (e.isDirectory() && fs.existsSync(main)) tests.set(e.name, main);
+    }
+  for (const [t, file] of tests) out.push([`::${t}`, file]);
+  return out;
+}
+
 /**
  * Every test binary with its nextest id and the crates whose change can
  * break it. A test that starts the binary also depends on the host crates;
- * a `sushiai` integration test file with no mapping depends on every crate.
+ * a `sushiai` integration test without a `ci-crates:` header depends on
+ * every crate.
  */
 export function testBinaries(base = root, map = readTestMap()) {
   const all = crates(base);
@@ -114,24 +176,15 @@ export function testBinaries(base = root, map = readTestMap()) {
   for (const c of all) {
     const own = forward(all, c.name);
     const runsBin = testsRunBin(base, c.dir);
-    const lib = fs.existsSync(path.join(base, c.dir, "src", "lib.rs"));
-    if (lib) out.push({ id: c.name, crate: c.name, deps: own });
-    if (fs.existsSync(path.join(base, c.dir, "src", "main.rs")))
-      out.push({ id: `${c.name}::bin/${c.name}`, crate: c.name, deps: own });
-    const testsDir = path.join(base, c.dir, "tests");
-    const files = fs.existsSync(testsDir)
-      ? fs.readdirSync(testsDir).filter((f) => f.endsWith(".rs"))
-      : [];
-    for (const f of files) {
-      const stem = f.replace(/\.rs$/, "");
+    for (const [suffix, file] of crateTargets(base, c)) {
       let deps = new Set(own);
-      if (c.name === BIN) {
-        const mapped = map.binTests[stem];
-        deps = mapped
-          ? new Set([...host, ...mapped.flatMap((m) => [...forward(all, m)])])
+      if (file && c.name === BIN) {
+        const named = headerCrates(fs.readFileSync(file, "utf8"), all, base);
+        deps = named
+          ? new Set([...host, ...named.flatMap((m) => [...forward(all, m)])])
           : every;
-      } else if (runsBin) deps = new Set([...own, ...host]);
-      out.push({ id: `${c.name}::${stem}`, crate: c.name, deps });
+      } else if (file && runsBin) deps = new Set([...own, ...host]);
+      out.push({ id: `${c.name}${suffix}`, crate: c.name, deps, file });
     }
   }
   return out;

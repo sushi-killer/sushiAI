@@ -282,13 +282,12 @@ by `scripts/check-conventions.mjs` in CI, not just a naming convention:
   `node scripts/test-rust.mjs --affected` alike (`scripts/ci-changes.mjs`):
   documents alone run only the static checks; a crate change runs the Rust
   test binaries that can see it (crate graph from the manifests,
-  `scripts/lib/rust-graph.mjs`; the `sushiai` binary's tests are mapped in
-  `scripts/ci-test-map.json`) and the node tests that drive the Rust side;
+  `scripts/lib/rust-graph.mjs`) and the node tests that drive the Rust side;
   any other code change runs every node test. The build and test setup
   (lockfiles, toolchain, `.config/`, test helpers, the CI scripts) and a push
   to `main` run everything; `CI_ALL=1 npm run ci` does too. A new test of the
-  `sushiai` binary needs its line in `scripts/ci-test-map.json`
-  (`tests/ci-pipeline.test.cjs` fails otherwise).
+  `sushiai` binary starts with a `//! ci-crates: <crates it drives>` line
+  (`tests/ci-pipeline.test.cjs` fails otherwise); scripts never name a module.
 - Tests are `node --test` `.cjs` files importing `.ts` sources directly via
   Node's type-stripping (Node ≥22.18) — no type-checking happens at test
   time, so test assertions have to catch real behavior, not just satisfy the

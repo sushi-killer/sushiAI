@@ -128,6 +128,14 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest archive --workspace --archive-file nextest.tar.zst
+      # Every built test binary is one the selector knows, and the selection
+      # matches at least one test (the shards pass an empty part only).
+      - run: >-
+          cargo nextest list --workspace --message-format json
+          ${RUST_FILTER:+-E "$RUST_FILTER"} > nextest-list.json
+          && node scripts/check-test-binaries.mjs nextest-list.json "$RUST_FILTER"
+        env:
+          RUST_FILTER: ${{ needs.changes.outputs.rust_filter }}
       - uses: actions/upload-artifact@v4
         with:
           name: nextest-${{ matrix.os }}
@@ -169,6 +177,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nextest-${{ matrix.os }}
+      # --no-tests=pass covers a shard whose part of the selection is empty;
+      # rust-build already failed a selection that matches nothing.
       - run: >-
           cargo nextest run --archive-file nextest.tar.zst
           --workspace-remap . --extract-to . --profile ci

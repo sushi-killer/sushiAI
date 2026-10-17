@@ -201,19 +201,29 @@ test("the required check is a job that waits for every other job", () => {
 });
 
 test("every Rust test binary has a dependency set, and the binary's tests a mapping", async () => {
-  const { testBinaries, readTestMap } = await import(
+  const { testBinaries, crates, CI_CRATES } = await import(
     pathToFileURL(path.join(root, "scripts/lib/rust-graph.mjs")).href
   );
-  const map = readTestMap();
-  const binTests = fs
-    .readdirSync(path.join(root, "crates/sushiai/tests"))
-    .filter((f) => f.endsWith(".rs"))
-    .map((f) => f.replace(/\.rs$/, ""))
-    .sort();
-  // An unmapped test of the binary would run on every crate change; a new
-  // one gets its line in scripts/ci-test-map.json.
-  assert.deepEqual(Object.keys(map.binTests).sort(), binTests);
-  for (const b of testBinaries()) assert.ok(b.deps.has(b.crate), b.id);
+  // A test of the binary without its header would run on every crate
+  // change; a new one names the modules it drives in `//! ci-crates:`.
+  const dir = path.join(root, "crates/sushiai/tests");
+  const names = new Set(crates().map((c) => c.name));
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".rs"))) {
+    const line = CI_CRATES.exec(fs.readFileSync(path.join(dir, f), "utf8"));
+    assert.ok(line, `${f}: no //! ci-crates: header`);
+    for (const w of line[1].trim().split(/\s+/))
+      assert.ok(
+        w === "host" || w.startsWith("crates-with:") || names.has(w),
+        `${f}: unknown crate ${w}`,
+      );
+  }
+  const all = testBinaries();
+  for (const b of all) assert.ok(b.deps.has(b.crate), b.id);
+  // rust_standards checks every crate that holds a rust-standards.json.
+  const standards = all.find((b) => b.id === "sushiai::rust_standards");
+  for (const c of crates())
+    if (fs.existsSync(path.join(root, c.dir, "rust-standards.json")))
+      assert.ok(standards.deps.has(c.name), c.name);
 });
 
 test("the macOS Rust tests run only for a change that can differ on macOS", async () => {
@@ -264,7 +274,7 @@ test("the macOS Rust tests run only for a change that can differ on macOS", asyn
     "crates/sushiai-orch/tests/fixtures/fake.sh",
   ])
     assert.equal(classify([path]).platform, true, path);
-  // A crate with a platform-only dependency (scripts/ci-platform.json).
+  // A crate with a platform-only dependency (scripts/ci-platform.mjs).
   assert.equal(classify(["crates/sushiai-hold/src/lib.rs"]).platform, true);
   // A file whose tests failed only on macOS before.
   const history = classify([
@@ -297,18 +307,18 @@ test("the Rust matrices shard ubuntu always and macOS only for a platform change
   );
 });
 
-test("scripts/ci-platform.json matches the manifests and the test sources", async () => {
-  const { generate, readData } = await import(
+test("the platform data comes from the manifests and the marked test files", async () => {
+  const { readData, MACOS_ONLY } = await import(
     pathToFileURL(path.join(root, "scripts/ci-platform.mjs")).href
   );
   const data = readData();
-  assert.deepEqual(
-    generate(data),
-    data,
-    "stale: run node scripts/ci-platform.mjs --write",
-  );
-  for (const entry of data.macosOnly)
-    assert.ok(entry.files.length > 0, `no source defines ${entry.test}`);
+  assert.ok(data.crates.includes("crates/sushiai-hold"));
+  for (const file of data.macosOnly) {
+    const text = fs.readFileSync(path.join(root, file), "utf8");
+    // Each marker names the CI run that showed the macOS-only failure.
+    for (const line of text.split("\n").filter((l) => MACOS_ONLY.test(l)))
+      assert.match(line, /run \d+/, `${file}: ${line.trim()}`);
+  }
 });
 
 test("the workspace has no doc tests, so CI runs no cargo test --doc pass", () => {

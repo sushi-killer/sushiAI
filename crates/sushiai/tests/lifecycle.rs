@@ -1,3 +1,4 @@
+//! ci-crates: sushiai-agents
 //! Catalog wiring, lifecycle notifications, daemon control and recovery, against real
 //! daemon and holder processes under a temporary `SUSHIAI_HOME`.
 

@@ -360,6 +360,54 @@ test("the nextest summary lists FLAKY tests apart from failed ones", async () =>
   assert.match(text, /`ci-probe flaky_once`/);
 });
 
+test("a flaky test on main opens one issue, and each further flake comments on it", async () => {
+  const { plan, titleOf, LABEL } = await import(
+    pathToFileURL(path.join(root, "scripts/flaky-report.mjs")).href
+  );
+  const cases = [
+    { id: "a x", status: "flaky" },
+    { id: "b y", status: "flaky" },
+    { id: "c z", status: "failed" },
+    { id: "d w", status: "passed" },
+  ];
+  const calls = plan(cases, [{ number: 7, title: titleOf("b y") }], "RUN");
+  assert.equal(calls.length, 2, "failed and passed tests are not flakes");
+  assert.deepEqual(calls[0].slice(0, 6), [
+    "issue",
+    "create",
+    "--title",
+    titleOf("a x"),
+    "--label",
+    LABEL,
+  ]);
+  assert.deepEqual(calls[1].slice(0, 3), ["issue", "comment", "7"]);
+  assert.match(calls[1][4], /RUN/);
+});
+
+test("a quarantined test has an owner, an issue and an expiry not yet passed", async () => {
+  const { readQuarantine, rustFilter } = await ciChanges();
+  const today = new Date().toISOString().slice(0, 10);
+  for (const q of readQuarantine()) {
+    for (const key of ["binary", "test", "owner", "issue", "expires"])
+      assert.ok(q[key], `${q.test}: ${key}`);
+    assert.match(q.expires, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(
+      q.expires >= today,
+      `${q.test}: quarantine expired ${q.expires}; fix the test or renew it with its owner`,
+    );
+  }
+  const q = [{ binary: "b::t", test: "m::x" }];
+  assert.equal(rustFilter({ rustTests: null }, []), "");
+  assert.equal(
+    rustFilter({ rustTests: null }, q),
+    "not (binary_id(=b::t) & test(=m::x))",
+  );
+  assert.equal(
+    rustFilter({ rustTests: ["a"] }, q),
+    "(binary_id(=a)) & not (binary_id(=b::t) & test(=m::x))",
+  );
+});
+
 test("npm run ci still runs every check", async () => {
   assert.equal(pkg.scripts.ci, "node scripts/ci.mjs");
   assert.equal(pkg.scripts["ci:web"], undefined);

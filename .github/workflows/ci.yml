@@ -143,6 +143,11 @@ jobs:
       matrix: ${{ fromJSON(needs.changes.outputs.rust_test) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # issues: write for the flake accounting on main (scripts/flaky-report.mjs).
+    permissions:
+      contents: read
+      actions: read
+      issues: write
     env:
       # The archive extracts its target directory to where the build job had
       # it (the same path on every runner of an OS), so env!("CARGO_BIN_EXE_*")
@@ -171,6 +176,12 @@ jobs:
           --no-tests=pass ${RUST_FILTER:+-E "$RUST_FILTER"}
       - if: always()
         run: node scripts/nextest-summary.mjs target/nextest/ci/junit.xml "${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }}"
+      # Every FLAKY test on main gets an issue labelled `flaky`; each further
+      # flake adds a comment. It never fails the job.
+      - if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: node scripts/flaky-report.mjs target/nextest/ci/junit.xml "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - if: always()
         uses: actions/upload-artifact@v4
         with:

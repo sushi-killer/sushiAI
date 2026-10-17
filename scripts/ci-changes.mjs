@@ -272,6 +272,23 @@ export function matrices({ platform }) {
   };
 }
 
+// Quarantined Rust tests: each entry names its binary, test, owner, expiry
+// date and issue (tests/ci-pipeline.test.cjs fails on a missing field or a
+// past expiry, so a quarantine cannot be forgotten).
+export const QUARANTINE = path.join(root, ".config", "flaky-quarantine.json");
+export function readQuarantine() {
+  return JSON.parse(fs.readFileSync(QUARANTINE, "utf8"));
+}
+
+/** The nextest filterset for a scope: its test binaries minus the quarantine; "" runs all. */
+export function rustFilter(scope, quarantine = readQuarantine()) {
+  const parts = [];
+  if (scope.rustTests) parts.push(`(${nextestFilter(scope.rustTests)})`);
+  for (const q of quarantine)
+    parts.push(`not (binary_id(=${q.binary}) & test(=${q.test}))`);
+  return parts.join(" & ");
+}
+
 /** The scope as `key=value` lines for $GITHUB_OUTPUT. */
 export function outputs(scope) {
   const { build, test } = matrices(scope);
@@ -282,7 +299,7 @@ export function outputs(scope) {
     `platform=${scope.platform}`,
     `rust_build=${JSON.stringify(build)}`,
     `rust_test=${JSON.stringify(test)}`,
-    `rust_filter=${scope.rustTests ? nextestFilter(scope.rustTests) : ""}`,
+    `rust_filter=${rustFilter(scope)}`,
     `node=${nodeTests.length > 0}`,
     `node_tests=${nodeTests.join(" ")}`,
     `web=${scope.web}`,

@@ -1,4 +1,3 @@
-use crate::clock::now_ms;
 use crate::engine::state::App;
 use crate::task::attempt::VerifyOutcome;
 use crate::task::state::Task;
@@ -33,7 +32,7 @@ impl<'a> CheckContext<'a> {
     }
 
     pub(in crate::engine) fn decision(&self, mut line: String, lines: &mut Vec<String>) {
-        let mut stored = self
+        let stored = self
             .task_id
             .and_then(|id| self.app.store.load_task(id).ok().flatten());
         if let Some(held) = stored
@@ -60,11 +59,10 @@ impl<'a> CheckContext<'a> {
                         .push(line.clone());
                 }
             }
-            if let Some(task) = stored.as_mut() {
-                record_check_decisions(task, vec![line]);
-                task.touch(now_ms());
-                self.app.save_task_logged(task);
-                self.app.broadcast_task(task);
+            // Read and written under the task lock: a copy read earlier would
+            // write back over an attempt another writer saved in between.
+            if stored.is_some() {
+                self.app.append_decision(id, line);
             }
         }
     }
@@ -93,3 +91,6 @@ pub(in crate::engine) fn record_check_outcomes(
     lines.extend(results.iter().flat_map(|r| r.decisions.iter().cloned()));
     record_check_decisions(task, lines);
 }
+
+#[cfg(test)]
+mod tests;

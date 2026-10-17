@@ -230,6 +230,13 @@ pub(super) fn failure_report(task: &Task) -> String {
 /// Ends the ladder: the task is `failed`, no question is left open. The
 /// caller returns `Stop`; the loop's end tells the owner (`notify_task_failed`).
 pub(super) fn end_ladder(app: &App, task: &mut Task) {
+    end_ladder_on(task);
+    app.save_task_logged(task);
+    app.broadcast_task(task);
+}
+
+/// What ending the ladder changes on `task`; the caller saves it.
+pub(super) fn end_ladder_on(task: &mut Task) {
     let signature = task
         .attempts
         .iter()
@@ -244,8 +251,6 @@ pub(super) fn end_ladder(app: &App, task: &mut Task) {
         implement_attempt_count(task)
     ));
     task.touch(now_ms());
-    app.save_task_logged(task);
-    app.broadcast_task(task);
 }
 
 /// A route other than `current` (another harness first, else another model)

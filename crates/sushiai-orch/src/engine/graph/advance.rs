@@ -184,12 +184,22 @@ impl App {
                 .and_then(|id| self.store.load_task(id).ok().flatten())
                 .is_some_and(|target| target.status == TaskStatus::Done);
             if ready && !task.archived && !self.controls.lock().unwrap().contains_key(&task.id) {
-                task.clear_park();
-                task.record_decision("Park: the until task is done, resuming".into());
-                task.touch(now_ms());
-                let _ = self.store.save_task(task);
-                self.broadcast_task(task);
-                self.spawn_task_loop(task.id.clone(), true);
+                // Cleared on the current copy, under the task lock, while it is still parked.
+                let until = task.queue.park.as_ref().and_then(|p| p.until.clone());
+                let saved = self.update_task_if(&task.id, |fresh| {
+                    let same = !fresh.archived
+                        && fresh.queue.park.as_ref().and_then(|p| p.until.clone()) == until;
+                    if same {
+                        fresh.clear_park();
+                        fresh.record_decision("Park: the until task is done, resuming".into());
+                        fresh.touch(now_ms());
+                    }
+                    same
+                });
+                if let Some(saved) = saved {
+                    *task = saved;
+                    self.spawn_task_loop(task.id.clone(), true);
+                }
             }
         }
     }

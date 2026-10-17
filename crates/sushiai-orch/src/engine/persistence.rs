@@ -80,6 +80,30 @@ impl App {
 }
 
 impl App {
+    /// Changes the stored task under its lock when `f` says it changed it (`true`): `f` sees
+    /// the current copy, never one read before the lock. Saved and broadcast only then;
+    /// `updatedAt` is left alone. Returns the saved task.
+    pub(crate) fn update_task_if(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Task) -> bool,
+    ) -> Option<Task> {
+        let lock = self.task_lock(id);
+        let _guard = lock.lock().unwrap();
+        let mut task = self.store.load_task(id).ok().flatten()?;
+        if !f(&mut task) {
+            return None;
+        }
+        if let Err(e) = self.store.save_task(&task) {
+            eprintln!("orch: saving task {id} failed: {e}");
+            return None;
+        }
+        self.broadcast_task(&task);
+        Some(task)
+    }
+}
+
+impl App {
     /// Appends a line to a task's `decisions` and persists it right away --
     /// for call sites that don't otherwise hold the task in memory. Call sites that
     /// already hold `&mut Task` push the line onto their own copy instead, so

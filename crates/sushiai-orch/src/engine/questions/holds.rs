@@ -26,36 +26,33 @@ impl App {
         reason: &str,
         task_id: Option<&str>,
     ) -> Vec<(String, i64)> {
-        let tasks: Vec<Task> = match (reason, task_id) {
-            ("waiting" | "reminder", Some(id)) => self
-                .store
-                .load_task(id)
-                .ok()
-                .flatten()
-                .into_iter()
-                .collect(),
+        let ids: Vec<String> = match (reason, task_id) {
+            ("waiting" | "reminder", Some(id)) => vec![id.to_string()],
             ("restart", _) => self
                 .store
                 .list_tasks()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|t| t.repo == repo)
+                .map(|t| t.id.clone())
                 .collect(),
             _ => return Vec::new(),
         };
         let at = now_ms();
         let mut held = Vec::new();
-        for mut task in tasks {
-            if task.status != TaskStatus::Waiting || task.archived {
-                continue;
+        for id in ids {
+            let saved = self.update_task_if(&id, |task| {
+                let holdable = task.status == TaskStatus::Waiting
+                    && !task.archived
+                    && task.question.as_ref().is_some_and(|q| !owner_only(q.kind));
+                if holdable {
+                    task.hold_question(at);
+                }
+                holdable
+            });
+            if saved.is_some() {
+                held.push((id, at));
             }
-            let Some(_) = task.question.as_ref().filter(|q| !owner_only(q.kind)) else {
-                continue;
-            };
-            task.hold_question(at);
-            held.push((task.id.clone(), at));
-            self.save_task_logged(&task);
-            self.broadcast_task(&task);
         }
         held
     }
@@ -86,7 +83,6 @@ impl App {
             // whose hold the TTL ended while the turn ran.
             let lapsed = !q.held_for_overseer && q.asked_at.is_none_or(|asked| asked <= *at);
             let asked_at = q.asked_at;
-            let waiting = task.status == TaskStatus::Waiting;
             if ours {
                 if ladder_owns(q) {
                     if self.step_unanswered_exhausted(&mut task) {
@@ -94,9 +90,18 @@ impl App {
                     }
                     continue;
                 }
-                task.release_question_hold(hand_over && waiting);
-                self.save_task_logged(&task);
-                self.broadcast_task(&task);
+                // Released on the current copy, and only while it is still this hold.
+                self.update_task_if(id, |task| {
+                    let still = task
+                        .question
+                        .as_ref()
+                        .is_some_and(|q| q.held_at == Some(*at) && !ladder_owns(q));
+                    if still {
+                        let waiting = task.status == TaskStatus::Waiting;
+                        task.release_question_hold(hand_over && waiting);
+                    }
+                    still
+                });
             } else if hand_over && lapsed {
                 self.hand_to_owner(id, asked_at);
             }
@@ -209,18 +214,15 @@ impl App {
             return;
         }
         for (id, _) in self.wake_questions(repo, reason, task_id) {
-            let Ok(Some(mut task)) = self.store.load_task(&id) else {
-                continue;
-            };
-            let Some(question) = task.question.as_ref() else {
-                continue;
-            };
-            if ladder_owns(question) || (!question.held_for_overseer && question.for_owner) {
-                continue;
-            }
-            task.hand_over_question(now_ms());
-            self.save_task_logged(&task);
-            self.broadcast_task(&task);
+            self.update_task_if(&id, |task| {
+                let open = task.question.as_ref().is_some_and(|question| {
+                    !ladder_owns(question) && (question.held_for_overseer || !question.for_owner)
+                });
+                if open {
+                    task.hand_over_question(now_ms());
+                }
+                open
+            });
         }
     }
 }

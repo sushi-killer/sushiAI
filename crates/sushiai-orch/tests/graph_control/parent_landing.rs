@@ -29,7 +29,7 @@ fn a_parent_landing_conflict_gets_one_agent_resolution_and_lands_both_intents() 
         "part",
         json!({"paths":["shared.txt"],"parent":parent,"verify":["true"]}),
     );
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     assert_eq!(get(&daemon, &parent)["baseSha"], initial);
     assert_eq!(
         std::fs::read_to_string(gates.path().join("head_part_1")).unwrap(),

@@ -81,15 +81,19 @@ fn an_auth_failure_sends_one_notice_does_not_loop_and_task_pr_opens_it_later() {
 
 /// Retries a landing task until the dirty bound has passed and the retry gives up.
 fn gave_up(s: &Setup, id: &str) {
-    wait_until("the dirty bound to pass and the retry to give up", || {
-        s.daemon
-            .request("task.start", serde_json::json!({"id": id}));
-        let t = s.daemon.request("task.get", serde_json::json!({"id": id}));
-        t["decisions"]
-            .to_string()
-            .contains("Land: gave up")
-            .then_some(())
-    });
+    wait_task(
+        &s.daemon,
+        id,
+        "the dirty bound to pass and the retry to give up",
+        |t| {
+            s.daemon
+                .request("task.start", serde_json::json!({"id": id}));
+            t["decisions"]
+                .to_string()
+                .contains("Land: gave up")
+                .then_some(())
+        },
+    );
 }
 
 #[test]
@@ -219,7 +223,7 @@ fn the_overseer_cannot_open_a_pull_request_orchd_owns() {
     let s = setup_full(&script(reply, true), Pr::Default, false, FAKE_GH, &[]);
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
-    wait_for(&s.tools.path().join("draft-started"));
+    wait_for(&s, "draft-started");
     let err = s.daemon.request_error(
         "task.pr",
         serde_json::json!({"id": id, "source": "overseer"}),

@@ -246,7 +246,7 @@ fn a_pull_request_opened_while_the_draft_runs_is_not_opened_twice() {
     );
     let id = s.create(serde_json::json!({}));
     done(&s, &id);
-    wait_for(&s.tools.path().join("draft-started"));
+    wait_for(&s, "draft-started");
     let opened = s.daemon.request("task.pr", serde_json::json!({"id": id}));
     assert_eq!(opened["prUrl"], URL, "{opened}");
     // A different head for the same task is refused while that one is open.

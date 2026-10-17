@@ -427,11 +427,20 @@ fn a_flooding_session_stays_running_and_its_screen_keeps_up() {
     // An attached client that reads slowly, while the flood runs.
     client.attach(&id);
     let shell = child_of(sandbox.holder_pid(&id));
-    wait_until("the flood to end", || {
+    // The flood counts as ended only after `yes` was seen running (or the marker came through
+    // the client): before it starts, no `yes` child is not an end.
+    let mut seen = false;
+    wait_until("the flood to start and end", || {
         client.frames();
-        !processes()
+        let running = processes()
             .iter()
-            .any(|(_, ppid, argv)| *ppid == shell && argv == "yes")
+            .any(|(_, ppid, argv)| *ppid == shell && argv == "yes");
+        let marked = client
+            .output
+            .iter()
+            .any(|(_, bytes)| bytes.windows(10).any(|w| w == b"marker-end"));
+        seen |= running || marked;
+        seen && !running
     });
     // The flood ends; the session is still running and a fresh attach shows the last line.
     let mut fresh = sandbox.client();

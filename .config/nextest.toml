@@ -17,7 +17,8 @@ setup = 'sushiai-bin'
 # CI (`--profile ci`): a failed test runs once more. One that passes on the
 # retry is FLAKY: scripts/nextest-summary.mjs lists it in the job summary and
 # as a warning, so a retry never hides it. A test still running after 4 min is
-# stopped (the shared test deadline is 3 min), so a hang fails with its name.
+# stopped. The waits of one test share a 200 s budget (crates/test_wait.rs), so a hang
+# fails with its own message before the runner stops it.
 [profile.ci]
 test-threads = 12
 retries = 1

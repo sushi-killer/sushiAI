@@ -1,60 +1,36 @@
 use super::process::Daemon;
 use super::protocol::log_tail;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
-/// The one wall-clock budget every wait in this suite shares: 180 s, or
-/// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (unset, 0 or anything else
-/// means 180 s, like `tests/helpers/deadline.cjs`). Read once per test process. A test that measures
-/// timing scales its slow job and its budget from this value instead of using its own constant.
-pub fn deadline() -> Duration {
-    static DEADLINE: OnceLock<Duration> = OnceLock::new();
-    *DEADLINE.get_or_init(|| {
-        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0);
-        Duration::from_secs(secs.unwrap_or(180))
-    })
+// The one implementation of every wait of the Rust tests: a deadline shared by all the
+// waits of a test, a poll interval, absence checks.
+#[path = "../../../test_wait.rs"]
+mod test_wait;
+pub(super) use test_wait::poll_deadline;
+#[allow(unused_imports)] // each test binary uses a subset
+pub use test_wait::{deadline, holds_for, wait_state, wait_until, ABSENCE_WINDOW};
+
+/// The last lines of the daemon's log, for the panic of a wait that ran out.
+pub fn daemon_log_tail(daemon: &Daemon) -> String {
+    log_tail(&daemon.socket)
 }
 
-/// Polls `check` every 50 ms until it returns `Some` or the deadline passes (`None`).
-pub(super) fn poll_deadline<T>(mut check: impl FnMut() -> Option<T>) -> Option<T> {
-    let start = Instant::now();
-    loop {
-        if let Some(value) = check() {
-            return Some(value);
-        }
-        if start.elapsed() >= deadline() {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Polls `check` until it returns `Some`; panics naming `what` after the deadline.
-pub fn wait_until<T>(what: &str, check: impl FnMut() -> Option<T>) -> T {
-    poll_deadline(check)
-        .unwrap_or_else(|| panic!("timed out after {:?} waiting for {what}", deadline()))
-}
-
-/// How long an absence check watches: long enough for the daemon's next tick
-/// to act on something it should not do. A positive wait never uses it.
-pub const ABSENCE_WINDOW: Duration = Duration::from_millis(1500);
-
-/// An absence check: polls `still` for `window` and panics naming `what` as
-/// soon as it stops holding (a forbidden start, a second run). This, not a
-/// bare sleep, is how a test waits for something not to happen.
-pub fn holds_for(what: &str, window: Duration, mut still: impl FnMut() -> bool) {
-    let end = Instant::now() + window;
-    loop {
-        assert!(still(), "{what} stopped holding");
-        if Instant::now() >= end {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+/// Polls the task `task_id` until `pick` returns `Some` for it. At the deadline the panic
+/// prints the last task seen and the daemon log tail.
+pub fn wait_task<T>(
+    daemon: &Daemon,
+    task_id: &str,
+    what: &str,
+    mut pick: impl FnMut(&serde_json::Value) -> Option<T>,
+) -> T {
+    wait_state(
+        what,
+        || {
+            let task = daemon.request("task.get", serde_json::json!({"id": task_id}));
+            pick(&task).ok_or_else(|| format!("task {task_id}: {task}"))
+        },
+        || log_tail(&daemon.socket),
+    )
 }
 
 /// Removes a directory tree that a stopped daemon or its agents may have just released:

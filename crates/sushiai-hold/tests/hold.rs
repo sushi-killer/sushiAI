@@ -6,7 +6,7 @@ use std::time::Duration;
 
 #[path = "../../test_wait.rs"]
 mod test_wait;
-use test_wait::{holds_for, wait_until};
+use test_wait::{holds_for, wait_state, wait_until};
 
 use serde_json::{json, Value};
 use sushiai_hold::{start, Config};
@@ -24,6 +24,10 @@ impl Conn {
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
             .expect("timeout");
+        // A send that cannot finish fails the test instead of blocking it.
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("write timeout");
         Conn {
             stream,
             decoder: Decoder::new(),
@@ -171,12 +175,21 @@ fn input_to_a_child_that_does_not_read_is_refused_and_close_still_works() {
     // `ready` is printed after the tty is raw: before it the child still reads input.
     let (_, early_exit) = conn.output_until("ready");
     assert!(early_exit.is_none(), "child exited before it was ready");
-    let chunk = "QUFB".repeat(16 * 1024); // 48 KiB of "AAA..." per request
-                                          // Input keeps coming until the holder refuses one request.
-    let refused = wait_until("a refused hold.input", || {
-        conn.send("hold.input", json!({"data": chunk}));
-        response_error_code(conn.read())
-    });
+    // 48 KiB of "AAA..." per request
+    let chunk = "QUFB".repeat(16 * 1024);
+    // Input keeps coming until the holder refuses one request; 40 requests (about 2 MiB)
+    // without a refusal is a failure, not a reason to keep sending.
+    let mut sent = 0;
+    let refused = wait_state(
+        "a refused hold.input",
+        || {
+            assert!(sent < 40, "{sent} hold.input requests were not refused");
+            sent += 1;
+            conn.send("hold.input", json!({"data": chunk}));
+            response_error_code(conn.read()).ok_or_else(|| format!("{sent} requests, none refused"))
+        },
+        String::new,
+    );
     assert_eq!(refused, sushiai_protocol::code::INPUT_BACKPRESSURE);
     conn.send("hold.close", json!({"signal": "KILL"}));
     let (_, exit) = conn.output_until("never-appears");

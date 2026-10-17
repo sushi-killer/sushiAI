@@ -6,7 +6,7 @@ use common::polling::{holds_for, settle, ABSENCE_WINDOW};
 use common::attempts::run_file;
 use common::harness::fake_harness_script;
 use common::native_sandbox::fit_sandbox;
-use common::polling::{poll_until, wait_until};
+use common::polling::{daemon_log_tail, poll_until, wait_state, wait_task};
 use common::process::Daemon;
 use common::repository::{git_out, init_git_repo};
 
@@ -121,13 +121,29 @@ fn configure(gates: &Path, name: &str, mode: &str, file: &str, hold: bool) {
     }
 }
 
-fn started(gates: &Path, name: &str, n: u32) {
-    wait_until(&format!("{name} attempt {n}"), || {
-        gates
-            .join(format!("started_{name}_{n}"))
-            .exists()
-            .then_some(())
-    });
+fn started(daemon: &Daemon, gates: &Path, name: &str, n: u32) {
+    let marker = gates.join(format!("started_{name}_{n}"));
+    wait_state(
+        &format!("{name} attempt {n}"),
+        || {
+            if marker.exists() {
+                return Ok(());
+            }
+            let mut files: Vec<String> = std::fs::read_dir(gates)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort();
+            Err(format!(
+                "{} missing; gate files: {files:?}",
+                marker.display()
+            ))
+        },
+        || daemon_log_tail(daemon),
+    );
 }
 
 fn create(daemon: &Daemon, repo: &Path, name: &str, mut params: Value) -> String {
@@ -197,13 +213,13 @@ fn base_commit_outside_leases_reaches_a_live_part_before_its_next_attempt() {
         &["part.txt", "health.txt"],
         "test \"$(cat health.txt)\" = ok",
     );
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     commit_file(repo.path(), "outside.txt", "base fix\n");
     let fix = git_out(repo.path(), &["rev-parse", "HEAD"]);
     std::fs::remove_file(gates.path().join("hold_part_1")).unwrap();
     // maxAttempts=1 is spent; the live loop keeps its lease.
     // The ladder starts the next attempt itself: nobody is asked.
-    started(gates.path(), "part", 2);
+    started(&daemon, gates.path(), "part", 2);
     let task = get(&daemon, &part);
     assert_eq!(
         std::fs::read_to_string(Path::new(task["worktree"].as_str().unwrap()).join("outside.txt"))
@@ -244,12 +260,12 @@ fn base_commit_on_held_paths_waits_for_explicit_sync() {
         &["shared.txt", "part.txt", "health.txt"],
         "test \"$(cat health.txt)\" = ok",
     );
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     commit_file(repo.path(), "shared.txt", "base fix\n");
     let fix = git_out(repo.path(), &["rev-parse", "HEAD"]);
     std::fs::remove_file(gates.path().join("hold_part_1")).unwrap();
     // The ladder starts the next attempt itself: nobody is asked.
-    started(gates.path(), "part", 2);
+    started(&daemon, gates.path(), "part", 2);
     let task = get(&daemon, &part);
     let wt = Path::new(task["worktree"].as_str().unwrap());
     assert_eq!(
@@ -282,14 +298,14 @@ fn conflicting_base_commit_gives_an_ordinary_step_with_the_conflict_in_the_brief
         &["shared.txt", "health.txt"],
         "test \"$(cat health.txt)\" = ok",
     );
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     commit_file(repo.path(), "shared.txt", "base change\n");
     // On-demand sync is allowed to overlap the graph's held paths.
     let sync = daemon.request("task.sync", json!({"id": part}));
     assert_eq!(sync["id"], parent);
     assert_eq!(sync["synced"], true, "{sync}");
     std::fs::remove_file(gates.path().join("hold_part_1")).unwrap();
-    started(gates.path(), "part", 2);
+    started(&daemon, gates.path(), "part", 2);
     let brief = std::fs::read_to_string(gates.path().join("brief_part_2")).unwrap();
     assert!(
         brief.contains("## Base moved") && brief.contains("shared.txt"),
@@ -304,12 +320,11 @@ fn conflicting_base_commit_gives_an_ordinary_step_with_the_conflict_in_the_brief
     );
     // A step that keeps failing goes to the ordinary ladder and ends it: the
     // task fails or asks, and the attempts stay within twice the budget.
-    let ended = wait_until(
+    let ended = wait_task(
+        &daemon,
+        &part,
         "the failing conflict step to reach the end of the ladder",
-        || {
-            let task = get(&daemon, &part);
-            (task["status"] == "failed" || task["question"].is_object()).then_some(task)
-        },
+        |task| (task["status"] == "failed" || task["question"].is_object()).then(|| task.clone()),
     );
     assert!(ended["attempts"].as_array().unwrap().len() <= 6, "{ended}");
 }
@@ -321,7 +336,7 @@ fn sync_aborts_a_conflict_on_the_parent_and_returns_the_files() {
     let (daemon, _scripts) = daemon(gates.path());
     let repo = repo();
     let (parent, part) = graph(&daemon, repo.path(), "part", &["shared.txt"], "true");
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     let task = get(&daemon, &parent);
     let wt = Path::new(task["worktree"].as_str().unwrap());
     commit_file(wt, "shared.txt", "parent change\n");
@@ -354,7 +369,7 @@ fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
     let (mut daemon, scripts) = daemon(gates.path());
     let repo = repo();
     let (parent, part) = graph(&daemon, repo.path(), "part", &["shared.txt"], "true");
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     let part_task = get(&daemon, &part);
     let waiter = daemon.request("task.create", json!({
         "repo": repo.path(), "title": "waiter", "goal": "CASE_waiter: change a file", "verify": ["true"],
@@ -362,7 +377,7 @@ fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
     }))["id"].as_str().unwrap().to_string();
     // The part only planned `shared.txt`: it holds no lease on it, so the
     // waiter runs at once.
-    started(gates.path(), "waiter", 1);
+    started(&daemon, gates.path(), "waiter", 1);
     assert!(get(&daemon, &waiter)["wait"].is_null());
     let dependent = create(
         &daemon,
@@ -378,11 +393,13 @@ fn park_asks_no_dependent_and_a_planned_path_blocks_nobody() {
     assert_eq!(parked["park"]["reason"], "waits for a flaky check fix");
     assert_eq!(parked["park"]["by"], "lead");
     assert!(parked["question"].is_null());
-    started(gates.path(), "waiter", 1);
-    wait_until("the parked loop to be interrupted", || {
-        let task = get(&daemon, &part);
-        (task["attempts"][0]["status"] == "interrupted").then_some(())
-    });
+    started(&daemon, gates.path(), "waiter", 1);
+    wait_task(
+        &daemon,
+        &part,
+        "the parked loop to be interrupted",
+        |task| (task["attempts"][0]["status"] == "interrupted").then_some(()),
+    );
     for id in [&parent, &dependent] {
         let task = get(&daemon, id);
         assert!(task["question"].is_null(), "{task}");
@@ -438,11 +455,11 @@ fn park_until_resumes_when_that_task_lands() {
         json!({"id": paused, "reason": "waits for the fix", "until": fixer}),
     );
     start(&daemon, &fixer);
-    started(gates.path(), "fixer", 1);
+    started(&daemon, gates.path(), "fixer", 1);
     assert!(!gates.path().join("started_paused_1").exists());
     std::fs::remove_file(gates.path().join("hold_fixer_1")).unwrap();
     assert_eq!(settle(&daemon, &fixer)["status"], "done");
-    started(gates.path(), "paused", 1);
+    started(&daemon, gates.path(), "paused", 1);
     assert!(get(&daemon, &paused)["park"].is_null());
     let manual = create(
         &daemon,
@@ -451,10 +468,10 @@ fn park_until_resumes_when_that_task_lands() {
         json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
     );
     start(&daemon, &manual);
-    started(gates.path(), "manual", 1);
+    started(&daemon, gates.path(), "manual", 1);
     daemon.request("task.park", json!({"id": manual, "reason": "pause"}));
     start(&daemon, &manual);
-    started(gates.path(), "manual", 2);
+    started(&daemon, gates.path(), "manual", 2);
     assert!(get(&daemon, &manual)["park"].is_null());
 }
 
@@ -498,7 +515,7 @@ fn stopped_holder_never_blocks_a_waiter() {
     );
     start(&daemon, &holder);
     // The holder has really changed `shared.txt` by the time it holds.
-    started(gates.path(), "holder", 1);
+    started(&daemon, gates.path(), "holder", 1);
     let waiter = create(
         &daemon,
         repo.path(),
@@ -506,7 +523,7 @@ fn stopped_holder_never_blocks_a_waiter() {
         json!({"paths": [], "parent": null, "dependsOn": [], "verify": ["true"]}),
     );
     start(&daemon, &waiter);
-    started(gates.path(), "waiter", 1);
+    started(&daemon, gates.path(), "waiter", 1);
     let token = hook_token(&daemon, &waiter);
     let file = format!(
         "{}/shared.txt",
@@ -516,8 +533,8 @@ fn stopped_holder_never_blocks_a_waiter() {
     assert_eq!(get(&daemon, &waiter)["wait"]["kind"], "file");
     let stopped = daemon.request("task.stop", json!({"id": holder, "source": "lead"}));
     assert_eq!(stopped["status"], "stopped", "{stopped}");
-    wait_until("the file wait to clear", || {
-        get(&daemon, &waiter)["wait"].is_null().then_some(())
+    wait_task(&daemon, &waiter, "the file wait to clear", |task| {
+        task["wait"].is_null().then_some(())
     });
     assert!(!edit_denied(&daemon, &token, &file));
     assert!(decision_contains(
@@ -536,7 +553,7 @@ fn stopped_part_stays_stopped_while_its_parent_runs() {
     daemon.request("settings.set", json!({"settings": settings}));
     let repo = repo();
     let (parent, part) = graph(&daemon, repo.path(), "part", &[], "true");
-    started(gates.path(), "part", 1);
+    started(&daemon, gates.path(), "part", 1);
     daemon.request("task.stop", json!({"id": part, "source": "lead"}));
     let parent_task = waiting(&daemon, &parent);
     assert_eq!(parent_task["question"]["kind"], "dependency_ended");
@@ -603,7 +620,7 @@ fn rpc_answers_are_labelled_with_their_source() {
             params["source"] = json!(source);
         }
         daemon.request("task.answer", params);
-        started(gates.path(), name, next);
+        started(&daemon, gates.path(), name, next);
         let task = get(&daemon, &id);
         assert!(decision_contains(&task, line), "{task}");
         assert_eq!(task["questionHistory"][0]["answeredBy"], by, "{task}");
@@ -699,7 +716,7 @@ fn base_sync_preserves_relay_work_between_attempts() {
         json!({"repo": repo.path(), "request": "Build both relay parts"}),
     );
     let parent_id = parent["id"].as_str().unwrap();
-    started(gates.path(), "second", 1);
+    started(&daemon, gates.path(), "second", 1);
     let tasks = daemon.request("task.list", json!({"repo": parent["repo"]}));
     let second = tasks
         .as_array()
@@ -717,7 +734,7 @@ fn base_sync_preserves_relay_work_between_attempts() {
     commit_file(repo.path(), "outside.txt", "base fix\n");
     std::fs::remove_file(gates.path().join("hold_second_1")).unwrap();
     // The ladder starts the next attempt itself: nobody is asked.
-    started(gates.path(), "second", 2);
+    started(&daemon, gates.path(), "second", 2);
     assert_eq!(
         std::fs::read_to_string(worktree.join("outside.txt")).unwrap(),
         "base fix\n"

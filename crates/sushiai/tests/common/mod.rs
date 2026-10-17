@@ -8,7 +8,6 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -17,55 +16,20 @@ use sushiai_protocol::{encode, Decoder, Frame, Message, Request, RpcError};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_sushiai");
 
-/// The one wall-clock budget every positive wait in this suite shares: 180 s, or
-/// `SUSHIAI_TEST_DEADLINE_SECS` when it is a positive whole number (unset, 0 or anything else
-/// means 180 s; the same contract as `sushiai-orch/tests/common` and
-/// `tests/helpers/deadline.cjs`). A short window belongs only to a check that something does
-/// not happen.
-pub fn deadline() -> Duration {
-    static DEADLINE: OnceLock<Duration> = OnceLock::new();
-    *DEADLINE.get_or_init(|| {
-        let secs = std::env::var("SUSHIAI_TEST_DEADLINE_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0);
-        Duration::from_secs(secs.unwrap_or(180))
-    })
-}
+// The one implementation of every wait of the Rust tests (a budget shared by all the waits
+// of a test, one poll interval, absence checks); a short window belongs only to a check that
+// something does not happen.
+#[path = "../../../test_wait.rs"]
+mod test_wait;
+/// Polls `check` until it returns `Some`; panics naming `what` at the end of the budget.
+#[allow(unused_imports)]
+pub use test_wait::wait_until as wait_value;
+#[allow(unused_imports)] // each test binary uses a subset
+pub use test_wait::{deadline, expiry, holds_for, wait_state, ABSENCE_WINDOW};
 
-/// Polls `ok` until it is true; panics naming `what` after the shared deadline.
-pub fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
-    wait_value(what, || ok().then_some(()));
-}
-
-/// Polls `check` until it returns `Some`; panics naming `what` after the shared deadline.
-pub fn wait_value<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + self::deadline();
-    loop {
-        if let Some(value) = check() {
-            return value;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        sleep(Duration::from_millis(50));
-    }
-}
-
-/// How long an absence check watches: long enough for the daemon to act on
-/// something it should not do. A positive wait never uses it.
-pub const ABSENCE_WINDOW: Duration = Duration::from_millis(1500);
-
-/// An absence check: polls `still` for `window` and panics naming `what` as
-/// soon as it stops holding. This, not a bare sleep, is how a test waits for
-/// something not to happen.
-pub fn holds_for(what: &str, window: Duration, mut still: impl FnMut() -> bool) {
-    let end = Instant::now() + window;
-    loop {
-        assert!(still(), "{what} stopped holding");
-        if Instant::now() >= end {
-            return;
-        }
-        sleep(Duration::from_millis(50));
-    }
+/// Polls `ok` until it is true; panics naming `what` at the end of the budget.
+pub fn wait_until(what: &str, ok: impl FnMut() -> bool) {
+    test_wait::wait_flag(what, ok);
 }
 
 pub fn processes() -> Vec<(u32, u32, String)> {
@@ -86,6 +50,8 @@ pub fn alive(pid: u32) -> bool {
     sushiai_daemon::process::alive(pid as i32)
 }
 
+const CLEANUP_WINDOW: Duration = Duration::from_secs(30);
+
 /// Close the sessions of this disposable home through their owning daemon.
 pub fn shutdown_home(home: &Path) {
     if !home.join("daemon.lock").exists() {
@@ -104,12 +70,14 @@ pub fn shutdown_home(home: &Path) {
         None
     };
     // A recovery daemon that exits (a home it refuses, such as a newer state
-    // schema) never opens the socket: stop waiting for it then.
-    let deadline = Instant::now() + self::deadline();
+    // schema) never opens the socket: stop waiting for it then, and still run
+    // `shutdown` (it returns at once when nothing answers). Cleanup has a window of its own:
+    // it also runs after a test spent its budget.
+    let deadline = Instant::now() + CLEANUP_WINDOW;
     while UnixStream::connect(home.join("daemon.sock")).is_err() && Instant::now() < deadline {
         if let Some(child) = recovery.as_mut() {
             if !matches!(child.try_wait(), Ok(None)) {
-                return;
+                break;
             }
         }
         sleep(Duration::from_millis(25));
@@ -121,7 +89,7 @@ pub fn shutdown_home(home: &Path) {
         .stderr(Stdio::null())
         .status();
     if let Some(child) = recovery.as_mut() {
-        let deadline = Instant::now() + self::deadline();
+        let deadline = Instant::now() + CLEANUP_WINDOW;
         while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
             sleep(Duration::from_millis(25));
         }
@@ -217,7 +185,7 @@ impl Sandbox {
         let mut command = self.command();
         command.stderr(Stdio::piped());
         let mut child = command.spawn().expect("spawn daemon");
-        let deadline = Instant::now() + self::deadline();
+        let deadline = expiry();
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
                 break status;
@@ -383,7 +351,7 @@ impl Client {
 
     /// Waits for the response to request `id`.
     pub fn response(&mut self, method: &str, id: u64) -> Result<Value, RpcError> {
-        let deadline = Instant::now() + self::deadline();
+        let deadline = expiry();
         while Instant::now() < deadline {
             // File every frame of a read, so notifications that follow the response are kept,
             // and keep the responses to other requests for their own `response` call.
@@ -410,7 +378,7 @@ impl Client {
 
     /// Reads for up to `secs` until `done` is true.
     pub fn pump_until(&mut self, what: &str, done: impl Fn(&Client) -> bool) {
-        let deadline = Instant::now() + self::deadline();
+        let deadline = expiry();
         while !done(self) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             for frame in self.frames() {
@@ -498,7 +466,7 @@ pub fn wait_settled(client: &mut Client, id: &str) {
 }
 
 pub fn wait_snapshot_contains(client: &mut Client, id: &str, needle: &str) {
-    let deadline = Instant::now() + self::deadline();
+    let deadline = expiry();
     loop {
         let snapshot = client.attach(id);
         if snapshot.contains(needle) {

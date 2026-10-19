@@ -1,0 +1,705 @@
+/* Architecture diagram in the Artifacts Preview (`.arch.json`): toolbar, dotted
+ * board, Inspect panel, status bar. Values follow Figma `Canvas/*`. Tokens only. */
+
+.dg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-app);
+  outline: 0;
+}
+.dg-toolbar {
+  background: var(--bg-dialog);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 37px;
+  flex: none;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line-divider);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.dg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  white-space: nowrap;
+  border-radius: var(--radius-row);
+}
+.dg-chip.kind {
+  height: 22px;
+  padding: 0 9px;
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+.dg-chip.title {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+}
+.dg-chip.title {
+  gap: 4px;
+}
+.dg-chip.title b {
+  flex: none;
+  font-weight: 500;
+}
+.dg-chip.title b.ok {
+  color: var(--tone-ok);
+}
+.dg-chip.title b.warn {
+  color: var(--tone-warning);
+}
+.dg-chip.title b.bad {
+  color: var(--tone-danger);
+}
+.dg-chip.title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dg-chip svg {
+  flex: none;
+}
+.pv-menu.dg-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 150px;
+}
+.dg-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dg-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--line-divider);
+}
+.dg-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Board: the dot grid pans and zooms with the content (--gx/--gy/--gs/--gr). */
+.dg-board {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  outline: 0;
+  user-select: none;
+  background-color: var(--bg-app);
+  background-image: radial-gradient(
+    circle,
+    var(--line) var(--gr),
+    transparent calc(var(--gr) + 0.5px)
+  );
+  background-size: var(--gs) var(--gs);
+  background-position: var(--gx) var(--gy);
+}
+.dg-board.pan {
+  cursor: grab;
+}
+.dg-board.panning {
+  cursor: grabbing;
+}
+.dg-marquee {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 1px solid var(--focus);
+  background: color-mix(in srgb, var(--focus) 10%, transparent);
+  pointer-events: none;
+}
+.dg-fab {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+}
+.dg-fab:hover {
+  background: var(--bg-hover);
+}
+.dg-fab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.dg-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.dg-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+.dg-group {
+  fill: var(--bg-dialog);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+.dg-group.selected {
+  stroke: var(--focus);
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
+.dg-group.target {
+  stroke: var(--focus);
+  stroke-dasharray: none;
+}
+.dg-group-head {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: grab;
+}
+.dg-group-head svg {
+  flex: none;
+}
+.dg-group-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dg-group-rename {
+  position: absolute;
+  z-index: 2;
+  width: 180px;
+  height: 20px;
+}
+.dg-group-rename .dg-rename {
+  left: 0;
+  top: 0;
+  width: 100%;
+}
+.dg-resize {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 2px;
+  background: var(--focus);
+  cursor: nwse-resize;
+}
+.dg-edge .line {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dg-edge .head {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dg-edge.dashed .line {
+  stroke-dasharray: 5 3;
+}
+.dg-edge.guess .line {
+  stroke: var(--tone-warning);
+  stroke-dasharray: 5 4;
+}
+.dg-edge.guess .head {
+  stroke: var(--tone-warning);
+}
+.dg-edge.selected .line,
+.dg-edge.selected .head {
+  stroke: var(--focus);
+  stroke-width: 2;
+}
+.dg-edge .hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.dg-rubber {
+  fill: none;
+  stroke: var(--focus);
+  stroke-width: 1.3;
+  stroke-dasharray: 4 3;
+}
+.dg-label {
+  position: absolute;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+  transform: translate(-50%, calc(-100% - 6px));
+  pointer-events: none;
+}
+.dg-label.vertical {
+  transform: translate(6px, -50%);
+}
+.dg-label.guess {
+  color: var(--tone-warning);
+}
+
+.dg-node-wrap {
+  position: absolute;
+}
+.dg-node {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  height: 100%;
+  padding: 8px 10px 7px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-raised);
+  color: var(--text);
+  text-align: left;
+  cursor: default;
+}
+.dg-node.shape-box {
+  justify-content: center;
+}
+.dg-node.delta-changed {
+  border: 1.3px solid var(--tone-warning);
+}
+.dg-node.delta-new {
+  border-color: transparent;
+}
+.dg-node.delta-removed {
+  border: 1.3px dashed var(--tone-danger);
+}
+.dg-node.delta-removed .dg-title {
+  text-decoration: line-through;
+}
+.dg-node.shape-pill {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 999px;
+}
+.dg-node.shape-pill .dg-title {
+  min-width: 0;
+}
+.dg-node.shape-circle {
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border-radius: 50%;
+  text-align: center;
+}
+.dg-node.shape-circle .dg-title {
+  font-size: 11px;
+  line-height: 13px;
+}
+.dg-node.shape-diamond .dg-title {
+  font-size: 12px;
+  line-height: 14px;
+}
+.dg-node.shape-diamond,
+.dg-node.shape-cylinder,
+.dg-node.shape-person {
+  border: 0;
+  background: transparent;
+}
+.dg-node.shape-diamond {
+  align-items: center;
+  justify-content: center;
+  padding: 0 35px;
+  text-align: center;
+}
+.dg-node.shape-diamond .dg-title,
+.dg-node.shape-circle .dg-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dg-node.shape-cylinder {
+  justify-content: center;
+  padding: 12px 10px 4px;
+}
+.dg-node.shape-person {
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 0;
+  text-align: center;
+}
+.dg-node.shape-person .dg-title,
+.dg-node.shape-person .dg-tech {
+  max-width: 100%;
+}
+.dg-node.shape-pill .dg-tech,
+.dg-node.shape-diamond .dg-tech,
+.dg-node.shape-circle .dg-tech {
+  display: none;
+}
+.dg-shape {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.dg-node > .dg-title,
+.dg-node > .dg-tech,
+.dg-node > .dg-kind-row {
+  position: relative;
+}
+.dg-shape.dg-person {
+  position: static;
+  flex: none;
+}
+.dg-shape polygon,
+.dg-shape path,
+.dg-shape circle {
+  fill: var(--bg-raised);
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+.dg-shape path.arc {
+  fill: none;
+}
+.dg-shape.delta-new * {
+  stroke: var(--tone-ok);
+  stroke-width: 1.3;
+  stroke-dasharray: 5 3;
+}
+.dg-shape.delta-changed * {
+  stroke: var(--tone-warning);
+  stroke-width: 1.3;
+}
+.dg-shape.delta-removed * {
+  stroke: var(--tone-danger);
+  stroke-width: 1.3;
+  stroke-dasharray: 5 3;
+}
+.dg-step {
+  position: absolute;
+  left: -7px;
+  top: -7px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  pointer-events: none;
+}
+.dg-dash {
+  position: absolute;
+  left: -1px;
+  top: -1px;
+  pointer-events: none;
+}
+.dg-dash rect {
+  fill: none;
+  stroke: var(--tone-ok);
+  stroke-width: 1.3;
+  stroke-dasharray: 5 3;
+}
+.dg-node-wrap.selected .dg-node {
+  outline: 2px solid var(--focus);
+  outline-offset: 0;
+}
+.dg-kind-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 13px;
+  color: var(--text-faint);
+}
+.dg-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+.dg-icon.k-app {
+  color: var(--accent-blue);
+}
+.dg-icon.k-service {
+  color: var(--accent-violet);
+}
+.dg-icon.k-data {
+  color: var(--accent-amber);
+}
+.dg-icon.k-external {
+  color: var(--text-muted);
+}
+.dg-kind {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.dg-tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-count);
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 11px;
+}
+.dg-tag.new {
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+}
+.dg-tag.changed {
+  background: var(--tone-warning-bg);
+  color: var(--tone-warning);
+}
+.dg-tag.out {
+  position: absolute;
+  right: 0;
+  top: -4px;
+  transform: translateY(-100%);
+  margin: 0;
+}
+.dg-tag.removed {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
+.dg-title,
+.dg-tech {
+  letter-spacing: -0.005em;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dg-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text);
+}
+.dg-tech {
+  font-size: 10.5px;
+  line-height: 13px;
+  color: var(--text-muted);
+}
+.dg-rename {
+  position: absolute;
+  left: 8px;
+  top: 21px;
+  width: calc(100% - 16px);
+  height: 20px;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border: 1px solid var(--focus);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  outline: 0;
+}
+.dg-port {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: var(--focus);
+  opacity: 0;
+  cursor: crosshair;
+}
+.dg-node-wrap:hover .dg-port,
+.dg-node-wrap.selected .dg-port {
+  opacity: 1;
+}
+.dg-bar {
+  position: absolute;
+  left: 0;
+  display: flex;
+  gap: 4px;
+}
+.dg-bar button {
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-row);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+}
+.dg-bar button:first-child {
+  border-color: var(--tone-ok);
+  color: var(--tone-ok);
+}
+.dg-bar button:hover {
+  background: var(--bg-hover);
+}
+
+.dg-note {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 8px;
+  border: 1px solid var(--tone-warning);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: default;
+}
+.dg-note svg {
+  flex: none;
+  color: var(--tone-warning);
+}
+.dg-note.selected {
+  outline: 2px solid var(--focus);
+}
+
+/* Inspect panel. */
+.dg-inspect {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 260px;
+  border-left: 1px solid var(--line-divider);
+  background: var(--bg-app);
+}
+.dg-inspect-head {
+  padding: 12px 12px 6px;
+}
+.dg-inspect-head h2 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.dg-inspect-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+  overflow-y: auto;
+}
+.dg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.dg-field .ui-input,
+.dg-field .ui-select {
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+}
+.dg-field .ui-input {
+  flex: none;
+  padding: 0 var(--gap-sm);
+}
+.dg-static {
+  color: var(--text);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.dg-inspect-row {
+  display: flex;
+  gap: 6px;
+}
+.dg-inspect-row .ui-button {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  font-size: var(--text-sm);
+}
+
+.dg-statusbar {
+  background: var(--bg-dialog);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+  flex: none;
+  box-sizing: border-box;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line-divider);
+  font-size: 11px;
+}
+.dg-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.dg-count,
+.dg-status-end {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.dg-status-end.warn {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--tone-warning);
+}
+.dg-spacer {
+  flex: 1;
+}
+
+.dg-inspect-row .ui-button.dg-delete {
+  border-color: transparent;
+  background: none;
+  color: var(--tone-danger);
+}
+.dg-inspect-row .ui-button.dg-delete:hover {
+  background: var(--bg-hover);
+}

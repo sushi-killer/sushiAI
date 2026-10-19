@@ -11,6 +11,8 @@ test("kindOf maps extensions and defaults to text", async () => {
   assert.equal(kindOf("/a/x.png"), "image");
   assert.equal(kindOf("/a/x.pdf"), "pdf");
   assert.equal(kindOf("/a/x.svg"), "svg");
+  assert.equal(kindOf("/a/docs/Map.arch.json"), "diagram");
+  assert.equal(kindOf("/a/x.json"), "text");
   assert.equal(kindOf("/a.d/notes"), "text");
   assert.equal(kindOf("/a/x.log"), "text");
 });

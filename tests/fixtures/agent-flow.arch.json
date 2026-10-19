@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "title": "Agent task loop",
+  "groups": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "icon": "bot",
+      "x": 16,
+      "y": 16,
+      "w": 1030,
+      "h": 150
+    },
+    {
+      "id": "owner",
+      "label": "Owner",
+      "icon": "user",
+      "x": 16,
+      "y": 186,
+      "w": 1030,
+      "h": 150
+    },
+    {
+      "id": "ci",
+      "label": "CI",
+      "icon": "git",
+      "x": 16,
+      "y": 356,
+      "w": 1030,
+      "h": 150
+    }
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "title": "Start",
+      "shape": "pill",
+      "group": "owner",
+      "x": 36,
+      "y": 238
+    },
+    {
+      "id": "read-task",
+      "title": "Read the task",
+      "caption": "Step",
+      "step": 1,
+      "group": "agent",
+      "x": 124,
+      "y": 60
+    },
+    {
+      "id": "write-plan",
+      "title": "Write the plan",
+      "caption": "Step",
+      "step": 2,
+      "group": "agent",
+      "x": 316,
+      "y": 60
+    },
+    {
+      "id": "plan-approved",
+      "title": "Plan approved?",
+      "shape": "diamond",
+      "group": "owner",
+      "x": 316,
+      "y": 216
+    },
+    {
+      "id": "implement",
+      "title": "Implement",
+      "caption": "Step",
+      "step": 3,
+      "group": "agent",
+      "x": 508,
+      "y": 60
+    },
+    {
+      "id": "run-checks",
+      "title": "Run checks",
+      "icon": "terminal",
+      "caption": "Skill",
+      "step": 4,
+      "group": "ci",
+      "x": 250,
+      "y": 400
+    },
+    {
+      "id": "checks-green",
+      "title": "Checks green?",
+      "shape": "diamond",
+      "group": "ci",
+      "x": 470,
+      "y": 386
+    },
+    {
+      "id": "open-pr",
+      "title": "Open PR",
+      "shape": "box",
+      "icon": "git",
+      "group": "agent",
+      "x": 740,
+      "y": 68,
+      "step": 5
+    },
+    {
+      "id": "done",
+      "title": "Done",
+      "shape": "pill",
+      "group": "owner",
+      "x": 830,
+      "y": 238
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-read",
+      "from": "start",
+      "to": "read-task"
+    },
+    {
+      "id": "read-write",
+      "from": "read-task",
+      "to": "write-plan"
+    },
+    {
+      "id": "write-review",
+      "from": "write-plan",
+      "to": "plan-approved"
+    },
+    {
+      "id": "plan-yes",
+      "from": "plan-approved",
+      "to": "implement",
+      "label": "yes"
+    },
+    {
+      "id": "plan-no",
+      "from": "plan-approved",
+      "to": "write-plan",
+      "label": "no",
+      "style": "dashed"
+    },
+    {
+      "id": "implement-checks",
+      "from": "implement",
+      "to": "run-checks"
+    },
+    {
+      "id": "checks-run",
+      "from": "run-checks",
+      "to": "checks-green"
+    },
+    {
+      "id": "checks-yes",
+      "from": "checks-green",
+      "to": "open-pr",
+      "label": "yes"
+    },
+    {
+      "id": "checks-no",
+      "from": "checks-green",
+      "to": "implement",
+      "label": "no",
+      "style": "dashed"
+    },
+    {
+      "id": "pr-done",
+      "from": "open-pr",
+      "to": "done"
+    }
+  ],
+  "notes": []
+}

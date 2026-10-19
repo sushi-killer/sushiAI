@@ -5,14 +5,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { groupRects, nodeSize } from "./model.ts";
-import {
-  NOTE_H,
-  NOTE_W,
-  type Diagram,
-  type Point,
-  type Rect,
-} from "./types.ts";
+import { groupRects, nodeSize, noteSize } from "./model.ts";
+import type { Diagram, Point, Rect } from "./types.ts";
 
 export type View = { tx: number; ty: number; s: number };
 
@@ -38,8 +32,7 @@ export function useViewport(
       const at = p.get(n.id);
       if (at) rects.push({ ...at, ...nodeSize(n) });
     }
-    for (const n of d.notes)
-      rects.push({ x: n.x, y: n.y, w: NOTE_W, h: NOTE_H });
+    for (const n of d.notes) rects.push({ x: n.x, y: n.y, ...noteSize(n) });
     if (!rects.length) return setView({ tx: FIT_PAD, ty: FIT_PAD, s: 1 });
     const x0 = Math.min(...rects.map((r) => r.x));
     const y0 = Math.min(...rects.map((r) => r.y));

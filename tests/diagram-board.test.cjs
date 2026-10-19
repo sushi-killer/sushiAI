@@ -208,3 +208,30 @@ test("countLabel is singular for one", async () => {
   assert.equal(countLabel(0, 2), "0 blocks · 2 links");
   assert.equal(countLabel(9, 10), "9 blocks · 10 links");
 });
+
+test("the marquee and the free spot use the wrapped size of a block and a note", async () => {
+  const { marqueeHits, freeSpot } = await board;
+  const { nodeSize, noteSize } = await model;
+  const long = node("a", 0, 0, {
+    title:
+      "A very long title for one block that has to wrap onto many lines. ".repeat(
+        3,
+      ),
+  });
+  const d = {
+    ...diagram([long], []),
+    notes: [{ id: "n", text: "1\n2\n3\n4", x: 400, y: 0 }],
+  };
+  const pos = new Map([["a", { x: 0, y: 0 }]]);
+  const low = nodeSize(long).h - 2;
+  assert.ok(low > 62);
+  const hits = marqueeHits(d, pos, { x: 10, y: low, w: 4, h: 1 });
+  assert.deepEqual(hits, [{ type: "node", id: "a" }]);
+  const note = noteSize(d.notes[0]);
+  assert.ok(note.h > 30);
+  assert.deepEqual(marqueeHits(d, pos, { x: 410, y: note.h - 2, w: 4, h: 1 }), [
+    { type: "note", id: "n" },
+  ]);
+  const spot = freeSpot(d, 10, 10);
+  assert.ok(spot.y >= Math.max(nodeSize(long).h, note.h));
+});

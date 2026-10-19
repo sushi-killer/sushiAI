@@ -8,14 +8,6 @@
 
 export const DIAGRAM_VERSION = 1;
 
-/** A `box` block is drawn at this size; other
- * shapes have their own size, see `nodeSize` in model.ts. */
-export const NODE_W = 170;
-export const NODE_H = 62;
-/** A note is drawn at this size. */
-export const NOTE_W = 280;
-export const NOTE_H = 30;
-
 /** Presets, not types: a preset only supplies a default icon and caption. */
 export type NodeKind = "app" | "service" | "data" | "external";
 export type Delta = "new" | "changed" | "exists" | "removed";
@@ -79,6 +71,10 @@ export type DiagramNode = {
   /** Id of the boundary the component sits in: derived from where the block
    * lies (the smallest group around its centre), never written. */
   group?: string;
+  /** The size the owner gave by dragging a corner. Absent = the size the file
+   * has, else the size the text needs. */
+  w?: number;
+  h?: number;
   /** Top-left on the board. Absent = placed by the Preview. */
   x?: number;
   y?: number;
@@ -95,8 +91,9 @@ export type DiagramEdge = {
   /** `dashed` is a neutral dashed line; `guess` an unconfirmed link (dashed
    * warning line). Default `plain`. */
   style?: "plain" | "dashed" | "guess";
-  /** Arrow heads. Default `end`. */
-  arrow?: "end" | "both" | "none";
+  /** Arrow heads: at `to` (`end`, the default), at `from` (`start`), both or
+   * none. */
+  arrow?: "end" | "start" | "both" | "none";
   status?: "proposed";
   [extra: string]: unknown;
 };
@@ -143,6 +140,8 @@ export type DiagramOp =
   /** Sets the boundary to `rect` and shifts its placed members by dx/dy. */
   | { op: "move-group"; id: string; rect: Rect; dx: number; dy: number }
   | { op: "resize-group"; id: string; rect: Rect }
+  /** The least size a block draws at; its text still never clips. */
+  | { op: "resize-node"; id: string; w: number; h: number }
   | { op: "connect"; edge: DiagramEdge }
   | { op: "move"; id: string; x: number; y: number }
   | {
@@ -170,6 +169,7 @@ export type DiagramOp =
 
 export type Rect = { x: number; y: number; w: number; h: number };
 export type Point = { x: number; y: number };
+export type Size = { w: number; h: number };
 
 /** One selected thing on the board. */
 export type Picked = {

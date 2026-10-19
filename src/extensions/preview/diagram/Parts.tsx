@@ -1,6 +1,7 @@
 import { TriangleAlert } from "lucide-react";
 import { useRef } from "react";
 import { iconFor } from "./icons.ts";
+import { noteSize } from "./model.ts";
 import type { DiagramGroup, DiagramNote, Point, Rect } from "./types.ts";
 
 export function RenameInput(props: {
@@ -84,11 +85,12 @@ export function NotePin(props: {
   at: Point;
   selected: boolean;
 }) {
+  const { w, h } = noteSize(props.note);
   return (
     <button
       type="button"
       className={`dg-note${props.selected ? " selected" : ""}`}
-      style={{ left: props.at.x, top: props.at.y }}
+      style={{ left: props.at.x, top: props.at.y, width: w, minHeight: h }}
       data-note={props.note.id}
       aria-label={`note ${props.note.text}`}
     >

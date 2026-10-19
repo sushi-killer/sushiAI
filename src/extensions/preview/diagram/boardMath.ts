@@ -3,12 +3,11 @@ import {
   groupAt,
   groupRects,
   nodeSize,
+  noteSize,
   placeNodes,
   within,
 } from "./model.ts";
 import {
-  NOTE_H,
-  NOTE_W,
   type Diagram,
   type DiagramOp,
   type Picked,
@@ -45,7 +44,7 @@ export function freeSpot(d: Diagram, w: number, h: number): Point {
     const at = pos.get(n.id);
     if (at) rects.push({ ...at, ...nodeSize(n) });
   }
-  for (const n of d.notes) rects.push({ x: n.x, y: n.y, w: NOTE_W, h: NOTE_H });
+  for (const n of d.notes) rects.push({ x: n.x, y: n.y, ...noteSize(n) });
   if (!rects.length) return clampSpot({ x: 0, y: 0 }, w, h);
   const x = Math.min(...rects.map((r) => r.x));
   const y = Math.max(...rects.map((r) => r.y + r.h)) + GAP;
@@ -96,6 +95,14 @@ export type Gesture =
       sy: number;
       last: Point | null;
     }
+  | {
+      kind: "size";
+      id: string;
+      sx: number;
+      sy: number;
+      base: { w: number; h: number };
+      last: { w: number; h: number } | null;
+    }
   | { kind: "connect"; from: string };
 
 export const typing = (el: EventTarget | null) =>
@@ -128,7 +135,7 @@ export function marqueeHits(
     }
   }
   for (const n of d.notes)
-    if (intersects(box, { x: n.x, y: n.y, w: NOTE_W, h: NOTE_H }))
+    if (intersects(box, { x: n.x, y: n.y, ...noteSize(n) }))
       out.push({ type: "note", id: n.id });
   for (const e of d.edges)
     if (nodes.has(e.from) && nodes.has(e.to))

@@ -4,10 +4,6 @@
 
 import {
   ICONS as ICON_NAMES,
-  NODE_H,
-  NODE_W,
-  NOTE_H,
-  NOTE_W,
   SHAPES as SHAPE_NAMES,
   type Delta,
   type Diagram,
@@ -19,32 +15,27 @@ import {
   type IconName,
   type NodeKind,
   type Shape,
+  type Size,
   type Point,
   type Rect,
 } from "./types.ts";
+import {
+  fitBlock,
+  fitNote,
+  MIN_NODE_H,
+  MIN_NODE_W,
+  textWidth,
+  type BlockText,
+} from "./measure.ts";
 
 const KINDS: readonly string[] = ["app", "service", "data", "external"];
 const DELTAS: readonly string[] = ["new", "changed", "exists", "removed"];
 const STYLES: readonly string[] = ["plain", "dashed", "guess"];
-const ARROWS: readonly string[] = ["end", "both", "none"];
+const ARROWS: readonly string[] = ["end", "start", "both", "none"];
 const ICONS: readonly string[] = ICON_NAMES;
 const SHAPES: readonly string[] = SHAPE_NAMES;
 const MAX_ICON = 40;
 const MAX_STEP = 999;
-
-const SIZES: Record<string, { w: number; h: number }> = {
-  box: { w: NODE_W, h: NODE_H },
-  pill: { w: 170, h: 44 },
-  diamond: { w: 150, h: 90 },
-  cylinder: { w: 170, h: 72 },
-  person: { w: 120, h: 84 },
-  circle: { w: 72, h: 72 },
-};
-
-/** The drawn size of a block, from its shape (default box). */
-export function nodeSize(node: { shape?: unknown }): { w: number; h: number } {
-  return SIZES[node.shape as string] ?? SIZES.box;
-}
 
 const KIND_PRESETS: Record<string, { icon: IconName; caption: string }> = {
   app: { icon: "laptop", caption: "App" },
@@ -52,6 +43,23 @@ const KIND_PRESETS: Record<string, { icon: IconName; caption: string }> = {
   data: { icon: "database", caption: "Data" },
   external: { icon: "cloud", caption: "External" },
 };
+
+/** The icon row of a block: the icon, the caption (not "Step" over a number),
+ * and the tag (`proposed` or its delta). */
+export function kindOf(node: Partial<DiagramNode>): {
+  icon?: IconName;
+  caption?: string;
+  tag?: string;
+} {
+  const { icon, caption } = presetOf(node as DiagramNode);
+  const out: { icon?: IconName; caption?: string; tag?: string } = {};
+  if (icon !== undefined) out.icon = icon;
+  if (caption !== undefined && !(caption === "Step" && node.step !== undefined))
+    out.caption = caption;
+  const tag = node.status === "proposed" ? "proposed" : node.delta;
+  if (tag !== undefined) out.tag = tag;
+  return out;
+}
 
 /** Icon and caption a block shows: its own win, else the legacy kind's. */
 export function presetOf(node: DiagramNode): {
@@ -194,12 +202,12 @@ function stash(item: Obj, raw: Obj, keys: string[], own: string[]) {
 }
 
 /** Puts `own` (our sushiai keys) and the parked fields back on `out`. Colour
- * and anything `skip` names are the caller's to set. */
-function writeBack(out: Obj, own: Obj, jc: Jc, skip: string[] = []) {
+ * is the caller's to set. */
+function writeBack(out: Obj, own: Obj, jc: Jc) {
   const sushiai = { ...own, ...(isObj(jc.sushiai) ? jc.sushiai : {}) };
   if (Object.keys(sushiai).length > 0) out.sushiai = sushiai;
   for (const [k, v] of Object.entries(jc)) {
-    if (k !== "sushiai" && k !== "color" && !skip.includes(k) && !(k in out)) {
+    if (k !== "sushiai" && k !== "color" && !(k in out)) {
       out[k] = v;
     }
   }
@@ -218,14 +226,81 @@ function splitText(whole: string): { title: string; tech?: string } {
   return tech ? { title, tech } : { title };
 }
 
-/** The size a block has in the file (kept while the owner does not change it),
- * else the size its shape draws. */
-export function sizeOf(node: DiagramNode): { w: number; h: number } {
-  const jc = jcOf(node);
-  const w = jc.width;
-  const h = jc.height;
-  return num(w) && num(h) && w > 0 && h > 0 ? { w, h } : nodeSize(node);
+const given = (v: unknown) => (num(v) && v > 0 ? v : undefined);
+
+const blockText = (node: Partial<DiagramNode>): BlockText => {
+  const shape = SHAPES.includes(node.shape as string)
+    ? (node.shape as string)
+    : "box";
+  const { icon, caption, tag } = kindOf(node);
+  const row = shape === "box" || shape === "cylinder";
+  const kindRow =
+    row && (icon || caption || tag)
+      ? (icon ? 18 : 0) +
+        (caption
+          ? textWidth(caption.toUpperCase(), 9.5, true) +
+            Math.ceil(caption.length * 0.06 * 9.5) +
+            6
+          : 0) +
+        (tag ? textWidth(tag, 9.5, true) + 20 : 0)
+      : 0;
+  return {
+    shape,
+    title: node.title ?? "",
+    tech: node.tech ?? "",
+    kindRow,
+    icon: icon !== undefined,
+  };
+};
+
+const sizes = new WeakMap<object, Size>();
+const sized = <T extends object>(item: T, make: (item: T) => Size): Size => {
+  let size = sizes.get(item);
+  if (!size) sizes.set(item, (size = make(item)));
+  return size;
+};
+
+export { MIN_NODE_H, MIN_NODE_W };
+
+/** The size a block draws at, everywhere. Unless a size was chosen the block
+ * sizes itself: its shape's width grows to the text up to a maximum, then the
+ * text wraps, and the height holds every line. A chosen size is a fixed width
+ * with the text wrapped in it, and a height that is not undercut. The width
+ * and height a file merely carries do not fix anything. */
+export function nodeSize(node: Partial<DiagramNode>): Size {
+  return sized(node, (n) =>
+    fitBlock(blockText(n), given(n.w) && given(n.h) ? { w: n.w, h: n.h } : {}),
+  );
 }
+
+/** `node` after the owner drags its corner to `w` by `h`: the size is chosen. */
+export function resizeNode(node: DiagramNode, w: number, h: number) {
+  const next = without(node, "_jc") as DiagramNode;
+  const jc = without(jcOf(node), "width", "height");
+  if (Object.keys(jc).length > 0) next._jc = jc;
+  return { ...next, w: Math.max(MIN_NODE_W, w), h: Math.max(MIN_NODE_H, h) };
+}
+
+function dropFileSize<T extends object>(n: T): T {
+  const jc = without(jcOf(n), "width", "height");
+  const next = without(n as Obj, "_jc") as T & { _jc?: Jc };
+  if (Object.keys(jc).length > 0) next._jc = jc;
+  return next;
+}
+
+/** The size written for a block. A block whose size was never chosen and that
+ * was not edited keeps the width and height the file had, so another edit
+ * never changes what it says. */
+function writtenSize(n: DiagramNode): Size {
+  const drawn = nodeSize(n);
+  if (given(n.w) && given(n.h)) return drawn;
+  const jc = jcOf(n);
+  return { w: given(jc.width) ?? drawn.w, h: given(jc.height) ?? drawn.h };
+}
+
+/** The size a note draws at: its lines, wrapped at a maximum width. */
+export const noteSize = (note: DiagramNote): Size =>
+  sized(note, (n) => fitNote(n.text));
 
 /** Reads a JSON Canvas 1.0 file. Text nodes are blocks (or notes); a group's
  * members are the blocks whose centre lies inside it, the smallest group
@@ -343,6 +418,8 @@ export function parseDiagram(
         return fail("nodes", i, "x and y must be finite numbers in range");
       }
       const note: DiagramNote = { id, text: n.text as string, x: n.x, y: n.y };
+      // The file's size stays in `_jc` unless it is what the text needs.
+      const fit = fitNote(note.text);
       stash(
         note,
         n,
@@ -350,8 +427,8 @@ export function parseDiagram(
           "type",
           "x",
           "y",
-          "width",
-          "height",
+          ...(n.width === fit.w ? ["width"] : []),
+          ...(n.height === fit.h ? ["height"] : []),
           "text",
           ...(n.color === NOTE_COLOR ? ["color"] : []),
         ],
@@ -406,8 +483,14 @@ export function parseDiagram(
     // The file's own text and size stay in `_jc` when they differ from what
     // the model would write: they go back out while the title, the tech line
     // and the shape are as they were read.
-    const size = nodeSize(block);
     const same = (key: string, mine: unknown) => (n[key] === mine ? [key] : []);
+    const size = fitBlock(blockText(block));
+    // The size the owner (or an agent) marked as chosen is read back as such.
+    const chosen = s.size === "fixed" && given(n.width) && given(n.height);
+    if (chosen) {
+      block.w = n.width as number;
+      block.h = n.height as number;
+    }
     stash(
       block,
       n,
@@ -423,13 +506,24 @@ export function parseDiagram(
               ),
             ]
           : []),
-        ...same("width", size.w),
-        ...same("height", size.h),
+        ...(chosen ? ["width", "height"] : []),
+        ...(!chosen
+          ? [...same("width", size.w), ...same("height", size.h)]
+          : []),
         ...(delta !== undefined && n.color === DELTA_COLOR[delta]
           ? ["color"]
           : []),
       ],
-      ["kind", "shape", "icon", "caption", "step", "delta", "status"],
+      [
+        "kind",
+        "shape",
+        "icon",
+        "caption",
+        "step",
+        "delta",
+        "status",
+        ...(chosen ? ["size"] : []),
+      ],
     );
     nodes.push(block);
     blockIds.add(id);
@@ -486,9 +580,7 @@ export function parseDiagram(
     const ends = [e.fromEnd ?? "none", e.toEnd ?? "arrow"].join();
     if (ends === "arrow,arrow") edge.arrow = "both";
     else if (ends === "none,none") edge.arrow = "none";
-    // A direction the model cannot draw (arrow at the start only) stays in
-    // `_jc` and is written back while `arrow` is unset.
-    const drawn = ends === "none,arrow" || edge.arrow !== undefined;
+    else if (ends === "arrow,none") edge.arrow = "start";
     stash(
       edge,
       e,
@@ -496,7 +588,8 @@ export function parseDiagram(
         "fromNode",
         "toNode",
         "label",
-        ...(drawn ? ["fromEnd", "toEnd"] : []),
+        "fromEnd",
+        "toEnd",
         ...(s.style === "guess" && e.color === GUESS_COLOR ? ["color"] : []),
       ],
       ["style", "status"],
@@ -588,6 +681,7 @@ export function serializeDiagram(d: Diagram): string {
       status: n.status,
       kind: n.kind,
       delta: n.delta,
+      size: given(n.w) && given(n.h) ? "fixed" : undefined,
     });
     const derived = n.tech ? `${n.title}\n${n.tech}` : n.title;
     const text =
@@ -599,7 +693,7 @@ export function serializeDiagram(d: Diagram): string {
       put(
         n.id,
         type,
-        { ...(pos.get(n.id) as Point), ...sizeOf(n) },
+        { ...(pos.get(n.id) as Point), ...writtenSize(n) },
         (n.delta && DELTA_COLOR[n.delta]) || jc.color,
         type === "text" ? { text } : {},
         own,
@@ -609,7 +703,13 @@ export function serializeDiagram(d: Diagram): string {
   }
   for (const n of d.notes) {
     const jc = jcOf(n);
-    const r = { x: n.x, y: n.y, w: NOTE_W, h: NOTE_H };
+    const fit = noteSize(n);
+    const r = {
+      x: n.x,
+      y: n.y,
+      w: given(jc.width) ?? fit.w,
+      h: given(jc.height) ?? fit.h,
+    };
     items.push(
       put(
         n.id,
@@ -646,18 +746,16 @@ export function serializeDiagram(d: Diagram): string {
     const ends: Record<string, [unknown, unknown]> = {
       both: ["arrow", "arrow"],
       none: ["none", "none"],
+      start: ["arrow", "none"],
       end: [undefined, undefined],
     };
-    const [fromEnd, toEnd] = e.arrow ? ends[e.arrow] : [jc.fromEnd, jc.toEnd];
+    const [fromEnd, toEnd] = ends[e.arrow ?? "end"];
     if (fromEnd !== undefined) link.fromEnd = fromEnd;
     if (toEnd !== undefined) link.toEnd = toEnd;
     const color = e.style === "guess" ? GUESS_COLOR : jc.color;
     if (color !== undefined) link.color = color;
     if (e.label !== undefined) link.label = e.label;
-    writeBack(link, defined({ style: e.style, status: e.status }), jc, [
-      "fromEnd",
-      "toEnd",
-    ]);
+    writeBack(link, defined({ style: e.style, status: e.status }), jc);
     links.push(link);
   }
   for (const r of raw) {
@@ -767,6 +865,13 @@ export function applyOp(d: Diagram, op: DiagramOp): Diagram {
         groups: d.groups.map((g) => (g.id === op.id ? { ...g, ...rect } : g)),
       };
     }
+    case "resize-node": {
+      const node = d.nodes.find((n) => n.id === op.id);
+      if (!node || !num(op.w) || !num(op.h)) return d;
+      if (badNum({ w: op.w, h: op.h }, ["w", "h"])) return d;
+      const next = resizeNode(node, op.w, op.h);
+      return { ...d, nodes: d.nodes.map((n) => (n.id === op.id ? next : n)) };
+    }
     case "connect": {
       const e = op.edge;
       const has = (id: string) => d.nodes.some((n) => n.id === id);
@@ -845,9 +950,10 @@ function applySet(
   const own = node ? jcOf(node).type : undefined;
   const target = own === "file" || own === "link";
   if (node) {
+    // An edited block is written at the size it draws, not the file's old one.
     const update = (next: (n: DiagramNode) => DiagramNode) => ({
       ...d,
-      nodes: patch(d.nodes, next),
+      nodes: patch(d.nodes, (n) => dropFileSize(next(n))),
     });
     switch (field) {
       case "title":
@@ -856,7 +962,7 @@ function applySet(
         // A new shape draws at its own size, not the one the file gave.
         return clear || SHAPES.includes(value)
           ? update((n) => {
-              const next = setOrClear(n) as DiagramNode;
+              const next = without(setOrClear(n) as DiagramNode, "w", "h");
               const jc = without(jcOf(n), "width", "height");
               return Object.keys(jc).length > 0
                 ? { ...next, _jc: jc }
@@ -923,7 +1029,10 @@ function applySet(
   }
   const note = d.notes.find((n) => n.id === id);
   if (note && field === "text" && !clear) {
-    return { ...d, notes: patch(d.notes, (n) => ({ ...n, text: value })) };
+    return {
+      ...d,
+      notes: patch(d.notes, (n) => dropFileSize({ ...n, text: value })),
+    };
   }
   return d;
 }
@@ -936,11 +1045,11 @@ function applySet(
 function setGroup(d: Diagram, node: DiagramNode, value: string): Diagram {
   const rects = groupRects(d);
   const at = placeNodes(d).get(node.id) as Point;
-  const size = sizeOf(node);
+  const size = nodeSize(node);
   const centreOf = (p: Point) => ({ x: p.x + size.w / 2, y: p.y + size.h / 2 });
   const taken = d.nodes
     .filter((n) => n.id !== node.id && hasPos(n))
-    .map((n) => ({ x: n.x as number, y: n.y as number, ...sizeOf(n) }));
+    .map((n) => ({ x: n.x as number, y: n.y as number, ...nodeSize(n) }));
   const clear = (r: Rect) =>
     !taken.some((t) =>
       overlaps({ ...r, ...size, w: size.w, h: size.h }, t, GAP),
@@ -1071,7 +1180,7 @@ export function deriveGroups(d: Diagram): Diagram {
   let changed = false;
   const nodes = d.nodes.map((n) => {
     if (!hasPos(n)) return n;
-    const { w, h } = sizeOf(n);
+    const { w, h } = nodeSize(n);
     const into = groupAt(rects, {
       x: (n.x as number) + w / 2,
       y: (n.y as number) + h / 2,
@@ -1100,13 +1209,13 @@ export function within(d: Diagram, id: string): Set<string> {
     if (
       n.group === id ||
       (hasPos(n) &&
-        inside({ x: n.x as number, y: n.y as number, ...sizeOf(n) }))
+        inside({ x: n.x as number, y: n.y as number, ...nodeSize(n) }))
     ) {
       out.add(n.id);
     }
   }
   for (const n of d.notes) {
-    if (inside({ x: n.x, y: n.y, w: NOTE_W, h: NOTE_H })) out.add(n.id);
+    if (inside({ x: n.x, y: n.y, ...noteSize(n) })) out.add(n.id);
   }
   return out;
 }
@@ -1384,6 +1493,161 @@ export function labelAt(points: Point[]): {
     y: (p.y + q.y) / 2,
     vertical: p.x === q.x,
   };
+}
+
+export type LabelSpot = {
+  x: number;
+  y: number;
+  vertical: boolean;
+  flip: boolean;
+};
+
+export type LabelRoute = {
+  id: string;
+  text?: string;
+  points: Point[];
+  arrow?: DiagramEdge["arrow"];
+  /** The edge leaves a diamond: its label goes just after the vertex. */
+  exit?: boolean;
+};
+
+const CHIP_H = 16;
+const CHIP_GAP = 6;
+const HEAD_LEN = 8;
+const HEAD_HALF = 4;
+const SLIDE_STEP = 4;
+const MAX_SLIDES = 24;
+const EXIT_AT = [28, 24, 32];
+
+const chipRect = (s: LabelSpot, w: number): Rect => {
+  if (s.vertical) {
+    return {
+      x: s.flip ? s.x - CHIP_GAP - w : s.x + CHIP_GAP,
+      y: s.y - CHIP_H / 2,
+      w,
+      h: CHIP_H,
+    };
+  }
+  return {
+    x: s.x - w / 2,
+    y: s.flip ? s.y + CHIP_GAP : s.y - CHIP_GAP - CHIP_H,
+    w,
+    h: CHIP_H,
+  };
+};
+
+const segLength = (a: Point, b: Point) =>
+  Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+
+/** Where each labelled edge's chip goes. A chip sits on a run of its edge,
+ * on one side of the line, at the first spot that touches no block, no other
+ * chip, no arrowhead and no line; if none is free, the one that costs least:
+ * crossing a line, then covering a block, then an arrowhead, then a chip.
+ * Chips are placed in order, so two chips never share a spot. */
+export function placeLabels(
+  routes: LabelRoute[],
+  blocks: Rect[],
+): Map<string, LabelSpot> {
+  const out = new Map<string, LabelSpot>();
+  const heads: Rect[] = [];
+  const lines: Rect[] = [];
+  for (const r of routes) {
+    const n = r.points.length;
+    if (n < 2) continue;
+    const arrow = r.arrow ?? "end";
+    // The head lies back along the run from the tip.
+    const mark = (tip: Point, from: Point) => {
+      const len = segLength(tip, from) || 1;
+      const back = {
+        x: tip.x + ((from.x - tip.x) / len) * HEAD_LEN,
+        y: tip.y + ((from.y - tip.y) / len) * HEAD_LEN,
+      };
+      const flat = Math.abs(from.x - tip.x) >= Math.abs(from.y - tip.y);
+      heads.push({
+        x: Math.min(tip.x, back.x) - (flat ? 0 : HEAD_HALF),
+        y: Math.min(tip.y, back.y) - (flat ? HEAD_HALF : 0),
+        w: Math.abs(back.x - tip.x) + (flat ? 0 : 2 * HEAD_HALF),
+        h: Math.abs(back.y - tip.y) + (flat ? 2 * HEAD_HALF : 0),
+      });
+    };
+    if (arrow === "end" || arrow === "both")
+      mark(r.points[n - 1], r.points[n - 2]);
+    if (arrow === "start" || arrow === "both") mark(r.points[0], r.points[1]);
+    for (let i = 0; i + 1 < n; i++) {
+      const [a, b] = [r.points[i], r.points[i + 1]];
+      lines.push({
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(b.x - a.x),
+        h: Math.abs(b.y - a.y),
+      });
+    }
+  }
+  const placed: Rect[] = [];
+  const touches = (chip: Rect, list: Rect[]) =>
+    list.reduce((k, q) => k + (overlaps(chip, q, 2) ? 1 : 0), 0);
+  for (const r of routes) {
+    const mid = labelAt(r.points);
+    if (!r.text || r.points.length < 2) {
+      out.set(r.id, { ...mid, flip: false });
+      continue;
+    }
+    const w = textWidth(r.text, 10.5) + 10;
+    const spots: LabelSpot[] = [];
+    if (r.exit) {
+      const [a, b] = r.points;
+      const len = segLength(a, b);
+      for (const reach of EXIT_AT) {
+        const t = Math.min(reach, len - 4) / len;
+        spots.push({
+          x: a.x + (b.x - a.x) * t,
+          y: a.y + (b.y - a.y) * t,
+          vertical: a.x === b.x,
+          flip: false,
+        });
+      }
+    }
+    const runs = r.points
+      .slice(1)
+      .map((q, i) => ({ p: r.points[i], q, len: segLength(r.points[i], q) }))
+      .sort((m, n) => n.len - m.len);
+    for (const { p, q, len } of runs) {
+      // From the middle of the run outwards, a few px at a time.
+      const step = Math.max(SLIDE_STEP, len / MAX_SLIDES);
+      const reach = Math.floor(len / 2 / step);
+      for (let k = 0; k <= reach; k++) {
+        for (const side of k ? [-1, 1] : [1]) {
+          const t = 0.5 + (side * k * step) / len;
+          for (const flip of [false, true]) {
+            spots.push({
+              x: p.x + (q.x - p.x) * t,
+              y: p.y + (q.y - p.y) * t,
+              vertical: p.x === q.x,
+              flip,
+            });
+          }
+        }
+      }
+    }
+    let best = spots[0];
+    let bestScore = Infinity;
+    for (const spot of spots) {
+      const chip = chipRect(spot, w);
+      // Crossing a line costs least. A block costs more, but only once however
+      // many it covers: the label layer draws above blocks, and a chip that
+      // is centred on the run reads better than one half under a neighbour.
+      const score =
+        100 * touches(chip, placed) +
+        30 * touches(chip, heads) +
+        (touches(chip, blocks) > 0 ? 20 : 0) +
+        3 * touches(chip, lines);
+      if (score < bestScore) [best, bestScore] = [spot, score];
+      if (score === 0) break;
+    }
+    placed.push(chipRect(best, w));
+    out.set(r.id, best);
+  }
+  return out;
 }
 
 /** Owner ops replayed on a fresh file, then every unplaced node pinned where

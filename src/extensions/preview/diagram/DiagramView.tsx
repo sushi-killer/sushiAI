@@ -15,8 +15,14 @@ import {
 import { Inspect } from "./Inspect.tsx";
 import { InspectMany } from "./InspectMany.tsx";
 import { BoardItems, BoardSvg, HeadsSvg, StatusText } from "./Layers.tsx";
-import { groupRects, nodeSize, placeNodes, within } from "./model.ts";
-import type { Diagram, DiagramOp, Picked, Point, Rect } from "./types.ts";
+import {
+  groupRects,
+  nodeSize,
+  placeNodes,
+  resizeNode,
+  within,
+} from "./model.ts";
+import type { Diagram, DiagramOp, Picked, Point, Rect, Size } from "./types.ts";
 import { useDiagramSave, type SaveStatus } from "./useDiagramSave.ts";
 import { useMarquee } from "./useMarquee.ts";
 import { useMoveSet } from "./useMoveSet.ts";
@@ -53,6 +59,19 @@ function Board(
   },
 ) {
   const { diagram, push } = props;
+  const [size, setSize] = useState<{ id: string; w: number; h: number } | null>(
+    null,
+  );
+  // The size a block has while its corner is dragged; the diagram itself
+  // changes only when the resize is pushed.
+  const sizes = useMemo(() => {
+    const node = size && diagram.nodes.find((n) => n.id === size.id);
+    return new Map<string, Size>(
+      size && node
+        ? [[size.id, nodeSize(resizeNode(node, size.w, size.h))]]
+        : [],
+    );
+  }, [diagram, size]);
   const boardRef = useRef<HTMLDivElement>(null);
   const selection = useSelection(diagram);
   const { sel, one, isOn, pick } = selection;
@@ -83,6 +102,7 @@ function Board(
     setView,
     boardPoint,
     push,
+    setSize,
     spaceDown,
   });
 
@@ -148,10 +168,22 @@ function Board(
   };
   const moving = useMemo(
     () =>
-      new Set([...mover.moving, ...(drag ? [drag.id] : (carry?.ids ?? []))]),
-    [drag, carry, mover.moving],
+      new Set([
+        ...mover.moving,
+        ...(drag ? [drag.id] : (carry?.ids ?? [])),
+        ...sizes.keys(),
+      ]),
+    [drag, carry, mover.moving, sizes],
   );
-  const edges = useRoutes(diagram, diagram, pos, shownPos, groups, moving);
+  const edges = useRoutes(
+    diagram,
+    diagram,
+    pos,
+    shownPos,
+    groups,
+    moving,
+    sizes,
+  );
 
   // A new boundary or note may land outside the visible board.
   useEffect(() => {
@@ -289,6 +321,7 @@ function Board(
               groups={groups}
               edges={edges}
               shownPos={shownPos}
+              sizes={sizes}
               noteAt={noteAt}
               isOn={isOn}
               renaming={renaming}

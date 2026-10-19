@@ -2,6 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const model = import("../src/extensions/preview/diagram/model.ts");
+const measure = import("../src/extensions/preview/diagram/measure.ts");
 const board = import("../src/extensions/preview/diagram/boardMath.ts");
 
 const base = () => ({
@@ -48,6 +49,7 @@ const canvasBase = () => ({
       text: "DB\npg",
       x: 500,
       y: 40,
+      height: 66,
       color: "4",
       sushiai: { delta: "new" },
     }),
@@ -55,8 +57,8 @@ const canvasBase = () => ({
       text: "why?",
       x: 5,
       y: 6,
-      width: 280,
-      height: 30,
+      width: 70,
+      height: 32,
       color: "3",
       sushiai: { note: true },
     }),
@@ -2204,17 +2206,23 @@ test("an Obsidian canvas survives an unrelated edit node for node", async () => 
   const text = nodesOf(serializeDiagram(edited));
   assert.equal(text[0].text, "New\nPara one");
   assert.deepEqual([text[2].width, text[2].height], [150, 90]);
-  // the file's size decides which group a block belongs to
+  // a chosen size decides which group a block belongs to
   const wide = parseDiagram(
     file([
       grp("g", 0, 0, 300, 300),
-      textNode("w", { x: 200, y: 0, width: 400, height: 40 }),
+      textNode("w", {
+        x: 200,
+        y: 0,
+        width: 400,
+        height: 40,
+        sushiai: { size: "fixed" },
+      }),
     ]),
   ).diagram;
   assert.equal(
     wide.nodes[0].group,
     undefined,
-    "its centre, by the file size, is outside",
+    "its centre, by the chosen size, is outside",
   );
 });
 
@@ -2370,7 +2378,7 @@ test("setting arrow end on a start-only edge is written", async () => {
 });
 
 test("set group leaves a block outside every group, or in the group asked for", async () => {
-  const { parseDiagram, applyOp, groupRects, groupAt, sizeOf } = await model;
+  const { parseDiagram, applyOp, groupRects, groupAt, nodeSize } = await model;
   const d = parseDiagram(
     file([
       grp("a", 0, 0, 300, 200),
@@ -2383,7 +2391,7 @@ test("set group leaves a block outside every group, or in the group asked for", 
   ).diagram;
   const centreGroup = (dd, id) => {
     const n = dd.nodes.find((i) => i.id === id);
-    const { w, h } = sizeOf(n);
+    const { w, h } = nodeSize(n);
     return groupAt(groupRects(dd), { x: n.x + w / 2, y: n.y + h / 2 });
   };
   const out = applyOp(d, { op: "set", id: "x", field: "group", value: "" });
@@ -2471,4 +2479,338 @@ test("a file or link node refuses title, tech and caption edits", async () => {
       field,
     );
   }
+});
+
+const LONG =
+  "A very long title for one block that has to wrap onto several lines";
+const SUB =
+  "A subtitle with plenty of words so that it needs to wrap onto a third line too";
+
+test("a block grows to its text and wraps beyond the maximum width", async () => {
+  const { nodeSize } = await model;
+  const short = nodeSize({ title: "API" });
+  assert.deepEqual(short, { w: 170, h: 62 });
+  const wide = nodeSize({ title: "A title of medium length", shape: "box" });
+  assert.ok(wide.w >= short.w && wide.w <= 320);
+  const long = nodeSize({ title: LONG, tech: SUB });
+  assert.equal(long.w, 320);
+  assert.ok(long.h > short.h);
+  assert.ok(long.h >= 14 + 16 * 2 + 13 * 2);
+  const more = nodeSize({ title: LONG + LONG, tech: SUB + SUB });
+  assert.ok(more.h > long.h, "more text, more height");
+  assert.equal(more.w, 320);
+});
+
+test("a block sizes itself unless its size was chosen", async () => {
+  const { parseDiagram, nodeSize, MIN_NODE_W } = await model;
+  const read = (extra, sushiai) =>
+    parseDiagram(
+      file([
+        textNode("a", {
+          text: `${LONG}\n${SUB}`,
+          ...extra,
+          ...(sushiai && { sushiai }),
+        }),
+      ]),
+    ).diagram.nodes[0];
+  const auto = nodeSize(read({ width: 170, height: 62 }));
+  assert.equal(auto.w, 320, "the file's width alone fixes nothing");
+  assert.deepEqual(nodeSize(read({ width: 99, height: 9 })), auto);
+  const chosen = { size: "fixed" };
+  const narrow = nodeSize(read({ width: 120, height: 62 }, chosen));
+  assert.equal(narrow.w, 120, "a chosen width is kept, narrower or not");
+  assert.ok(narrow.h > auto.h, "narrower wraps onto more lines");
+  assert.equal(nodeSize(read({ width: 1, height: 1 }, chosen)).w, MIN_NODE_W);
+  assert.deepEqual(nodeSize(read({ width: 400, height: 300 }, chosen)), {
+    w: 400,
+    h: 300,
+  });
+  assert.equal(read({ width: 120, height: 62 }, chosen).w, 120);
+});
+
+test("a long word breaks at the width and the next word starts after its tail", async () => {
+  const { lineCount } = await measure;
+  const word = "x".repeat(40);
+  assert.equal(lineCount(`${word} bbbbbbbbbbb`, 12.5, 100, true), 4);
+  assert.equal(lineCount("ab cd", 12.5, 100, true), 1);
+  assert.equal(lineCount("a\n\nb", 12.5, 100, false, true), 3);
+});
+
+test("a block with a kind row, a title and a subtitle is as tall as its CSS", async () => {
+  const { nodeSize } = await model;
+  // 8 + 7 padding, 2 border, 13 row + 3 gap, 16 title, 3 gap, 13 subtitle.
+  const size = nodeSize({ title: "T", tech: "t", caption: "Step" });
+  assert.equal(size.h, 66);
+  const wide = nodeSize({
+    title: "T",
+    caption: "A caption that is quite long indeed",
+  });
+  assert.ok(wide.w > 170, "the caption row has room");
+});
+
+test("resize-node stores the size, round-trips it and keeps the text whole", async () => {
+  const {
+    parseDiagram,
+    applyOp,
+    serializeDiagram,
+    nodeSize,
+    MIN_NODE_W,
+    MIN_NODE_H,
+  } = await model;
+  const d = parseDiagram(file([textNode("a", { text: "A" })])).diagram;
+  const out = applyOp(d, { op: "resize-node", id: "a", w: 300, h: 140 });
+  assert.deepEqual(nodeSize(out.nodes[0]), { w: 300, h: 140 });
+  const saved = JSON.parse(serializeDiagram(out)).nodes[0];
+  assert.deepEqual([saved.width, saved.height], [300, 140]);
+  const again = parseDiagram(serializeDiagram(out)).diagram;
+  assert.deepEqual(nodeSize(again.nodes[0]), { w: 300, h: 140 });
+  assert.equal(serializeDiagram(again), serializeDiagram(out));
+  const small = applyOp(out, { op: "resize-node", id: "a", w: 10, h: 10 });
+  assert.equal(nodeSize(small.nodes[0]).w, MIN_NODE_W);
+  assert.ok(nodeSize(small.nodes[0]).h >= MIN_NODE_H);
+  const long = applyOp(
+    { ...d, nodes: [{ ...d.nodes[0], title: LONG }] },
+    { op: "resize-node", id: "a", w: 10, h: 10 },
+  );
+  assert.ok(nodeSize(long.nodes[0]).h > MIN_NODE_H, "the text still fits");
+  assert.equal(applyOp(d, { op: "resize-node", id: "zz", w: 9, h: 9 }), d);
+  assert.equal(applyOp(d, { op: "resize-node", id: "a", w: NaN, h: 9 }), d);
+});
+
+test("a block nobody touched keeps the file's width and height on save", async () => {
+  const { parseDiagram, applyOp, serializeDiagram, nodeSize } = await model;
+  const text = file([
+    textNode("a", { text: `${LONG}\n${SUB}`, width: 170, height: 62 }),
+    textNode("b", { x: 400 }),
+  ]);
+  const d = parseDiagram(text).diagram;
+  const moved = applyOp(d, { op: "move", id: "b", x: 500, y: 0 });
+  const a = JSON.parse(serializeDiagram(moved)).nodes[0];
+  assert.deepEqual([a.width, a.height], [170, 62]);
+  const sized = applyOp(moved, { op: "resize-node", id: "a", w: 170, h: 62 });
+  const grown = JSON.parse(serializeDiagram(sized)).nodes[0];
+  assert.equal(grown.width, 170);
+  assert.ok(grown.height > 62, "after a resize the drawn size is written");
+  assert.equal(grown.sushiai.size, "fixed");
+  const back = parseDiagram(serializeDiagram(sized)).diagram;
+  assert.equal(back.nodes[0].w, 170);
+  assert.equal(serializeDiagram(back), serializeDiagram(sized));
+  const reshaped = applyOp(sized, {
+    op: "set",
+    id: "a",
+    field: "shape",
+    value: "pill",
+  });
+  assert.equal(reshaped.nodes[0].w, undefined, "a new shape clears the size");
+  const edited = applyOp(d, { op: "set", id: "a", field: "title", value: "T" });
+  const written = JSON.parse(serializeDiagram(edited)).nodes[0];
+  const drawn = nodeSize(edited.nodes[0]);
+  assert.deepEqual([written.width, written.height], [drawn.w, drawn.h]);
+  assert.notEqual(written.width, 170, "an edited block says what it draws");
+  assert.equal(written.sushiai?.size, undefined);
+});
+
+test("a note holds several lines and its size follows them", async () => {
+  const { parseDiagram, applyOp, serializeDiagram, noteSize } = await model;
+  const note = (text) => ({ id: "n", text, x: 0, y: 0 });
+  const one = noteSize(note("Ready?"));
+  const three = noteSize(note("First\nSecond\nThird"));
+  assert.ok(three.h >= one.h + 2 * 15);
+  const wrapped = noteSize(note("word ".repeat(60)));
+  assert.equal(wrapped.w, 280);
+  assert.ok(wrapped.h > three.h);
+  const d = parseDiagram(
+    file([
+      {
+        id: "n",
+        type: "text",
+        text: "A\nB",
+        x: 5,
+        y: 6,
+        width: 280,
+        height: 30,
+        color: "3",
+        sushiai: { note: true },
+      },
+    ]),
+  ).diagram;
+  assert.equal(d.notes[0].text, "A\nB");
+  const edited = applyOp(d, {
+    op: "set",
+    id: "n",
+    field: "text",
+    value: "x\ny\nz",
+  });
+  const saved = JSON.parse(serializeDiagram(edited)).nodes[0];
+  assert.equal(saved.text, "x\ny\nz");
+  assert.deepEqual(
+    [saved.width, saved.height],
+    [noteSize(edited.notes[0]).w, noteSize(edited.notes[0]).h],
+  );
+  assert.deepEqual(
+    parseDiagram(serializeDiagram(edited)).diagram.notes,
+    edited.notes,
+  );
+});
+
+test("an arrow at the start only is a direction of its own and round-trips", async () => {
+  const { parseDiagram, applyOp, serializeDiagram } = await model;
+  const link = (extra) => ({ id: "e", fromNode: "a", toNode: "b", ...extra });
+  const read = (extra) =>
+    parseDiagram(
+      file([textNode("a"), textNode("b", { x: 300 })], [link(extra)]),
+    ).diagram;
+  const d = read({ fromEnd: "arrow", toEnd: "none" });
+  assert.equal(d.edges[0].arrow, "start");
+  assert.equal(d.edges[0]._jc, undefined);
+  const saved = JSON.parse(serializeDiagram(d)).edges[0];
+  assert.deepEqual([saved.fromEnd, saved.toEnd], ["arrow", "none"]);
+  assert.equal(read({}).edges[0].arrow, undefined);
+  assert.equal(read({ toEnd: "none" }).edges[0].arrow, "none");
+  const set = applyOp(read({}), {
+    op: "set",
+    id: "e",
+    field: "arrow",
+    value: "start",
+  });
+  assert.equal(set.edges[0].arrow, "start");
+});
+
+const chip = (spot, text) => {
+  const w = text.length * 6 + 10;
+  return spot.vertical
+    ? { x: spot.flip ? spot.x - 6 - w : spot.x + 6, y: spot.y - 8, w, h: 16 }
+    : { x: spot.x - w / 2, y: spot.flip ? spot.y + 6 : spot.y - 22, w, h: 16 };
+};
+const apart = (a, b) =>
+  a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+
+test("labels of two edges between the same blocks never overlap each other or a head", async () => {
+  const { placeLabels } = await model;
+  const routes = [
+    {
+      id: "ab",
+      text: "request",
+      points: [
+        { x: 170, y: 22 },
+        { x: 300, y: 22 },
+      ],
+    },
+    {
+      id: "ba",
+      text: "response",
+      points: [
+        { x: 300, y: 38 },
+        { x: 170, y: 38 },
+      ],
+    },
+  ];
+  const spots = placeLabels(routes, []);
+  const a = chip(spots.get("ab"), "request");
+  const b = chip(spots.get("ba"), "response");
+  assert.ok(apart(a, b), "chips apart");
+  for (const head of [
+    { x: 290, y: 12, w: 20, h: 20 },
+    { x: 160, y: 28, w: 20, h: 20 },
+  ]) {
+    assert.ok(apart(a, head) && apart(b, head), "clear of the arrowheads");
+  }
+  for (const line of [22, 38]) {
+    for (const c of [a, b]) {
+      assert.ok(
+        c.y + c.h <= line || c.y >= line,
+        "chip does not sit on a line",
+      );
+    }
+  }
+});
+
+test("a label slides off a block and off the end segment's arrowhead", async () => {
+  const { placeLabels } = await model;
+  const points = [
+    { x: 0, y: 100 },
+    { x: 200, y: 100 },
+  ];
+  const block = { x: 60, y: 60, w: 80, h: 30 };
+  const spot = placeLabels([{ id: "e", text: "go", points }], [block]).get("e");
+  const c = chip(spot, "go");
+  assert.ok(apart(c, block));
+  assert.ok(apart(c, { x: 190, y: 90, w: 20, h: 20 }));
+});
+
+const pairBetween = (gap) => {
+  const left = { x: 0, y: 0, w: 170, h: 62 };
+  const right = { x: 170 + gap, y: 0, w: 170, h: 62 };
+  const routes = [
+    {
+      id: "ab",
+      text: "cache lookup",
+      points: [
+        { x: 170, y: 22 },
+        { x: 170 + gap, y: 22 },
+      ],
+    },
+    {
+      id: "ba",
+      text: "cached session",
+      points: [
+        { x: 170 + gap, y: 38 },
+        { x: 170, y: 38 },
+      ],
+    },
+  ];
+  return { blocks: [left, right], routes };
+};
+
+test("antiparallel labels between blocks 100 px apart touch no block, one out each side", async () => {
+  const { placeLabels } = await model;
+  const { blocks, routes } = pairBetween(100);
+  const spots = placeLabels(routes, blocks);
+  const a = chip(spots.get("ab"), "cache lookup");
+  const b = chip(spots.get("ba"), "cached session");
+  for (const c of [a, b]) {
+    for (const block of blocks) assert.ok(apart(c, block), "clear of blocks");
+  }
+  assert.ok(apart(a, b));
+  assert.ok(a.y + a.h <= 22, "the top label is above the top line");
+  assert.ok(b.y >= 38, "the bottom label is below the bottom line");
+});
+
+test("when a gap is too narrow a label stays centred on it, not half under a block", async () => {
+  const { placeLabels } = await model;
+  const { blocks, routes } = pairBetween(60);
+  const spots = placeLabels(routes, blocks);
+  for (const id of ["ab", "ba"]) {
+    assert.equal(spots.get(id).x, 200, `${id} sits on the middle of the run`);
+  }
+  const a = chip(spots.get("ab"), "cache lookup");
+  const b = chip(spots.get("ba"), "cached session");
+  assert.ok(apart(a, b));
+});
+
+test("a note keeps the file's width and height through an unrelated edit, until its text is edited", async () => {
+  const { parseDiagram, applyOps, serializeDiagram, noteSize } = await model;
+  const note = {
+    id: "n",
+    type: "text",
+    text: "note\ntwo",
+    x: 5,
+    y: 6,
+    width: 280,
+    height: 30,
+    color: "3",
+    sushiai: { note: true },
+  };
+  const text = file([note, textNode("b", { x: 400 })]);
+  const d = parseDiagram(text).diagram;
+  const moved = applyOps(d, [{ op: "move", id: "b", x: 500, y: 0 }]);
+  const saved = JSON.parse(serializeDiagram(moved)).nodes[0];
+  assert.deepEqual(saved, note);
+  assert.ok(noteSize(d.notes[0]).h !== 30, "it still draws the fitted size");
+  const edited = applyOps(d, [
+    { op: "set", id: "n", field: "text", value: "a\nb\nc" },
+  ]);
+  const out = JSON.parse(serializeDiagram(edited)).nodes[0];
+  const fit = noteSize(edited.notes[0]);
+  assert.deepEqual([out.width, out.height], [fit.w, fit.h]);
 });

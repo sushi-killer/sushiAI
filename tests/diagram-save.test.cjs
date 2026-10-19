@@ -230,6 +230,42 @@ test("an agent write overwritten before the next poll still re-arms the notice",
   assert.equal(notice.saved("h4", "h3"), false);
 });
 
+test("a poll that sees an owner write before its reply arrives sends no second notice", async () => {
+  const { createEditNotice } = await save;
+  const notice = createEditNotice("h0");
+  const sent = [];
+  let hash = "h0";
+  for (let i = 1; i <= 5; i++) {
+    notice.saving(hash);
+    notice.polled(`h${i}`);
+    sent.push(notice.saved(`h${i}`, hash));
+    hash = `h${i}`;
+  }
+  assert.deepEqual(sent, [true, false, false, false, false]);
+});
+
+test("a write by the agent polled during an owner save re-arms the notice", async () => {
+  const { createEditNotice } = await save;
+  const notice = createEditNotice("h0");
+  notice.saving("h0");
+  assert.equal(notice.saved("h1", "h0"), true);
+  notice.saving("h1");
+  notice.polled("agent-1");
+  assert.equal(notice.saved("h2", "h1"), true);
+});
+
+test("an agent write polled after a failed owner save re-arms the notice at once", async () => {
+  const { createEditNotice } = await save;
+  const notice = createEditNotice("h0");
+  notice.saving("h0");
+  assert.equal(notice.saved("h1", "h0"), true);
+  notice.saving("h1");
+  notice.failed();
+  notice.polled("agent-1");
+  notice.saving("agent-1");
+  assert.equal(notice.saved("h2", "agent-1"), true);
+});
+
 test("saveOps returns the hash it read", async () => {
   const { saveOps } = await save;
   const d = disk(file());

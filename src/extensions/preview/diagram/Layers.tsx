@@ -1,3 +1,4 @@
+import type { LabelSpot } from "./model.ts";
 import { NodeCard } from "./NodeCard.tsx";
 import { GroupBox, NotePin } from "./Parts.tsx";
 import type {
@@ -8,6 +9,7 @@ import type {
   Picked,
   Point,
   Rect,
+  Size,
 } from "./types.ts";
 import type { SaveStatus } from "./useDiagramSave.ts";
 
@@ -100,10 +102,10 @@ export function HeadsSvg(props: {
         const cls = `dg-edge${edge.style === "guess" ? " guess" : ""}${props.isOn("edge", edge.id) ? " selected" : ""}`;
         return (
           <g key={edge.id} className={cls}>
-            {edge.arrow !== "none" && (
+            {edge.arrow !== "none" && edge.arrow !== "start" && (
               <path d={arrow(points[n - 2], points[n - 1])} className="head" />
             )}
-            {edge.arrow === "both" && (
+            {(edge.arrow === "both" || edge.arrow === "start") && (
               <path d={arrow(points[1], points[0])} className="head" />
             )}
           </g>
@@ -118,9 +120,11 @@ export function BoardItems(props: {
   groups: Map<string, Rect>;
   edges: {
     edge: DiagramEdge;
-    label: { x: number; y: number; vertical: boolean };
+    label: LabelSpot;
   }[];
   shownPos: Map<string, Point>;
+  /** Live sizes of blocks being resized. */
+  sizes: Map<string, Size>;
   noteAt: (id: string, x: number, y: number) => Point;
   isOn: IsOn;
   renaming: string;
@@ -150,18 +154,6 @@ export function BoardItems(props: {
           )
         );
       })}
-      {props.edges.map(
-        ({ edge, label }) =>
-          edge.label && (
-            <span
-              key={edge.id}
-              className={`dg-label${label.vertical ? " vertical" : ""}${edge.style === "guess" ? " guess" : ""}`}
-              style={{ left: label.x, top: label.y }}
-            >
-              {edge.label}
-            </span>
-          ),
-      )}
       {diagram.nodes.map((node) => {
         const at = props.shownPos.get(node.id);
         return (
@@ -170,6 +162,7 @@ export function BoardItems(props: {
               key={node.id}
               node={node}
               at={at}
+              size={props.sizes.get(node.id)}
               selected={on("node", node.id)}
               renaming={renaming === node.id}
               onRename={(title) => {
@@ -191,6 +184,19 @@ export function BoardItems(props: {
           )
         );
       })}
+      {/* Above the blocks, so a block never hides a label. */}
+      {props.edges.map(
+        ({ edge, label }) =>
+          edge.label && (
+            <span
+              key={edge.id}
+              className={`dg-label${label.vertical ? " vertical" : ""}${label.flip ? " flip" : ""}${edge.style === "guess" ? " guess" : ""}`}
+              style={{ left: label.x, top: label.y }}
+            >
+              {edge.label}
+            </span>
+          ),
+      )}
       {diagram.notes.map((note) => (
         <NotePin
           key={note.id}

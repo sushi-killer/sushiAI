@@ -1,8 +1,8 @@
 import { iconFor, toneOf } from "./icons.ts";
-import { nodeSize, presetOf } from "./model.ts";
+import { kindOf, nodeSize } from "./model.ts";
 import { RenameInput } from "./Parts.tsx";
 import { SHAPES } from "./types.ts";
-import type { DiagramNode, Point, Shape } from "./types.ts";
+import type { DiagramNode, Point, Shape, Size } from "./types.ts";
 
 const CYL_RY = 8;
 
@@ -61,6 +61,8 @@ function Outline(props: { shape: Shape; w: number; h: number; delta: string }) {
 export function NodeCard(props: {
   node: DiagramNode;
   at: Point;
+  /** Overrides the size while the block is being resized. */
+  size?: Size;
   selected: boolean;
   renaming: boolean;
   onRename: (title: string | null) => void;
@@ -69,14 +71,11 @@ export function NodeCard(props: {
 }) {
   const { node, at, selected, renaming } = props;
   const shape = shapeOf(node);
-  const { w, h } = nodeSize(node);
-  const { icon, caption: preset } = presetOf(node);
-  const caption =
-    preset === "Step" && node.step !== undefined ? undefined : preset;
+  const { w, h } = props.size ?? nodeSize(node);
+  const { icon, caption, tag } = kindOf(node);
   const Icon = iconFor(icon);
   const delta = node.delta;
   const proposed = node.status === "proposed";
-  const tag = proposed ? "proposed" : delta;
   const tone = toneOf(icon);
   const outside =
     shape === "diamond" || shape === "circle" || shape === "person";
@@ -177,6 +176,14 @@ export function NodeCard(props: {
           data-port={node.id}
         />
       ))}
+      {selected && (
+        <span
+          className="dg-resize"
+          style={{ left: w - 4, top: h - 4 }}
+          data-node-resize={node.id}
+          aria-label={`Resize ${node.title}`}
+        />
+      )}
       {proposed && selected && (
         <div className="dg-bar" style={{ top: h + 6 }}>
           <button type="button" onClick={props.onAccept}>

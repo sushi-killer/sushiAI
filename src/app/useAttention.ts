@@ -34,8 +34,7 @@ export function useAttention({
   selected,
   zoomed,
   switchWorkspace,
-  setSelected,
-  setZoomed,
+  revealPane,
 }: {
   workspaces: Workspace[];
   connectionProfiles: ConnectionProfile[];
@@ -45,8 +44,7 @@ export function useAttention({
   selected: string;
   zoomed: string | null;
   switchWorkspace(id: string): void;
-  setSelected(id: string): void;
-  setZoomed(id: string | null): void;
+  revealPane(workspaceId: string, panelId: string): void;
 }) {
   // Modules put rows in the Inbox. `moduleUis` is a constant list, so the
   // hooks below run in the same order on every render.
@@ -160,10 +158,9 @@ export function useAttention({
     () =>
       window.bridge?.onAttentionOpen((target) => {
         switchWorkspace(target.workspaceId);
-        setSelected(target.panelId);
-        setZoomed(target.panelId);
+        revealPane(target.workspaceId, target.panelId);
       }),
-    [switchWorkspace, setSelected, setZoomed],
+    [switchWorkspace, revealPane],
   );
 
   return {

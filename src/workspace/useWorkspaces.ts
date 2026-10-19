@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { contains, leaf, remove, resize, split, uid } from "../layout.ts";
+import { contains, leafIds, remove, resize, uid } from "../layout.ts";
 import { initialWorkspace } from "../workspaceState.ts";
 import {
   LOCAL_ENDPOINT,
@@ -28,6 +28,8 @@ import {
 } from "../app/projects.ts";
 import {
   appendPanel,
+  revealPanel,
+  withPanel,
   findPanelOwner,
   fixSelection,
   groupPanelIds,
@@ -227,13 +229,23 @@ export function useWorkspaces({
   /** "Hide only": drop the pane from the layout but leave its process running.
    * The session and the transcript are untouched. */
   function hidePanel(workspaceId: string, panelId: string) {
-    updateWorkspace(workspaceId, (w) => ({
-      ...w,
-      layout: remove(w.layout, panelId),
-    }));
+    const owner = workspacesRef.current.find((w) => w.id === workspaceId);
+    const layout = remove(owner?.layout ?? null, panelId);
+    updateWorkspace(workspaceId, (w) => ({ ...w, layout }));
     disposeTerminal(panelId);
     setZoomed(null);
+    setSelected((id) => (id === panelId ? leafIds(layout)[0] || "" : id));
   }
+  /** Puts a listed pane back on its workspace's canvas, selected and focused:
+   * the one way the sidebar, Inbox, attention and modules show a pane. */
+  const revealPane = useCallback(
+    (workspaceId: string, panelId: string) => {
+      updateWorkspace(workspaceId, (w) => revealPanel(w, panelId));
+      setSelected(panelId);
+      setZoomed(panelId);
+    },
+    [updateWorkspace],
+  );
   /** Renames a workspace. The name is the desktop's; daemons learn it with the
    * catalog sync, which is not part of this slice. */
   async function renameWorkspace(workspaceId: string, name: string) {
@@ -597,12 +609,7 @@ export function useWorkspaces({
   );
   function showPanel(panel: Panel) {
     showWorkspace();
-    setSelected(panel.id);
-    setZoomed(panel.id);
-    updateWorkspace(active.id, (w) => ({
-      ...w,
-      layout: w.layout || leaf(panel.id),
-    }));
+    revealPane(active.id, panel.id);
   }
   const drop = useCallback(
     (target: string, edge: string) => {
@@ -796,9 +803,7 @@ export function useWorkspaces({
       updateWorkspace(current.id, (w) => ({
         ...w,
         panels: [...w.panels, panel],
-        layout: w.layout
-          ? split(w.layout, leaf(panel.id), "row", 0.55)
-          : leaf(panel.id),
+        layout: withPanel(w.layout, panel.id, 0.55),
       }));
       setSelected(panel.id);
       setZoomed(panel.id);
@@ -837,6 +842,7 @@ export function useWorkspaces({
     selectWorkspace,
     insertPanel,
     hidePanel,
+    revealPane,
     renameWorkspace,
     createWorkspace,
     addPanel,

@@ -61,6 +61,7 @@ function render({ cwd = "/tmp/project", git } = {}) {
       panel,
       workspaces: [workspace],
       projectGit: git ? { [workspace.id]: git } : {},
+      hidePanel: () => {},
       endSessions: async () => {},
       onClose: () => {},
     }),
@@ -94,9 +95,7 @@ test("close dialog waits for PR status before enabling session end", () => {
   assert.match(markup, /<button class="ui-button danger" disabled="">/);
 });
 
-test("close dialog offers only Close session and Cancel", () => {
+test("close dialog offers Cancel, Hide and Close session", () => {
   const markup = render({ git: { linkedWorktree: false } });
-  assert.match(markup, />Cancel</);
-  assert.match(markup, />Close session</);
-  assert.doesNotMatch(markup, /Hide only/);
+  assert.match(markup, />Cancel<.*>Hide<.*>Close session</s);
 });

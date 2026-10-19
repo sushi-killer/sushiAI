@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { LOCAL_ENDPOINT } from "../daemonSessions.ts";
-import { contains, leaf, split, uid } from "../layout.ts";
+import { contains, uid } from "../layout.ts";
 import type { Panel, Workspace } from "../types.ts";
 import type { WorkspaceController } from "../workspace/useWorkspaces.ts";
 import { moduleUis, type ModuleShell } from "./modules.ts";
@@ -119,18 +119,7 @@ export function useModuleShell(inputs: Inputs) {
       if (place.kind === "reveal") {
         const { panel, workspaceId } = place;
         latest.current.switchWorkspace(workspaceId);
-        ws.updateWorkspace(workspaceId, (workspace) =>
-          contains(workspace.layout, panel.id)
-            ? workspace
-            : {
-                ...workspace,
-                layout: workspace.layout
-                  ? split(workspace.layout, leaf(panel.id), "row", 0.65)
-                  : leaf(panel.id),
-              },
-        );
-        ws.setSelected(panel.id);
-        ws.setZoomed(panel.id);
+        ws.revealPane(workspaceId, panel.id);
         return;
       }
       try {

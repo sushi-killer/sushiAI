@@ -147,8 +147,7 @@ export function App() {
     selected,
     zoomed,
     switchWorkspace,
-    setSelected,
-    setZoomed,
+    revealPane: ws.revealPane,
   });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
@@ -193,8 +192,7 @@ export function App() {
   );
   function selectHostPane(workspace: Workspace, panel: Panel) {
     switchWorkspace(workspace.id);
-    setSelected(panel.id);
-    setZoomed(panel.id);
+    ws.revealPane(workspace.id, panel.id);
   }
   const primaryExtensionNavigation = primaryNavigation(extensionRegistry);
   const openPanelPicker = useCallback(() => setDialog({ kind: "pane" }), []);
@@ -479,6 +477,7 @@ export function App() {
               panel={target.panel}
               workspaces={workspaces}
               projectGit={projectGit}
+              hidePanel={ws.hidePanel}
               endSessions={endSessions}
               onClose={closeDialog}
             />

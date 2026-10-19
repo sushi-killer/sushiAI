@@ -631,3 +631,37 @@ test("rename, close and reopen map a panel onto daemon calls", async () => {
   );
   assert.equal(launched.cwd, "/tmp");
 });
+
+test("withPanel puts a hidden panel back on the canvas once", async () => {
+  const { withPanel } = await library;
+  const { leaf, leafIds } = await layoutLibrary;
+  assert.deepEqual(withPanel(null, "a"), leaf("a"));
+  const shown = withPanel(leaf("a"), "b");
+  assert.deepEqual(leafIds(shown), ["a", "b"]);
+  assert.equal(withPanel(shown, "b"), shown);
+});
+
+test("revealPanel puts a hidden pane back and leaves a chat thread alone", async () => {
+  const { revealPanel } = await library;
+  const { contains, leafIds } = await layoutLibrary;
+  const before = await workspace(
+    [panel("a"), panel("hidden"), panel("thread", "chat")],
+    ["a"],
+  );
+  const shown = revealPanel(before, "hidden");
+  assert.deepEqual(leafIds(shown.layout), ["a", "hidden"]);
+  assert.equal(revealPanel(shown, "hidden"), shown);
+  assert.equal(revealPanel(before, "thread"), before);
+  assert.equal(revealPanel(before, "missing"), before);
+  assert.equal(contains(before.layout, "hidden"), false);
+});
+
+test("tidyWorkspace keeps a hidden pane off the canvas", async () => {
+  const { tidyWorkspace } = await library;
+  const { leafIds } = await layoutLibrary;
+  const before = await workspace(
+    [panel("a"), panel("hidden"), panel("b")],
+    ["a", "b"],
+  );
+  assert.deepEqual(leafIds(tidyWorkspace(before).layout).sort(), ["a", "b"]);
+});

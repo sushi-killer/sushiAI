@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use sushiai_agents::heuristic::{self, ScreenAgent};
+use sushiai_agents::harness;
 use sushiai_agents::hooks::{self, HookEvent};
-use sushiai_agents::status::{Detected, ExitInfo, Input, SessionStatus as AgentState, Status};
+use sushiai_agents::status::{ExitInfo, Input, SessionStatus as AgentState, Status};
 use sushiai_core::hibernate::{can_hibernate, decide, BusyMeter, Candidate, Decision};
 use sushiai_core::{mark_exited, mark_hibernated, Screen, SCROLLBACK_LINES};
 use sushiai_protocol::{
@@ -319,8 +319,8 @@ struct Actor {
     attaching: Option<u64>,
     /// A close asked for while detached: sent once the holder is reachable again.
     close_pending: Option<bool>,
-    /// Which screen heuristic reads this session, if any.
-    screen_agent: Option<ScreenAgent>,
+    /// The screen rules of the agent that has no usable hooks, if any.
+    screen_agent: Option<harness::screen::Screen>,
     /// When the screen was last read, and when the next read is due after output was held back.
     screen_read: Option<Instant>,
     screen_due: Option<Instant>,
@@ -414,8 +414,9 @@ fn spawn_actor(
         registry.announce_created(&info.id);
     }
     registry.set_handle(&info.id, handle.clone());
-    let watch_foreground = agent::agent_of(info_name.as_deref()).is_none()
-        && agent::screen_agent_of(info_name.as_deref()).is_none();
+    let screen_agent = harness::screen_of(info_name.as_deref());
+    let watch_foreground =
+        agent::agent_of(info_name.as_deref()).is_none() && screen_agent.is_none();
     let child = holder
         .as_ref()
         .and_then(|h| foreground::child_pid(h.child_pid, info.holder_pid));
@@ -436,7 +437,7 @@ fn spawn_actor(
         retry: None,
         attaching: None,
         close_pending: None,
-        screen_agent: agent::screen_agent_of(info_name.as_deref()),
+        screen_agent,
         screen_read: None,
         screen_due: None,
         child,
@@ -473,9 +474,9 @@ fn spawn_actor(
 /// previous daemon, so the machine is told the ask went back to the terminal.
 fn restore_agent(info: &SessionInfo) -> Option<Agent> {
     // A screen-only agent has a status in its record; any other plain command has none.
+    let reads_screen = harness::screen_of(info.agent.name.as_deref()).is_some();
     if agent::agent_of(info.agent.name.as_deref()).is_none()
-        && (agent::screen_agent_of(info.agent.name.as_deref()).is_none()
-            || info.agent.agent_status.is_none())
+        && (!reads_screen || info.agent.agent_status.is_none())
     {
         return None;
     }
@@ -1301,30 +1302,19 @@ impl Actor {
         }
     }
 
-    /// Reads the screen with the agent's heuristic. The state machine ignores it while hooks
+    /// Reads the screen with the agent's own rules. The state machine ignores it while hooks
     /// drive the status, so a hook status always wins. Codex dialogs only ever block; for the
     /// others a quiet screen with text on it means the agent waits for the owner.
     fn read_screen(&mut self) {
         self.screen_due = None;
         self.screen_read = Some(Instant::now());
-        let (Some(kind), Some(agent)) = (self.screen_agent, self.agent.as_mut()) else {
+        let (Some(screen), Some(agent)) = (self.screen_agent, self.agent.as_mut()) else {
             return;
         };
         let text = self.screen.text();
         let lines: Vec<&str> = text.lines().collect();
-        let seen = match (heuristic::detect(kind, &lines), kind) {
-            (Some(blocked @ Detected::Blocked(_)), _) => Some(blocked),
-            (Some(_), ScreenAgent::Codex) => None,
-            (Some(other), _) => Some(other),
-            (None, ScreenAgent::Codex) => {
-                (agent.status.status == Status::Blocked).then_some(Detected::Idle)
-            }
-            (None, _) => lines
-                .iter()
-                .any(|l| !l.trim().is_empty())
-                .then_some(Detected::Idle),
-        };
-        if let Some(seen) = seen {
+        let blocked = agent.status.status == Status::Blocked;
+        if let Some(seen) = screen.read(&lines, blocked) {
             agent.status.apply(Input::Screen(seen), now_ms());
             self.publish();
         }

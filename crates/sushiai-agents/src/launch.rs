@@ -8,7 +8,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::Agent;
+use crate::harness::Agent;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LaunchError {

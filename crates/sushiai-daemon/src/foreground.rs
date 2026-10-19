@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use crate::agent::AGENT_NAMES;
+use sushiai_agents::harness;
 
 /// Programs that run an agent as a script (`node .../codex.js`).
 const INTERPRETERS: &[&str] = &["node", "nodejs", "bun", "deno"];
@@ -16,7 +16,9 @@ const INTERPRETERS: &[&str] = &["node", "nodejs", "bun", "deno"];
 /// The variables of the agent's process that say where its files are.
 const WANTED_ENV: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"];
 
-/// The npm package directory an agent's script lives in.
+/// The npm package directory an agent's script lives in. This is still a per-agent table the
+/// daemon owns, so a new agent is not yet one file for `agent_in` (its session lookup moves in
+/// a later step).
 fn package_dir(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("node_modules/@anthropic-ai/claude-code/"),
@@ -36,7 +38,7 @@ fn basename(path: &str) -> &str {
 /// `claude-monitor` or `node claude-api-demo/server.js` are not.
 pub fn agent_in(argv: &[String]) -> Option<&'static str> {
     let base = basename(argv.first()?);
-    if let Some(found) = AGENT_NAMES.iter().copied().find(|a| *a == base) {
+    if let Some(found) = harness::process_names().find(|a| *a == base) {
         return Some(found);
     }
     if !INTERPRETERS.contains(&base) {
@@ -48,7 +50,7 @@ pub fn agent_in(argv: &[String]) -> Option<&'static str> {
         script = args.next()?;
     }
     let file = basename(script);
-    AGENT_NAMES.iter().copied().find(|a| {
+    harness::process_names().find(|a| {
         file == *a
             || [".js", ".mjs", ".cjs"]
                 .iter()

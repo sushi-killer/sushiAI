@@ -5,10 +5,9 @@ use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use sushiai_agents::heuristic::ScreenAgent;
+use sushiai_agents::harness::{self, Agent};
 use sushiai_agents::launch::{self, AgentSession, LaunchParams};
 use sushiai_agents::status::{Status, StatusSource as AgentSource};
-use sushiai_agents::Agent;
 use sushiai_protocol::{code, AgentInfo, AgentStatus, Decision, SessionCreate, StatusSource};
 
 use crate::error::Fail;
@@ -56,27 +55,10 @@ fn uuid_v4() -> std::io::Result<String> {
     ))
 }
 
-/// Every agent name the daemon knows. The foreground detection of a hand-started agent
-/// matches these and no others.
-pub const AGENT_NAMES: &[&str] = &["claude", "codex", "gemini", "cursor-agent"];
-
+/// The launch id of an agent whose sessions the daemon starts with hooks: `claude` and
+/// `codex`. Every other name (gemini, cursor-agent, shell, unknown) is a plain command.
 pub fn agent_of(name: Option<&str>) -> Option<Agent> {
-    match name {
-        Some("claude") => Some(Agent::Claude),
-        Some("codex") => Some(Agent::Codex),
-        _ => None,
-    }
-}
-
-/// The screen heuristic that reads an agent's status: `gemini` and `cursor-agent` send no
-/// hooks at all, and Codex shows some dialogs no hook reports.
-pub fn screen_agent_of(name: Option<&str>) -> Option<ScreenAgent> {
-    match name {
-        Some("gemini") => Some(ScreenAgent::Gemini),
-        Some("cursor-agent") => Some(ScreenAgent::Cursor),
-        Some("codex") => Some(ScreenAgent::Codex),
-        _ => None,
-    }
+    harness::find(name?).and_then(|h| h.agent())
 }
 
 pub fn status_to_wire(s: Status) -> AgentStatus {
@@ -148,10 +130,11 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
             return Err(invalid("cmd, cols and rows are required"));
         }
         // An agent without hooks starts with a screen-read status.
-        let screen_only = matches!(
-            screen_agent_of(p.agent.as_deref()),
-            Some(ScreenAgent::Gemini | ScreenAgent::Cursor)
-        );
+        let screen_only = p
+            .agent
+            .as_deref()
+            .and_then(harness::find)
+            .is_some_and(|h| h.screen().is_some() && h.agent().is_none());
         let agent = AgentInfo {
             name: p.agent.clone(),
             agent_status: screen_only.then_some(AgentStatus::Starting),

@@ -5,12 +5,12 @@ use std::fs;
 
 use serde_json::{json, Value};
 use sushiai_agents::codex_hooks::{install, is_ours, merge, remove, uninstall};
+use sushiai_agents::harness::Agent;
 use sushiai_agents::hooks::parse;
 use sushiai_agents::launch::{
     build, claude_settings, permission_timeout, AgentSession, LaunchError, LaunchParams,
 };
 use sushiai_agents::status::{BlockedKind, ExitInfo, Input, SessionStatus, Status, StatusSource};
-use sushiai_agents::Agent;
 
 const BIN: &str = "/home/user/.sushiai/bin/sushiai";
 

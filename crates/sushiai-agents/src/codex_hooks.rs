@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
+use crate::harness::Agent;
 use crate::launch::{hook_command, permission_timeout, require_absolute, LaunchError};
-use crate::Agent;
 
 /// (Codex event, hook argument, timeout seconds; 0 = the permission timeout). SessionEnd and Interrupt
 /// have a 1-3 s budget on the Codex side, so the entry asks for little.

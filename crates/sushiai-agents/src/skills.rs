@@ -1,16 +1,15 @@
-//! Skills for Claude Code and Codex: the one table of skill folders, the scan of them, and the
-//! install and removal of a skill sushiAI ships. Nothing else in sushiAI names a skill folder:
-//! the bin wires this module to `sushiai skills` and `sushiai orch register`, and the app runs
-//! that binary.
+//! Skills for the agents in [`crate::harness`]: the scan of their skill folders and the install
+//! and removal of a skill sushiAI ships. Each agent declares its own folders, so this module
+//! names no agent; the bin wires it to `sushiai skills` and `sushiai orch register`, and the app
+//! runs that binary.
 //!
 //! Reads no environment: the caller resolves `CLAUDE_CONFIG_DIR` and `CODEX_HOME` into
 //! [`Homes`].
 //!
-//! The folders, in scan order (the first copy of a file a harness sees is its row):
-//! - Claude Code: `<claude>/skills`, `<project>/.claude/skills`, then its plugins
-//!   (`<claude>/plugins/installed_plugins.json`, switched on in `<claude>/settings.json`).
-//! - Codex: `<codex>/skills` (with its `.system` folder), `<home>/.agents/skills`,
-//!   `<project>/.agents/skills`, then its plugins (`<codex>/config.toml`).
+//! The folders, in scan order (the first copy of a file an agent sees is its row): every agent's
+//! user folders in registry order, then the project's. Claude Code adds its plugins
+//! (`<claude>/plugins/installed_plugins.json`, switched on in `<claude>/settings.json`), Codex
+//! its plugins (`<codex>/config.toml`).
 //!
 //! Codex reads both of its user folders, so a skill sushiAI installs goes into `<codex>/skills`
 //! only, and a copy of ours left in `<home>/.agents/skills` is removed. Checked against
@@ -25,6 +24,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use crate::harness::{
+    self, registry, DisabledBy, HarnessRef, Homes, Scope, SkillConfigs, SkillFacts, Source,
+};
 
 const SKILL_FILE: &str = "SKILL.md";
 /// How deep a plugin's `skills` folder is searched.
@@ -46,77 +49,6 @@ const SCAN_SKIP: [&str; 10] = [
     "debug",
 ];
 
-/// The folders the skill folders hang off.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Homes {
-    /// The user's home, for `~/.agents/skills`.
-    pub home: PathBuf,
-    /// Claude Code's folder (`CLAUDE_CONFIG_DIR`, default `~/.claude`).
-    pub claude: PathBuf,
-    /// Codex's home (`CODEX_HOME`, default `~/.codex`).
-    pub codex: PathBuf,
-}
-
-impl Homes {
-    /// The default folders under `home`, each replaced by the tool's own setting when given.
-    pub fn new(home: &Path, claude: Option<PathBuf>, codex: Option<PathBuf>) -> Homes {
-        Homes {
-            home: home.to_path_buf(),
-            claude: claude.unwrap_or_else(|| home.join(".claude")),
-            codex: codex.unwrap_or_else(|| home.join(".codex")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum Harness {
-    #[serde(rename = "Claude Code")]
-    Claude,
-    Codex,
-}
-
-/// Every harness whose skills sushiAI lists and installs.
-pub const HARNESSES: [Harness; 2] = [Harness::Claude, Harness::Codex];
-
-impl Harness {
-    /// The short id routines use (`claude`, `codex`).
-    pub fn id(self) -> &'static str {
-        match self {
-            Harness::Claude => "claude",
-            Harness::Codex => "codex",
-        }
-    }
-
-    /// The provider name of the app's settings.
-    pub fn provider(self) -> &'static str {
-        match self {
-            Harness::Claude => "Claude",
-            Harness::Codex => "Codex",
-        }
-    }
-
-    /// The tool's own folder; nothing is installed for a tool without one.
-    fn home(self, homes: &Homes) -> &Path {
-        match self {
-            Harness::Claude => &homes.claude,
-            Harness::Codex => &homes.codex,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    User,
-    Project,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum Source {
-    Local,
-    Plugin,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Availability {
@@ -124,51 +56,32 @@ pub enum Availability {
     Disabled,
 }
 
-/// What switched a skill off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DisabledBy {
-    /// Its plugin is off.
-    Provider,
-    /// A Codex `[[skills.config]]` entry with `enabled = false`.
-    SkillConfig,
-    /// A Claude `skillOverrides` entry `"off"`.
-    SkillOverride,
-}
-
-/// One folder of skills.
+/// One skill folder of one agent, with the agent that reads it.
 struct Root {
-    harness: Harness,
+    harness: HarnessRef,
     scope: Scope,
     dir: PathBuf,
+    hidden: bool,
 }
 
-/// The one table of skill folders. The first user folder of a harness is where it installs.
-fn roots(homes: &Homes, project: Option<&Path>) -> Vec<Root> {
-    let root = |harness, scope, dir: PathBuf| Root {
-        harness,
-        scope,
-        dir: dir.join("skills"),
-    };
-    let mut roots = vec![
-        root(Harness::Claude, Scope::User, homes.claude.clone()),
-        root(Harness::Codex, Scope::User, homes.codex.clone()),
-        root(Harness::Codex, Scope::User, homes.home.join(".agents")),
-    ];
-    if let Some(p) = project {
-        roots.push(root(Harness::Claude, Scope::Project, p.join(".claude")));
-        roots.push(root(Harness::Codex, Scope::Project, p.join(".agents")));
+/// Every skill folder to scan: the user folders of every agent in registry order first (the
+/// first is where [`install`] writes), then the project's. The order is load-bearing — the
+/// first copy of a file wins the row.
+fn skill_folders(homes: &Homes, project: Option<&Path>) -> Vec<Root> {
+    let mut all: Vec<Root> = Vec::new();
+    for harness in registry() {
+        for root in harness.skills_roots(homes, project) {
+            all.push(Root {
+                harness: *harness,
+                scope: root.scope,
+                dir: root.dir,
+                hidden: root.hidden,
+            });
+        }
     }
-    roots
-}
-
-/// The user folders of one harness, the install folder first.
-fn user_roots(homes: &Homes, harness: Harness) -> Vec<PathBuf> {
-    roots(homes, None)
-        .into_iter()
-        .filter(|r| r.harness == harness)
-        .map(|r| r.dir)
-        .collect()
+    let (user, project): (Vec<Root>, Vec<Root>) =
+        all.into_iter().partition(|r| r.scope == Scope::User);
+    user.into_iter().chain(project).collect()
 }
 
 /// One skill as a harness sees it.
@@ -177,7 +90,7 @@ fn user_roots(homes: &Homes, harness: Harness) -> Vec<PathBuf> {
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub harness: Harness,
+    pub harness: HarnessRef,
     pub provider: &'static str,
     pub source: Source,
     pub scope: Scope,
@@ -237,34 +150,37 @@ impl Skill {
 
 /// Where a skill was found and what switches it on.
 struct Origin<'a> {
-    harness: Harness,
+    harness: HarnessRef,
     scope: Scope,
     source: Source,
     root: &'a Path,
     plugin: Option<&'a Plugin>,
+    /// Keep a hidden top-level folder inside this one (Codex's `.system`).
+    hidden: bool,
 }
 
 /// An installed plugin folder.
 struct Plugin {
-    harness: Harness,
+    harness: HarnessRef,
     key: String,
     root: PathBuf,
     enabled: bool,
     scope: Option<String>,
 }
 
-/// Every skill Claude Code and Codex see here: their skill folders (and the project's, when
-/// given) and their plugins. A file linked into several folders of one harness is one row;
-/// a row is a duplicate only when its harness sees another active skill of the same name.
+/// Every skill the agents in the registry see here: their skill folders (and the project's,
+/// when given) and their plugins. A file linked into several folders of one agent is one row;
+/// a row is a duplicate only when its agent sees another active skill of the same name.
 pub fn scan(homes: &Homes, project: Option<&Path>) -> Vec<Skill> {
     let mut found = Vec::new();
-    for root in roots(homes, project) {
+    for root in skill_folders(homes, project) {
         let origin = Origin {
             harness: root.harness,
             scope: root.scope,
             source: Source::Local,
             root: &root.dir,
             plugin: None,
+            hidden: root.hidden,
         };
         collect_folder(&root.dir, &origin, &mut found, true);
     }
@@ -279,6 +195,7 @@ pub fn scan(homes: &Homes, project: Option<&Path>) -> Vec<Skill> {
             source: Source::Plugin,
             root: &plugin.root,
             plugin: Some(plugin),
+            hidden: false,
         };
         collect_file(&plugin.root.join(SKILL_FILE), &origin, &mut found);
         collect_tree(&plugin.root.join("skills"), &origin, &mut found);
@@ -287,20 +204,24 @@ pub fn scan(homes: &Homes, project: Option<&Path>) -> Vec<Skill> {
     let mut seen = HashSet::new();
     found.retain(|s| seen.insert((s.harness, s.real.clone())));
 
-    let overrides = claude_overrides(&claude_settings);
-    let configs = codex_skill_configs(&codex_config, homes);
+    let configs = SkillConfigs {
+        codex: codex_skill_configs(&codex_config, homes),
+        claude: claude_overrides(&claude_settings),
+    };
     for s in &mut found {
-        let config = configs
-            .get(Path::new(&s.file))
-            .or_else(|| configs.get(&s.real));
-        let off = match (s.harness, s.source) {
-            _ if s.availability == Availability::Disabled => None,
-            (Harness::Codex, _) if config == Some(&false) => Some(DisabledBy::SkillConfig),
-            (Harness::Claude, Source::Local) if overrides.contains(&normalize(&s.name)) => {
-                Some(DisabledBy::SkillOverride)
-            }
-            _ => None,
-        };
+        if s.availability == Availability::Disabled {
+            continue;
+        }
+        let name = normalize(&s.name);
+        let off = s.harness.disabled_by(
+            &SkillFacts {
+                name: &name,
+                file: &s.file,
+                real: &s.real,
+                source: s.source,
+            },
+            &configs,
+        );
         if let Some(by) = off {
             s.availability = Availability::Disabled;
             s.disabled_by = Some(by);
@@ -318,7 +239,7 @@ pub fn scan(homes: &Homes, project: Option<&Path>) -> Vec<Skill> {
 }
 
 fn mark_duplicates(found: &mut [Skill]) {
-    let mut groups: HashMap<(Harness, String), Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<(HarnessRef, String), Vec<usize>> = HashMap::new();
     for (i, s) in found.iter().enumerate() {
         if s.availability == Availability::Active {
             groups
@@ -361,8 +282,9 @@ fn file_name(path: &Path) -> String {
         .into_owned()
 }
 
-/// `<dir>/<name>/SKILL.md` for each folder in a skill folder. Hidden folders are skipped,
-/// except Codex's `.system`, which holds skills of its own.
+/// `<dir>/<name>/SKILL.md` for each folder in a skill folder. Hidden folders are skipped, except
+/// a hidden top-level folder of a root that declares one (Codex's `.system`, which holds skills
+/// of its own).
 fn collect_folder(dir: &Path, origin: &Origin, found: &mut Vec<Skill>, top: bool) {
     for entry in sorted_entries(dir) {
         let name = file_name(&entry);
@@ -370,7 +292,7 @@ fn collect_folder(dir: &Path, origin: &Origin, found: &mut Vec<Skill>, top: bool
             continue;
         }
         if name.starts_with('.') {
-            if top && name == ".system" && origin.harness == Harness::Codex {
+            if top && origin.hidden && name == ".system" {
                 collect_folder(&entry, origin, found, false);
             }
             continue;
@@ -444,7 +366,8 @@ fn collect_file(file: &Path, origin: &Origin, found: &mut Vec<Skill>) {
         name,
         description: fields.get("description").cloned().unwrap_or_default(),
         harness: origin.harness,
-        provider: origin.harness.provider(),
+        // Only an agent with skill folders has rows, and each of those names a provider.
+        provider: origin.harness.provider().unwrap_or_default(),
         source: origin.source,
         scope: origin.scope,
         availability: if plugin_off {
@@ -513,6 +436,9 @@ fn claude_overrides(settings: &Value) -> HashSet<String> {
 
 /// Claude's installed plugins: the newest installation of each, on when `enabledPlugins` says so.
 fn claude_plugins(homes: &Homes, settings: &Value) -> Vec<Plugin> {
+    let Some(claude) = harness::of_agent(harness::Agent::Claude) else {
+        return Vec::new();
+    };
     let installed = read_json(&homes.claude.join("plugins").join("installed_plugins.json"));
     let mut out = Vec::new();
     for (key, installs) in installed["plugins"].as_object().into_iter().flatten() {
@@ -535,7 +461,7 @@ fn claude_plugins(homes: &Homes, settings: &Value) -> Vec<Plugin> {
             continue;
         }
         out.push(Plugin {
-            harness: Harness::Claude,
+            harness: claude,
             key: key.clone(),
             root,
             enabled: settings["enabledPlugins"][key] == true,
@@ -560,6 +486,9 @@ fn newest_dir(dir: &Path) -> Option<PathBuf> {
 
 /// Codex's plugins in `config.toml`: its cached copy, else its marketplace folder.
 fn codex_plugins(homes: &Homes, config: &toml_edit::DocumentMut) -> Vec<Plugin> {
+    let Some(codex) = harness::of_agent(harness::Agent::Codex) else {
+        return Vec::new();
+    };
     let marketplaces = config.get("marketplaces");
     let mut out = Vec::new();
     let Some(plugins) = config.get("plugins").and_then(|p| p.as_table_like()) else {
@@ -596,7 +525,7 @@ fn codex_plugins(homes: &Homes, config: &toml_edit::DocumentMut) -> Vec<Plugin> 
             continue;
         };
         out.push(Plugin {
-            harness: Harness::Codex,
+            harness: codex,
             key: key.to_string(),
             root,
             enabled,
@@ -795,11 +724,15 @@ pub fn install(homes: &Homes, name: &str, text: &str) -> Result<Vec<Change>, Err
         return Err(Error::Text(name.into()));
     }
     let mut changes = Vec::new();
-    for harness in HARNESSES {
-        if !harness.home(homes).is_dir() {
+    for harness in registry() {
+        if !harness.home(homes).is_some_and(Path::is_dir) {
             continue;
         }
-        let user = user_roots(homes, harness);
+        let user: Vec<PathBuf> = harness
+            .skills_roots(homes, None)
+            .into_iter()
+            .map(|root| root.dir)
+            .collect();
         let Some((target, others)) = user.split_first() else {
             continue;
         };
@@ -827,14 +760,14 @@ pub fn install(homes: &Homes, name: &str, text: &str) -> Result<Vec<Change>, Err
     Ok(changes)
 }
 
-/// Removes the skill `name` from every user folder of both harnesses, wherever its SKILL.md
+/// Removes the skill `name` from every user folder of every agent, wherever its SKILL.md
 /// declares that name.
 pub fn remove(homes: &Homes, name: &str) -> Result<Vec<Change>, Error> {
     if !valid_name(name) {
         return Err(Error::Name(name.into()));
     }
     let mut changes = Vec::new();
-    for root in roots(homes, None) {
+    for root in skill_folders(homes, None) {
         remove_ours(&root.dir, name, None, &mut changes);
     }
     Ok(changes)
@@ -886,13 +819,34 @@ mod tests {
             Some(PathBuf::from("/c")),
             Some(PathBuf::from("/x")),
         );
-        let dirs: Vec<PathBuf> = roots(&h, None).into_iter().map(|r| r.dir).collect();
+        let dirs: Vec<PathBuf> = skill_folders(&h, None).into_iter().map(|r| r.dir).collect();
         assert_eq!(
             dirs,
             [
                 PathBuf::from("/c/skills"),
                 PathBuf::from("/x/skills"),
                 PathBuf::from("/u/.agents/skills"),
+            ]
+        );
+    }
+
+    /// The order is load-bearing: every user folder in registry order (the first of each agent
+    /// is where `install` writes), then the project's.
+    #[test]
+    fn every_user_folder_comes_before_the_project() {
+        let h = homes(Path::new("/u"));
+        let folders: Vec<(Scope, PathBuf)> = skill_folders(&h, Some(Path::new("/p")))
+            .into_iter()
+            .map(|r| (r.scope, r.dir))
+            .collect();
+        assert_eq!(
+            folders,
+            [
+                (Scope::User, PathBuf::from("/u/.claude/skills")),
+                (Scope::User, PathBuf::from("/u/.codex/skills")),
+                (Scope::User, PathBuf::from("/u/.agents/skills")),
+                (Scope::Project, PathBuf::from("/p/.claude/skills")),
+                (Scope::Project, PathBuf::from("/p/.agents/skills")),
             ]
         );
     }
@@ -909,21 +863,32 @@ mod tests {
             &h.claude.join("skills/.hidden/SKILL.md"),
             &skill("hidden", "x"),
         );
+        // Codex's `.system` counts at the top of every root it reads, not only its own home.
+        write(
+            &h.home.join(".agents/skills/.system/agentsys/SKILL.md"),
+            &skill("agentsys", "Agent skills"),
+        );
         let project = home.path().join("app");
         write(
             &project.join(".claude/skills/local/SKILL.md"),
             &skill("local", "Project"),
         );
+        write(
+            &project.join(".agents/skills/.system/projsys/SKILL.md"),
+            &skill("projsys", "Project system"),
+        );
         let rows = scan(&h, Some(&project));
-        let names: Vec<(&str, Harness, Scope)> = rows
+        let names: Vec<(&str, &str, Scope)> = rows
             .iter()
-            .map(|r| (r.name.as_str(), r.harness, r.scope))
+            .map(|r| (r.name.as_str(), r.harness.id(), r.scope))
             .collect();
         assert_eq!(
             names,
             [
-                ("imagegen", Harness::Codex, Scope::User),
-                ("local", Harness::Claude, Scope::Project),
+                ("agentsys", "codex", Scope::User),
+                ("imagegen", "codex", Scope::User),
+                ("local", "claude", Scope::Project),
+                ("projsys", "codex", Scope::Project),
             ]
         );
     }

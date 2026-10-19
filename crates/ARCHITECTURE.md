@@ -18,12 +18,15 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   transitions, state file model. No IO, no tokio. `Screen::resize` moves the rows a
   shorter screen would drop (above the cursor) into scrollback, as a terminal does; vt100
   alone drops the bottom rows, the newest output.
-- `sushiai-agents`: pure agent logic: hook payload parsing, the status state
-  machine, launch specs, Codex `hooks.json` merging, screen heuristics, and
-  `skills`: the one table of Claude Code and Codex skill folders, their scan
-  (catalog rows, realpath dedupe, duplicates per harness) and the install and
-  removal of a skill sushiAI ships. It reads no environment. No tokio; the only
-  IO is `codex_hooks::install`/`uninstall` and `skills`.
+- `sushiai-agents`: pure agent logic: `harness`, the one registry of agent CLIs
+  (id, label, config home, skill folders, screen rules, hook capability; one
+  file per agent, `shell.rs` is the template), hook payload parsing, the status
+  state machine, launch specs, Codex `hooks.json` merging, and `skills`: the
+  scan of the skill folders the registry declares (catalog rows, realpath
+  dedupe, duplicates per harness) and the install and removal of a skill sushiAI
+  ships. Every other module in the crate asks the registry and names no agent.
+  It reads no environment. No tokio; the only IO is
+  `codex_hooks::install`/`uninstall` and `skills`.
 - `sushiai-daemon`: tokio shell. Socket server, one actor per session, holder
   client, state file IO, holder spawning.
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
@@ -93,15 +96,15 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
   the process status stays in `status`.
 - Screen-read status: `gemini` and `cursor-agent` send no hooks, and Codex shows
   dialogs no hook reports. For those the actor reads the screen with
-  `sushiai_agents::heuristic::detect` on output, at most every 500 ms (one more
-  read when held-back output is due), and feeds `Screen`. The state machine
+  `sushiai_agents::harness::screen::Screen::read` on output, at most every 500 ms
+  (one more read when held-back output is due), and feeds `Screen`. The state machine
   applies it only while no hook drives the status, so a hook status always wins
   (`statusSource` says which); Codex dialogs only ever block, and a
   `SessionStart` hook ends a dialog read before any hook.
 - Hand-started agents: a session created without an agent (a shell) is polled
   every 2 s. `foreground.rs` reads the PTY's foreground process group of the
   shell (`HoldAttachResult.child` is the shell pid; for an older holder, the
-  holder's only child) and matches its command line against `agent::AGENT_NAMES`:
+  holder's only child) and matches its command line against `sushiai_agents::harness::process_names()`:
   the program name exactly, or an interpreter's script (`node .../codex.js`, or a
   script inside the agent's npm package). The result is `foregroundAgent` and
   `foregroundCwd` in the record and in `session.meta`. The agent's own

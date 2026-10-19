@@ -1,10 +1,10 @@
 use std::process::Command;
 
 use serde_json::Value;
+use sushiai_agents::harness::Agent;
 use sushiai_agents::launch::{
     build, claude_settings, hook_command, shell_quote, AgentSession, LaunchError, LaunchParams,
 };
-use sushiai_agents::Agent;
 
 const BIN: &str = "/home/user/.sushiai/bin/sushiai";
 

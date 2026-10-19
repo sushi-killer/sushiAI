@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { createServer } from "vite";
 
 const { exitAction } = createRequire(import.meta.url)(
@@ -59,8 +60,50 @@ function devEnv() {
       const to = join(vars.SUSHIAI_HOME, name);
       if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
     }
+    // The app's own data (workspaces, panes) too: a shared one made the dev
+    // app reopen the installed app's panes and resume their agent sessions a
+    // second time in its own daemon.
+    if (!vars.BRIDGE_DATA_DIR) {
+      vars.BRIDGE_DATA_DIR = join(vars.SUSHIAI_HOME, "app-data");
+      seedAppData(vars.BRIDGE_DATA_DIR, join(real, INSTALLED_DATA));
+    }
   }
   return vars;
+}
+
+const INSTALLED_DATA = "Library/Application Support/sushiai-workspace";
+
+/** First run only: the installed app's projects and ssh hosts, as the legacy
+ * files the app imports on open. Never workspaces, so no pane or session. */
+function seedAppData(dir, installed) {
+  if (existsSync(dir)) return;
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = join(installed, "sushiai.db");
+  if (!existsSync(file)) return;
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const projects = {};
+    for (const row of db.prepare("SELECT id, data FROM projects").all())
+      projects[row.id] = { ...JSON.parse(row.data), folders: [] };
+    for (const row of db
+      .prepare("SELECT host, path, project_id FROM folders")
+      .all())
+      projects[row.project_id]?.folders.push({
+        endpoint: row.host,
+        cwd: row.path,
+      });
+    const hosts = db
+      .prepare("SELECT data FROM connections ORDER BY position")
+      .all()
+      .map((row) => JSON.parse(row.data));
+    writeFileSync(join(dir, "projects.json"), JSON.stringify(projects));
+    writeFileSync(join(dir, "connections.json"), JSON.stringify(hosts));
+  } catch (error) {
+    console.warn(`[dev] could not copy projects: ${error.message}`);
+  } finally {
+    db?.close();
+  }
 }
 
 function start() {

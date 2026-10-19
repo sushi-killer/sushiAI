@@ -2,7 +2,7 @@
 // says, and the text sent back to an agent. No React, no bridge.
 
 export type ArtifactKind =
-  "markdown" | "html" | "image" | "pdf" | "svg" | "text";
+  "markdown" | "html" | "image" | "pdf" | "svg" | "text" | "diagram";
 
 const EXTENSIONS: Record<string, ArtifactKind> = {
   md: "markdown",
@@ -22,6 +22,7 @@ const EXTENSIONS: Record<string, ArtifactKind> = {
 
 export function kindOf(path: string): ArtifactKind {
   const name = path.slice(path.lastIndexOf("/") + 1);
+  if (name.toLowerCase().endsWith(".arch.json")) return "diagram";
   const dot = name.lastIndexOf(".");
   if (dot < 0) return "text";
   return EXTENSIONS[name.slice(dot + 1).toLowerCase()] || "text";

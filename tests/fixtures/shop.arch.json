@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "title": "Shop · Delta",
+  "groups": [
+    {
+      "id": "phone",
+      "label": "Phone",
+      "icon": "phone",
+      "x": 16,
+      "y": 150,
+      "w": 190,
+      "h": 100
+    },
+    {
+      "id": "cloud",
+      "label": "Cloud",
+      "icon": "cloud",
+      "x": 226,
+      "y": 16,
+      "w": 420,
+      "h": 234
+    },
+    {
+      "id": "office",
+      "label": "Office network",
+      "icon": "laptop",
+      "x": 16,
+      "y": 290,
+      "w": 630,
+      "h": 210
+    },
+    {
+      "id": "vendor",
+      "label": "Payment provider",
+      "icon": "server",
+      "x": 436,
+      "y": 530,
+      "w": 210,
+      "h": 104
+    }
+  ],
+  "nodes": [
+    {
+      "id": "mobile-app",
+      "kind": "app",
+      "title": "Mobile app",
+      "tech": "iOS and Android",
+      "delta": "new",
+      "group": "phone",
+      "x": 26,
+      "y": 180
+    },
+    {
+      "id": "search",
+      "kind": "service",
+      "title": "Search",
+      "tech": "Full-text, per store",
+      "delta": "new",
+      "group": "cloud",
+      "x": 246,
+      "y": 46
+    },
+    {
+      "id": "orders-db",
+      "kind": "data",
+      "title": "Orders DB",
+      "tech": "Postgres · orders, users",
+      "delta": "new",
+      "group": "cloud",
+      "x": 456,
+      "y": 46
+    },
+    {
+      "id": "api",
+      "kind": "service",
+      "title": "Public API",
+      "tech": "HTTPS + WSS · OAuth",
+      "delta": "new",
+      "group": "cloud",
+      "x": 351,
+      "y": 160
+    },
+    {
+      "id": "admin",
+      "kind": "app",
+      "title": "Admin panel",
+      "tech": "React · + refunds page",
+      "delta": "changed",
+      "group": "office",
+      "x": 36,
+      "y": 330
+    },
+    {
+      "id": "backoffice",
+      "kind": "service",
+      "title": "Back office",
+      "tech": "Go service · job queue",
+      "delta": "exists",
+      "group": "office",
+      "x": 246,
+      "y": 330
+    },
+    {
+      "id": "sync",
+      "kind": "service",
+      "title": "Sync worker",
+      "tech": "Outbound only · no open port",
+      "delta": "new",
+      "group": "office",
+      "x": 456,
+      "y": 330
+    },
+    {
+      "id": "reports",
+      "kind": "service",
+      "title": "Reports",
+      "tech": "Nightly exports",
+      "delta": "exists",
+      "group": "office",
+      "x": 246,
+      "y": 420
+    },
+    {
+      "id": "ledger",
+      "kind": "data",
+      "title": "Ledger",
+      "tech": "Card tokens",
+      "delta": "exists",
+      "group": "vendor",
+      "x": 456,
+      "y": 560
+    }
+  ],
+  "edges": [
+    {
+      "id": "app-api",
+      "from": "mobile-app",
+      "to": "api",
+      "label": "HTTPS"
+    },
+    {
+      "id": "api-search",
+      "from": "api",
+      "to": "search"
+    },
+    {
+      "id": "api-db",
+      "from": "api",
+      "to": "orders-db",
+      "label": "SQL"
+    },
+    {
+      "id": "sync-api",
+      "from": "sync",
+      "to": "api",
+      "label": "WSS"
+    },
+    {
+      "id": "admin-backoffice",
+      "from": "admin",
+      "to": "backoffice"
+    },
+    {
+      "id": "sync-backoffice",
+      "from": "sync",
+      "to": "backoffice"
+    },
+    {
+      "id": "backoffice-reports",
+      "from": "backoffice",
+      "to": "reports"
+    },
+    {
+      "id": "ledger-sync",
+      "from": "ledger",
+      "to": "sync",
+      "label": "tokens?",
+      "style": "guess"
+    }
+  ],
+  "notes": [
+    {
+      "id": "tokens-boundary",
+      "text": "Card tokens cross a trust boundary. Who delivers them?",
+      "x": 96,
+      "y": 574
+    }
+  ]
+}

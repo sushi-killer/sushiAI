@@ -1,9 +1,13 @@
 ---
 name: sushiai-routines
-description: Build a sushiAI routine - a scheduled background agent run - from one sentence of the owner. Use when the owner asks to create, change or repair a routine, or says "every morning do X" or "run this on a schedule". Works for Claude Code and Codex. Not for one-off tasks the owner wants done now.
+description: Only where sushiAI is installed (the `sushiai` command exists). Build a sushiAI routine - a scheduled background agent run - from one sentence of the owner. Use when the owner asks to create, change or repair a routine, or says "every morning do X" or "run this on a schedule". Works for Claude Code and Codex. Not for one-off tasks the owner wants done now.
 ---
 
 # sushiAI routines builder
+
+First run `command -v sushiai`. If it prints nothing, sushiAI is not installed
+here and this skill does not apply: tell the owner a routine needs sushiAI and
+stop.
 
 A routine is a folder with `routine.json` (when, where - a host and optional
 projects -, which agent, how it runs) and `brief.md` (what each run does). The daemon of the routine's host

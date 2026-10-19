@@ -45,6 +45,7 @@ import {
   useDocSelection,
   type Selection,
 } from "./Comments.tsx";
+import { DiagramView } from "./diagram/DiagramView.tsx";
 import { MarkdownDoc } from "./MarkdownDoc.tsx";
 import {
   hostOfEndpoint,
@@ -290,6 +291,17 @@ export function PreviewView(props: CoreViewProps) {
     }
   };
 
+  // A failed re-read must not take the diagram board away: the last text stays.
+  const lastDiagram = useRef<{
+    path: string;
+    text: string;
+    hash: string;
+  } | null>(null);
+  if (kind === "diagram" && file.state === "ready")
+    lastDiagram.current = { path, text: file.text, hash: file.hash };
+  const shownDiagram =
+    lastDiagram.current?.path === path ? lastDiagram.current : null;
+
   const orchestratorOn = useOrchestratorEnabled();
   const [card, setCard] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -465,6 +477,24 @@ export function PreviewView(props: CoreViewProps) {
           </div>
         ) : !path ? (
           <div className="pv-empty">No file is open.</div>
+        ) : kind === "diagram" && shownDiagram ? (
+          <DiagramView
+            key={path}
+            text={shownDiagram.text}
+            hash={shownDiagram.hash}
+            readError={file.state === "error" ? file.message : ""}
+            path={path}
+            cwd={cwd}
+            connection={connection}
+            onComment={(quote, where) =>
+              setBoxFor({ quote, where, x: 12, y: 48 })
+            }
+            onEdited={() =>
+              void sendToAgent(editedMessage(path)).catch((error) =>
+                setSendError(errorText(error)),
+              )
+            }
+          />
         ) : file.state === "loading" ? (
           <div className="loading">Loading…</div>
         ) : file.state === "error" ? (

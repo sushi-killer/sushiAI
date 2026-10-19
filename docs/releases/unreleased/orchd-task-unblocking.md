@@ -1,1 +1,0 @@
-Orchestrator tasks no longer stall on their own checks: a file a check expects to change or disappear stays editable, a re-plan may replace a check its own plan wrote, and checks for files a task adds see those files before they are committed. A scheduled routine whose agent answers within moments keeps its answer.

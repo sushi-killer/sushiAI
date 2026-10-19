@@ -2,10 +2,11 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const model = import("../src/extensions/preview/diagram/model.ts");
+const board = import("../src/extensions/preview/diagram/boardMath.ts");
 
 const base = () => ({
   version: 1,
-  groups: [{ id: "cloud", label: "Cloud" }],
+  groups: [{ id: "cloud", label: "Cloud", x: 0, y: 0, w: 400, h: 300 }],
   nodes: [
     { id: "api", kind: "service", title: "API", group: "cloud" },
     { id: "db", kind: "data", title: "DB", tech: "pg", delta: "new" },
@@ -14,9 +15,58 @@ const base = () => ({
   notes: [{ id: "n1", text: "why?", x: 5, y: 6 }],
 });
 
-test("parseDiagram accepts a file and defaults missing arrays", async () => {
+const textNode = (id, extra = {}) => ({
+  id,
+  type: "text",
+  text: id,
+  x: 0,
+  y: 0,
+  width: 170,
+  height: 62,
+  ...extra,
+});
+const file = (nodes = [], edges = [], more = {}) =>
+  JSON.stringify({ nodes, edges, ...more });
+const canvasBase = () => ({
+  nodes: [
+    {
+      id: "cloud",
+      type: "group",
+      label: "Cloud",
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300,
+    },
+    textNode("api", {
+      text: "API",
+      x: 20,
+      y: 40,
+      sushiai: { kind: "service" },
+    }),
+    textNode("db", {
+      text: "DB\npg",
+      x: 500,
+      y: 40,
+      color: "4",
+      sushiai: { delta: "new" },
+    }),
+    textNode("n1", {
+      text: "why?",
+      x: 5,
+      y: 6,
+      width: 280,
+      height: 30,
+      color: "3",
+      sushiai: { note: true },
+    }),
+  ],
+  edges: [{ id: "e1", fromNode: "api", toNode: "db", label: "sql" }],
+});
+
+test("parseDiagram reads JSON Canvas and defaults missing arrays", async () => {
   const { parseDiagram } = await model;
-  const r = parseDiagram('{"version":1}');
+  const r = parseDiagram("{}");
   assert.deepEqual(r.diagram, {
     version: 1,
     groups: [],
@@ -24,79 +74,142 @@ test("parseDiagram accepts a file and defaults missing arrays", async () => {
     edges: [],
     notes: [],
   });
-  assert.ok(parseDiagram(JSON.stringify(base())).diagram);
+  const { diagram } = parseDiagram(JSON.stringify(canvasBase()));
+  assert.deepEqual(diagram.groups, [
+    { id: "cloud", label: "Cloud", x: 0, y: 0, w: 400, h: 300 },
+  ]);
+  assert.deepEqual(diagram.nodes, [
+    { id: "api", title: "API", kind: "service", x: 20, y: 40, group: "cloud" },
+    { id: "db", title: "DB", tech: "pg", delta: "new", x: 500, y: 40 },
+  ]);
+  assert.deepEqual(diagram.edges, [
+    { id: "e1", from: "api", to: "db", label: "sql" },
+  ]);
+  assert.deepEqual(diagram.notes, [{ id: "n1", text: "why?", x: 5, y: 6 }]);
 });
 
 test("parseDiagram rejects bad files with an error naming the item", async () => {
   const { parseDiagram } = await model;
   const bad = (mut) => {
-    const d = base();
+    const d = canvasBase();
     mut(d);
     return parseDiagram(JSON.stringify(d)).error;
   };
   assert.match(parseDiagram("{").error, /not valid JSON/);
   assert.match(parseDiagram("[]").error, /object/);
-  assert.match(parseDiagram('{"version":2}').error, /version/);
-  assert.match(parseDiagram('{"version":1,"nodes":{}}').error, /nodes/);
+  assert.match(parseDiagram('{"sushiai":{"version":2}}').error, /version/);
+  assert.match(parseDiagram('{"nodes":{}}').error, /nodes/);
+  assert.match(parseDiagram('{"edges":{}}').error, /edges/);
   assert.equal(
-    bad((d) => (d.nodes[1].kind = "db")),
-    'nodes[1] (db): unknown kind "db"',
+    bad((d) => (d.nodes[2].sushiai.kind = "db")),
+    'nodes[2] (db): unknown kind "db"',
   );
   assert.match(
-    bad((d) => (d.nodes[1].id = "api")),
-    /nodes\[1\] \(api\): duplicate id/,
+    bad((d) => (d.nodes[2].id = "api")),
+    /nodes\[2\] \(api\): duplicate id/,
   );
   assert.match(
     bad((d) => (d.nodes[0].id = "e1")),
     /duplicate id/,
   );
   assert.match(
-    bad((d) => (d.nodes[0].id = "")),
+    bad((d) => (d.nodes[1].id = "")),
     /id must be a non-empty/,
   );
   assert.match(
-    bad((d) => (d.edges[0].to = "ghost")),
+    bad((d) => delete d.nodes[1].type),
+    /type must be a string/,
+  );
+  assert.match(
+    bad((d) => (d.edges[0].toNode = "ghost")),
     /edges\[0\] \(e1\).*ghost/,
   );
   assert.match(
-    bad((d) => (d.nodes[0].group = "nope")),
-    /unknown group/,
-  );
-  assert.match(
-    bad((d) => (d.nodes[0].delta = "old")),
+    bad((d) => (d.nodes[2].sushiai.delta = "old")),
     /unknown delta/,
   );
   assert.match(
-    bad((d) => (d.nodes[0].status = "done")),
+    bad((d) => (d.nodes[1].sushiai.status = "done")),
     /unknown status/,
   );
   assert.match(
-    bad((d) => (d.edges[0].style = "wavy")),
+    bad((d) => (d.edges[0].sushiai = { style: "wavy" })),
     /unknown style/,
   );
   assert.match(
-    bad((d) => (d.nodes[0].x = "1")),
+    bad((d) => (d.edges[0].toEnd = "dot")),
+    /unknown toEnd/,
+  );
+  assert.match(
+    bad((d) => (d.edges[0].fromSide = "middle")),
+    /unknown fromSide/,
+  );
+  assert.match(
+    bad((d) => (d.nodes[1].x = "1")),
     /x must be a finite/,
   );
   assert.match(
-    bad((d) => delete d.notes[0].y),
-    /notes\[0\] \(n1\)/,
+    bad((d) => delete d.nodes[3].y),
+    /nodes\[3\] \(n1\)/,
   );
   assert.match(
-    bad((d) => delete d.notes[0].text),
-    /text/,
+    bad((d) => delete d.nodes[1].text),
+    /text must be a string/,
+  );
+  assert.match(
+    bad((d) => (d.nodes[1].sushiai = [])),
+    /sushiai must be an object/,
   );
 });
 
 test("unknown fields survive parse and serialize", async () => {
   const { parseDiagram, serializeDiagram } = await model;
-  const d = base();
+  const d = canvasBase();
   d.future = { a: 1 };
-  d.nodes[0].owner = "team";
+  d.sushiai = { version: 1, title: "T", later: true };
+  d.nodes[1].owner = "team";
+  d.nodes[1].color = "#336699";
+  d.nodes[1].sushiai.shapeHint = 2;
+  d.nodes[0].background = "bg.png";
   d.edges[0].weight = 3;
-  const text = JSON.stringify(d, null, 2) + "\n";
-  const r = parseDiagram(text);
-  assert.equal(serializeDiagram(r.diagram), text);
+  d.edges[0].fromSide = "right";
+  d.edges[0].color = "5";
+  d.nodes.push({ id: "x", type: "icon", x: 1, y: 2, width: 3, height: 4 });
+  d.edges.push({ id: "ex", fromNode: "cloud", toNode: "api" });
+  const r = parseDiagram(JSON.stringify(d));
+  const out = JSON.parse(serializeDiagram(r.diagram));
+  const find = (list, id) => list.find((i) => i.id === id);
+  assert.deepEqual(out.future, { a: 1 });
+  assert.deepEqual(out.sushiai, { version: 1, title: "T", later: true });
+  assert.equal(find(out.nodes, "api").owner, "team");
+  assert.equal(find(out.nodes, "api").color, "#336699");
+  assert.equal(find(out.nodes, "api").sushiai.shapeHint, 2);
+  assert.equal(find(out.nodes, "cloud").background, "bg.png");
+  assert.equal(find(out.edges, "e1").weight, 3);
+  assert.equal(find(out.edges, "e1").fromSide, "right");
+  assert.equal(find(out.edges, "e1").color, "5");
+  assert.deepEqual(find(out.nodes, "x"), d.nodes[4]);
+  assert.deepEqual(find(out.edges, "ex"), d.edges[1]);
+  // a link to a node that was deleted does not dangle
+  const gone = serializeDiagram(applyDeleted(r.diagram, "api", await model));
+  assert.equal(find(JSON.parse(gone).edges, "ex"), undefined);
+});
+
+function applyDeleted(d, id, m) {
+  return m.applyOp(d, { op: "delete", id });
+}
+
+test("node order and top-level order of edges are kept", async () => {
+  const { parseDiagram, serializeDiagram } = await model;
+  const d = canvasBase();
+  d.nodes.reverse();
+  const out = JSON.parse(
+    serializeDiagram(parseDiagram(JSON.stringify(d)).diagram),
+  );
+  assert.deepEqual(
+    out.nodes.map((n) => n.id),
+    ["n1", "db", "api", "cloud"],
+  );
 });
 
 test("add-node, connect: no-ops and happy paths", async () => {
@@ -270,7 +383,7 @@ test("adding a node never moves existing ones", async () => {
   for (const [k, p] of first) assert.deepEqual(more.get(k), p);
 });
 
-test("placeNodes puts group members in explicit bounds or beside members", async () => {
+test("placeNodes puts group members in the group's bounds", async () => {
   const { placeNodes } = await model;
   const d = {
     version: 1,
@@ -288,16 +401,6 @@ test("placeNodes puts group members in explicit bounds or beside members", async
   assert.deepEqual(pos.get("b"), { x: 730, y: 330 });
   assert.deepEqual(pos.get("c"), { x: 520, y: 420 });
   assertNoOverlap(pos);
-
-  const e = {
-    version: 1,
-    groups: [{ id: "g", label: "G" }],
-    nodes: [nd("a", { group: "g", x: 300, y: 300 }), nd("b", { group: "g" })],
-    edges: [],
-    notes: [],
-  };
-  const p = placeNodes(e).get("b");
-  assert.deepEqual(p, { x: 510, y: 300 });
 });
 
 test("lattice skips group rects", async () => {
@@ -313,37 +416,32 @@ test("lattice skips group rects", async () => {
   assert.equal(p.x >= 300 || p.y >= 100, true);
 });
 
-test("groupRects pads members and unions explicit bounds", async () => {
+test("groupRects gives each group its own bounds and nothing grows them", async () => {
   const { groupRects } = await model;
   const d = {
     version: 1,
     groups: [
-      { id: "g", label: "G" },
+      { id: "g", label: "G", x: 10, y: 20, w: 100, h: 50 },
       { id: "e", label: "E" },
-      { id: "x", label: "X", x: 0, y: 0, w: 100, h: 100 },
     ],
-    nodes: [
-      nd("a", { group: "g" }),
-      nd("b", { group: "g" }),
-      nd("c", { group: "x" }),
-    ],
+    nodes: [nd("a", { group: "g", x: 500, y: 500 })],
     edges: [],
     notes: [],
   };
-  const pos = new Map([
-    ["a", { x: 100, y: 100 }],
-    ["b", { x: 400, y: 200 }],
-    ["c", { x: 50, y: 50 }],
-  ]);
-  const r = groupRects(d, pos);
-  assert.deepEqual(r.get("g"), {
-    x: 90,
-    y: 70,
-    w: 490,
-    h: 262 - 70 + 8,
-  });
+  const r = groupRects(d);
+  assert.deepEqual(r.get("g"), { x: 10, y: 20, w: 100, h: 50 });
   assert.equal(r.has("e"), false);
-  assert.deepEqual(r.get("x"), { x: 0, y: 0, w: 230, h: 120 });
+});
+
+test("groupAt picks the smallest group and none outside", async () => {
+  const { groupAt } = await model;
+  const rects = new Map([
+    ["big", { x: 0, y: 0, w: 800, h: 600 }],
+    ["small", { x: 100, y: 100, w: 200, h: 100 }],
+  ]);
+  assert.equal(groupAt(rects, { x: 150, y: 150 }), "small");
+  assert.equal(groupAt(rects, { x: 500, y: 500 }), "big");
+  assert.equal(groupAt(rects, { x: 900, y: 900 }), "");
 });
 
 test("materialize writes positions only where missing", async () => {
@@ -458,9 +556,13 @@ test("replay: owner ops applied to a file the agent changed keep both", async ()
 
 test("parseDiagram rejects more than 1000 items", async () => {
   const { parseDiagram } = await model;
-  const nodes = Array.from({ length: 1001 }, (_, i) => nd(`n${i}`));
-  assert.match(parseDiagram(JSON.stringify(bare(nodes))).error, /1000/);
-  assert.ok(parseDiagram(JSON.stringify(bare(nodes.slice(1)))).diagram);
+  const nodes = Array.from({ length: 1001 }, (_, i) => textNode(`n${i}`));
+  assert.match(parseDiagram(file(nodes)).error, /1000/);
+  assert.ok(parseDiagram(file(nodes.slice(1))).diagram);
+  const edge = (i) => ({ id: `e${i}`, fromNode: "n1", toNode: "n2" });
+  const mixed = nodes.slice(0, 600);
+  const links = Array.from({ length: 401 }, (_, i) => edge(i));
+  assert.match(parseDiagram(file(mixed, links)).error, /1000/);
 });
 
 test("1000 unplaced nodes place fast without overlap", async () => {
@@ -511,9 +613,9 @@ test("reidOps renames a clashing add-node and remaps later ops", async () => {
 });
 
 test("the shop fixture parses and its groups keep their bounds", async () => {
-  const { parseDiagram, groupRects, placeNodes } = await model;
+  const { parseDiagram, groupRects } = await model;
   const text = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "fixtures/shop.arch.json"),
+    require("node:path").join(__dirname, "fixtures/shop.canvas"),
     "utf8",
   );
   const { diagram } = parseDiagram(text);
@@ -521,7 +623,7 @@ test("the shop fixture parses and its groups keep their bounds", async () => {
   assert.equal(diagram.edges.length, 8);
   assert.equal(diagram.groups.length, 4);
   assert.equal(diagram.notes.length, 1);
-  const rects = groupRects(diagram, placeNodes(diagram));
+  const rects = groupRects(diagram);
   for (const g of diagram.groups) {
     assert.deepEqual(rects.get(g.id), { x: g.x, y: g.y, w: g.w, h: g.h });
   }
@@ -553,14 +655,14 @@ test("routeEdge dodges avoid rects and groupLabelRect sizes the label", async ()
   });
 
   const text = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "fixtures/shop.arch.json"),
+    require("node:path").join(__dirname, "fixtures/shop.canvas"),
     "utf8",
   );
   const { diagram } = parseDiagram(text);
   const pos = placeNodes(diagram);
   const rect = (id) => ({ ...pos.get(id), w: 170, h: 62 });
   const labels = diagram.groups.map((g) =>
-    groupLabelRect(groupRects(diagram, pos).get(g.id), g.label),
+    groupLabelRect(groupRects(diagram).get(g.id), g.label),
   );
   const [p, q] = routeEdge(rect("ledger"), rect("sync"), labels);
   const lab = labels[3];
@@ -573,27 +675,23 @@ test("routeEdge dodges avoid rects and groupLabelRect sizes the label", async ()
 
 test("coordinates out of range are refused and cannot stall placement", async () => {
   const { parseDiagram, placeNodes } = await model;
-  const doc = (n) => JSON.stringify(bare([n]));
+  const doc = (n) => file([n]);
   assert.match(
-    parseDiagram(doc(nd("a", { x: 1e20, y: 0 }))).error,
+    parseDiagram(doc(textNode("a", { x: 1e20, y: 0 }))).error,
     /nodes\[0\] \(a\)/,
   );
-  assert.ok(parseDiagram(doc(nd("a", { x: 1e5, y: -1e5 }))).diagram);
-  const g = (extra) =>
-    JSON.stringify({
-      ...bare([]),
-      groups: [{ id: "g", label: "G", ...extra }],
-    });
+  assert.ok(parseDiagram(doc(textNode("a", { x: 1e5, y: -1e5 }))).diagram);
+  const g = (extra) => file([{ id: "g", type: "group", label: "G", ...extra }]);
   assert.match(
-    parseDiagram(g({ x: 0, y: 0, w: 0, h: 5 })).error,
-    /groups\[0\]/,
+    parseDiagram(g({ x: 0, y: 0, width: 0, height: 5 })).error,
+    /nodes\[0\]/,
   );
   assert.match(
-    parseDiagram(g({ x: 0, y: 0, w: 5, h: 1e9 })).error,
-    /groups\[0\]/,
+    parseDiagram(g({ x: 0, y: 0, width: 5, height: 1e9 })).error,
+    /nodes\[0\]/,
   );
-  const note = { ...bare([]), notes: [{ id: "n", text: "t", x: 1e9, y: 0 }] };
-  assert.match(parseDiagram(JSON.stringify(note)).error, /notes\[0\]/);
+  const note = textNode("n", { x: 1e9, y: 0, sushiai: { note: true } });
+  assert.match(parseDiagram(file([note])).error, /nodes\[0\]/);
 
   const t = Date.now();
   const pos = placeNodes(bare([nd("a", { x: 1e20, y: 0 }), nd("b"), nd("c")]));
@@ -682,7 +780,7 @@ test("move-group sets the rect and shifts only placed members", async () => {
   const d = base();
   d.nodes[0].x = 10;
   d.nodes[0].y = 20;
-  d.nodes.push({ id: "other", kind: "app", title: "O", x: 1, y: 1 });
+  d.nodes.push({ id: "other", kind: "app", title: "O", x: 900, y: 900 });
   const rect = { x: 50, y: 60, w: 300, h: 200 };
   const out = applyOp(d, {
     op: "move-group",
@@ -695,7 +793,7 @@ test("move-group sets the rect and shifts only placed members", async () => {
   assert.deepEqual([out.nodes[0].x, out.nodes[0].y], [15, 15]);
   // db has no group, other is outside the group
   assert.equal(out.nodes[1].x, undefined);
-  assert.deepEqual([out.nodes[2].x, out.nodes[2].y], [1, 1]);
+  assert.deepEqual([out.nodes[2].x, out.nodes[2].y], [900, 900]);
   // an unplaced member stays unplaced
   const un = applyOp(base(), {
     op: "move-group",
@@ -799,17 +897,24 @@ test("reidOps renames a clashing add-group and add-note and remaps later ops", a
   const { reidOps, applyOps } = await model;
   const fresh = base();
   const ops = [
-    { op: "add-group", group: { id: "cloud", label: "Mine" } },
+    {
+      op: "add-group",
+      group: { id: "cloud", label: "Mine", x: 1000, y: 0, w: 300, h: 200 },
+    },
     { op: "add-note", note: { id: "n1", text: "mine", x: 0, y: 0 } },
     { op: "set", id: "api", field: "group", value: "cloud" },
     {
       op: "move-group",
       id: "cloud",
-      rect: { x: 0, y: 0, w: 300, h: 200 },
+      rect: { x: 1000, y: 0, w: 300, h: 200 },
       dx: 0,
       dy: 0,
     },
-    { op: "resize-group", id: "cloud", rect: { x: 0, y: 0, w: 400, h: 300 } },
+    {
+      op: "resize-group",
+      id: "cloud",
+      rect: { x: 1000, y: 0, w: 400, h: 300 },
+    },
     { op: "set", id: "cloud", field: "icon", value: "server" },
     { op: "set", id: "n1", field: "text", value: "edited" },
   ];
@@ -826,7 +931,7 @@ test("reidOps renames a clashing add-group and add-note and remaps later ops", a
   assert.deepEqual(out.groups[1], {
     id: "cloud-2",
     label: "Mine",
-    x: 0,
+    x: 1000,
     y: 0,
     w: 400,
     h: 300,
@@ -892,56 +997,71 @@ test("a later op follows a remap carried over from an earlier batch", async () =
 
 test("parseDiagram validates the universal block fields", async () => {
   const { parseDiagram } = await model;
-  const withNode = (extra, edge = {}) =>
+  const withNode = (extra, edge = {}, own = {}) =>
     parseDiagram(
-      JSON.stringify({
-        version: 1,
-        nodes: [
-          { id: "a", title: "A", ...extra },
-          { id: "b", title: "B" },
-        ],
-        edges: [{ id: "e", from: "a", to: "b", ...edge }],
-      }),
+      file(
+        [textNode("a", { ...extra, sushiai: own }), textNode("b", { x: 300 })],
+        [{ id: "e", fromNode: "a", toNode: "b", ...edge }],
+      ),
     );
-  assert.ok(withNode({}).diagram, "id and title are enough");
-  assert.ok(
-    withNode(
-      {
-        shape: "diamond",
-        icon: "bot",
-        caption: "Agent",
-        tech: "t",
-        step: 3,
-        delta: "removed",
-        kind: "app",
-      },
-      { style: "dashed", arrow: "both" },
-    ).diagram,
-  );
-  const err = (extra, edge) => withNode(extra, edge).error;
+  assert.ok(withNode({}).diagram, "id, type and text are enough");
+  const full = withNode(
+    { text: "A\nt" },
+    { sushiai: { style: "dashed" }, fromEnd: "arrow" },
+    {
+      shape: "diamond",
+      icon: "bot",
+      caption: "Agent",
+      step: 3,
+      delta: "removed",
+      kind: "app",
+    },
+  ).diagram;
+  assert.ok(full);
+  assert.equal(full.edges[0].arrow, "both");
+  assert.equal(full.nodes[0].tech, "t");
+  const err = (own, edge) => withNode({}, edge, own).error;
   assert.match(err({ shape: "star" }), /unknown shape/);
   assert.match(err({ icon: 5 }), /icon/);
   assert.match(err({ icon: "x".repeat(41) }), /icon/);
   assert.match(err({ caption: 5 }), /caption/);
-  assert.match(err({ tech: 5 }), /tech/);
   assert.ok(
-    withNode({ caption: "x".repeat(500), tech: "y".repeat(500) }).diagram,
+    withNode(
+      { text: `${"x".repeat(500)}\n${"y".repeat(500)}` },
+      {},
+      {
+        caption: "x".repeat(500),
+      },
+    ).diagram,
   );
-  assert.ok(withNode({ icon: "not-in-the-table" }).diagram);
+  assert.ok(withNode({}, {}, { icon: "not-in-the-table" }).diagram);
   for (const step of [0, 1.5, 1000, "2", -1]) {
     assert.match(err({ step }), /step/);
   }
   assert.match(err({ kind: "db" }), /unknown kind/);
   assert.match(err({ delta: "old" }), /unknown delta/);
-  assert.match(err({}, { arrow: "up" }), /unknown arrow/);
-  assert.match(err({}, { style: "wavy" }), /unknown style/);
-  const g = parseDiagram(
-    '{"version":1,"groups":[{"id":"g","label":"G","icon":"lock"}]}',
-  );
-  assert.ok(g.diagram);
-  assert.ok(
-    parseDiagram('{"version":1,"groups":[{"id":"g","label":"G","icon":"x"}]}')
-      .diagram,
+  assert.match(err({}, { toEnd: "up" }), /unknown toEnd/);
+  assert.match(err({}, { sushiai: { style: "wavy" } }), /unknown style/);
+  const group = (own) =>
+    parseDiagram(
+      file([
+        {
+          id: "g",
+          type: "group",
+          x: 0,
+          y: 0,
+          width: 9,
+          height: 9,
+          sushiai: own,
+        },
+      ]),
+    );
+  assert.ok(group({ icon: "lock" }).diagram);
+  assert.ok(group({ icon: "x" }).diagram);
+  assert.equal(group({}).diagram.groups[0].label, "");
+  assert.match(
+    parseDiagram(file([{ id: "g", type: "group", x: 0, y: 0 }])).error,
+    /width/,
   );
 });
 
@@ -1000,8 +1120,17 @@ test("PRESETS are valid blocks", async () => {
       "person",
     ],
   );
+  const { serializeDiagram } = await model;
   const nodes = PRESETS.map((p) => ({ id: p.id, title: p.label, ...p.node }));
-  assert.ok(parseDiagram(JSON.stringify({ version: 1, nodes })).diagram);
+  const text = serializeDiagram({ ...bare(nodes) });
+  assert.deepEqual(
+    parseDiagram(text).diagram.nodes,
+    nodes.map((n, i) => ({
+      ...n,
+      x: parseDiagram(text).diagram.nodes[i].x,
+      y: parseDiagram(text).diagram.nodes[i].y,
+    })),
+  );
 });
 
 test("set handles the universal block fields", async () => {
@@ -1062,30 +1191,6 @@ test("placement with mixed shapes never overlaps", async () => {
       assert.ok(apart, `${nodes[i].id} overlaps ${nodes[j].id}`);
     }
   }
-});
-
-test("a group wraps members by their own sizes", async () => {
-  const { groupRects } = await model;
-  const d = {
-    version: 1,
-    groups: [{ id: "g", label: "G" }],
-    notes: [],
-    edges: [],
-    nodes: [
-      { id: "a", title: "A", shape: "diamond", group: "g" },
-      { id: "b", title: "B", shape: "circle", group: "g" },
-    ],
-  };
-  const pos = new Map([
-    ["a", { x: 100, y: 100 }],
-    ["b", { x: 400, y: 100 }],
-  ]);
-  assert.deepEqual(groupRects(d, pos).get("g"), {
-    x: 90,
-    y: 70,
-    w: 72 + 400 - 100 + 20,
-    h: 90 + 30 + 8,
-  });
 });
 
 test("routeEdge joins a diamond and a box", async () => {
@@ -1243,7 +1348,7 @@ test("routeEdges: two edges toward the same side of a diamond take two vertices"
 test("routeEdges: no two edges of the agent-flow fixture share a segment", async () => {
   const { parseDiagram, placeNodes, routeEdges } = await model;
   const text = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "fixtures/agent-flow.arch.json"),
+    require("node:path").join(__dirname, "fixtures/agent-flow.canvas"),
     "utf8",
   );
   const d = parseDiagram(text).diagram;
@@ -1286,12 +1391,12 @@ test("routeEdges keeps lone links exactly as routeEdge draws them", async () => 
     routeEdges,
   } = await model;
   const text = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "fixtures/shop.arch.json"),
+    require("node:path").join(__dirname, "fixtures/shop.canvas"),
     "utf8",
   );
   const d = parseDiagram(text).diagram;
   const pos = placeNodes(d);
-  const avoid = [...groupRects(d, pos).values()];
+  const avoid = [...groupRects(d).values()];
   const routes = routeEdges(d, pos, avoid);
   const rect = (id) => ({
     ...pos.get(id),
@@ -1474,8 +1579,8 @@ test("routeEdges: no route runs through a block, ends included", async () => {
         "utf8",
       ),
     ).diagram;
-  check("agent-flow", read("agent-flow.arch.json"));
-  check("shop", read("shop.arch.json"));
+  check("agent-flow", read("agent-flow.canvas"));
+  check("shop", read("shop.canvas"));
   const star = flow(
     [
       { id: "q", title: "Q?", shape: "diamond" },
@@ -1548,11 +1653,7 @@ test("routeEdges: every segment is horizontal or vertical", async () => {
       { id: "pc", from: "p2", to: "c1" },
     ],
   );
-  for (const d of [
-    read("agent-flow.arch.json"),
-    read("shop.arch.json"),
-    mixed,
-  ]) {
+  for (const d of [read("agent-flow.canvas"), read("shop.canvas"), mixed]) {
     for (const [id, pts] of routeEdges(d, placeNodes(d))) {
       for (let i = 1; i < pts.length; i++) {
         assert.ok(
@@ -1602,7 +1703,7 @@ const clearOfOthers = ({ d, rects, routes }) => {
 };
 
 test("routeEdges: no run comes within 12px of a block that is not its end", async () => {
-  for (const name of ["agent-flow.arch.json", "shop.arch.json"]) {
+  for (const name of ["agent-flow.canvas", "shop.canvas"]) {
     clearOfOthers(await fixtureRoutes(name));
   }
 });
@@ -1630,7 +1731,7 @@ test("routeEdges: a route never squeezes through a corridor narrower than the cl
 });
 
 test("routeEdges: agent-flow has no sideways step under 16px and diamonds end on vertices", async () => {
-  const { d, rects, routes } = await fixtureRoutes("agent-flow.arch.json");
+  const { d, rects, routes } = await fixtureRoutes("agent-flow.canvas");
   for (const e of d.edges) {
     const pts = routes.get(e.id);
     for (let i = 1; i < pts.length - 2; i++) {
@@ -1651,5 +1752,723 @@ test("routeEdges: agent-flow has no sideways step under 16px and diamonds end on
         (p.y === cy && (p.x === r.x || p.x === r.x + r.w));
       assert.ok(vertex, `${e.id} meets ${id} off a vertex`);
     }
+  }
+});
+
+// A JSON Canvas 1.0 checker: what any tool reading the file may rely on.
+function validateCanvas(text) {
+  const errors = [];
+  const o = JSON.parse(text);
+  const ids = new Set();
+  const int = (v) => Number.isInteger(v);
+  const color = (v) => v === undefined || /^([1-6]|#[0-9a-fA-F]{6})$/.test(v);
+  const nodeIds = new Set((o.nodes ?? []).map((n) => n.id));
+  for (const n of o.nodes ?? []) {
+    if (typeof n.id !== "string" || ids.has(n.id)) errors.push(`id ${n.id}`);
+    ids.add(n.id);
+    if (!["text", "file", "link", "group"].includes(n.type))
+      errors.push(`type ${n.id}`);
+    for (const k of ["x", "y", "width", "height"])
+      if (!int(n[k])) errors.push(`${k} ${n.id}`);
+    if (!color(n.color)) errors.push(`color ${n.id}`);
+    if (n.type === "text" && typeof n.text !== "string")
+      errors.push(`text ${n.id}`);
+    if (n.type === "file" && typeof n.file !== "string")
+      errors.push(`file ${n.id}`);
+    if (n.type === "link" && typeof n.url !== "string")
+      errors.push(`url ${n.id}`);
+    if (
+      n.type === "group" &&
+      n.label !== undefined &&
+      typeof n.label !== "string"
+    )
+      errors.push(`label ${n.id}`);
+  }
+  for (const e of o.edges ?? []) {
+    if (typeof e.id !== "string" || ids.has(e.id)) errors.push(`id ${e.id}`);
+    ids.add(e.id);
+    if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode))
+      errors.push(`ref ${e.id}`);
+    for (const k of ["fromSide", "toSide"])
+      if (
+        e[k] !== undefined &&
+        !["top", "right", "bottom", "left"].includes(e[k])
+      )
+        errors.push(`${k} ${e.id}`);
+    for (const k of ["fromEnd", "toEnd"])
+      if (e[k] !== undefined && !["none", "arrow"].includes(e[k]))
+        errors.push(`${k} ${e.id}`);
+    if (!color(e.color)) errors.push(`color ${e.id}`);
+    if (e.label !== undefined && typeof e.label !== "string")
+      errors.push(`label ${e.id}`);
+  }
+  return errors;
+}
+
+const fixture = (name) =>
+  require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "fixtures", name),
+    "utf8",
+  );
+
+test("both fixtures round-trip and are valid JSON Canvas", async () => {
+  const { parseDiagram, serializeDiagram } = await model;
+  for (const name of ["shop.canvas", "agent-flow.canvas"]) {
+    const first = parseDiagram(fixture(name)).diagram;
+    const text = serializeDiagram(first);
+    assert.deepEqual(validateCanvas(text), [], name);
+    assert.deepEqual(parseDiagram(text).diagram, first, name);
+    assert.equal(serializeDiagram(parseDiagram(text).diagram), text, name);
+  }
+});
+
+test("a written file is valid even for an unplaced, grouped, edited diagram", async () => {
+  const { applyOps, serializeDiagram, parseDiagram } = await model;
+  const d = applyOps(bare([]), [
+    {
+      op: "add-group",
+      group: { id: "g", label: "G", x: 0, y: 0, w: 300, h: 160 },
+    },
+    {
+      op: "add-node",
+      node: { id: "a", title: "A", tech: "t", delta: "new", group: "g" },
+    },
+    {
+      op: "add-node",
+      node: { id: "b", title: "B", shape: "diamond", step: 2 },
+    },
+    {
+      op: "add-node",
+      node: { id: "c", title: "C", delta: "changed", x: 10.4, y: 400.6 },
+    },
+    { op: "add-note", note: { id: "n", text: "why?", x: 1.5, y: 2 } },
+    {
+      op: "connect",
+      edge: { id: "e1", from: "a", to: "b", arrow: "both", style: "guess" },
+    },
+    {
+      op: "connect",
+      edge: { id: "e2", from: "b", to: "c", arrow: "none", status: "proposed" },
+    },
+    { op: "connect", edge: { id: "e3", from: "a", to: "c", label: "x" } },
+  ]);
+  const text = serializeDiagram(d);
+  assert.deepEqual(validateCanvas(text), []);
+  const out = JSON.parse(text);
+  const byId = (id) => out.nodes.find((n) => n.id === id);
+  assert.equal(byId("a").color, "4");
+  assert.equal(byId("c").color, "3");
+  assert.equal(byId("b").color, undefined);
+  assert.equal(byId("n").color, "3");
+  assert.equal(byId("g").type, "group");
+  assert.equal(byId("a").text, "A\nt");
+  const edge = (id) => out.edges.find((e) => e.id === id);
+  assert.deepEqual([edge("e1").fromEnd, edge("e1").toEnd], ["arrow", "arrow"]);
+  assert.equal(edge("e1").color, "3");
+  assert.deepEqual([edge("e2").fromEnd, edge("e2").toEnd], ["none", "none"]);
+  assert.deepEqual(
+    [edge("e3").fromEnd, edge("e3").toEnd],
+    [undefined, undefined],
+  );
+  assert.equal(byId("g").label, "G");
+  assert.equal(out.nodes[0].id, "g", "groups sit under the blocks");
+  const back = parseDiagram(text).diagram;
+  assert.equal(back.nodes.find((n) => n.id === "a").group, "g");
+  assert.equal(back.nodes.find((n) => n.id === "a").delta, "new");
+  assert.equal(back.edges.find((e) => e.id === "e1").style, "guess");
+  assert.equal(back.edges.find((e) => e.id === "e2").status, "proposed");
+});
+
+test("a canvas made in Obsidian, with no sushiai keys, opens", async () => {
+  const { parseDiagram, serializeDiagram } = await model;
+  const text = JSON.stringify({
+    nodes: [
+      {
+        id: "g1",
+        type: "group",
+        label: "Backend",
+        x: 0,
+        y: 0,
+        width: 600,
+        height: 400,
+        color: "5",
+      },
+      {
+        id: "t1",
+        type: "text",
+        text: "# Gateway\nnginx",
+        x: 40,
+        y: 60,
+        width: 250,
+        height: 60,
+        color: "4",
+      },
+      {
+        id: "t2",
+        type: "text",
+        text: "Worker",
+        x: 320,
+        y: 60,
+        width: 250,
+        height: 60,
+        color: "3",
+      },
+      {
+        id: "t3",
+        type: "text",
+        text: "Old queue",
+        x: 40,
+        y: 600,
+        width: 250,
+        height: 60,
+        color: "1",
+      },
+      {
+        id: "t4",
+        type: "text",
+        text: "Plain",
+        x: 700,
+        y: 60,
+        width: 250,
+        height: 60,
+        color: "#ff8800",
+      },
+      {
+        id: "f1",
+        type: "file",
+        file: "docs/notes/design.md",
+        x: 40,
+        y: 220,
+        width: 400,
+        height: 200,
+      },
+      {
+        id: "l1",
+        type: "link",
+        url: "https://example.com/spec",
+        x: 700,
+        y: 220,
+        width: 400,
+        height: 200,
+      },
+    ],
+    edges: [
+      {
+        id: "e1",
+        fromNode: "t1",
+        fromSide: "right",
+        toNode: "t2",
+        toSide: "left",
+        label: "calls",
+      },
+      { id: "e2", fromNode: "t2", toNode: "f1", toEnd: "none" },
+      {
+        id: "e3",
+        fromNode: "t4",
+        toNode: "l1",
+        fromEnd: "arrow",
+        toEnd: "arrow",
+        color: "2",
+      },
+      { id: "e4", fromNode: "g1", toNode: "t4" },
+    ],
+  });
+  const { diagram } = parseDiagram(text);
+  const node = (id) => diagram.nodes.find((n) => n.id === id);
+  assert.deepEqual(
+    diagram.groups.map((g) => [g.id, g.label]),
+    [["g1", "Backend"]],
+  );
+  assert.equal(node("t1").title, "# Gateway");
+  assert.equal(node("t1").tech, "nginx");
+  assert.equal(node("t1").delta, "new");
+  assert.equal(node("t2").delta, "changed");
+  assert.equal(node("t3").delta, "removed");
+  assert.equal(node("t4").delta, undefined);
+  assert.equal(node("t1").group, "g1");
+  assert.equal(node("t3").group, undefined, "outside the group");
+  assert.equal(node("t4").group, undefined);
+  assert.equal(node("f1").title, "design.md");
+  assert.equal(node("f1").caption, "File");
+  assert.equal(node("l1").title, "https://example.com/spec");
+  assert.equal(node("l1").caption, "Link");
+  assert.equal(
+    diagram.edges.length,
+    3,
+    "the edge from a group is kept, not drawn",
+  );
+  assert.equal(diagram.edges[2].arrow, "both");
+  const out = JSON.parse(serializeDiagram(diagram));
+  assert.deepEqual(validateCanvas(JSON.stringify(out)), []);
+  const find = (id) => out.nodes.find((n) => n.id === id);
+  assert.equal(find("f1").file, "docs/notes/design.md");
+  assert.equal(find("f1").type, "file");
+  assert.equal(find("l1").url, "https://example.com/spec");
+  assert.equal(find("t4").color, "#ff8800");
+  assert.equal(find("g1").color, "5");
+  assert.equal(find("t1").color, "4");
+  assert.equal(find("t1").text, "# Gateway\nnginx");
+  const e1 = out.edges.find((e) => e.id === "e1");
+  assert.deepEqual([e1.fromSide, e1.toSide], ["right", "left"]);
+  assert.equal(out.edges.find((e) => e.id === "e3").color, "2");
+  assert.equal(out.edges.find((e) => e.id === "e4").fromNode, "g1");
+  assert.deepEqual(
+    out.nodes.map((n) => n.id),
+    ["g1", "t1", "t2", "t3", "t4", "f1", "l1"],
+  );
+});
+
+test("a file or link node keeps its text: a title edit is refused", async () => {
+  const { parseDiagram, applyOp } = await model;
+  const d = parseDiagram(
+    file([
+      {
+        id: "f",
+        type: "file",
+        file: "a/b.md",
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+      },
+      textNode("t"),
+    ]),
+  ).diagram;
+  const set = (id) => applyOp(d, { op: "set", id, field: "title", value: "X" });
+  assert.equal(set("f"), d);
+  assert.equal(set("t").nodes[1].title, "X");
+});
+
+test("group membership follows geometry, the smallest group wins", async () => {
+  const { parseDiagram } = await model;
+  const g = (id, x, y, w, h) => ({
+    id,
+    type: "group",
+    label: id,
+    x,
+    y,
+    width: w,
+    height: h,
+  });
+  // a block is 170 x 62: its centre is (x + 85, y + 31)
+  const { diagram } = parseDiagram(
+    file([
+      g("outer", 0, 0, 1000, 800),
+      g("inner", 100, 100, 400, 300),
+      g("deep", 150, 150, 200, 100),
+      textNode("a", { x: 20, y: 20 }),
+      textNode("b", { x: 120, y: 300 }),
+      textNode("c", { x: 140, y: 170 }),
+      textNode("d", { x: 1200, y: 20 }),
+      textNode("e", { x: 600, y: 500 }),
+    ]),
+  );
+  const of = (id) => diagram.nodes.find((n) => n.id === id).group;
+  assert.equal(of("a"), "outer");
+  assert.equal(of("b"), "inner");
+  assert.equal(of("c"), "deep");
+  assert.equal(of("d"), undefined);
+  assert.equal(of("e"), "outer");
+});
+
+test("set group moves the block into the group", async () => {
+  const { parseDiagram, applyOp, groupRects, serializeDiagram } = await model;
+  const g = (id, x, y, w, h) => ({
+    id,
+    type: "group",
+    label: id,
+    x,
+    y,
+    width: w,
+    height: h,
+  });
+  const d = parseDiagram(
+    file([
+      g("g1", 0, 0, 300, 200),
+      g("g2", 600, 0, 300, 200),
+      textNode("in", { x: 20, y: 60 }),
+      textNode("out", { x: 400, y: 600 }),
+    ]),
+  ).diagram;
+  const node = (dd, id) => dd.nodes.find((n) => n.id === id);
+  // already inside: stays put
+  const same = applyOp(d, { op: "set", id: "in", field: "group", value: "g1" });
+  assert.deepEqual([node(same, "in").x, node(same, "in").y], [20, 60]);
+  // from outside: lands inside the group's rect
+  const moved = applyOp(d, {
+    op: "set",
+    id: "out",
+    field: "group",
+    value: "g2",
+  });
+  const at = node(moved, "out");
+  assert.equal(at.group, "g2");
+  const rect = groupRects(moved).get("g2");
+  assert.ok(at.x >= rect.x && at.x + 170 <= rect.x + rect.w);
+  assert.ok(at.y >= rect.y && at.y + 62 <= rect.y + rect.h);
+  // from group to group: leaves g1, joins g2
+  const hop = applyOp(d, { op: "set", id: "in", field: "group", value: "g2" });
+  assert.equal(
+    node(parseDiagram(serializeDiagram(hop)).diagram, "in").group,
+    "g2",
+  );
+  assert.equal(
+    node(parseDiagram(serializeDiagram(moved)).diagram, "out").group,
+    "g2",
+  );
+  // a full group grows to hold one more
+  const small = parseDiagram(
+    file([
+      g("g", 0, 0, 200, 100),
+      textNode("a", { x: 10, y: 30 }),
+      textNode("b", { x: 900, y: 900 }),
+    ]),
+  ).diagram;
+  const grown = applyOp(small, {
+    op: "set",
+    id: "b",
+    field: "group",
+    value: "g",
+  });
+  const back = parseDiagram(serializeDiagram(grown)).diagram;
+  assert.equal(node(back, "b").group, "g");
+  assert.equal(node(back, "a").group, "g");
+  // out of the group: just below it
+  const left = applyOp(d, { op: "set", id: "in", field: "group", value: "" });
+  assert.equal(node(left, "in").group, undefined);
+  assert.equal(
+    node(parseDiagram(serializeDiagram(left)).diagram, "in").group,
+    undefined,
+  );
+  // a block dragged out first stays where it was dropped
+  const dropped = applyOp(d, { op: "move", id: "in", x: 400, y: 400 });
+  const free = applyOp(dropped, {
+    op: "set",
+    id: "in",
+    field: "group",
+    value: "",
+  });
+  assert.deepEqual([node(free, "in").x, node(free, "in").y], [400, 400]);
+});
+
+const grp = (id, x, y, width, height, extra = {}) => ({
+  id,
+  type: "group",
+  label: id,
+  x,
+  y,
+  width,
+  height,
+  ...extra,
+});
+const nodesOf = (text) => JSON.parse(text).nodes;
+
+test("an Obsidian canvas survives an unrelated edit node for node", async () => {
+  const { parseDiagram, serializeDiagram, applyOps } = await model;
+  const original = [
+    textNode("t", {
+      text: "# Title\n\nPara one\n",
+      x: 10,
+      y: 10,
+      width: 250,
+      height: 180,
+    }),
+    {
+      id: "f",
+      type: "file",
+      file: "a/b.md",
+      x: 300,
+      y: 10,
+      width: 400,
+      height: 400,
+    },
+    textNode("m", { text: "Move me", x: 900, y: 10, width: 250, height: 60 }),
+  ];
+  const d = parseDiagram(file(original)).diagram;
+  const out = nodesOf(
+    serializeDiagram(applyOps(d, [{ op: "move", id: "m", x: 920, y: 30 }])),
+  );
+  assert.deepEqual(out[0], original[0]);
+  assert.deepEqual(out[1], original[1]);
+  assert.deepEqual(
+    [out[2].x, out[2].y, out[2].width, out[2].height],
+    [920, 30, 250, 60],
+  );
+  const again = serializeDiagram(parseDiagram(serializeDiagram(d)).diagram);
+  assert.equal(again, serializeDiagram(d));
+  // an edit of the title writes the new text; a shape change resets the size
+  const edited = applyOps(d, [
+    { op: "set", id: "t", field: "title", value: "New" },
+    { op: "set", id: "m", field: "shape", value: "diamond" },
+  ]);
+  const text = nodesOf(serializeDiagram(edited));
+  assert.equal(text[0].text, "New\nPara one");
+  assert.deepEqual([text[2].width, text[2].height], [150, 90]);
+  // the file's size decides which group a block belongs to
+  const wide = parseDiagram(
+    file([
+      grp("g", 0, 0, 300, 300),
+      textNode("w", { x: 200, y: 0, width: 400, height: 40 }),
+    ]),
+  ).diagram;
+  assert.equal(
+    wide.nodes[0].group,
+    undefined,
+    "its centre, by the file size, is outside",
+  );
+});
+
+test("a group keeps the bounds the file gave it", async () => {
+  const { parseDiagram, serializeDiagram, applyOps } = await model;
+  const d = parseDiagram(
+    file([
+      grp("g", 0, 0, 300, 200),
+      textNode("a", { x: 0, y: 0 }),
+      textNode("b", { x: 200, y: 150 }),
+    ]),
+  ).diagram;
+  const group = (dd) => nodesOf(serializeDiagram(dd))[0];
+  const bounds = (g) => [g.x, g.y, g.width, g.height];
+  assert.deepEqual(bounds(group(d)), [0, 0, 300, 200]);
+  assert.deepEqual(bounds(group(applyOps(d, []))), [0, 0, 300, 200]);
+  const moved = applyOps(d, [{ op: "move", id: "a", x: 20, y: 40 }]);
+  assert.deepEqual(bounds(group(moved)), [0, 0, 300, 200]);
+});
+
+test("membership is derived again after ops", async () => {
+  const { parseDiagram, applyOps } = await model;
+  const d = parseDiagram(
+    file([
+      grp("g", 0, 0, 300, 200),
+      textNode("a", { x: 20, y: 40 }),
+      textNode("b", { x: 600, y: 40 }),
+    ]),
+  ).diagram;
+  const node = (dd, id) => dd.nodes.find((n) => n.id === id);
+  const out = applyOps(d, [
+    { op: "move", id: "a", x: 900, y: 900 },
+    { op: "move", id: "b", x: 40, y: 60 },
+  ]);
+  assert.equal(node(out, "a").group, undefined);
+  assert.equal(node(out, "b").group, "g");
+  assert.deepEqual(
+    out.groups[0],
+    d.groups[0],
+    "a member moving never changes the group",
+  );
+});
+
+test("moving a group carries nested groups, blocks, notes and file nodes", async () => {
+  const { parseDiagram, applyOp, serializeDiagram } = await model;
+  const d = parseDiagram(
+    file([
+      grp("outer", 0, 0, 800, 600),
+      grp("inner", 400, 100, 300, 200),
+      textNode("in", { x: 20, y: 40 }),
+      textNode("deep", { x: 420, y: 140 }),
+      {
+        id: "f",
+        type: "file",
+        file: "a.md",
+        x: 20,
+        y: 300,
+        width: 200,
+        height: 100,
+      },
+      textNode("n", {
+        x: 20,
+        y: 500,
+        width: 280,
+        height: 30,
+        color: "3",
+        sushiai: { note: true },
+      }),
+      textNode("away", { x: 1200, y: 40 }),
+    ]),
+  ).diagram;
+  const out = applyOp(d, {
+    op: "move-group",
+    id: "outer",
+    rect: { x: 10, y: 20, w: 800, h: 600 },
+    dx: 10,
+    dy: 20,
+  });
+  const at = (id) => {
+    const i = [...out.nodes, ...out.notes, ...out.groups].find(
+      (n) => n.id === id,
+    );
+    return [i.x, i.y];
+  };
+  assert.deepEqual(at("outer"), [10, 20]);
+  assert.deepEqual(at("inner"), [410, 120]);
+  assert.deepEqual(at("in"), [30, 60]);
+  assert.deepEqual(at("deep"), [430, 160]);
+  assert.deepEqual(at("f"), [30, 320]);
+  assert.deepEqual(at("n"), [30, 520]);
+  assert.deepEqual(at("away"), [1200, 40]);
+  const back = JSON.parse(serializeDiagram(out)).nodes.find(
+    (n) => n.id === "inner",
+  );
+  assert.deepEqual([back.x, back.y], [410, 120]);
+});
+
+test("a picked group carries what lies inside it, which then moves no other way", async () => {
+  const { parseDiagram } = await model;
+  const { moveSet } = await board;
+  const d = parseDiagram(
+    file([
+      grp("g", 0, 0, 800, 600),
+      grp("h", 400, 100, 300, 200),
+      textNode("a", { x: 20, y: 40 }),
+      textNode("n", {
+        x: 20,
+        y: 500,
+        width: 280,
+        height: 30,
+        sushiai: { note: true },
+      }),
+      textNode("c", { x: 1000, y: 40 }),
+    ]),
+  ).diagram;
+  const picks = ["g", "h"]
+    .map((id) => ({ type: "group", id }))
+    .concat([
+      { type: "node", id: "a" },
+      { type: "note", id: "n" },
+      { type: "node", id: "c" },
+    ]);
+  assert.deepEqual(moveSet(d, picks), {
+    nodes: ["c"],
+    notes: [],
+    groups: ["g"],
+  });
+});
+
+test("setting arrow end on a start-only edge is written", async () => {
+  const { parseDiagram, applyOp, serializeDiagram } = await model;
+  const d = parseDiagram(
+    file(
+      [textNode("a"), textNode("b", { x: 300 })],
+      [
+        {
+          id: "e",
+          fromNode: "a",
+          toNode: "b",
+          fromEnd: "arrow",
+          toEnd: "none",
+        },
+      ],
+    ),
+  ).diagram;
+  const edge = (dd) => JSON.parse(serializeDiagram(dd)).edges[0];
+  assert.deepEqual([edge(d).fromEnd, edge(d).toEnd], ["arrow", "none"]);
+  const end = applyOp(d, { op: "set", id: "e", field: "arrow", value: "end" });
+  assert.deepEqual(
+    [edge(end).fromEnd, edge(end).toEnd],
+    [undefined, undefined],
+  );
+});
+
+test("set group leaves a block outside every group, or in the group asked for", async () => {
+  const { parseDiagram, applyOp, groupRects, groupAt, sizeOf } = await model;
+  const d = parseDiagram(
+    file([
+      grp("a", 0, 0, 300, 200),
+      grp("b", 320, 0, 300, 200),
+      grp("big", 0, 400, 800, 600),
+      grp("small", 100, 500, 300, 200),
+      textNode("x", { x: 20, y: 40 }),
+      textNode("y", { x: 20, y: 800 }),
+    ]),
+  ).diagram;
+  const centreGroup = (dd, id) => {
+    const n = dd.nodes.find((i) => i.id === id);
+    const { w, h } = sizeOf(n);
+    return groupAt(groupRects(dd), { x: n.x + w / 2, y: n.y + h / 2 });
+  };
+  const out = applyOp(d, { op: "set", id: "x", field: "group", value: "" });
+  assert.equal(centreGroup(out, "x"), "");
+  assert.equal(out.nodes[0].group, undefined);
+  // the group beside it is not a landing place either
+  const wide = applyOp(
+    parseDiagram(
+      file([
+        grp("a", 0, 0, 300, 200),
+        grp("b", 0, 210, 300, 200),
+        textNode("x", { x: 20, y: 40 }),
+      ]),
+    ).diagram,
+    { op: "set", id: "x", field: "group", value: "" },
+  );
+  assert.equal(centreGroup(wide, "x"), "");
+  // into "big" while its centre is inside "small": the block leaves "small"
+  const into = applyOp(d, {
+    op: "set",
+    id: "y",
+    field: "group",
+    value: "small",
+  });
+  assert.equal(centreGroup(into, "y"), "small");
+  const bigger = applyOp(
+    parseDiagram(
+      file([
+        grp("big", 0, 400, 800, 600),
+        grp("small", 100, 500, 300, 200),
+        textNode("y", { x: 120, y: 520 }),
+      ]),
+    ).diagram,
+    { op: "set", id: "y", field: "group", value: "big" },
+  );
+  assert.equal(centreGroup(bigger, "y"), "big");
+});
+
+test("a note keeps its colour, and a link must join node ids", async () => {
+  const { parseDiagram, serializeDiagram } = await model;
+  const note = textNode("n", {
+    color: "#112233",
+    width: 280,
+    height: 30,
+    sushiai: { note: true },
+  });
+  const out = nodesOf(serializeDiagram(parseDiagram(file([note])).diagram));
+  assert.equal(out[0].color, "#112233");
+  const plain = { ...note, color: undefined };
+  assert.equal(
+    nodesOf(serializeDiagram(parseDiagram(file([plain])).diagram))[0].color,
+    "3",
+  );
+  const bad = parseDiagram(
+    file(
+      [textNode("a"), textNode("b", { x: 300 })],
+      [
+        { id: "e1", fromNode: "a", toNode: "b" },
+        { id: "e2", fromNode: "a", toNode: "e1" },
+      ],
+    ),
+  );
+  assert.match(bad.error, /edges\[1\] \(e2\).*toNode references unknown node/);
+});
+
+test("a file or link node refuses title, tech and caption edits", async () => {
+  const { parseDiagram, applyOp } = await model;
+  const d = parseDiagram(
+    file([
+      {
+        id: "f",
+        type: "file",
+        file: "a/b.md",
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+      },
+    ]),
+  ).diagram;
+  for (const field of ["title", "tech", "caption"]) {
+    assert.equal(
+      applyOp(d, { op: "set", id: "f", field, value: "X" }),
+      d,
+      field,
+    );
   }
 });

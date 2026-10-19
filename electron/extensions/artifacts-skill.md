@@ -1,6 +1,6 @@
 ---
 name: sushiai-artifacts
-description: Only inside a sushiAI session (SUSHIAI_SESSION_ID is set). Show the owner a document you wrote - a plan, research, report, deck or diagram - in a sushiAI Preview half of your own pane. Works for Claude Code and Codex, in any project and on any host. Use when the owner asks to show, open or "make it a doc", a Markdown (.md) file, a presentation, slides or a deck, a diagram, a flowchart or block diagram, when the owner asks to design, draw or show an architecture, the order of steps of an agent or a skill, or a change as-is / to-be (write an editable `.arch.json` canvas), and after you write a plan or report the owner should read. Not for scratch notes.
+description: Only inside a sushiAI session (SUSHIAI_SESSION_ID is set). Show the owner a document you wrote - a plan, research, report, deck or diagram - in a sushiAI Preview half of your own pane. Works for Claude Code and Codex, in any project and on any host. Use when the owner asks to show, open or "make it a doc", a Markdown (.md) file, a presentation, slides or a deck, a diagram, a flowchart or block diagram, when the owner asks to design, draw or show an architecture, the order of steps of an agent or a skill, or a change as-is / to-be (write an editable `.canvas` file), and after you write a plan or report the owner should read. Not for scratch notes.
 ---
 
 # sushiAI artifacts
@@ -9,7 +9,7 @@ description: Only inside a sushiAI session (SUSHIAI_SESSION_ID is set). Show the
 
 Run `echo "${SUSHIAI_SESSION_ID:-none}"`. If it prints `none`, you are not
 inside sushiAI and this skill does not apply: stop reading it and do the task
-the usual way (plain Markdown, Mermaid, HTML). Do not write `.arch.json` and
+the usual way (plain Markdown, Mermaid, HTML). Do not write `.canvas` files and
 do not run `sushiai open` there.
 
 sushiAI can open a file you wrote in a Preview half of your
@@ -23,7 +23,7 @@ a plan as a task. Works on every host and with any agent.
 - You finished a plan or a report the owner must read before you go on.
 - The owner asks to design, draw or show an architecture, a flowchart or
   block diagram, an order of steps of an agent or a skill, or a change as-is / to-be, or you want the owner to
-  approve one. Write an `.arch.json` canvas, not Mermaid: the owner edits it
+  approve one. Write a `.canvas` file, not Mermaid: the owner edits it
   in the Preview and you both work on the same file.
 
 Do not open scratch notes, logs or code files.
@@ -36,14 +36,14 @@ one file. Edit the same file on every revision - the Preview updates by itself.
 
 ## Formats
 
-| Want                                         | Write                                                                 |
-| -------------------------------------------- | --------------------------------------------------------------------- |
-| Text, research                               | `.md` (GitHub Markdown: headings, tables, task lists, code blocks)    |
-| Plan                                         | `.md` with `kind: plan` in the frontmatter (see below)                |
-| Deck                                         | one `.html` with reveal.js from a CDN (template below)                |
-| Sequence diagram, chart                      | one `.html` with Mermaid from a CDN, or an `.svg` file                |
-| Diagram (architecture, steps, as-is / to-be) | `docs/arch/<slug>.arch.json` (opens as an editable canvas, see below) |
-| Image, PDF                                   | the file as it is (`.png`, `.jpg`, `.svg`, `.pdf`)                    |
+| Want                                         | Write                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| Text, research                               | `.md` (GitHub Markdown: headings, tables, task lists, code blocks) |
+| Plan                                         | `.md` with `kind: plan` in the frontmatter (see below)             |
+| Deck                                         | one `.html` with reveal.js from a CDN (template below)             |
+| Sequence diagram, chart                      | one `.html` with Mermaid from a CDN, or an `.svg` file             |
+| Diagram (architecture, steps, as-is / to-be) | `docs/arch/<slug>.canvas` (opens as an editable canvas, see below) |
+| Image, PDF                                   | the file as it is (`.png`, `.jpg`, `.svg`, `.pdf`)                 |
 
 Markdown frontmatter (optional, first lines of the file):
 
@@ -167,108 +167,317 @@ line, `[sushiAI Preview] The owner edited <path>. Reread it before you change
 it.` Read the file again before your next edit, so you never write back an
 old copy.
 
-## Diagrams (.arch.json)
+## Diagrams (.canvas)
 
 Use a diagram for an architecture, an order of steps of an agent or a skill,
 or a change as-is / to-be. Write one file per view at
-`docs/arch/<slug>.arch.json`. The Preview opens it as an editable canvas.
+`docs/arch/<slug>.canvas`. The file is a JSON Canvas 1.0 file. The Preview
+opens it as an editable canvas. The file opens in Obsidian and other JSON
+Canvas tools too. They may drop the `sushiai` fields when they save.
 
-One block type covers all three. Optional properties set its look. The file
-is JSON; `version` is always 1.
+The file is JSON with three top-level keys: `nodes`, `edges` and `sushiai`.
+`sushiai.version` is always 1. `sushiai.title` is the title of the view.
 
-| Property  | Meaning                                                                                                                                                                                                                        |
+### Blocks
+
+A block is a `text` node. Its `text` is the title. A second line is the
+subtitle, such as the technology, the transport or the role. Give every node
+integer `x`, `y`, `width` and `height`. Use even numbers (2 px grid). Sizes
+per shape:
+
+| Shape      | Width by height | Use                  |
+| ---------- | --------------- | -------------------- |
+| `box`      | 170 by 62       | step or component    |
+| `pill`     | 170 by 44       | start, end or action |
+| `diamond`  | 150 by 90       | decision             |
+| `cylinder` | 170 by 72       | data store           |
+| `person`   | 120 by 84       | role                 |
+| `circle`   | 72 by 72        | start or end dot     |
+
+Extras go in the `sushiai` object of the node. Set only the keys you use:
+
+| Key       | Meaning                                                                                                                                                                                                                        |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `shape`   | `box` step or component; `pill` start, end or action; `diamond` decision; `cylinder` data store; `person` role; `circle` start or end dot                                                                                      |
+| `shape`   | One of the shapes above. Absent means `box`.                                                                                                                                                                                   |
 | `icon`    | One of: `laptop` `server` `database` `cloud` `phone` `globe` `bot` `user` `users` `terminal` `code` `puzzle` `file` `folder` `message` `key` `lock` `zap` `play` `flag` `check` `git` `cpu` `box`. Another name shows no icon. |
-| `caption` | Small uppercase line above the title, such as `Step` or `Skill`                                                                                                                                                                |
-| `tech`    | One line under the title: technology, transport or role                                                                                                                                                                        |
-| `step`    | Order number badge: a whole number from 1 to 999                                                                                                                                                                               |
+| `caption` | Small uppercase line above the title, such as `Step` or `Skill`.                                                                                                                                                               |
+| `step`    | Order number badge: a whole number from 1 to 999.                                                                                                                                                                              |
+| `status`  | `proposed` (see Proposals below).                                                                                                                                                                                              |
 | `delta`   | `new`, `changed`, `exists` or `removed`. Absent means no mark.                                                                                                                                                                 |
 
-Sizes: box 170 by 62, pill 170 by 44, diamond 150 by 90, cylinder 170 by 72,
-person 120 by 84, circle 72 by 72.
+Delta:
 
 - `new` is to-be only. `changed` exists and will change. `exists` is as-is.
-  `removed` exists and will go. The Preview marks each block, and the title
-  shows how many are new, changed or removed.
-- A group is a boundary (a trust zone, a network) or a lane (one actor per
-  row). A block joins a group with its `group` id.
-- An edge `label` is the text on the line. `style` is `plain` (default),
-  `dashed`, or `guess` (not confirmed). `arrow` is `end` (default), `both`
-  or `none`.
-- A note is a question for the owner. One question per note.
-- `"status": "proposed"` on a block or an edge: the owner accepts it (the
-  field is removed) or rejects it (the item is deleted).
-- Ids are stable slugs. Never rename an id.
-- `x` and `y` are optional. Leave them out on new blocks: the Preview places
-  them. Use even numbers (2 px grid).
+  `removed` exists and will go.
+- Set `color` to match the delta: `new` is `"4"`, `changed` is `"3"` and
+  `removed` is `"1"`. `exists` has no `color`.
+- The Preview marks each block, and the title shows how many are new, changed
+  or removed.
 
-Example a, app architecture (3 blocks, 1 group):
+### Groups
+
+A group is a `group` node with `label`, `x`, `y`, `width` and `height`. It is
+a boundary (a trust zone, a network) or a lane (one actor per row). Optional
+`sushiai.icon` takes the same names as a block icon.
+
+A block belongs to the group whose rectangle contains the centre of the block.
+Do not write a group id on a block. Place the block fully inside the group.
+A group is exactly the `x`, `y`, `width` and `height` you write; the Preview
+does not pad or grow it. Leave room: about 30 px above the first block for the
+label, and 10 px at the sides and 8 px below.
+
+### Notes
+
+A note is a question for the owner. It is a `text` node with
+`"sushiai": { "note": true }` and `"color": "3"`. Its `text` is the question.
+One question per note.
+
+### Edges
+
+- `fromNode` and `toNode` are the ids of the two nodes.
+- `label` is the text on the line.
+- `toEnd` is `arrow` by default. `fromEnd` is `none` by default. Write them
+  only when they differ. For both arrows set `fromEnd` to `arrow`. For no
+  arrow set `toEnd` to `none`.
+- `sushiai.style` is `dashed` or `guess`. `guess` means not confirmed; set
+  `color` to `"3"` as well. Absent means a plain line.
+- `sushiai.status` is `proposed` (see Proposals below).
+
+### Proposals
+
+`"status": "proposed"` in `sushiai` on a node or an edge marks an item the
+agent proposed. The owner accepts it (the field is removed) or rejects it (the
+item is deleted).
+
+### Ids and layout
+
+- Every node and every edge has a unique id. Ids are stable slugs. Never rename
+  an id.
+- Leave at least 40 px between blocks. No two blocks overlap.
+- Do not reorder items.
+
+Example a, app architecture (one group, one cylinder):
 
 ```json
 {
-  "version": 1,
-  "groups": [{ "id": "cloud", "label": "Cloud", "icon": "cloud" }],
   "nodes": [
-    { "id": "web", "title": "Web app", "tech": "React" },
-    { "id": "api", "title": "API", "tech": "HTTPS", "group": "cloud" },
-    { "id": "db", "title": "Database", "shape": "cylinder", "group": "cloud" }
-  ],
-  "edges": [
-    { "id": "web-api", "from": "web", "to": "api", "label": "HTTPS" },
-    { "id": "api-db", "from": "api", "to": "db" }
-  ],
-  "notes": []
-}
-```
-
-Example b, order of steps (start, 2 steps, a decision):
-
-```json
-{
-  "version": 1,
-  "groups": [],
-  "nodes": [
-    { "id": "start", "title": "Start", "shape": "circle" },
-    { "id": "read", "title": "Read", "step": 1 },
-    { "id": "plan", "title": "Plan", "step": 2 },
-    { "id": "ok", "title": "Approved?", "shape": "diamond" },
-    { "id": "end", "title": "Done", "shape": "circle" }
-  ],
-  "edges": [
-    { "id": "s-r", "from": "start", "to": "read" },
-    { "id": "r-p", "from": "read", "to": "plan" },
-    { "id": "p-ok", "from": "plan", "to": "ok" },
-    { "id": "ok-end", "from": "ok", "to": "end", "label": "yes" },
     {
-      "id": "ok-p",
-      "from": "ok",
-      "to": "plan",
-      "label": "no",
-      "style": "dashed"
+      "id": "cloud",
+      "type": "group",
+      "label": "Cloud",
+      "x": 40,
+      "y": 40,
+      "width": 420,
+      "height": 240,
+      "sushiai": { "icon": "cloud" }
+    },
+    {
+      "id": "web",
+      "type": "text",
+      "text": "Web app\nReact",
+      "x": 40,
+      "y": 320,
+      "width": 170,
+      "height": 62,
+      "sushiai": { "icon": "globe" }
+    },
+    {
+      "id": "api",
+      "type": "text",
+      "text": "API\nHTTPS",
+      "x": 100,
+      "y": 100,
+      "width": 170,
+      "height": 62,
+      "sushiai": { "icon": "server" }
+    },
+    {
+      "id": "db",
+      "type": "text",
+      "text": "Database\nPostgreSQL",
+      "x": 100,
+      "y": 202,
+      "width": 170,
+      "height": 72,
+      "sushiai": { "shape": "cylinder", "icon": "database" }
     }
   ],
-  "notes": []
+  "edges": [
+    {
+      "id": "web-api",
+      "fromNode": "web",
+      "toNode": "api",
+      "label": "HTTPS"
+    },
+    {
+      "id": "api-db",
+      "fromNode": "api",
+      "toNode": "db"
+    }
+  ],
+  "sushiai": { "version": 1, "title": "App architecture" }
 }
 ```
 
-Example c, module as-is and to-be (one exists, one changed, one new, one removed):
+Example b, order of steps (start, two steps, a decision):
 
 ```json
 {
-  "version": 1,
-  "groups": [],
   "nodes": [
-    { "id": "login", "title": "Login", "delta": "exists" },
-    { "id": "token", "title": "Token check", "delta": "changed" },
-    { "id": "mfa", "title": "Second factor", "delta": "new" },
-    { "id": "basic", "title": "Basic auth", "delta": "removed" }
+    {
+      "id": "start",
+      "type": "text",
+      "text": "Start",
+      "x": 40,
+      "y": 100,
+      "width": 72,
+      "height": 72,
+      "sushiai": { "shape": "circle" }
+    },
+    {
+      "id": "read",
+      "type": "text",
+      "text": "Read",
+      "x": 152,
+      "y": 106,
+      "width": 170,
+      "height": 62,
+      "sushiai": { "caption": "Step", "step": 1 }
+    },
+    {
+      "id": "plan",
+      "type": "text",
+      "text": "Plan",
+      "x": 362,
+      "y": 106,
+      "width": 170,
+      "height": 62,
+      "sushiai": { "caption": "Step", "step": 2 }
+    },
+    {
+      "id": "ok",
+      "type": "text",
+      "text": "Approved?",
+      "x": 574,
+      "y": 92,
+      "width": 150,
+      "height": 90,
+      "sushiai": { "shape": "diamond" }
+    },
+    {
+      "id": "end",
+      "type": "text",
+      "text": "Done",
+      "x": 764,
+      "y": 100,
+      "width": 72,
+      "height": 72,
+      "sushiai": { "shape": "circle" }
+    }
   ],
   "edges": [
-    { "id": "login-token", "from": "login", "to": "token" },
-    { "id": "token-mfa", "from": "token", "to": "mfa" }
+    {
+      "id": "s-r",
+      "fromNode": "start",
+      "toNode": "read"
+    },
+    {
+      "id": "r-p",
+      "fromNode": "read",
+      "toNode": "plan"
+    },
+    {
+      "id": "p-ok",
+      "fromNode": "plan",
+      "toNode": "ok"
+    },
+    {
+      "id": "ok-end",
+      "fromNode": "ok",
+      "toNode": "end",
+      "label": "yes"
+    },
+    {
+      "id": "ok-p",
+      "fromNode": "ok",
+      "toNode": "plan",
+      "label": "no",
+      "sushiai": { "style": "dashed" }
+    }
   ],
-  "notes": []
+  "sushiai": { "version": 1, "title": "Agent task steps" }
+}
+```
+
+Example c, one module as-is and to-be (one exists, one changed, one new, one
+removed):
+
+```json
+{
+  "nodes": [
+    {
+      "id": "login",
+      "type": "text",
+      "text": "Login\nPassword form",
+      "x": 40,
+      "y": 100,
+      "width": 170,
+      "height": 62,
+      "sushiai": { "delta": "exists" }
+    },
+    {
+      "id": "token",
+      "type": "text",
+      "text": "Token check\nAPI",
+      "x": 252,
+      "y": 100,
+      "width": 170,
+      "height": 62,
+      "color": "3",
+      "sushiai": { "delta": "changed" }
+    },
+    {
+      "id": "mfa",
+      "type": "text",
+      "text": "Second factor\nTOTP",
+      "x": 464,
+      "y": 100,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "sushiai": { "delta": "new" }
+    },
+    {
+      "id": "basic",
+      "type": "text",
+      "text": "Basic auth\nLegacy",
+      "x": 252,
+      "y": 220,
+      "width": 170,
+      "height": 62,
+      "color": "1",
+      "sushiai": { "delta": "removed" }
+    }
+  ],
+  "edges": [
+    {
+      "id": "login-token",
+      "fromNode": "login",
+      "toNode": "token"
+    },
+    {
+      "id": "token-mfa",
+      "fromNode": "token",
+      "toNode": "mfa"
+    },
+    {
+      "id": "login-basic",
+      "fromNode": "login",
+      "toNode": "basic",
+      "sushiai": { "style": "dashed" }
+    }
+  ],
+  "sushiai": { "version": 1, "title": "Login as-is and to-be" }
 }
 ```
 
@@ -279,4 +488,5 @@ Editing:
 - Change only the items you mean to change. Never move what the owner placed.
 - Keep fields you do not know. Do not reorder items.
 - Check that the file is valid JSON before you save it.
-- Open it with the command in `## Open it`, with the path of the `.arch.json` file.
+- Open it with the command in `## Open it`, with the path of the `.canvas`
+  file.

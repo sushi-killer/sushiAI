@@ -1,7 +1,5 @@
 import { useRef, useState } from "react";
 import {
-  dropGroup,
-  leaveBounds,
   marqueeHits,
   moveSet,
   samePick,
@@ -90,7 +88,7 @@ export function useBoardPointer(a: Args) {
         moved: false,
       };
     } else if (gid) {
-      const base = groupRects(d, p).get(gid);
+      const base = groupRects(d).get(gid);
       const item: Picked = { type: "group", id: gid };
       const next = resize ? [item] : clickOn(item, additive);
       if (resize) pick(item);
@@ -205,16 +203,7 @@ export function useBoardPointer(a: Args) {
         else if (!g.shift) pick(g.item);
       }
       if (g.kind === "move" && g.last) {
-        const { diagram: d, pos: p } = latest.current;
         push({ op: "move", id: g.id, ...g.last }, true);
-        const node = d.nodes.find((n) => n.id === g.id);
-        if (node) {
-          const into = dropGroup(d, p, g.id, g.last);
-          if (into !== (node.group || "")) {
-            for (const op of leaveBounds(d, p, g.id, into)) push(op, true);
-            push({ op: "set", id: g.id, field: "group", value: into }, true);
-          }
-        }
         setDrag(null);
       }
       if (g.kind === "group" && g.last) {

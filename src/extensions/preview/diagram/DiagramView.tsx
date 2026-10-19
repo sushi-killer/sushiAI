@@ -8,15 +8,14 @@ import { ContextMenu } from "./ContextMenu.tsx";
 import {
   deleteOps,
   dropGroup,
-  emptiedBounds,
-  leaveBounds,
   moveSet,
   typing,
+  countLabel,
 } from "./boardMath.ts";
 import { Inspect } from "./Inspect.tsx";
 import { InspectMany } from "./InspectMany.tsx";
 import { BoardItems, BoardSvg, HeadsSvg, StatusText } from "./Layers.tsx";
-import { groupRects, nodeSize, placeNodes } from "./model.ts";
+import { groupRects, nodeSize, placeNodes, within } from "./model.ts";
 import type { Diagram, DiagramOp, Picked, Point, Rect } from "./types.ts";
 import { useDiagramSave, type SaveStatus } from "./useDiagramSave.ts";
 import { useMarquee } from "./useMarquee.ts";
@@ -67,7 +66,7 @@ function Board(
   latest.current = { diagram, pos };
   const pushAll = (ops: DiagramOp[]) =>
     ops.forEach((op, i) => push(op, i === ops.length - 1));
-  const mover = useMoveSet(diagram, latest, pushAll);
+  const mover = useMoveSet(latest, pushAll);
   const { shift } = mover;
   const { view, viewRef, setView, fit, boardPoint } = useViewport(
     boardRef,
@@ -87,44 +86,53 @@ function Board(
     spaceDown,
   });
 
+  // What a group move carries along while it is dragged or nudged.
+  const carry = useMemo(() => {
+    const live = gdrag && (gdrag.dx || gdrag.dy) ? gdrag : null;
+    if (live) return { ids: within(diagram, live.id), ...live };
+    if (!shift || (!shift.dx && !shift.dy)) return null;
+    const ids = new Set(
+      shift.set.groups.flatMap((id) => [...within(diagram, id)]),
+    );
+    return { ids, dx: shift.dx, dy: shift.dy };
+  }, [diagram, gdrag, shift]);
   const shownPos = useMemo(() => {
     const out = new Map(pos);
     if (drag && out.has(drag.id)) out.set(drag.id, { x: drag.x, y: drag.y });
-    if (gdrag && (gdrag.dx || gdrag.dy))
-      for (const n of diagram.nodes)
-        if (n.group === gdrag.id && typeof n.x === "number") {
-          const at = out.get(n.id);
-          if (at) out.set(n.id, { x: at.x + gdrag.dx, y: at.y + gdrag.dy });
-        }
+    if (carry)
+      for (const id of carry.ids) {
+        const at = out.get(id);
+        if (at) out.set(id, { x: at.x + carry.dx, y: at.y + carry.dy });
+      }
     if (shift)
       for (const id of mover.moving) {
         const at = out.get(id);
         if (at) out.set(id, { x: at.x + shift.dx, y: at.y + shift.dy });
       }
     return out;
-  }, [diagram, pos, drag, gdrag, shift, mover.moving]);
+  }, [pos, drag, carry, shift, mover.moving]);
   const groups = useMemo(() => {
-    if (gdrag) return groupRects(diagram, pos).set(gdrag.id, gdrag.rect);
-    const out = groupRects(diagram, shownPos);
-    if (shift) {
-      const base = groupRects(diagram, pos);
-      for (const id of shift.set.groups) {
-        const r = base.get(id);
-        if (r) out.set(id, { ...r, x: r.x + shift.dx, y: r.y + shift.dy });
-      }
-    }
+    const out = groupRects(diagram);
+    const move = (id: string, dx: number, dy: number) => {
+      const r = out.get(id);
+      if (r) out.set(id, { ...r, x: r.x + dx, y: r.y + dy });
+    };
+    if (carry) for (const id of carry.ids) move(id, carry.dx, carry.dy);
+    if (gdrag) out.set(gdrag.id, gdrag.rect);
+    else if (shift)
+      for (const id of shift.set.groups) move(id, shift.dx, shift.dy);
     return out;
-  }, [diagram, pos, shownPos, gdrag, shift]);
+  }, [diagram, carry, gdrag, shift]);
   // The boundary a dragged component would land in.
   const target = useMemo(() => {
     if (!drag || !diagram.nodes.some((n) => n.id === drag.id)) return "";
-    return dropGroup(diagram, pos, drag.id, drag);
-  }, [diagram, pos, drag]);
+    return dropGroup(diagram, drag.id, drag);
+  }, [diagram, drag]);
   const noteAt = (id: string, x: number, y: number): Point => {
     if (drag?.id === id) return { x: drag.x, y: drag.y };
-    return shift?.set.notes.includes(id)
-      ? { x: x + shift.dx, y: y + shift.dy }
-      : { x, y };
+    if (shift?.set.notes.includes(id))
+      return { x: x + shift.dx, y: y + shift.dy };
+    return carry?.ids.has(id) ? { x: x + carry.dx, y: y + carry.dy } : { x, y };
   };
   props.onRemapRef.current = (remap) => {
     const to = (id: string) => remap.get(id) ?? id;
@@ -140,15 +148,8 @@ function Board(
   };
   const moving = useMemo(
     () =>
-      new Set([
-        ...mover.moving,
-        ...(drag
-          ? [drag.id]
-          : gdrag && (gdrag.dx || gdrag.dy)
-            ? diagram.nodes.filter((n) => n.group === gdrag.id).map((n) => n.id)
-            : []),
-      ]),
-    [drag, gdrag, diagram, mover.moving],
+      new Set([...mover.moving, ...(drag ? [drag.id] : (carry?.ids ?? []))]),
+    [drag, carry, mover.moving],
   );
   const edges = useRoutes(diagram, diagram, pos, shownPos, groups, moving);
 
@@ -169,15 +170,8 @@ function Board(
       fit();
   };
 
-  const pushKeepingBounds = (op: DiagramOp, immediate = false) => {
-    const { diagram: d, pos: p } = latest.current;
-    if (op.op === "set" && op.field === "group")
-      for (const bounds of leaveBounds(d, p, op.id, op.value))
-        push(bounds, true);
-    push(op, immediate);
-  };
   const remove = (picks: Picked[]) => {
-    pushAll(deleteOps(latest.current.diagram, latest.current.pos, picks));
+    pushAll(deleteOps(picks));
     pick(null);
   };
   const setMany = (
@@ -185,16 +179,7 @@ function Board(
     field: "shape" | "icon" | "delta" | "group",
     value: string,
   ) => {
-    const { diagram: d, pos: p } = latest.current;
     const ops: DiagramOp[] = [];
-    if (field === "group") {
-      const leaving = new Set(
-        ids.filter(
-          (id) => (d.nodes.find((n) => n.id === id)?.group || "") !== value,
-        ),
-      );
-      ops.push(...emptiedBounds(d, p, leaving, new Set([value])));
-    }
     for (const id of ids) ops.push({ op: "set", id, field, value });
     pushAll(ops);
   };
@@ -343,7 +328,7 @@ function Board(
             diagram={diagram}
             picked={one}
             focusText={one.id === fresh}
-            onOp={(op) => pushKeepingBounds(op, op.op !== "set")}
+            onOp={(op) => push(op, op.op !== "set")}
             onDelete={() => remove([one])}
             onComment={props.onComment}
           />
@@ -366,7 +351,7 @@ function Board(
           {shownPath(props.path, props.cwd)}
         </span>
         <span className="dg-count">
-          {diagram.nodes.length} blocks · {diagram.edges.length} links
+          {countLabel(diagram.nodes.length, diagram.edges.length)}
         </span>
         <span className="dg-spacer" />
         <StatusText status={props.status} readError={props.readError} />
@@ -375,7 +360,7 @@ function Board(
   );
 }
 
-/** The `.arch.json` diagram drawn and edited inside the Preview. */
+/** The `.canvas` diagram drawn and edited inside the Preview. */
 export function DiagramView(props: Props) {
   const onRemapRef = useRef<(remap: Map<string, string>) => void>(() => {});
   const { display, error, status, push } = useDiagramSave({

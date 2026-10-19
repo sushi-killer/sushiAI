@@ -22,7 +22,7 @@ const EXTENSIONS: Record<string, ArtifactKind> = {
 
 export function kindOf(path: string): ArtifactKind {
   const name = path.slice(path.lastIndexOf("/") + 1);
-  if (name.toLowerCase().endsWith(".arch.json")) return "diagram";
+  if (name.toLowerCase().endsWith(".canvas")) return "diagram";
   const dot = name.lastIndexOf(".");
   if (dot < 0) return "text";
   return EXTENSIONS[name.slice(dot + 1).toLowerCase()] || "text";

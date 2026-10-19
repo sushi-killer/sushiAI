@@ -1,0 +1,242 @@
+{
+  "nodes": [
+    {
+      "id": "phone",
+      "type": "group",
+      "x": 16,
+      "y": 150,
+      "width": 190,
+      "height": 100,
+      "label": "Phone",
+      "sushiai": {
+        "icon": "phone"
+      }
+    },
+    {
+      "id": "cloud",
+      "type": "group",
+      "x": 226,
+      "y": 16,
+      "width": 420,
+      "height": 234,
+      "label": "Cloud",
+      "sushiai": {
+        "icon": "cloud"
+      }
+    },
+    {
+      "id": "office",
+      "type": "group",
+      "x": 16,
+      "y": 290,
+      "width": 630,
+      "height": 210,
+      "label": "Office network",
+      "sushiai": {
+        "icon": "laptop"
+      }
+    },
+    {
+      "id": "vendor",
+      "type": "group",
+      "x": 436,
+      "y": 530,
+      "width": 210,
+      "height": 104,
+      "label": "Payment provider",
+      "sushiai": {
+        "icon": "server"
+      }
+    },
+    {
+      "id": "mobile-app",
+      "type": "text",
+      "x": 26,
+      "y": 180,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "text": "Mobile app\niOS and Android",
+      "sushiai": {
+        "kind": "app",
+        "delta": "new"
+      }
+    },
+    {
+      "id": "search",
+      "type": "text",
+      "x": 246,
+      "y": 46,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "text": "Search\nFull-text, per store",
+      "sushiai": {
+        "kind": "service",
+        "delta": "new"
+      }
+    },
+    {
+      "id": "orders-db",
+      "type": "text",
+      "x": 456,
+      "y": 46,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "text": "Orders DB\nPostgres · orders, users",
+      "sushiai": {
+        "kind": "data",
+        "delta": "new"
+      }
+    },
+    {
+      "id": "api",
+      "type": "text",
+      "x": 351,
+      "y": 160,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "text": "Public API\nHTTPS + WSS · OAuth",
+      "sushiai": {
+        "kind": "service",
+        "delta": "new"
+      }
+    },
+    {
+      "id": "admin",
+      "type": "text",
+      "x": 36,
+      "y": 330,
+      "width": 170,
+      "height": 62,
+      "color": "3",
+      "text": "Admin panel\nReact · + refunds page",
+      "sushiai": {
+        "kind": "app",
+        "delta": "changed"
+      }
+    },
+    {
+      "id": "backoffice",
+      "type": "text",
+      "x": 246,
+      "y": 330,
+      "width": 170,
+      "height": 62,
+      "text": "Back office\nGo service · job queue",
+      "sushiai": {
+        "kind": "service",
+        "delta": "exists"
+      }
+    },
+    {
+      "id": "sync",
+      "type": "text",
+      "x": 456,
+      "y": 330,
+      "width": 170,
+      "height": 62,
+      "color": "4",
+      "text": "Sync worker\nOutbound only · no open port",
+      "sushiai": {
+        "kind": "service",
+        "delta": "new"
+      }
+    },
+    {
+      "id": "reports",
+      "type": "text",
+      "x": 246,
+      "y": 420,
+      "width": 170,
+      "height": 62,
+      "text": "Reports\nNightly exports",
+      "sushiai": {
+        "kind": "service",
+        "delta": "exists"
+      }
+    },
+    {
+      "id": "ledger",
+      "type": "text",
+      "x": 456,
+      "y": 560,
+      "width": 170,
+      "height": 62,
+      "text": "Ledger\nCard tokens",
+      "sushiai": {
+        "kind": "data",
+        "delta": "exists"
+      }
+    },
+    {
+      "id": "tokens-boundary",
+      "type": "text",
+      "x": 96,
+      "y": 574,
+      "width": 280,
+      "height": 30,
+      "color": "3",
+      "text": "Card tokens cross a trust boundary. Who delivers them?",
+      "sushiai": {
+        "note": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "app-api",
+      "fromNode": "mobile-app",
+      "toNode": "api",
+      "label": "HTTPS"
+    },
+    {
+      "id": "api-search",
+      "fromNode": "api",
+      "toNode": "search"
+    },
+    {
+      "id": "api-db",
+      "fromNode": "api",
+      "toNode": "orders-db",
+      "label": "SQL"
+    },
+    {
+      "id": "sync-api",
+      "fromNode": "sync",
+      "toNode": "api",
+      "label": "WSS"
+    },
+    {
+      "id": "admin-backoffice",
+      "fromNode": "admin",
+      "toNode": "backoffice"
+    },
+    {
+      "id": "sync-backoffice",
+      "fromNode": "sync",
+      "toNode": "backoffice"
+    },
+    {
+      "id": "backoffice-reports",
+      "fromNode": "backoffice",
+      "toNode": "reports"
+    },
+    {
+      "id": "ledger-sync",
+      "fromNode": "ledger",
+      "toNode": "sync",
+      "color": "3",
+      "label": "tokens?",
+      "sushiai": {
+        "style": "guess"
+      }
+    }
+  ],
+  "sushiai": {
+    "version": 1,
+    "title": "Shop · Delta"
+  }
+}

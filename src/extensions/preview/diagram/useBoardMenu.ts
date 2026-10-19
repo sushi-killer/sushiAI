@@ -6,19 +6,18 @@ import {
   type MenuAt,
   type MenuItem,
 } from "./ContextMenu.tsx";
-import {
-  GROUP_H,
-  GROUP_W,
-  NOTE_H,
-  NOTE_W,
-  clampSpot,
-  freeSpot,
-  snap,
-} from "./boardMath.ts";
+import { GROUP_H, GROUP_W, clampSpot, freeSpot, snap } from "./boardMath.ts";
 import { quoteOf } from "./Inspect.tsx";
 import { quoteMany } from "./InspectMany.tsx";
 import { newId, nodeSize } from "./model.ts";
-import type { Diagram, DiagramOp, Picked, Point } from "./types.ts";
+import {
+  NOTE_H,
+  NOTE_W,
+  type Diagram,
+  type DiagramOp,
+  type Picked,
+  type Point,
+} from "./types.ts";
 
 type Args = {
   diagram: Diagram;

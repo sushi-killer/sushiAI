@@ -1,5 +1,5 @@
-/* Architecture diagram in the Artifacts Preview (`.arch.json`): toolbar, dotted
- * board, Inspect panel, status bar. Values follow Figma `Canvas/*`. Tokens only. */
+/* Architecture diagram in the Artifacts Preview (`.canvas`): toolbar, dotted
+ * board, Inspect panel, status bar. Tokens only. */
 
 .dg {
   position: absolute;

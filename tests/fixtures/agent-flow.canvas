@@ -1,0 +1,221 @@
+{
+  "nodes": [
+    {
+      "id": "agent",
+      "type": "group",
+      "x": 16,
+      "y": 16,
+      "width": 1030,
+      "height": 150,
+      "label": "Agent",
+      "sushiai": {
+        "icon": "bot"
+      }
+    },
+    {
+      "id": "owner",
+      "type": "group",
+      "x": 16,
+      "y": 186,
+      "width": 1030,
+      "height": 150,
+      "label": "Owner",
+      "sushiai": {
+        "icon": "user"
+      }
+    },
+    {
+      "id": "ci",
+      "type": "group",
+      "x": 16,
+      "y": 356,
+      "width": 1030,
+      "height": 150,
+      "label": "CI",
+      "sushiai": {
+        "icon": "git"
+      }
+    },
+    {
+      "id": "start",
+      "type": "text",
+      "x": 36,
+      "y": 238,
+      "width": 170,
+      "height": 44,
+      "text": "Start",
+      "sushiai": {
+        "shape": "pill"
+      }
+    },
+    {
+      "id": "read-task",
+      "type": "text",
+      "x": 124,
+      "y": 60,
+      "width": 170,
+      "height": 62,
+      "text": "Read the task",
+      "sushiai": {
+        "caption": "Step",
+        "step": 1
+      }
+    },
+    {
+      "id": "write-plan",
+      "type": "text",
+      "x": 316,
+      "y": 60,
+      "width": 170,
+      "height": 62,
+      "text": "Write the plan",
+      "sushiai": {
+        "caption": "Step",
+        "step": 2
+      }
+    },
+    {
+      "id": "plan-approved",
+      "type": "text",
+      "x": 316,
+      "y": 216,
+      "width": 150,
+      "height": 90,
+      "text": "Plan approved?",
+      "sushiai": {
+        "shape": "diamond"
+      }
+    },
+    {
+      "id": "implement",
+      "type": "text",
+      "x": 508,
+      "y": 60,
+      "width": 170,
+      "height": 62,
+      "text": "Implement",
+      "sushiai": {
+        "caption": "Step",
+        "step": 3
+      }
+    },
+    {
+      "id": "run-checks",
+      "type": "text",
+      "x": 250,
+      "y": 400,
+      "width": 170,
+      "height": 62,
+      "text": "Run checks",
+      "sushiai": {
+        "icon": "terminal",
+        "caption": "Skill",
+        "step": 4
+      }
+    },
+    {
+      "id": "checks-green",
+      "type": "text",
+      "x": 470,
+      "y": 386,
+      "width": 150,
+      "height": 90,
+      "text": "Checks green?",
+      "sushiai": {
+        "shape": "diamond"
+      }
+    },
+    {
+      "id": "open-pr",
+      "type": "text",
+      "x": 740,
+      "y": 68,
+      "width": 170,
+      "height": 62,
+      "text": "Open PR",
+      "sushiai": {
+        "shape": "box",
+        "icon": "git",
+        "step": 5
+      }
+    },
+    {
+      "id": "done",
+      "type": "text",
+      "x": 830,
+      "y": 238,
+      "width": 170,
+      "height": 44,
+      "text": "Done",
+      "sushiai": {
+        "shape": "pill"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-read",
+      "fromNode": "start",
+      "toNode": "read-task"
+    },
+    {
+      "id": "read-write",
+      "fromNode": "read-task",
+      "toNode": "write-plan"
+    },
+    {
+      "id": "write-review",
+      "fromNode": "write-plan",
+      "toNode": "plan-approved"
+    },
+    {
+      "id": "plan-yes",
+      "fromNode": "plan-approved",
+      "toNode": "implement",
+      "label": "yes"
+    },
+    {
+      "id": "plan-no",
+      "fromNode": "plan-approved",
+      "toNode": "write-plan",
+      "label": "no",
+      "sushiai": {
+        "style": "dashed"
+      }
+    },
+    {
+      "id": "implement-checks",
+      "fromNode": "implement",
+      "toNode": "run-checks"
+    },
+    {
+      "id": "checks-run",
+      "fromNode": "run-checks",
+      "toNode": "checks-green"
+    },
+    {
+      "id": "checks-yes",
+      "fromNode": "checks-green",
+      "toNode": "open-pr",
+      "label": "yes"
+    },
+    {
+      "id": "checks-no",
+      "fromNode": "checks-green",
+      "toNode": "implement",
+      "label": "no",
+      "sushiai": {
+        "style": "dashed"
+      }
+    },
+    {
+      "id": "pr-done",
+      "fromNode": "open-pr",
+      "toNode": "done"
+    }
+  ],
+  "sushiai": {
+    "version": 1,
+    "title": "Agent task loop"
+  }
+}

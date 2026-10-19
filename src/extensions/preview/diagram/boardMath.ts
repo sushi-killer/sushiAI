@@ -1,12 +1,32 @@
-import { MAX_COORD, groupRects, nodeSize, placeNodes } from "./model.ts";
-import type { Diagram, DiagramOp, Picked, Point, Rect } from "./types.ts";
+import {
+  MAX_COORD,
+  groupAt,
+  groupRects,
+  nodeSize,
+  placeNodes,
+  within,
+} from "./model.ts";
+import {
+  NOTE_H,
+  NOTE_W,
+  type Diagram,
+  type DiagramOp,
+  type Picked,
+  type Point,
+  type Rect,
+} from "./types.ts";
 
-export const NOTE_W = 280;
-export const NOTE_H = 30;
 export const GROUP_W = 420;
 export const GROUP_H = 240;
 const GAP = 40;
 export const GROUP_HEAD_H = 26;
+
+/** "1 block · 2 links": the status bar's count, singular for one. */
+export function countLabel(blocks: number, links: number): string {
+  const n = (count: number, word: string) =>
+    `${count} ${word}${count === 1 ? "" : "s"}`;
+  return `${n(blocks, "block")} · ${n(links, "link")}`;
+}
 
 export const snap = (n: number) => Math.round(n / 2) * 2;
 
@@ -20,7 +40,7 @@ export function clampSpot(p: Point, w: number, h: number): Point {
 /** Top-left for a new item: below everything already drawn. */
 export function freeSpot(d: Diagram, w: number, h: number): Point {
   const pos = placeNodes(d);
-  const rects: Rect[] = [...groupRects(d, pos).values()];
+  const rects: Rect[] = [...groupRects(d).values()];
   for (const n of d.nodes) {
     const at = pos.get(n.id);
     if (at) rects.push({ ...at, ...nodeSize(n) });
@@ -32,67 +52,11 @@ export function freeSpot(d: Diagram, w: number, h: number): Point {
   return clampSpot({ x: snap(x), y: snap(y) }, w, h);
 }
 
-/** The smallest boundary whose rect contains `p`, or "". */
-export function groupAt(rects: Map<string, Rect>, p: Point): string {
-  let best = "";
-  let area = Infinity;
-  for (const [id, r] of rects) {
-    const inside =
-      p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
-    if (inside && r.w * r.h < area) {
-      best = id;
-      area = r.w * r.h;
-    }
-  }
-  return best;
-}
-
-/** Boundary rects as they would be with component `id` out of the picture, so
- * a wrapping boundary does not stretch to follow the dragged component. */
-export function dropRects(
-  d: Diagram,
-  pos: Map<string, Point>,
-  id: string,
-): Map<string, Rect> {
-  return groupRects({ ...d, nodes: d.nodes.filter((n) => n.id !== id) }, pos);
-}
-
 /** The boundary component `id` belongs to after being dropped with its
- * top-left at `at`. Its own boundary counts as drawn before the drag, so a
- * nudge keeps it; a smaller boundary under the drop point wins. */
-export function dropGroup(
-  d: Diagram,
-  pos: Map<string, Point>,
-  id: string,
-  at: Point,
-): string {
-  const rects = dropRects(d, pos, id);
-  const own = d.nodes.find((n) => n.id === id)?.group;
-  const before = own ? groupRects(d, pos).get(own) : undefined;
-  if (own && before) rects.set(own, before);
+ * top-left at `at`: the smallest one around its centre. */
+export function dropGroup(d: Diagram, id: string, at: Point): string {
   const { w, h } = nodeSize(d.nodes.find((n) => n.id === id) ?? {});
-  return groupAt(rects, { x: at.x + w / 2, y: at.y + h / 2 });
-}
-
-/** Writes the explicit bounds of a boundary that has none when its last
- * member leaves it (moved out, regrouped or deleted), so it stays on the
- * board. `next` is the group the component goes to, "" for none. */
-export function leaveBounds(
-  d: Diagram,
-  pos: Map<string, Point>,
-  id: string,
-  next: string,
-): DiagramOp[] {
-  const own = d.nodes.find((n) => n.id === id)?.group;
-  const group = own ? d.groups.find((g) => g.id === own) : undefined;
-  if (!own || !group || own === next) return [];
-  const bounded = [group.x, group.y, group.w, group.h].every(
-    (v) => typeof v === "number",
-  );
-  const others = d.nodes.some((n) => n.group === own && n.id !== id);
-  const rect = groupRects(d, pos).get(own);
-  if (bounded || others || !rect) return [];
-  return [{ op: "resize-group", id: own, rect }];
+  return groupAt(groupRects(d), { x: at.x + w / 2, y: at.y + h / 2 });
 }
 
 export type Gesture =
@@ -152,7 +116,7 @@ export function marqueeHits(
   box: Rect,
 ): Picked[] {
   const out: Picked[] = [];
-  for (const [id, r] of groupRects(d, pos))
+  for (const [id, r] of groupRects(d))
     if (intersects(box, { ...r, h: Math.min(r.h, GROUP_HEAD_H) }))
       out.push({ type: "group", id });
   const nodes = new Set<string>();
@@ -194,18 +158,18 @@ export function livePicks(d: Diagram, picks: Picked[]): Picked[] {
 
 export type MoveSet = { nodes: string[]; notes: string[]; groups: string[] };
 
-/** What moves with a selection: a node whose group is picked too moves with
- * the group, not by itself. Edges do not move. */
+/** What moves with a selection: whatever lies inside a picked group moves
+ * with the group, not by itself. Edges do not move. */
 export function moveSet(d: Diagram, picks: Picked[]): MoveSet {
   const ids = (type: Picked["type"]) =>
     picks.filter((p) => p.type === type).map((p) => p.id);
-  const groups = ids("group");
-  const inGroup = new Set(groups);
-  const nodes = ids("node").filter((id) => {
-    const g = d.nodes.find((n) => n.id === id)?.group;
-    return !(g && inGroup.has(g));
-  });
-  return { nodes, notes: ids("note"), groups };
+  const carried = new Set(ids("group").flatMap((g) => [...within(d, g)]));
+  const free = (id: string) => !carried.has(id);
+  return {
+    nodes: ids("node").filter(free),
+    notes: ids("note").filter(free),
+    groups: ids("group").filter(free),
+  };
 }
 
 /** One op per moved item, for a shift of (dx, dy). */
@@ -218,7 +182,7 @@ export function moveOps(
 ): DiagramOp[] {
   if (!dx && !dy) return [];
   const ops: DiagramOp[] = [];
-  const rects = groupRects(d, pos);
+  const rects = groupRects(d);
   for (const id of set.groups) {
     const r = rects.get(id);
     if (r)
@@ -241,47 +205,11 @@ export function moveOps(
   return ops;
 }
 
-/** Explicit bounds for each auto-sized boundary that loses all its members,
- * so it stays on the board. `leaving` are the nodes going away; boundaries in
- * `keep` are going away or receiving them, so they need none. */
-export function emptiedBounds(
-  d: Diagram,
-  pos: Map<string, Point>,
-  leaving: Set<string>,
-  keep: Set<string>,
-): DiagramOp[] {
-  const rects = groupRects(d, pos);
-  const ops: DiagramOp[] = [];
-  for (const g of d.groups) {
-    const members = d.nodes.filter((n) => n.group === g.id);
-    const bounded = [g.x, g.y, g.w, g.h].every((v) => typeof v === "number");
-    const rect = rects.get(g.id);
-    if (
-      rect &&
-      !bounded &&
-      !keep.has(g.id) &&
-      members.length &&
-      members.every((n) => leaving.has(n.id))
-    )
-      ops.push({ op: "resize-group", id: g.id, rect });
-  }
-  return ops;
-}
-
 /** The ops that delete `picks`: links first, then blocks, notes and boundaries. */
-export function deleteOps(
-  d: Diagram,
-  pos: Map<string, Point>,
-  picks: Picked[],
-): DiagramOp[] {
+export function deleteOps(picks: Picked[]): DiagramOp[] {
   const ids = (type: Picked["type"]) =>
     picks.filter((p) => p.type === type).map((p) => p.id);
-  const nodes = ids("node");
-  const groups = ids("group");
-  return [
-    ...emptiedBounds(d, pos, new Set(nodes), new Set(groups)),
-    ...[...ids("edge"), ...nodes, ...ids("note"), ...groups].map(
-      (id): DiagramOp => ({ op: "delete", id }),
-    ),
-  ];
+  return [...ids("edge"), ...ids("node"), ...ids("note"), ...ids("group")].map(
+    (id): DiagramOp => ({ op: "delete", id }),
+  );
 }

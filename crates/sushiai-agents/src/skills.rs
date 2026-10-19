@@ -200,8 +200,6 @@ pub struct Skill {
     /// Milliseconds since the epoch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accessed_at: Option<u64>,
     pub content_hash: String,
     /// The harness sees another active skill of this name.
     pub is_duplicate: bool,
@@ -228,7 +226,7 @@ impl Skill {
     }
 
     /// The name the harness calls it by: a plugin's skills are `plugin:name`.
-    fn call_name(&self) -> String {
+    pub(crate) fn call_name(&self) -> String {
         let name = normalize(&self.name);
         match &self.plugin {
             Some(key) => format!("{}:{name}", key.split('@').next().unwrap_or(key)),
@@ -463,7 +461,6 @@ fn collect_file(file: &Path, origin: &Origin, found: &mut Vec<Skill>) {
         scripts,
         size: meta.len(),
         updated_at: millis(meta.modified()),
-        accessed_at: millis(meta.accessed()),
         content_hash: format!("{:x}", Sha256::digest(text.as_bytes())),
         is_duplicate: false,
         duplicate_kind: None,
@@ -636,7 +633,7 @@ fn codex_skill_configs(config: &toml_edit::DocumentMut, homes: &Homes) -> HashMa
 }
 
 /// Lower case, every run of other characters one `-`.
-fn normalize(value: &str) -> String {
+pub(crate) fn normalize(value: &str) -> String {
     let mut out = String::new();
     for c in value.chars().flat_map(char::to_lowercase) {
         if c.is_ascii_alphanumeric() {

@@ -394,8 +394,10 @@ export function SkillEditorPanel({
           {relativeDate(item.lastUsedAt)}
         </span>
         <span>
-          <strong>Calls</strong>
-          {item.usageCount ? item.usageCount.toLocaleString() : "Not available"}
+          <strong>Uses in 90 days</strong>
+          {item.usageIndexedAt
+            ? (item.usageCount ?? 0).toLocaleString()
+            : "Not indexed yet"}
         </span>
         <span>
           <strong>Updated</strong>

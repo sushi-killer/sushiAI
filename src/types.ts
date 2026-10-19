@@ -462,7 +462,10 @@ export type ChatModel = {
 };
 export type SkillProvider = "Codex" | "Claude";
 export type SkillUsage = {
+  provider?: SkillProvider;
   at: number;
+  calls?: number;
+  source?: "transcripts";
   project?: string;
   session?: string;
 };
@@ -480,9 +483,13 @@ export type SkillCatalogItem = {
   pluginScope?: "user" | "project" | "local";
   updatedAt?: number;
   lastUsedAt?: number;
-  lastUsedSource?: "skill event" | "usage cache" | "filesystem access";
+  lastUsedSource?: "transcripts";
+  /** Uses in the last 90 days, from the agents' transcripts. */
   usageCount?: number;
-  usageSource?: "skill events" | "usage cache" | "filesystem access";
+  /** When the transcript index last ran; absent until it has. */
+  usageIndexedAt?: number;
+  /** Characters of the description, which agents load in every session. */
+  descriptionChars?: number;
   recentUses?: SkillUsage[];
   size?: number;
   changed?: boolean;
@@ -762,6 +769,8 @@ export interface Bridge {
     kind: string,
     options?: { force?: boolean },
   ): Promise<SkillCatalogItem[]>;
+  /** The background transcript index finished and the catalog was rescanned. */
+  onSkillsUsageIndexed(callback: () => void): () => void;
   skillsManage(
     action: SkillManagementAction,
     item: SkillCatalogItem,

@@ -1,11 +1,12 @@
-//! `sushiai skills [--project DIR] [--json] [--catalog]` and `sushiai skills install|remove
-//! NAME`: wires `sushiai_agents::skills` to this host's folders. The tool folders come from
+//! `sushiai skills [--project DIR] [--json] [--catalog]`, `sushiai skills usage --index [--json]`
+//! and `sushiai skills install|remove NAME`: wires `sushiai_agents::skills` to this host's folders. The tool folders come from
 //! `CLAUDE_CONFIG_DIR` and `CODEX_HOME` here, nowhere else. Needs no daemon.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use sushiai_agents::skill_usage::{self, Usage};
 use sushiai_agents::skills::{self, Change, Homes, Source};
 
 /// The skill folders of the user home `home`, with the tools' own settings applied.
@@ -48,12 +49,52 @@ pub fn run(args: impl Iterator<Item = String>) -> i32 {
     let args: Vec<String> = args.collect();
     let result = match args.first().map(String::as_str) {
         Some(verb @ ("install" | "remove")) => change(verb, &args[1..]),
+        Some("usage") => index_usage(&args[1..]),
         _ => list(&args),
     };
     result.unwrap_or_else(|message| {
         eprintln!("sushiai skills: {message}");
         1
     })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Where the transcript usage index lives: `<sushiai home>/cache/skill-usage.json`.
+fn usage_cache() -> PathBuf {
+    sushiai_daemon::Home::from_env()
+        .dir()
+        .join("cache")
+        .join("skill-usage.json")
+}
+
+/// `skills usage --index [--json]`: builds or updates the cache from the transcripts.
+fn index_usage(args: &[String]) -> Result<i32, String> {
+    if !flag(args, "--index") {
+        return Err("usage: sushiai skills usage --index [--json]".into());
+    }
+    let started = std::time::Instant::now();
+    let stats = skill_usage::index(&homes()?, &usage_cache(), now_ms())
+        .map_err(|e| format!("cannot write the usage cache: {e}"))?;
+    let mut out = serde_json::to_value(&stats).map_err(|e| e.to_string())?;
+    out["durationMs"] = json!(started.elapsed().as_millis() as u64);
+    if flag(args, "--json") {
+        println!("{out}");
+    } else {
+        println!(
+            "{} files ({} skipped), {} bytes read, {} uses, {} ms",
+            stats.scanned_files,
+            stats.skipped_files,
+            stats.read_bytes,
+            stats.events,
+            out["durationMs"]
+        );
+    }
+    Ok(0)
 }
 
 fn flag(args: &[String], name: &str) -> bool {
@@ -97,9 +138,17 @@ fn list(args: &[String]) -> Result<i32, String> {
     if flag(args, "--catalog") {
         let rows = skills::scan(&homes, project);
         if flag(args, "--json") {
+            // Reads the cache only; `skills usage --index` is what fills it.
+            let usage = Usage::load(&usage_cache());
+            let now = now_ms();
+            let mut value = serde_json::to_value(&rows).map_err(|e| e.to_string())?;
+            for (row, skill) in value.as_array_mut().into_iter().flatten().zip(&rows) {
+                row["usage"] =
+                    serde_json::to_value(usage.of(skill, now)).map_err(|e| e.to_string())?;
+            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?
+                serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
             );
         } else {
             for s in &rows {

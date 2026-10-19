@@ -9,7 +9,6 @@ export type Shift = { set: MoveSet; dx: number; dy: number };
 /** A selection moving together: the live preview of a drag or of arrow-key
  * nudges, and the one op per item written when it ends. */
 export function useMoveSet(
-  diagram: Diagram,
   latest: React.RefObject<{ diagram: Diagram; pos: Map<string, Point> }>,
   pushAll: (ops: DiagramOp[]) => void,
 ) {
@@ -49,15 +48,8 @@ export function useMoveSet(
     const ids = new Set<string>();
     if (!shift || (!shift.dx && !shift.dy)) return ids;
     for (const id of shift.set.nodes) ids.add(id);
-    for (const n of diagram.nodes)
-      if (
-        n.group &&
-        shift.set.groups.includes(n.group) &&
-        typeof n.x === "number"
-      )
-        ids.add(n.id);
     return ids;
-  }, [shift, diagram]);
+  }, [shift]);
 
   return { shift, setShift, commit, nudge, moving };
 }

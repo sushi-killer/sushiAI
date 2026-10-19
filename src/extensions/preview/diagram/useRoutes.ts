@@ -83,7 +83,7 @@ export function useRoutes(
   groups: Map<string, Rect>,
   moving: Set<string>,
 ): Routed[] {
-  const still = useMemo(() => groupRects(diagram, pos), [diagram, pos]);
+  const still = useMemo(() => groupRects(diagram), [diagram]);
   const base = useMemo(() => {
     const avoid = shown.groups.flatMap((g) => {
       const r = still.get(g.id);

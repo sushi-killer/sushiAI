@@ -1,17 +1,24 @@
-// Pure model of the `.arch.json` diagram: parse, edit by ops, place, route.
+// Pure model of the diagram: read and write JSON Canvas, edit by ops, place,
+// route.
 // No React, no bridge.
 
 import {
   ICONS as ICON_NAMES,
   NODE_H,
   NODE_W,
+  NOTE_H,
+  NOTE_W,
   SHAPES as SHAPE_NAMES,
+  type Delta,
   type Diagram,
   type DiagramEdge,
   type DiagramGroup,
   type DiagramNode,
+  type DiagramNote,
   type DiagramOp,
   type IconName,
+  type NodeKind,
+  type Shape,
   type Point,
   type Rect,
 } from "./types.ts";
@@ -103,7 +110,7 @@ const STEP_Y = 90;
 const LATTICE_X = 26;
 const LATTICE_Y = 46;
 const LATTICE_COLS = 3;
-// Wrap padding matches the tightest boundary in Figma frame D; new nodes are
+// Wrap padding matches the tightest boundary of the reference layout; new nodes are
 // placed further in so a slot never touches the boundary line.
 const GROUP_PAD_X = 10;
 const GROUP_PAD_TOP = 30;
@@ -141,9 +148,90 @@ function allIds(d: Diagram): Set<string> {
   for (const list of [d.groups, d.nodes, d.edges, d.notes]) {
     for (const item of list) ids.add(item.id);
   }
+  const raw = (d._jc as { raw?: Obj[] } | undefined)?.raw;
+  for (const item of raw ?? []) ids.add(item.id as string);
   return ids;
 }
 
+const COLOR_DELTA: Record<string, Delta> = {
+  "4": "new",
+  "3": "changed",
+  "1": "removed",
+};
+const DELTA_COLOR: Record<string, string> = {
+  new: "4",
+  changed: "3",
+  removed: "1",
+};
+const NOTE_COLOR = "3";
+const GUESS_COLOR = "3";
+const SIDES: readonly string[] = ["top", "right", "bottom", "left"];
+const ENDS: readonly string[] = ["none", "arrow"];
+
+/** The fields of `o` outside `keys`, or undefined when none are left. */
+function restOf(o: Obj, keys: string[]): Obj | undefined {
+  const copy = without(o, ...keys);
+  return Object.keys(copy).length > 0 ? copy : undefined;
+}
+
+/** What a file keeps that the model has no field for: `_jc` on every item and
+ * on the diagram. Written back as it was read. */
+type Jc = {
+  /** JSON Canvas fields the model does not use (color, sides, file...). */
+  [key: string]: unknown;
+};
+const jcOf = (item: object): Jc => {
+  const jc = (item as { _jc?: unknown })._jc;
+  return isObj(jc) ? (jc as Jc) : {};
+};
+
+/** Parks what the model has no field for in `item._jc`: the file's own
+ * fields outside `keys`, and the sushiai keys outside `own`. */
+function stash(item: Obj, raw: Obj, keys: string[], own: string[]) {
+  const keep = restOf(raw, ["id", "sushiai", ...keys]);
+  const s = isObj(raw.sushiai) ? restOf(raw.sushiai, own) : undefined;
+  if (keep || s) item._jc = { ...keep, ...(s && { sushiai: s }) };
+}
+
+/** Puts `own` (our sushiai keys) and the parked fields back on `out`. Colour
+ * and anything `skip` names are the caller's to set. */
+function writeBack(out: Obj, own: Obj, jc: Jc, skip: string[] = []) {
+  const sushiai = { ...own, ...(isObj(jc.sushiai) ? jc.sushiai : {}) };
+  if (Object.keys(sushiai).length > 0) out.sushiai = sushiai;
+  for (const [k, v] of Object.entries(jc)) {
+    if (k !== "sushiai" && k !== "color" && !skip.includes(k) && !(k in out)) {
+      out[k] = v;
+    }
+  }
+}
+
+const defined = (o: Obj): Obj =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+
+const basename = (path: string) => path.replace(/\/+$/, "").split("/").pop();
+
+/** A text node is its title, then (after a line break) its tech line. */
+function splitText(whole: string): { title: string; tech?: string } {
+  const cut = whole.indexOf("\n");
+  const title = (cut < 0 ? whole : whole.slice(0, cut)).replace(/\r$/, "");
+  const tech = cut < 0 ? "" : whole.slice(cut + 1).trim();
+  return tech ? { title, tech } : { title };
+}
+
+/** The size a block has in the file (kept while the owner does not change it),
+ * else the size its shape draws. */
+export function sizeOf(node: DiagramNode): { w: number; h: number } {
+  const jc = jcOf(node);
+  const w = jc.width;
+  const h = jc.height;
+  return num(w) && num(h) && w > 0 && h > 0 ? { w, h } : nodeSize(node);
+}
+
+/** Reads a JSON Canvas 1.0 file. Text nodes are blocks (or notes); a group's
+ * members are the blocks whose centre lies inside it, the smallest group
+ * winning, as in Obsidian. File and link nodes are read-only boxes. A node of
+ * any other type, and a link that touches a group or a note, are kept as they
+ * are and not drawn. */
 export function parseDiagram(
   text: string,
 ): { diagram: Diagram } | { error: string } {
@@ -154,22 +242,29 @@ export function parseDiagram(
     return { error: `not valid JSON: ${(e as Error).message}` };
   }
   if (!isObj(raw)) return { error: "the file must be a JSON object" };
-  if (raw.version !== 1) {
-    return { error: `unsupported version ${JSON.stringify(raw.version)}` };
+  const meta = raw.sushiai;
+  if (meta !== undefined && !isObj(meta)) {
+    return { error: "sushiai must be an object" };
   }
-  const lists: Record<string, Obj[]> = {};
-  for (const key of ["groups", "nodes", "edges", "notes"]) {
+  if (meta?.version !== undefined && meta.version !== 1) {
+    return { error: `unsupported version ${JSON.stringify(meta.version)}` };
+  }
+  if (meta?.title !== undefined && typeof meta.title !== "string") {
+    return { error: "title must be a string" };
+  }
+  const lists: Record<string, unknown[]> = {};
+  for (const key of ["nodes", "edges"]) {
     const value = raw[key] ?? [];
     if (!Array.isArray(value)) return { error: `${key} must be an array` };
-    lists[key] = value as Obj[];
+    lists[key] = value;
   }
-  const total = Object.values(lists).reduce((n, l) => n + l.length, 0);
+  const total = lists.nodes.length + lists.edges.length;
   if (total > MAX_ITEMS) {
     return { error: `too many items (${total}); the limit is ${MAX_ITEMS}` };
   }
   const ids = new Set<string>();
-  const kindOfId = new Map<string, string>();
-  for (const key of ["groups", "nodes", "edges", "notes"]) {
+  const nodeIds = new Set<string>();
+  for (const key of ["nodes", "edges"]) {
     for (let i = 0; i < lists[key].length; i++) {
       const item = lists[key][i];
       if (!isObj(item)) return { error: `${key}[${i}]: must be an object` };
@@ -180,62 +275,171 @@ export function parseDiagram(
         return { error: `${key}[${i}] (${item.id}): duplicate id` };
       }
       ids.add(item.id);
-      kindOfId.set(item.id, key);
+      if (key === "nodes") nodeIds.add(item.id);
     }
   }
   const fail = (key: string, i: number, msg: string) => ({
-    error: `${key}[${i}] (${lists[key][i].id}): ${msg}`,
+    error: `${key}[${i}] (${(lists[key][i] as Obj).id}): ${msg}`,
   });
-  for (let i = 0; i < lists.groups.length; i++) {
-    const g = lists.groups[i];
-    if (typeof g.label !== "string")
-      return fail("groups", i, "label must be a string");
-    if (g.icon !== undefined && !validIconName(g.icon)) {
-      return fail("groups", i, "icon must be a string");
-    }
-    const bad = badNum(g, ["x", "y", "w", "h"]);
-    if (bad) return fail("groups", i, `${bad} must be a finite number`);
-  }
+
+  const groups: DiagramGroup[] = [];
+  const nodes: DiagramNode[] = [];
+  const notes: DiagramNote[] = [];
+  const edges: DiagramEdge[] = [];
+  const opaque: Obj[] = [];
+  const blockIds = new Set<string>();
   for (let i = 0; i < lists.nodes.length; i++) {
-    const n = lists.nodes[i];
-    if (n.kind !== undefined && !KINDS.includes(n.kind as string)) {
-      return fail("nodes", i, `unknown kind ${JSON.stringify(n.kind)}`);
+    const n = lists.nodes[i] as Obj;
+    const id = n.id as string;
+    if (typeof n.type !== "string") {
+      return fail("nodes", i, "type must be a string");
     }
-    if (typeof n.title !== "string")
-      return fail("nodes", i, "title must be a string");
-    if (n.shape !== undefined && !SHAPES.includes(n.shape as string)) {
-      return fail("nodes", i, `unknown shape ${JSON.stringify(n.shape)}`);
-    }
-    if (n.icon !== undefined && !validIconName(n.icon)) {
-      return fail("nodes", i, "icon must be a string");
-    }
-    for (const f of ["caption", "tech"]) {
-      if (n[f] !== undefined && typeof n[f] !== "string") {
-        return fail("nodes", i, `${f} must be a string`);
+    const s = n.sushiai ?? {};
+    if (!isObj(s)) return fail("nodes", i, "sushiai must be an object");
+    if (n.type === "group") {
+      if (n.label !== undefined && typeof n.label !== "string") {
+        return fail("nodes", i, "label must be a string");
       }
+      if (s.icon !== undefined && !validIconName(s.icon)) {
+        return fail("nodes", i, "icon must be a string");
+      }
+      const { x, y, width: w, height: h } = n;
+      if (
+        !(num(x) && num(y) && num(w) && num(h)) ||
+        badNum({ x, y, w, h }, ["x", "y", "w", "h"])
+      ) {
+        return fail("nodes", i, "x, y, width and height must be numbers");
+      }
+      const group: DiagramGroup = {
+        id,
+        label: (n.label as string) ?? "",
+        x,
+        y,
+        w,
+        h,
+      };
+      if (s.icon !== undefined) group.icon = s.icon as IconName;
+      stash(group, n, ["type", "x", "y", "width", "height", "label"], ["icon"]);
+      groups.push(group);
+      continue;
     }
-    if (n.step !== undefined && !validStep(n.step)) {
-      return fail("nodes", i, `step must be an integer from 1 to ${MAX_STEP}`);
-    }
-    if (n.delta !== undefined && !DELTAS.includes(n.delta as string)) {
-      return fail("nodes", i, `unknown delta ${JSON.stringify(n.delta)}`);
-    }
-    if (n.status !== undefined && n.status !== "proposed") {
-      return fail("nodes", i, `unknown status ${JSON.stringify(n.status)}`);
+    if (n.type !== "text" && n.type !== "file" && n.type !== "link") {
+      opaque.push(n);
+      continue;
     }
     const bad = badNum(n, ["x", "y"]);
     if (bad) return fail("nodes", i, `${bad} must be a finite number`);
-    if (n.group !== undefined) {
-      if (typeof n.group !== "string" || kindOfId.get(n.group) !== "groups") {
-        return fail("nodes", i, `unknown group ${JSON.stringify(n.group)}`);
-      }
+    if (n.type === "text" && typeof n.text !== "string") {
+      return fail("nodes", i, "text must be a string");
     }
+    if (n.type === "file" && typeof n.file !== "string") {
+      return fail("nodes", i, "file must be a string");
+    }
+    if (n.type === "link" && typeof n.url !== "string") {
+      return fail("nodes", i, "url must be a string");
+    }
+    if (n.type === "text" && s.note === true) {
+      if (!num(n.x) || !num(n.y)) {
+        return fail("nodes", i, "x and y must be finite numbers in range");
+      }
+      const note: DiagramNote = { id, text: n.text as string, x: n.x, y: n.y };
+      stash(
+        note,
+        n,
+        [
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+          "text",
+          ...(n.color === NOTE_COLOR ? ["color"] : []),
+        ],
+        ["note"],
+      );
+      notes.push(note);
+      continue;
+    }
+    if (s.kind !== undefined && !KINDS.includes(s.kind as string)) {
+      return fail("nodes", i, `unknown kind ${JSON.stringify(s.kind)}`);
+    }
+    if (s.shape !== undefined && !SHAPES.includes(s.shape as string)) {
+      return fail("nodes", i, `unknown shape ${JSON.stringify(s.shape)}`);
+    }
+    if (s.icon !== undefined && !validIconName(s.icon)) {
+      return fail("nodes", i, "icon must be a string");
+    }
+    if (s.caption !== undefined && typeof s.caption !== "string") {
+      return fail("nodes", i, "caption must be a string");
+    }
+    if (s.step !== undefined && !validStep(s.step)) {
+      return fail("nodes", i, `step must be an integer from 1 to ${MAX_STEP}`);
+    }
+    if (s.delta !== undefined && !DELTAS.includes(s.delta as string)) {
+      return fail("nodes", i, `unknown delta ${JSON.stringify(s.delta)}`);
+    }
+    if (s.status !== undefined && s.status !== "proposed") {
+      return fail("nodes", i, `unknown status ${JSON.stringify(s.status)}`);
+    }
+    const delta = (s.delta ?? COLOR_DELTA[n.color as string]) as
+      Delta | undefined;
+    const type = n.type as string;
+    const block: DiagramNode = { id, title: "" };
+    if (type === "text") {
+      Object.assign(block, splitText(n.text as string));
+    } else {
+      const target = (type === "file" ? n.file : n.url) as string;
+      block.title = (type === "file" ? basename(target) : target) || target;
+      block.caption = type === "file" ? "File" : "Link";
+    }
+    if (s.kind !== undefined) block.kind = s.kind as NodeKind;
+    if (s.shape !== undefined) block.shape = s.shape as Shape;
+    if (s.icon !== undefined) block.icon = s.icon as IconName;
+    if (s.caption !== undefined) block.caption = s.caption;
+    if (s.step !== undefined) block.step = s.step as number;
+    if (delta !== undefined) block.delta = delta;
+    if (s.status !== undefined) block.status = "proposed";
+    if (num(n.x) && num(n.y)) {
+      block.x = n.x;
+      block.y = n.y;
+    }
+    // The file's own text and size stay in `_jc` when they differ from what
+    // the model would write: they go back out while the title, the tech line
+    // and the shape are as they were read.
+    const size = nodeSize(block);
+    const same = (key: string, mine: unknown) => (n[key] === mine ? [key] : []);
+    stash(
+      block,
+      n,
+      [
+        "x",
+        "y",
+        ...(type === "text"
+          ? [
+              "type",
+              ...same(
+                "text",
+                block.tech ? `${block.title}\n${block.tech}` : block.title,
+              ),
+            ]
+          : []),
+        ...same("width", size.w),
+        ...same("height", size.h),
+        ...(delta !== undefined && n.color === DELTA_COLOR[delta]
+          ? ["color"]
+          : []),
+      ],
+      ["kind", "shape", "icon", "caption", "step", "delta", "status"],
+    );
+    nodes.push(block);
+    blockIds.add(id);
   }
   for (let i = 0; i < lists.edges.length; i++) {
-    const e = lists.edges[i];
-    for (const end of ["from", "to"]) {
+    const e = lists.edges[i] as Obj;
+    const id = e.id as string;
+    for (const end of ["fromNode", "toNode"]) {
       const target = e[end];
-      if (typeof target !== "string" || kindOfId.get(target) !== "nodes") {
+      if (typeof target !== "string" || !nodeIds.has(target)) {
         return fail(
           "edges",
           i,
@@ -246,33 +450,231 @@ export function parseDiagram(
     if (e.label !== undefined && typeof e.label !== "string") {
       return fail("edges", i, "label must be a string");
     }
-    if (e.style !== undefined && !STYLES.includes(e.style as string)) {
-      return fail("edges", i, `unknown style ${JSON.stringify(e.style)}`);
+    for (const side of ["fromSide", "toSide"]) {
+      if (e[side] !== undefined && !SIDES.includes(e[side] as string)) {
+        return fail("edges", i, `unknown ${side} ${JSON.stringify(e[side])}`);
+      }
     }
-    if (e.arrow !== undefined && !ARROWS.includes(e.arrow as string)) {
-      return fail("edges", i, `unknown arrow ${JSON.stringify(e.arrow)}`);
+    for (const end of ["fromEnd", "toEnd"]) {
+      if (e[end] !== undefined && !ENDS.includes(e[end] as string)) {
+        return fail("edges", i, `unknown ${end} ${JSON.stringify(e[end])}`);
+      }
     }
-    if (e.status !== undefined && e.status !== "proposed") {
-      return fail("edges", i, `unknown status ${JSON.stringify(e.status)}`);
+    const s = e.sushiai ?? {};
+    if (!isObj(s)) return fail("edges", i, "sushiai must be an object");
+    if (s.style !== undefined && !STYLES.includes(s.style as string)) {
+      return fail("edges", i, `unknown style ${JSON.stringify(s.style)}`);
     }
+    if (s.status !== undefined && s.status !== "proposed") {
+      return fail("edges", i, `unknown status ${JSON.stringify(s.status)}`);
+    }
+    if (
+      !blockIds.has(e.fromNode as string) ||
+      !blockIds.has(e.toNode as string)
+    ) {
+      opaque.push(e);
+      continue;
+    }
+    const edge: DiagramEdge = {
+      id,
+      from: e.fromNode as string,
+      to: e.toNode as string,
+    };
+    if (e.label !== undefined) edge.label = e.label as string;
+    if (s.style !== undefined) edge.style = s.style as DiagramEdge["style"];
+    if (s.status !== undefined) edge.status = "proposed";
+    const ends = [e.fromEnd ?? "none", e.toEnd ?? "arrow"].join();
+    if (ends === "arrow,arrow") edge.arrow = "both";
+    else if (ends === "none,none") edge.arrow = "none";
+    // A direction the model cannot draw (arrow at the start only) stays in
+    // `_jc` and is written back while `arrow` is unset.
+    const drawn = ends === "none,arrow" || edge.arrow !== undefined;
+    stash(
+      edge,
+      e,
+      [
+        "fromNode",
+        "toNode",
+        "label",
+        ...(drawn ? ["fromEnd", "toEnd"] : []),
+        ...(s.style === "guess" && e.color === GUESS_COLOR ? ["color"] : []),
+      ],
+      ["style", "status"],
+    );
+    edges.push(edge);
   }
-  for (let i = 0; i < lists.notes.length; i++) {
-    const n = lists.notes[i];
-    if (typeof n.text !== "string")
-      return fail("notes", i, "text must be a string");
-    if (!num(n.x) || !num(n.y) || badNum(n, ["x", "y"]))
-      return fail("notes", i, "x and y must be finite numbers in range");
-  }
-  if (raw.title !== undefined && typeof raw.title !== "string") {
-    return { error: "title must be a string" };
-  }
-  return {
-    diagram: { ...raw, ...lists, version: 1 } as unknown as Diagram,
-  };
+
+  const diagram = deriveGroups({
+    version: 1,
+    groups,
+    nodes,
+    edges,
+    notes,
+  });
+  if (typeof meta?.title === "string") diagram.title = meta.title;
+  const top: Jc = {};
+  const extra = restOf(raw, ["nodes", "edges", "sushiai"]);
+  if (extra) top.extra = extra;
+  const metaRest = meta && restOf(meta, ["version", "title"]);
+  if (metaRest) top.sushiai = metaRest;
+  if (opaque.length > 0) top.raw = opaque;
+  const order = [...lists.nodes, ...lists.edges].map((i) => (i as Obj).id);
+  const isLink = (o: Obj) => "fromNode" in o;
+  const natural = [
+    ...groups,
+    ...nodes,
+    ...notes,
+    ...opaque.filter((o) => !isLink(o)),
+    ...edges,
+    ...opaque.filter(isLink),
+  ].map((i) => i.id);
+  if (order.join() !== natural.join()) top.order = order;
+  if (Object.keys(top).length > 0) diagram._jc = top;
+  return { diagram };
 }
 
+const whole = (v: number) => Math.round(v);
+
+/** Writes valid JSON Canvas 1.0: every node has integer x, y, width and
+ * height (unplaced blocks where the Preview draws them), colours come from
+ * deltas, and what the file held beyond the model is written back. */
 export function serializeDiagram(d: Diagram): string {
-  return `${JSON.stringify(d, null, 2)}\n`;
+  const pos = placeNodes(d);
+  const rects = groupRects(d);
+  const put = (
+    id: string,
+    type: string,
+    r: Rect,
+    color: unknown,
+    fields: Obj,
+    own: Obj,
+    jc: Jc,
+  ): Obj => {
+    const out: Obj = {
+      id,
+      type,
+      x: whole(r.x),
+      y: whole(r.y),
+      width: whole(r.w),
+      height: whole(r.h),
+    };
+    if (color !== undefined) out.color = color;
+    Object.assign(out, fields);
+    writeBack(out, own, jc);
+    return out;
+  };
+  const items: Obj[] = [];
+  const first = new Set<string>();
+  for (const g of d.groups) {
+    const jc = jcOf(g);
+    const r = rects.get(g.id) ?? { x: 0, y: 0, w: MIN_GROUP_W, h: MIN_GROUP_H };
+    const fields = g.label ? { label: g.label } : {};
+    items.push(
+      put(g.id, "group", r, jc.color, fields, defined({ icon: g.icon }), jc),
+    );
+    first.add(g.id);
+  }
+  for (const n of d.nodes) {
+    const jc = jcOf(n);
+    const type = typeof jc.type === "string" ? jc.type : "text";
+    const own = defined({
+      shape: n.shape,
+      icon: n.icon,
+      caption:
+        type !== "text" && n.caption === (type === "file" ? "File" : "Link")
+          ? undefined
+          : n.caption,
+      step: n.step,
+      status: n.status,
+      kind: n.kind,
+      delta: n.delta,
+    });
+    const derived = n.tech ? `${n.title}\n${n.tech}` : n.title;
+    const text =
+      typeof jc.text === "string" &&
+      JSON.stringify(splitText(jc.text)) === JSON.stringify(splitText(derived))
+        ? jc.text
+        : derived;
+    items.push(
+      put(
+        n.id,
+        type,
+        { ...(pos.get(n.id) as Point), ...sizeOf(n) },
+        (n.delta && DELTA_COLOR[n.delta]) || jc.color,
+        type === "text" ? { text } : {},
+        own,
+        jc,
+      ),
+    );
+  }
+  for (const n of d.notes) {
+    const jc = jcOf(n);
+    const r = { x: n.x, y: n.y, w: NOTE_W, h: NOTE_H };
+    items.push(
+      put(
+        n.id,
+        "text",
+        r,
+        jc.color ?? NOTE_COLOR,
+        { text: n.text },
+        { note: true },
+        jc,
+      ),
+    );
+  }
+  const top = jcOf(d);
+  const raw = Array.isArray(top.raw) ? (top.raw as Obj[]) : [];
+  const order = new Map(
+    (Array.isArray(top.order) ? (top.order as string[]) : []).map((id, i) => [
+      id,
+      i,
+    ]),
+  );
+  // Groups sit under everything else unless the file said otherwise.
+  const rank = (id: unknown) =>
+    first.has(id as string) && !order.has(id as string)
+      ? -1
+      : (order.get(id as string) ?? Infinity);
+  const nodeItems = [...items, ...raw.filter((r) => !("fromNode" in r))].sort(
+    (a, b) => rank(a.id) - rank(b.id),
+  );
+  const live = new Set(nodeItems.map((n) => n.id as string));
+  const links: Obj[] = [];
+  for (const e of d.edges) {
+    const jc = jcOf(e);
+    const link: Obj = { id: e.id, fromNode: e.from, toNode: e.to };
+    const ends: Record<string, [unknown, unknown]> = {
+      both: ["arrow", "arrow"],
+      none: ["none", "none"],
+      end: [undefined, undefined],
+    };
+    const [fromEnd, toEnd] = e.arrow ? ends[e.arrow] : [jc.fromEnd, jc.toEnd];
+    if (fromEnd !== undefined) link.fromEnd = fromEnd;
+    if (toEnd !== undefined) link.toEnd = toEnd;
+    const color = e.style === "guess" ? GUESS_COLOR : jc.color;
+    if (color !== undefined) link.color = color;
+    if (e.label !== undefined) link.label = e.label;
+    writeBack(link, defined({ style: e.style, status: e.status }), jc, [
+      "fromEnd",
+      "toEnd",
+    ]);
+    links.push(link);
+  }
+  for (const r of raw) {
+    if (!("fromNode" in r)) continue;
+    if (live.has(r.fromNode as string) && live.has(r.toNode as string)) {
+      links.push(r);
+    }
+  }
+  links.sort((a, b) => rank(a.id) - rank(b.id));
+  const meta: Obj = { version: 1 };
+  if (d.title !== undefined) meta.title = d.title;
+  Object.assign(meta, isObj(top.sushiai) ? top.sushiai : {});
+  const out: Obj = { nodes: nodeItems, edges: links, sushiai: meta };
+  for (const [k, v] of Object.entries(isObj(top.extra) ? top.extra : {})) {
+    if (!(k in out)) out[k] = v;
+  }
+  return `${JSON.stringify(out, null, 2)}\n`;
 }
 
 function without<T extends Obj>(o: T, ...keys: string[]): T {
@@ -296,6 +698,10 @@ export function applyOp(d: Diagram, op: DiagramOp): Diagram {
         g.id !== "" &&
         typeof g.label === "string" &&
         (g.icon === undefined || ICONS.includes(g.icon as string)) &&
+        num(g.x) &&
+        num(g.y) &&
+        num(g.w) &&
+        num(g.h) &&
         !badNum(g, ["x", "y", "w", "h"]);
       if (!ok || allIds(d).has(op.group.id)) return d;
       return { ...d, groups: [...d.groups, op.group] };
@@ -319,24 +725,28 @@ export function applyOp(d: Diagram, op: DiagramOp): Diagram {
       if (!isObj(r) || !num(op.dx) || !num(op.dy)) return d;
       if (!num(r.x) || !num(r.y) || !num(r.w) || !num(r.h)) return d;
       if (badNum(r, ["x", "y", "w", "h"])) return d;
-      const shifted = d.nodes.some(
-        (n) =>
-          n.group === op.id &&
-          hasPos(n) &&
-          (Math.abs((n.x as number) + op.dx) > MAX_COORD ||
-            Math.abs((n.y as number) + op.dy) > MAX_COORD),
+      // Everything inside the group travels with it, nested groups included.
+      const carried = within(d, op.id);
+      const shift = <T extends { id: string; x?: number; y?: number }>(
+        i: T,
+      ): T =>
+        carried.has(i.id) && num(i.x) && num(i.y)
+          ? { ...i, x: i.x + op.dx, y: i.y + op.dy }
+          : i;
+      const far = [...d.nodes, ...d.notes, ...d.groups].some(
+        (i) =>
+          carried.has(i.id) &&
+          (Math.abs((i.x as number) + op.dx) > MAX_COORD ||
+            Math.abs((i.y as number) + op.dy) > MAX_COORD),
       );
-      if (shifted) return d;
+      if (far) return d;
       return {
         ...d,
         groups: d.groups.map((g) =>
-          g.id === op.id ? { ...g, ...op.rect } : g,
+          g.id === op.id ? { ...g, ...op.rect } : shift(g),
         ),
-        nodes: d.nodes.map((n) =>
-          n.group === op.id && hasPos(n)
-            ? { ...n, x: (n.x as number) + op.dx, y: (n.y as number) + op.dy }
-            : n,
-        ),
+        nodes: d.nodes.map(shift),
+        notes: d.notes.map(shift),
       };
     }
     case "resize-group": {
@@ -431,6 +841,9 @@ function applySet(
   const setOrClear = <T extends Obj>(item: T): T =>
     clear ? without(item, field) : { ...item, [field]: value };
 
+  // A file or link node's text is its target, not ours to rewrite.
+  const own = node ? jcOf(node).type : undefined;
+  const target = own === "file" || own === "link";
   if (node) {
     const update = (next: (n: DiagramNode) => DiagramNode) => ({
       ...d,
@@ -438,10 +851,17 @@ function applySet(
     });
     switch (field) {
       case "title":
-        return clear ? d : update((n) => ({ ...n, title: value }));
+        return clear || target ? d : update((n) => ({ ...n, title: value }));
       case "shape":
+        // A new shape draws at its own size, not the one the file gave.
         return clear || SHAPES.includes(value)
-          ? update((n) => setOrClear(n) as DiagramNode)
+          ? update((n) => {
+              const next = setOrClear(n) as DiagramNode;
+              const jc = without(jcOf(n), "width", "height");
+              return Object.keys(jc).length > 0
+                ? { ...next, _jc: jc }
+                : without(next, "_jc");
+            })
           : d;
       case "icon":
         return clear || ICONS.includes(value)
@@ -460,10 +880,10 @@ function applySet(
           : d;
       case "caption":
       case "tech":
-        return update((n) => setOrClear(n) as DiagramNode);
+        return target ? d : update((n) => setOrClear(n) as DiagramNode);
       case "group":
         return clear || d.groups.some((g) => g.id === value)
-          ? update((n) => setOrClear(n) as DiagramNode)
+          ? setGroup(d, node, value)
           : d;
       default:
         return d;
@@ -508,8 +928,78 @@ function applySet(
   return d;
 }
 
+/** A block's group is where it lies, so a change of group moves the block.
+ * Into a group: it stays when that group is the smallest one at its centre,
+ * else it goes to the first free slot inside, and the group grows to hold it.
+ * Out of every group (""): it stays when it is already outside, else it goes
+ * to a free spot below them all. */
+function setGroup(d: Diagram, node: DiagramNode, value: string): Diagram {
+  const rects = groupRects(d);
+  const at = placeNodes(d).get(node.id) as Point;
+  const size = sizeOf(node);
+  const centreOf = (p: Point) => ({ x: p.x + size.w / 2, y: p.y + size.h / 2 });
+  const taken = d.nodes
+    .filter((n) => n.id !== node.id && hasPos(n))
+    .map((n) => ({ x: n.x as number, y: n.y as number, ...sizeOf(n) }));
+  const clear = (r: Rect) =>
+    !taken.some((t) =>
+      overlaps({ ...r, ...size, w: size.w, h: size.h }, t, GAP),
+    );
+  const put = (next: DiagramNode, groups = d.groups): Diagram => ({
+    ...d,
+    groups,
+    nodes: d.nodes.map((n) => (n.id === node.id ? next : n)),
+  });
+  const placed = (p: Point) => ({ x: p.x, y: p.y, w: size.w, h: size.h });
+  if (value === "") {
+    if (!groupAt(rects, centreOf(at))) return put(without(node, "group"));
+    const all = [...rects.values()];
+    let y = Math.max(...all.map((r) => r.y + r.h)) + GAP;
+    while (!clear({ ...placed({ x: at.x, y }) }) && y < MAX_COORD) y += STEP_Y;
+    return put({ ...without(node, "group"), x: at.x, y });
+  }
+  const target = rects.get(value) as Rect;
+  if (groupAt(rects, centreOf(at)) === value)
+    return put({ ...node, group: value });
+  const grownBy = (p: Point): Rect =>
+    bbox([
+      target,
+      {
+        x: p.x - GROUP_PAD_X,
+        y: p.y - GROUP_PAD_TOP,
+        w: size.w + 2 * GROUP_PAD_X,
+        h: size.h + GROUP_PAD_TOP + GROUP_PAD_BOTTOM,
+      },
+    ]);
+  // The first free slot in the group's lattice where the group, grown to
+  // hold the block, is still the smallest group at the block's centre.
+  const cols = Math.max(
+    1,
+    Math.floor((target.w - 2 * SLOT_INSET - size.w) / STEP_X) + 1,
+  );
+  let slot: Point | undefined;
+  for (let k = 0; k < 400 && !slot; k++) {
+    const p = {
+      x: target.x + SLOT_INSET + (k % cols) * STEP_X,
+      y: target.y + GROUP_PAD_TOP + Math.floor(k / cols) * STEP_Y,
+    };
+    const grown = new Map(rects).set(value, grownBy(p));
+    if (clear(placed(p)) && groupAt(grown, centreOf(p)) === value) slot = p;
+  }
+  const p = slot ?? { x: target.x + SLOT_INSET, y: target.y + target.h };
+  const grown = grownBy(p);
+  return put(
+    { ...node, group: value, x: p.x, y: p.y },
+    d.groups.map((g) =>
+      g.id === value
+        ? { ...g, x: grown.x, y: grown.y, w: grown.w, h: grown.h }
+        : g,
+    ),
+  );
+}
+
 export function applyOps(d: Diagram, ops: DiagramOp[]): Diagram {
-  return ops.reduce(applyOp, d);
+  return deriveGroups(ops.reduce(applyOp, d));
 }
 
 export function newId(d: Diagram, base: string): string {
@@ -548,29 +1038,75 @@ const nodeRect = (p: Point, n: DiagramNode): Rect => ({
   ...nodeSize(n),
 });
 
-export function groupRects(
-  d: Diagram,
-  pos: Map<string, Point>,
-): Map<string, Rect> {
+/** Where each group is: its own bounds, which only a deliberate edit changes. */
+export function groupRects(d: Diagram): Map<string, Rect> {
   const out = new Map<string, Rect>();
   for (const g of d.groups) {
-    const parts: Rect[] = [];
     if (num(g.x) && num(g.y) && num(g.w) && num(g.h)) {
-      parts.push({ x: g.x, y: g.y, w: g.w, h: g.h });
+      out.set(g.id, { x: g.x, y: g.y, w: g.w, h: g.h });
     }
-    const members = d.nodes
-      .filter((n) => n.group === g.id && pos.has(n.id))
-      .map((n) => nodeRect(pos.get(n.id) as Point, n));
-    if (members.length > 0) {
-      const b = bbox(members);
-      parts.push({
-        x: b.x - GROUP_PAD_X,
-        y: b.y - GROUP_PAD_TOP,
-        w: b.w + 2 * GROUP_PAD_X,
-        h: b.h + GROUP_PAD_TOP + GROUP_PAD_BOTTOM,
-      });
+  }
+  return out;
+}
+
+/** The smallest group whose rect contains `p`, or "". */
+export function groupAt(rects: Map<string, Rect>, p: Point): string {
+  let best = "";
+  let area = Infinity;
+  for (const [id, r] of rects) {
+    const inside =
+      p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+    if (inside && r.w * r.h < area) {
+      best = id;
+      area = r.w * r.h;
     }
-    if (parts.length > 0) out.set(g.id, bbox(parts));
+  }
+  return best;
+}
+
+/** Sets every placed block's `group` from where it lies (the one place
+ * membership is decided); a block without a position keeps what it has. */
+export function deriveGroups(d: Diagram): Diagram {
+  const rects = groupRects(d);
+  let changed = false;
+  const nodes = d.nodes.map((n) => {
+    if (!hasPos(n)) return n;
+    const { w, h } = sizeOf(n);
+    const into = groupAt(rects, {
+      x: (n.x as number) + w / 2,
+      y: (n.y as number) + h / 2,
+    });
+    if ((n.group ?? "") === into) return n;
+    changed = true;
+    return into ? { ...n, group: into } : without(n, "group");
+  });
+  return changed ? { ...d, nodes } : d;
+}
+
+/** The ids that move with group `id`: the groups, blocks and notes whose rect
+ * lies inside it, and the blocks that belong to it. */
+export function within(d: Diagram, id: string): Set<string> {
+  const out = new Set<string>();
+  const box = groupRects(d).get(id);
+  if (!box) return out;
+  const inside = (r: Rect) =>
+    r.x >= box.x &&
+    r.y >= box.y &&
+    r.x + r.w <= box.x + box.w &&
+    r.y + r.h <= box.y + box.h;
+  for (const [gid, r] of groupRects(d))
+    if (gid !== id && inside(r)) out.add(gid);
+  for (const n of d.nodes) {
+    if (
+      n.group === id ||
+      (hasPos(n) &&
+        inside({ x: n.x as number, y: n.y as number, ...sizeOf(n) }))
+    ) {
+      out.add(n.id);
+    }
+  }
+  for (const n of d.notes) {
+    if (inside({ x: n.x, y: n.y, w: NOTE_W, h: NOTE_H })) out.add(n.id);
   }
   return out;
 }
@@ -637,10 +1173,8 @@ export function placeNodes(d: Diagram): Map<string, Point> {
     const pt = pos.get(n.id);
     if (pt) nodeIdx.add(nodeRect(pt, n));
   }
-  // Group rects are built once and only grow as members are placed.
   const groupIdx = rectIndex();
-  const grects = groupRects(d, pos);
-  for (const r of grects.values()) groupIdx.add(r);
+  for (const r of groupRects(d).values()) groupIdx.add(r);
 
   let checks = 0;
   // Slots found taken stay taken, so a lattice scan resumes where it stopped.
@@ -679,32 +1213,12 @@ export function placeNodes(d: Diagram): Map<string, Point> {
         Math.floor((g.w - 2 * SLOT_INSET - nw) / STEP_X) + 1,
       );
       p = scan(cols, g.x + SLOT_INSET, g.y + GROUP_PAD_TOP, false, n);
-    } else if (g) {
-      const members = d.nodes
-        .filter((m) => m.group === g.id && pos.has(m.id))
-        .map((m) => nodeRect(pos.get(m.id) as Point, m));
-      if (members.length > 0) {
-        const b = bbox(members);
-        const cols = Math.floor((b.w - nw) / STEP_X) + 2;
-        p = scan(Math.max(2, cols), b.x, b.y, false, n);
-      }
     }
     p ??= scan(LATTICE_COLS, LATTICE_X, LATTICE_Y, true, n);
     const at = p ?? { x: LATTICE_X, y: LATTICE_Y };
     pos.set(n.id, at);
     const r = nodeRect(at, n);
     nodeIdx.add(r);
-    if (g) {
-      const padded = {
-        x: r.x - GROUP_PAD_X,
-        y: r.y - GROUP_PAD_TOP,
-        w: r.w + 2 * GROUP_PAD_X,
-        h: r.h + GROUP_PAD_TOP + GROUP_PAD_BOTTOM,
-      };
-      const grown = bbox([grects.get(g.id) ?? padded, padded]);
-      grects.set(g.id, grown);
-      groupIdx.add(grown);
-    }
   }
   return pos;
 }

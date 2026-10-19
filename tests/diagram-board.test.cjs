@@ -22,118 +22,40 @@ const diagram = (nodes, groups) => ({
 });
 const centre = (x, y) => ({ x, y });
 
-test("nudging the only member of an auto-sized boundary keeps it", async () => {
+const box = (id, x, y, w, h) => ({ id, label: id, x, y, w, h });
+
+test("a nudge inside the boundary keeps the group", async () => {
   const { dropGroup } = await board;
-  const { placeNodes } = await model;
   const d = diagram(
     [node("a", 0, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
+    [box("g", 0, 0, 300, 200)],
   );
-  assert.equal(dropGroup(d, placeNodes(d), "a", centre(10, 6)), "g");
-});
-
-test("nudging one of two members keeps it in the boundary", async () => {
-  const { dropGroup } = await board;
-  const { placeNodes } = await model;
-  const d = diagram(
-    [node("a", 0, 0, { group: "g" }), node("b", 200, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
-  );
-  assert.equal(dropGroup(d, placeNodes(d), "b", centre(220, 0)), "g");
+  assert.equal(dropGroup(d, "a", centre(10, 6)), "g");
 });
 
 test("a drop outside every boundary clears the group", async () => {
   const { dropGroup } = await board;
-  const { placeNodes } = await model;
   const d = diagram(
-    [node("a", 0, 0, { group: "g" }), node("b", 200, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
+    [node("a", 0, 0, { group: "g" })],
+    [box("g", 0, 0, 300, 200)],
   );
-  assert.equal(dropGroup(d, placeNodes(d), "b", centre(900, 900)), "");
+  assert.equal(dropGroup(d, "a", centre(900, 900)), "");
 });
 
 test("a drop into a smaller boundary moves the component", async () => {
   const { dropGroup } = await board;
-  const { placeNodes } = await model;
   const d = diagram(
     [node("a", 20, 40, { group: "big" })],
-    [
-      { id: "big", label: "Big", x: 0, y: 0, w: 800, h: 600 },
-      { id: "small", label: "Small", x: 400, y: 100, w: 300, h: 200 },
-    ],
+    [box("big", 0, 0, 800, 600), box("small", 400, 100, 300, 200)],
   );
-  assert.equal(dropGroup(d, placeNodes(d), "a", centre(450, 140)), "small");
-  assert.equal(dropGroup(d, placeNodes(d), "a", centre(60, 60)), "big");
+  assert.equal(dropGroup(d, "a", centre(450, 140)), "small");
+  assert.equal(dropGroup(d, "a", centre(60, 60)), "big");
 });
 
 test("a component without a boundary joins the one under the drop", async () => {
   const { dropGroup } = await board;
-  const { placeNodes } = await model;
-  const d = diagram(
-    [node("a", 900, 900)],
-    [{ id: "g", label: "G", x: 0, y: 0, w: 400, h: 300 }],
-  );
-  assert.equal(dropGroup(d, placeNodes(d), "a", centre(100, 100)), "g");
-});
-
-test("the last member leaving an unbounded boundary writes its bounds", async () => {
-  const { leaveBounds } = await board;
-  const { placeNodes, applyOps } = await model;
-  const d = diagram(
-    [node("a", 0, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
-  );
-  const pos = placeNodes(d);
-  const ops = leaveBounds(d, pos, "a", "");
-  assert.equal(ops.length, 1);
-  assert.equal(ops[0].op, "resize-group");
-  const after = applyOps(d, [
-    ...ops,
-    { op: "set", id: "a", field: "group", value: "" },
-  ]);
-  const g = after.groups[0];
-  assert.deepEqual([g.x, g.y, g.w, g.h], [-10, -30, 190, 100]);
-  const rects = (await model).groupRects(after, placeNodes(after));
-  assert.ok(rects.has("g"));
-});
-
-test("bounds are left alone when the boundary has bounds or other members", async () => {
-  const { leaveBounds } = await board;
-  const { placeNodes } = await model;
-  const bounded = diagram(
-    [node("a", 0, 0, { group: "g" })],
-    [{ id: "g", label: "G", x: 0, y: 0, w: 300, h: 200 }],
-  );
-  assert.deepEqual(leaveBounds(bounded, placeNodes(bounded), "a", ""), []);
-  const shared = diagram(
-    [node("a", 0, 0, { group: "g" }), node("b", 200, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
-  );
-  assert.deepEqual(leaveBounds(shared, placeNodes(shared), "a", ""), []);
-  assert.deepEqual(leaveBounds(shared, placeNodes(shared), "a", "g"), []);
-});
-
-test("dropRects leaves the dragged component out of a wrapping boundary", async () => {
-  const { dropRects } = await board;
-  const { placeNodes, groupRects } = await model;
-  const d = diagram(
-    [node("a", 0, 0, { group: "g" }), node("b", 600, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
-  );
-  const pos = placeNodes(d);
-  assert.ok(groupRects(d, pos).get("g").w > 700);
-  assert.equal(dropRects(d, pos, "b").get("g").w, 190);
-});
-
-test("groupAt picks the smallest boundary and none outside", async () => {
-  const { groupAt } = await board;
-  const rects = new Map([
-    ["big", { x: 0, y: 0, w: 800, h: 600 }],
-    ["small", { x: 100, y: 100, w: 200, h: 100 }],
-  ]);
-  assert.equal(groupAt(rects, { x: 150, y: 150 }), "small");
-  assert.equal(groupAt(rects, { x: 500, y: 500 }), "big");
-  assert.equal(groupAt(rects, { x: 900, y: 900 }), "");
+  const d = diagram([node("a", 900, 900)], [box("g", 0, 0, 400, 300)]);
+  assert.equal(dropGroup(d, "a", centre(100, 100)), "g");
 });
 
 test("freeSpot lands below everything and stays inside the file range", async () => {
@@ -156,7 +78,6 @@ test("freeSpot lands below everything and stays inside the file range", async ()
 
 test("drop and free-spot math uses each block's own size", async () => {
   const { dropGroup, freeSpot } = await board;
-  const { placeNodes } = await model;
   const d = diagram(
     [
       node("a", 0, 0, { group: "g", shape: "circle" }),
@@ -164,11 +85,10 @@ test("drop and free-spot math uses each block's own size", async () => {
     ],
     [{ id: "g", label: "G", x: 0, y: 0, w: 100, h: 100 }],
   );
-  const pos = placeNodes(d);
   // a circle dropped so its centre (36, 36) is inside the boundary
-  assert.equal(dropGroup(d, pos, "a", { x: 0, y: 0 }), "g");
+  assert.equal(dropGroup(d, "a", { x: 0, y: 0 }), "g");
   // a person (120x84) dropped at x 90 has its centre at x 150, outside
-  assert.equal(dropGroup(d, pos, "b", { x: 90, y: 0 }), "");
+  assert.equal(dropGroup(d, "b", { x: 90, y: 0 }), "");
   // below the person: 300 + 84 + gap 40
   assert.equal(freeSpot(d, 10, 10).y, 424);
 });
@@ -251,37 +171,22 @@ test("moving a note and a node writes one move op each", async () => {
   ]);
 });
 
-test("deleting a selection removes links first and keeps a boundary that lost every member", async () => {
+test("deleting a selection removes links first, then blocks, notes and groups", async () => {
   const { deleteOps } = await board;
-  const { placeNodes } = await model;
-  const d = diagram(
-    [node("a", 0, 0, { group: "g" }), node("b", 300, 0, { group: "g" })],
-    [{ id: "g", label: "G" }],
-  );
-  d.edges = [{ id: "ab", from: "a", to: "b" }];
-  d.notes = [{ id: "n", text: "?", x: 0, y: 200 }];
-  const ops = deleteOps(d, placeNodes(d), [
+  const ops = deleteOps([
+    { type: "group", id: "g" },
     { type: "node", id: "a" },
-    { type: "node", id: "b" },
     { type: "note", id: "n" },
     { type: "edge", id: "ab" },
   ]);
-  assert.equal(ops[0].op, "resize-group");
-  assert.equal(ops[0].id, "g");
   assert.deepEqual(
-    ops.slice(1).map((o) => o.id),
-    ["ab", "a", "b", "n"],
-  );
-  const some = deleteOps(d, placeNodes(d), [{ type: "node", id: "a" }]);
-  assert.deepEqual(some, [{ op: "delete", id: "a" }]);
-  const withGroup = deleteOps(d, placeNodes(d), [
-    { type: "node", id: "a" },
-    { type: "node", id: "b" },
-    { type: "group", id: "g" },
-  ]);
-  assert.deepEqual(
-    withGroup.map((o) => o.op),
-    ["delete", "delete", "delete"],
+    ops.map((o) => [o.op, o.id]),
+    [
+      ["delete", "ab"],
+      ["delete", "a"],
+      ["delete", "n"],
+      ["delete", "g"],
+    ],
   );
 });
 
@@ -295,4 +200,11 @@ test("a selection loses ids the file no longer has", async () => {
     kept.map((p) => `${p.type}:${p.id}`),
     ["group:g", "node:a"],
   );
+});
+
+test("countLabel is singular for one", async () => {
+  const { countLabel } = await board;
+  assert.equal(countLabel(1, 1), "1 block · 1 link");
+  assert.equal(countLabel(0, 2), "0 blocks · 2 links");
+  assert.equal(countLabel(9, 10), "9 blocks · 10 links");
 });

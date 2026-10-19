@@ -5,9 +5,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { NOTE_H, NOTE_W } from "./boardMath.ts";
 import { groupRects, nodeSize } from "./model.ts";
-import type { Diagram, Point, Rect } from "./types.ts";
+import {
+  NOTE_H,
+  NOTE_W,
+  type Diagram,
+  type Point,
+  type Rect,
+} from "./types.ts";
 
 export type View = { tx: number; ty: number; s: number };
 
@@ -28,7 +33,7 @@ export function useViewport(
     const el = boardRef.current;
     if (!el) return;
     const { diagram: d, pos: p } = latest.current;
-    const rects: Rect[] = [...groupRects(d, p).values()];
+    const rects: Rect[] = [...groupRects(d).values()];
     for (const n of d.nodes) {
       const at = p.get(n.id);
       if (at) rects.push({ ...at, ...nodeSize(n) });

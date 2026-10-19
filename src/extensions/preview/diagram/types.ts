@@ -1,4 +1,5 @@
-// The `.arch.json` diagram file: blocks, links, groups and notes. One
+// The diagram file, JSON Canvas 1.0 (`.canvas`), read into blocks, links,
+// groups and notes. One
 // universal block covers an app architecture, an agent's or a skill's order of
 // steps, a module as-is and to-be: its look comes from optional properties
 // (shape, icon, caption, step, delta), not from a type. The file is the only
@@ -7,10 +8,13 @@
 
 export const DIAGRAM_VERSION = 1;
 
-/** A `box` block is drawn at this size (Figma `Canvas/Component`); other
+/** A `box` block is drawn at this size; other
  * shapes have their own size, see `nodeSize` in model.ts. */
 export const NODE_W = 170;
 export const NODE_H = 62;
+/** A note is drawn at this size. */
+export const NOTE_W = 280;
+export const NOTE_H = 30;
 
 /** Presets, not types: a preset only supplies a default icon and caption. */
 export type NodeKind = "app" | "service" | "data" | "external";
@@ -72,7 +76,8 @@ export type DiagramNode = {
   step?: number;
   /** As-is / to-be mark. Absent = no mark. */
   delta?: Delta;
-  /** Id of the boundary the component sits in. */
+  /** Id of the boundary the component sits in: derived from where the block
+   * lies (the smallest group around its centre), never written. */
   group?: string;
   /** Top-left on the board. Absent = placed by the Preview. */
   x?: number;
@@ -110,7 +115,7 @@ export type DiagramGroup = {
   [extra: string]: unknown;
 };
 
-/** A question or warning pinned on the board (Figma `Canvas/Pin`). */
+/** A question or warning pinned on the board. */
 export type DiagramNote = {
   id: string;
   text: string;

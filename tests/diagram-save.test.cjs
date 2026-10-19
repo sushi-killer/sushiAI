@@ -3,17 +3,24 @@ const assert = require("node:assert/strict");
 
 const save = import("../src/extensions/preview/diagram/saveOps.ts");
 
+const text = (id, label, x, own = {}) => ({
+  id,
+  type: "text",
+  text: label,
+  x,
+  y: 0,
+  width: 170,
+  height: 62,
+  sushiai: own,
+});
 const file = (extra = []) =>
   JSON.stringify({
-    version: 1,
-    groups: [],
     nodes: [
-      { id: "api", kind: "service", title: "API", x: 0, y: 0 },
-      { id: "db", kind: "data", title: "DB", x: 300, y: 0 },
+      text("api", "API", 0, { kind: "service" }),
+      text("db", "DB", 300, { kind: "data" }),
       ...extra,
     ],
     edges: [],
-    notes: [],
   });
 
 // A file on "disk" with a hash per version; `hooks.beforeWrite` lets a test
@@ -91,7 +98,7 @@ test("another error is not retried", async () => {
 
 test("a node the agent adds between read and write survives", async () => {
   const { saveOps } = await save;
-  const agent = { id: "cache", kind: "data", title: "Cache", x: 600, y: 0 };
+  const agent = text("cache", "Cache", 600, { kind: "data" });
   let done = false;
   const d = disk(file(), {
     beforeWrite: (s) => {
@@ -113,11 +120,9 @@ test("an owner node whose id the agent took meanwhile keeps both", async () => {
     op: "add-node",
     node: { id: "component", kind: "service", title: "Mine" },
   };
-  const d = disk(
-    file([{ id: "component", kind: "app", title: "Agent's", x: 600, y: 0 }]),
-  );
+  const d = disk(file([text("component", "Agent's", 600)]));
   await saveOps(d.io, [mine]);
-  const titles = JSON.parse(d.state.text).nodes.map((n) => n.title);
+  const titles = JSON.parse(d.state.text).nodes.map((n) => n.text);
   assert.ok(titles.includes("Mine") && titles.includes("Agent's"));
 });
 
@@ -237,21 +242,14 @@ test("a rename from one batch reaches ops queued behind it", async () => {
   const { createSaveQueue } = await save;
   const agentGroup = {
     id: "boundary",
+    type: "group",
     label: "Agent",
     x: 0,
     y: 200,
-    w: 300,
-    h: 150,
+    width: 300,
+    height: 150,
   };
-  const d = disk(
-    JSON.stringify({
-      version: 1,
-      groups: [agentGroup],
-      nodes: [],
-      edges: [],
-      notes: [],
-    }),
-  );
+  const d = disk(JSON.stringify({ nodes: [agentGroup], edges: [] }));
   const maps = [];
   const queue = createSaveQueue(() => d.io, {
     pending: () => {},
@@ -266,7 +264,9 @@ test("a rename from one batch reaches ops queued behind it", async () => {
   const first = queue.flush();
   queue.push({ op: "set", id: "boundary", field: "label", value: "Renamed" });
   await first;
-  const groups = JSON.parse(d.state.text).groups;
+  const groups = JSON.parse(d.state.text).nodes.filter(
+    (n) => n.type === "group",
+  );
   assert.deepEqual(
     groups.map((g) => [g.id, g.label]),
     [

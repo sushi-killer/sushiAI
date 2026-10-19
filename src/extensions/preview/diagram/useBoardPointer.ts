@@ -7,7 +7,13 @@ import {
   type Gesture,
   type MoveSet,
 } from "./boardMath.ts";
-import { groupRects, MIN_GROUP_H, MIN_GROUP_W, newId } from "./model.ts";
+import {
+  groupRects,
+  MIN_GROUP_H,
+  MIN_GROUP_W,
+  newId,
+  nodeSize,
+} from "./model.ts";
 import type { Diagram, DiagramOp, Picked, Point, Rect } from "./types.ts";
 import type { useMarquee } from "./useMarquee.ts";
 import type { useMoveSet } from "./useMoveSet.ts";
@@ -39,6 +45,8 @@ type Args = {
   setView: (view: View) => void;
   boardPoint: (event: { clientX: number; clientY: number }) => Point;
   push: (op: DiagramOp, immediate?: boolean) => void;
+  /** The live size of a block while its corner is dragged. */
+  setSize: (size: { id: string; w: number; h: number } | null) => void;
   spaceDown: boolean;
 };
 
@@ -71,6 +79,7 @@ export function useBoardPointer(a: Args) {
     const note = t.closest<HTMLElement>("[data-note]");
     const edge = t.closest<HTMLElement>("[data-edge]");
     const resize = t.closest<HTMLElement>("[data-resize]");
+    const corner = t.closest<HTMLElement>("[data-node-resize]");
     const group = t.closest<HTMLElement>("[data-group]");
     const { diagram: d, pos: p } = latest.current;
     const gid = (resize || group)?.dataset[resize ? "resize" : "group"];
@@ -105,6 +114,18 @@ export function useBoardPointer(a: Args) {
               base,
               last: null,
             };
+    } else if (corner) {
+      const id = corner.dataset.nodeResize!;
+      const node = d.nodes.find((n) => n.id === id);
+      if (!node) return;
+      gesture.current = {
+        kind: "size",
+        id,
+        sx: event.clientX,
+        sy: event.clientY,
+        base: nodeSize(node),
+        last: null,
+      };
     } else if (port) {
       const from = port.dataset.port!;
       pick({ type: "node", id: from });
@@ -164,6 +185,14 @@ export function useBoardPointer(a: Args) {
         g.last = { x: snap(dx / v.s), y: snap(dy / v.s) };
         return mover.setShift({ set: g.set, dx: g.last.x, dy: g.last.y });
       }
+      if (g.kind === "size") {
+        if (!g.last && Math.hypot(dx, dy) <= 3) return;
+        g.last = {
+          w: snap(g.base.w + dx / v.s),
+          h: snap(g.base.h + dy / v.s),
+        };
+        return a.setSize({ id: g.id, ...g.last });
+      }
       if (g.kind === "group") {
         if (!g.last && Math.hypot(dx, dy) <= 3) return;
         const ox = snap(dx / v.s);
@@ -205,6 +234,10 @@ export function useBoardPointer(a: Args) {
       if (g.kind === "move" && g.last) {
         push({ op: "move", id: g.id, ...g.last }, true);
         setDrag(null);
+      }
+      if (g.kind === "size") {
+        a.setSize(null);
+        if (g.last) push({ op: "resize-node", id: g.id, ...g.last }, true);
       }
       if (g.kind === "group" && g.last) {
         const { rect, dx, dy } = g.last;

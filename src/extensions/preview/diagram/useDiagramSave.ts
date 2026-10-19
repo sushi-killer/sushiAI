@@ -95,8 +95,10 @@ export function useDiagramSave(input: Input) {
           },
           remapped: (map) => latest.current.onRemap(map),
           idle: () => setStatus({ state: "saved" }),
-          failed: (error) =>
-            setStatus({ state: "error", message: errorText(error) }),
+          failed: (error) => {
+            notice.current?.failed();
+            setStatus({ state: "error", message: errorText(error) });
+          },
         },
       ),
     [],

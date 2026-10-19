@@ -44,9 +44,11 @@ function TextField(props: {
   label: string;
   value: string;
   autoFocus?: boolean;
+  /** Several lines: Enter adds a line, Cmd/Ctrl+Enter or leaving commits. */
+  multiline?: boolean;
   onCommit: (value: string) => void;
 }) {
-  const ref = useRef<HTMLInputElement>(null);
+  const ref = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   const shown = useRef(props.value);
   shown.current = props.value;
   const commit = useRef(props.onCommit);
@@ -63,11 +65,12 @@ function TextField(props: {
       if (el && el.value !== shown.current) commit.current(el.value);
     };
   }, []);
+  const Field = props.multiline ? "textarea" : "input";
   return (
     <label className="dg-field">
       <span>{props.label}</span>
-      <input
-        className="ui-input"
+      <Field
+        className={props.multiline ? "ui-input dg-multiline" : "ui-input"}
         ref={ref}
         defaultValue={props.value}
         spellCheck={false}
@@ -78,7 +81,8 @@ function TextField(props: {
             props.onCommit(event.target.value);
         }}
         onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
+          const done = props.multiline ? event.metaKey || event.ctrlKey : true;
+          if (event.key === "Enter" && done) event.currentTarget.blur();
           if (event.key === "Escape") {
             event.currentTarget.value = props.value;
             event.currentTarget.blur();
@@ -235,10 +239,11 @@ export function Inspect({
               onCommit={(v) => set("style", v === "plain" ? "" : v)}
             />
             <SelectField
-              label="Arrows"
+              label="Direction"
               value={edge.arrow || "end"}
               options={[
                 ["end", "Forward"],
+                ["start", "Reverse"],
                 ["both", "Both ways"],
                 ["none", "None"],
               ]}
@@ -250,6 +255,7 @@ export function Inspect({
           <TextField
             label="Text"
             value={note.text}
+            multiline
             autoFocus={focusText}
             onCommit={(v) => v.trim() && set("text", v.trim())}
           />

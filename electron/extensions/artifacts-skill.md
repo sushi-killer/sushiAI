@@ -194,6 +194,12 @@ per shape:
 | `person`   | 120 by 84       | role                 |
 | `circle`   | 72 by 72        | start or end dot     |
 
+A block sizes itself: the Preview widens it to its text (up to 320 px), wraps
+the rest and makes it taller, so a long title or subtitle is never cut off.
+Your `width` and `height` are only the size other tools draw. To fix the size,
+set `"size": "fixed"` in the `sushiai` object of the node; the text then wraps
+in that width.
+
 Extras go in the `sushiai` object of the node. Set only the keys you use:
 
 | Key       | Meaning                                                                                                                                                                                                                        |
@@ -230,7 +236,8 @@ label, and 10 px at the sides and 8 px below.
 
 A note is a question for the owner. It is a `text` node with
 `"sushiai": { "note": true }` and `"color": "3"`. Its `text` is the question.
-One question per note.
+One question per note. The text may have several lines; the Preview wraps
+long lines, so do not set the note size.
 
 ### Edges
 
@@ -238,7 +245,8 @@ One question per note.
 - `label` is the text on the line.
 - `toEnd` is `arrow` by default. `fromEnd` is `none` by default. Write them
   only when they differ. For both arrows set `fromEnd` to `arrow`. For no
-  arrow set `toEnd` to `none`.
+  arrow set `toEnd` to `none`. For an arrow at `fromNode` only set `fromEnd`
+  to `arrow` and `toEnd` to `none`.
 - `sushiai.style` is `dashed` or `guess`. `guess` means not confirmed; set
   `color` to `"3"` as well. Absent means a plain line.
 - `sushiai.status` is `proposed` (see Proposals below).

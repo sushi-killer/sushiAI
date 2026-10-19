@@ -52,26 +52,47 @@ export async function saveOps(
 
 /** One "the owner edited" notice per stretch of owner saves. A polled hash
  * that is neither one we saw before a save nor one our own write returned
- * means someone else wrote; the next owner save after that sends one more. */
+ * means someone else wrote; the next owner save after that sends one more.
+ * A poll can read our write before the write's reply arrives, so a hash
+ * polled during a save is judged only once that save returns. */
 export function createEditNotice(initialHash: string) {
   const own = new Set([initialHash]);
+  const unsure = new Set<string>();
+  let writing = false;
   let armed = true;
+  const settle = () => {
+    for (const hash of unsure) if (!own.has(hash)) armed = true;
+    for (const hash of unsure) own.add(hash);
+    unsure.clear();
+  };
   return {
     polled(hash: string) {
       if (own.has(hash)) return;
+      if (writing) {
+        unsure.add(hash);
+        return;
+      }
       own.add(hash);
       armed = true;
     },
     saving(hash: string) {
+      settle();
+      writing = true;
       own.add(hash);
+    },
+    failed() {
+      writing = false;
+      settle();
     },
     /** True when the agent should be told about this save. `readHash` is the
      * file the write replaced: one we never saw means the agent wrote
      * between polls. */
     saved(hash: string, readHash: string): boolean {
+      writing = false;
       if (!own.has(readHash)) armed = true;
       own.add(readHash);
       own.add(hash);
+      settle();
       const send = armed;
       armed = false;
       return send;

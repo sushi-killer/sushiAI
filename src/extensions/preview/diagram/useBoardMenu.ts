@@ -9,10 +9,8 @@ import {
 import { GROUP_H, GROUP_W, clampSpot, freeSpot, snap } from "./boardMath.ts";
 import { quoteOf } from "./Inspect.tsx";
 import { quoteMany } from "./InspectMany.tsx";
-import { newId, nodeSize } from "./model.ts";
+import { newId, nodeSize, noteSize } from "./model.ts";
 import {
-  NOTE_H,
-  NOTE_W,
   type Diagram,
   type DiagramOp,
   type Picked,
@@ -60,10 +58,8 @@ export function useBoardMenu(a: Args) {
       const { preset } = choice;
       const id = newId(diagram, preset.id);
       const node = { id, title: preset.label, ...preset.node };
-      push({
-        op: "add-node",
-        node: { ...node, ...spot(nodeSize(node).w, nodeSize(node).h) },
-      });
+      const { w, h } = nodeSize(node);
+      push({ op: "add-node", node: { ...node, ...spot(w, h) } });
       setPicked({ type: "node", id });
       setRenaming(id);
     } else if (choice.what === "group") {
@@ -83,10 +79,9 @@ export function useBoardMenu(a: Args) {
       setRenaming(id);
     } else {
       const id = newId(diagram, "note");
-      push({
-        op: "add-note",
-        note: { id, text: "Question?", ...spot(NOTE_W, NOTE_H) },
-      });
+      const text = "Question?";
+      const { w, h } = noteSize({ id, text, x: 0, y: 0 });
+      push({ op: "add-note", note: { id, text, ...spot(w, h) } });
       setPicked({ type: "note", id });
       setFresh(id);
     }

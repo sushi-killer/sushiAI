@@ -637,7 +637,7 @@ export function PreviewView(props: CoreViewProps) {
           previewUrl ? (
             <div className="pv-image">
               <video
-                key={previewUrl}
+                key={`${previewUrl}:${hash}`}
                 className="pv-video"
                 src={previewUrl}
                 controls

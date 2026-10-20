@@ -2,6 +2,9 @@ const http = require("node:http");
 const path = require("node:path");
 const fs = require("node:fs");
 const { randomBytes } = require("node:crypto");
+const { once } = require("node:events");
+// One read of a range stays well under the 16 MB limit of a single read.
+const READ_CHUNK = 8 * 1024 * 1024;
 const ANNOTATE = fs.readFileSync(
   path.join(__dirname, "preview-annotate.js"),
   "utf8",
@@ -105,42 +108,75 @@ class PreviewServer {
         res.writeHead(403);
         return res.end("Preview access denied");
       }
-      const data = await this.connections.inspect(grant.endpoint, {
-        operation: "read",
-        root: grant.root,
-        path: relative,
-      });
-      const raw = Buffer.from(data.base64, "base64");
+      const read = (extra) =>
+        this.connections.inspect(grant.endpoint, {
+          operation: "read",
+          root: grant.root,
+          path: relative,
+          ...extra,
+        });
       const page = grant.annotate && /\.html?$/i.test(relative);
-      const text = page ? decodeUtf8(raw) : null;
-      // A page that is not valid UTF-8 is served as it is: re-encoding it
-      // would corrupt it.
-      const body =
-        text === null ? raw : Buffer.from(withAnnotations(text), "utf8");
+      let info, slice;
+      if (page) {
+        // A page is small and may be rewritten by the comment script, so it
+        // is read whole.
+        info = await read({});
+        const raw = Buffer.from(info.base64, "base64");
+        const text = decodeUtf8(raw);
+        // A page that is not valid UTF-8 is served as it is: re-encoding it
+        // would corrupt it.
+        const body =
+          text === null ? raw : Buffer.from(withAnnotations(text), "utf8");
+        info = { ...info, size: body.length };
+        slice = async function* (from, to) {
+          yield body.subarray(from, to + 1);
+        };
+      } else {
+        // Everything else is read by byte range, so a seek moves one slice
+        // and a large file never travels whole.
+        info = await read({ offset: 0, length: 0 });
+        slice = async function* (from, to) {
+          for (let at = from; at <= to; at += READ_CHUNK) {
+            const part = await read({
+              offset: at,
+              length: Math.min(READ_CHUNK, to - at + 1),
+            });
+            yield Buffer.from(part.base64, "base64");
+          }
+        };
+      }
+      const total = info.size;
+      const etag = `"${info.version}"`;
       const mime =
         relative.endsWith(".js") || relative.endsWith(".mjs")
           ? "text/javascript"
-          : data.mime;
-      // A video player seeks with byte ranges; without a 206 it cannot.
-      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+          : info.mime;
+      // A video player seeks with byte ranges; without a 206 it cannot. A
+      // range made against another version of the file is ignored (If-Range).
+      const ifRange = req.headers["if-range"];
+      const range =
+        ifRange !== undefined && ifRange !== etag
+          ? null
+          : /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
       let start = 0,
-        end = body.length - 1;
+        end = total - 1;
       if (range && (range[1] || range[2])) {
-        start = range[1] ? Number(range[1]) : body.length - Number(range[2]);
-        end = range[1] && range[2] ? Number(range[2]) : body.length - 1;
-        end = Math.min(end, body.length - 1);
+        start = range[1] ? Number(range[1]) : total - Number(range[2]);
+        end = range[1] && range[2] ? Number(range[2]) : total - 1;
+        end = Math.min(end, total - 1);
         start = Math.max(start, 0);
         if (start > end) {
-          res.writeHead(416, { "Content-Range": `bytes */${body.length}` });
+          res.writeHead(416, { "Content-Range": `bytes */${total}` });
           return res.end();
         }
       }
-      const partial = !!range && (start > 0 || end < body.length - 1);
+      const partial = !!range && (start > 0 || end < total - 1);
       res.writeHead(partial ? 206 : 200, {
         ...(partial
-          ? { "Content-Range": `bytes ${start}-${end}/${body.length}` }
+          ? { "Content-Range": `bytes ${start}-${end}/${total}` }
           : {}),
         "Accept-Ranges": "bytes",
+        ETag: etag,
         "Content-Type": mime,
         "Content-Length": end - start + 1,
         "X-Content-Type-Options": "nosniff",
@@ -157,10 +193,16 @@ class PreviewServer {
             }
           : {}),
       });
-      res.end(
-        req.method === "HEAD" ? undefined : body.subarray(start, end + 1),
-      );
+      if (req.method === "HEAD") return res.end();
+      for await (const chunk of slice(start, end)) {
+        if (res.destroyed) return;
+        if (!res.write(chunk)) await once(res, "drain");
+      }
+      res.end();
     } catch {
+      // Once the headers are out the status cannot change: cut the stream so
+      // the player sees a failed load, not a short file.
+      if (res.headersSent) return res.destroy();
       res.writeHead(404);
       res.end("File not found or unavailable");
     }

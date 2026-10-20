@@ -26,11 +26,95 @@ const cwd = input.cwd || process.cwd();
 // one of these segments, which is what actually distinguishes an invoked
 // command from the same words appearing as prose inside a quoted argument
 // (a commit message documenting this very rule, for instance).
+//
+// The split is quote-aware: a separator inside '...' or "..." is data, not a
+// boundary, and a heredoc body is data unless its line feeds a shell. What a
+// shell would run from a string stays visible: `$(...)` (live outside single
+// quotes) and the string of `bash -c` / `sh -c` / `zsh -c` / `eval`.
+const SHELL_STRING =
+  /^(?:(?:bash|sh|zsh)\s+(?:-\w+\s+)*-\w*c\w*|eval)\s+(['"])([\s\S]*)\1$/;
+const HEREDOC = /<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/g;
+
 function commandSegments(text) {
-  return text
-    .split(/\n|;|&&|\|\||\||\$\(/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+  const segments = [];
+  const subshells = []; // quote state saved at each open `$(`
+  let quote = "";
+  let buffer = "";
+  let line = "";
+  let dropTail = false; // text after a `)` that returns into a quote is data
+
+  const flush = () => {
+    const segment = buffer.trim();
+    buffer = "";
+    if (dropTail) dropTail = false;
+    else if (segment) segments.push(segment);
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === "\\" && quote !== "'") {
+      buffer += ch + (next ?? "");
+      line += ch + (next ?? "");
+      i++;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = "";
+    } else if (ch === "$" && next === "(") {
+      flush();
+      subshells.push(quote);
+      quote = "";
+      i++;
+      line = "";
+      continue;
+    } else if (quote === '"') {
+      if (ch === '"') quote = "";
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === ")" && subshells.length) {
+      flush();
+      quote = subshells.pop();
+      dropTail = quote !== "";
+      continue;
+    } else if (ch === "\n") {
+      flush();
+      const feedsShell = /\b(?:bash|sh|zsh)\b/.test(line);
+      const delimiters = [...line.matchAll(HEREDOC)].map((m) => m[2]);
+      line = "";
+      const rest = text.slice(i + 1).split("\n");
+      let used = 0;
+      for (const delimiter of delimiters) {
+        const end = rest.findIndex(
+          (l, n) => n >= used && l.trim() === delimiter,
+        );
+        const stop = end === -1 ? rest.length : end;
+        if (feedsShell)
+          segments.push(...commandSegments(rest.slice(used, stop).join("\n")));
+        used = stop + 1;
+      }
+      if (used) i += rest.slice(0, used).join("\n").length + 1;
+      continue;
+    } else if (
+      ch === ";" ||
+      (ch === "&" && next === "&") ||
+      (ch === "|" && next === "|") ||
+      ch === "|"
+    ) {
+      flush();
+      if (next === ch && ch !== ";") i++;
+      line += ch;
+      continue;
+    }
+    buffer += ch;
+    line += ch;
+  }
+  flush();
+
+  return segments.flatMap((segment) => {
+    const shell = segment.match(SHELL_STRING);
+    return shell ? [segment, ...commandSegments(shell[2])] : [segment];
+  });
 }
 
 // A script file executed by path never shows the dangerous text in the

@@ -186,6 +186,9 @@ full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A part
   `config.toml` of the named home, else `CODEX_HOME`, else `~/.codex`). A missing
   or unreadable file is an empty list, never an error. It is unrelated to
   `catalog.get`, which is the projects and groups of this host.
+- **Titles.** The registry names an untitled session from its first `UserPromptSubmit`
+  (`Registry::name_if_unset`, under the same lock as `session.update`) and never touches a
+  set title. An agent without hooks lists its display name until it has a title.
 - **Bindings.** `SessionInfo.project` / `group` are owned by the registry, as is
   `title`: `Registry::update` keeps the stored values, so an actor's stale copy
   never overwrites them. Bindings are opaque: `session.create {project?, group?}` and

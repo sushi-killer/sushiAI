@@ -122,7 +122,11 @@ export function placeLaunchedPanel(
       ...workspaces,
       {
         id: targetId,
-        name: request.label || cwd.split("/").filter(Boolean).pop() || cwd,
+        name:
+          request.workspaceName ||
+          request.label ||
+          cwd.split("/").filter(Boolean).pop() ||
+          cwd,
         cwd,
         connection: request.endpoint,
         ...(request.worktree

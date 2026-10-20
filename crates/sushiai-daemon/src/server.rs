@@ -824,7 +824,7 @@ async fn create_new(
         id: id.clone(),
         cmd: prepared.cmd.clone(),
         cwd: p.cwd.clone(),
-        title: p.title.clone(),
+        title: p.title.clone().filter(|t| !t.trim().is_empty()),
         status: SessionStatus::Running,
         exit_code: None,
         holder_pid: None,

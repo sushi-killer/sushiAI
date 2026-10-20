@@ -562,7 +562,7 @@ test("rename, close and reopen map a panel onto daemon calls", async () => {
     operationId: "op-1",
     endpoint: "ssh:devbox",
     cwd: "/tmp",
-    label: "app",
+    label: "p1",
     kind: "agent",
     agent: "codex",
     modelProfileId: undefined,
@@ -664,4 +664,28 @@ test("tidyWorkspace keeps a hidden pane off the canvas", async () => {
     ["a", "b"],
   );
   assert.deepEqual(leafIds(tidyWorkspace(before).layout).sort(), ["a", "b"]);
+});
+
+test("only a worktree launch, a terminal or a titled reopen carries a daemon title", async () => {
+  const { launchLabel, reopenRequest } = await library;
+  assert.equal(launchLabel({ kind: "agent", workspaceName: "app" }), "");
+  assert.equal(
+    launchLabel({ kind: "agent", workspaceName: "app", branch: "fix-x" }),
+    "app \u00b7 fix-x",
+  );
+  assert.equal(launchLabel({ kind: "terminal", workspaceName: "app" }), "zsh");
+
+  const owner = { ...(await workspace([])), name: "app", connection: "local" };
+  const reopen = (ended) => reopenRequest(owner, ended, "op", "/tmp/sock");
+  const titled = panel("p1", "agent", {
+    agent: "claude",
+    title: "Fix the form",
+  });
+  assert.equal(reopen(titled).label, "Fix the form");
+  const untitled = panel("p2", "agent", {
+    agent: "claude",
+    title: "Claude Code",
+  });
+  assert.equal(reopen(untitled).label, "");
+  assert.equal(reopen(panel("p3", "terminal")).label, "zsh");
 });

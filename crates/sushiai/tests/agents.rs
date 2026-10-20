@@ -432,6 +432,15 @@ fn a_turn_stop_while_a_subagent_runs_keeps_the_session_working() {
 
 #[test]
 fn the_first_prompt_names_an_unnamed_session_and_the_second_does_not_rename_it() {
+    named_by_first_prompt(None);
+}
+
+#[test]
+fn a_blank_title_at_create_counts_as_no_title() {
+    named_by_first_prompt(Some("   "));
+}
+
+fn named_by_first_prompt(title: Option<&str>) {
     let fake = Fake::new(
         "claude",
         "say('token', process.env.SUSHIAI_SESSION_TOKEN); stay();",
@@ -439,7 +448,16 @@ fn the_first_prompt_names_an_unnamed_session_and_the_second_does_not_rename_it()
     let mut sandbox = fake.sandbox();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    let id = create_agent(&mut client, "claude");
+    let id = match title {
+        None => create_agent(&mut client, "claude"),
+        Some(title) => client.call(
+            "session.create",
+            json!({"agent": "claude", "cwd": "/tmp", "cols": 80, "rows": 24, "title": title}),
+        )["id"]
+            .as_str()
+            .expect("id")
+            .to_string(),
+    };
     wait_until("token file", || !fake.read("token").is_empty());
     let token = fake.read("token").trim().to_string();
     let mut hook = hook_client(&sandbox);

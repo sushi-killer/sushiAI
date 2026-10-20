@@ -118,24 +118,25 @@ export function ChatView({
   }, [active.cwd, active.connection]);
   useEffect(() => {
     let live = true;
-    // The models, levels and modes are the daemon's agent catalog. It is empty
-    // until the daemon is up, so an empty answer never replaces a good one.
+    // The models, levels and modes are the agent catalog of the host the chat
+    // runs on. It is empty until a daemon is up, so an empty answer never
+    // replaces a good one.
     const load = () =>
       window.bridge
-        ?.chatModels()
+        ?.chatModels(active.connection)
         .then((value) => {
           if (live && Object.keys(value || {}).length) setCatalog(value);
         })
         .catch(() => {});
     load();
     const off = window.bridge?.onDaemonState?.((state) => {
-      if (state.host === "local" && state.state === "ready") load();
+      if (state.state === "ready") load();
     });
     return () => {
       live = false;
       off?.();
     };
-  }, []);
+  }, [active.connection]);
 
   function open(workspaceId: string, panelId: string) {
     memory.drafts[current?.id || ""] = draft;

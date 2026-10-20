@@ -403,7 +403,7 @@ const listFiles = async (dir) => {
   }
   return found;
 };
-// An agent's name for a person lives in one place, `src/app/agent-title.ts`,
+// An agent's name for a person lives in one place, `src/lib/agent-title.ts`,
 // which mirrors the Rust registry. Quoted anywhere else it is a copy that
 // drifts - the app once showed "Cursor Agent" in one list and "Cursor" in
 // another, and the chat called Claude "Claude" where every other screen said

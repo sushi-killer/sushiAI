@@ -33,8 +33,9 @@ pub(super) const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "
 /// The levels a Codex chat accepts. Codex publishes `ultra` on top of Claude's.
 pub(super) const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
-/// The levels the routine builder offers. The headless builder runs unattended,
-/// so it stays on the levels both CLIs share.
+/// The levels the routine builder offers a Codex run: the first three of its
+/// scale, since the headless builder runs unattended. Claude's builder offers
+/// its whole scale.
 pub(super) const BUILDER_EFFORTS: &[&str] = &["low", "medium", "high"];
 
 /// The permission modes the composer offers. Codex has no interactive approvals

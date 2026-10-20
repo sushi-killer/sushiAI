@@ -18,10 +18,26 @@ function registerChatIpc({
   /** The daemon manager's name for a chat's endpoint. */
   const hostOf = (endpoint) =>
     endpoint?.startsWith("ssh:") ? endpoint.slice(4) : "local";
-  /** This agent's catalog entry of the host a chat runs on; `{}` when the
-   * host's daemon cannot answer, which refuses every model and effort. */
-  const agentOf = async (agent, endpoint) =>
-    (await catalogs.of(hostOf(endpoint)))[agent] || {};
+  /** The agent catalog of the host a chat runs on. An ssh chat runs over plain
+   * ssh and needs no daemon there, so a host whose daemon cannot answer gets
+   * this Mac's catalog of the same CLIs. */
+  async function catalogFor(endpoint) {
+    const host = hostOf(endpoint);
+    const own = await catalogs.of(host);
+    return host === "local" || Object.keys(own).length
+      ? own
+      : catalogs.of("local");
+  }
+  /** One agent's entry; with no catalog at all the turn is refused with the
+   * reason, not as an invalid value. */
+  async function agentOf(agent, endpoint) {
+    const entry = (await catalogFor(endpoint))[agent];
+    if (!entry)
+      throw new Error(
+        "The agent list is not loaded yet: wait until the sushiAI daemon on this Mac is ready.",
+      );
+    return entry;
+  }
   function stop(panelId) {
     const proc = chats.get(panelId);
     if (!proc) return;
@@ -206,7 +222,7 @@ function registerChatIpc({
   );
   // The composer's models, levels and modes come from the host's daemon, which
   // reads the one catalog in sushiai-agents. No daemon, no list.
-  handle("chat-models", (endpoint) => catalogs.of(hostOf(endpoint)));
+  handle("chat-models", (endpoint) => catalogFor(endpoint));
 
   return {
     stop,

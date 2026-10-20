@@ -36,7 +36,7 @@ pub(super) struct Cursor;
 
 impl Harness for Cursor {
     fn id(&self) -> &'static str {
-        "cursor"
+        "cursor-agent"
     }
 
     fn label(&self) -> &'static str {
@@ -48,8 +48,7 @@ impl Harness for Cursor {
     }
 
     fn process_name(&self) -> Option<&'static str> {
-        // The binary itself is `cursor-agent`; the id is what the wire carries.
-        Some("cursor-agent")
+        Some(self.id())
     }
 
     fn home<'a>(&self, _homes: &'a Homes) -> Option<&'a Path> {

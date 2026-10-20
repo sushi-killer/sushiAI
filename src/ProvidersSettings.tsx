@@ -70,9 +70,18 @@ function ProfileForm({
     window.bridge?.providersModels(provider.id).then(setModels);
   }, [provider.id]);
   useEffect(() => {
-    window.bridge
-      ?.chatModels()
-      .then((catalog) => setEfforts(catalog?.claude?.efforts || []));
+    const load = () =>
+      window.bridge
+        ?.chatModels()
+        .then((catalog) => {
+          const levels = catalog?.claude?.efforts;
+          if (levels?.length) setEfforts(levels);
+        })
+        .catch(() => {});
+    load();
+    return window.bridge?.onDaemonState?.((state) => {
+      if (state.state === "ready") load();
+    });
   }, []);
   const effortOptions = [
     "",

@@ -64,15 +64,13 @@ fn the_two_launchable_agents_declare_their_capabilities() {
 }
 
 /// `foreground` matches a hand-started process by these names and no others.
-/// They are the binaries a person types, so they are not always the agent's id:
-/// `cursor` is started as `cursor-agent`.
 #[test]
 fn the_process_names_are_the_agents_that_have_one() {
     let names: Vec<&str> = process_names().collect();
     assert_eq!(names, ["claude", "codex", "gemini", "cursor-agent"]);
     for harness in registry() {
         if let Some(name) = harness.process_name() {
-            assert!(!name.is_empty(), "{}: an empty process name", harness.id());
+            assert_eq!(name, harness.id(), "a process name is the agent's id");
         }
     }
 }
@@ -208,7 +206,7 @@ fn every_agent_has_a_catalog_and_the_builder_set_is_smaller() {
 /// An agent with no models of its own offers nothing: only its label.
 #[test]
 fn an_agent_without_models_offers_no_levels() {
-    for id in ["gemini", "cursor", "shell"] {
+    for id in ["gemini", "cursor-agent", "shell"] {
         let catalog = agent(id).catalog(&Facts::default());
         assert!(catalog.models.is_empty(), "{id} lists models");
         assert!(catalog.efforts.is_empty(), "{id} lists levels");

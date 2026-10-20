@@ -43,7 +43,7 @@ function createAgentCatalog({ getManager, now = () => Date.now() }) {
     }
   }
 
-  return { of, forget: (host) => cache.delete(host) };
+  return { of };
 }
 
 module.exports = { createAgentCatalog };

@@ -967,7 +967,7 @@ fn gemini_and_cursor_status_is_read_from_the_screen() {
     // Cursor shows its working marker.
     let cursor = create_screen_agent(
         &mut client,
-        "cursor",
+        "cursor-agent",
         "printf 'thinking...\\nctrl+c to stop\\n'; sleep 60",
     );
     wait_status(&mut client, &cursor, 1, "working");

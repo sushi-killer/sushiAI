@@ -272,3 +272,43 @@ test("thread helpers: titles, relative time and grouping", async () => {
     [["new", "old"]],
   );
 });
+
+// The chat handler checks a turn against the catalog of the host it runs on.
+function chatHandler(catalogs) {
+  const { registerChatIpc } = require("../electron/ipc/chat.cjs");
+  const handlers = {};
+  registerChatIpc({
+    handle: (name, fn) => (handlers[name] = fn),
+    send: () => {},
+    getConnections: () => ({
+      get: () => ({ id: "build-host" }),
+      // A turn that passed every check reaches the ssh line; stop it there.
+      args: () => {
+        throw new Error("reached ssh");
+      },
+    }),
+    agentCatalog: { of: async (host) => catalogs[host] ?? {} },
+    executable: () => "/bin/false",
+    directory: () => {},
+    id: (value) => value,
+    chats: new Map(),
+  });
+  return (effort) =>
+    handlers.chat({
+      panelId: "p1",
+      cwd: "/work/my-app",
+      agent: "claude",
+      endpoint: "ssh:build-host",
+      messages: [{ role: "user", text: "hi" }],
+      effort,
+    });
+}
+
+test("an ssh chat without a daemon there is checked against this Mac's catalog", async () => {
+  const chat = chatHandler({ local: { claude: OFFERED } });
+  // A level this Mac's entry offers passes; one it lacks is refused.
+  await assert.rejects(chat("low"), /reached ssh/);
+  await assert.rejects(chat("max"), /Invalid effort/);
+  // With no catalog anywhere the reason is named, not an invalid value.
+  await assert.rejects(chatHandler({})("low"), /agent list is not loaded yet/);
+});

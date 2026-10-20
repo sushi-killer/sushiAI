@@ -45,7 +45,7 @@ fn gemini() {
 
 #[test]
 fn cursor() {
-    let cursor = screen("cursor");
+    let cursor = screen("cursor-agent");
     let write = ["Write to this file?", "proceed (y)", "keep (n)"];
     assert_eq!(cursor.read(&write, false), PERM);
     let run = [
@@ -69,7 +69,7 @@ fn cursor() {
 
 #[test]
 fn working_hint_only_counts_near_the_bottom() {
-    let cursor = screen("cursor");
+    let cursor = screen("cursor-agent");
     let mut lines: Vec<String> = vec!["ctrl+c to stop".into()];
     lines.extend((0..8).map(|i| format!("output {i}")));
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -115,8 +115,11 @@ fn claude_is_never_read() {
 fn rules_do_not_leak_between_agents_and_empty_screens_are_none() {
     assert_eq!(detect(screen("codex").rules, &["Apply this change?"]), None);
     assert_eq!(detect(screen("gemini").rules, &["Allow command?"]), None);
-    assert_eq!(detect(screen("cursor").rules, &["Run this command?"]), None);
+    assert_eq!(
+        detect(screen("cursor-agent").rules, &["Run this command?"]),
+        None
+    );
     let none: [&str; 0] = [];
     assert_eq!(detect(screen("gemini").rules, &none), None);
-    assert_eq!(detect(screen("cursor").rules, &["", "   "]), None);
+    assert_eq!(detect(screen("cursor-agent").rules, &["", "   "]), None);
 }

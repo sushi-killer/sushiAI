@@ -772,7 +772,7 @@ export interface Bridge {
     permission?: string;
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
-  chatModels(): Promise<ChatModels>;
+  chatModels(endpoint?: string): Promise<ChatModels>;
   onChat(callback: (event: ChatEvent) => void): () => void;
   catalog(
     kind: string,

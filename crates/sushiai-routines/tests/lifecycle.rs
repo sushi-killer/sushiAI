@@ -14,6 +14,25 @@ use sushiai_routines::{Agent, Config, Connector, Git, Routines};
 #[path = "../../test_wait.rs"]
 mod test_wait;
 
+/// The levels the agent catalog offers a harness. Claude takes all five, Codex the three a
+/// routine may ask for; the same table `sushiai agents catalog` prints. The module crate
+/// receives them as data, so a test stands in for the composition bin here.
+fn levels(harness: &str) -> &'static [String] {
+    static LEVELS: std::sync::OnceLock<(Vec<String>, Vec<String>)> = std::sync::OnceLock::new();
+    let words = |list: &[&str]| list.iter().map(|level| (*level).to_string()).collect();
+    let (claude, codex) = LEVELS.get_or_init(|| {
+        (
+            words(&["low", "medium", "high", "xhigh", "max"]),
+            words(&["low", "medium", "high"]),
+        )
+    });
+    if harness == "claude" {
+        claude
+    } else {
+        codex
+    }
+}
+
 #[derive(Default)]
 struct State {
     schedules: BTreeMap<String, Value>,
@@ -308,6 +327,10 @@ fn fixture_with(git: FakeGit) -> Fixture {
             Arc::new(move || clock.load(Ordering::SeqCst))
         },
         poll: Duration::from_millis(5),
+        builder_efforts: ["claude", "codex"]
+            .into_iter()
+            .map(|harness| (harness.to_string(), levels(harness).to_vec()))
+            .collect(),
         run_path: Some("/opt/sushiai/bin:/usr/bin".into()),
     });
     Fixture {
@@ -397,6 +420,11 @@ fn argv_for_claude_and_codex_is_exact() {
         read_only: &[],
         read_dirs: &[],
         skills: &[],
+        efforts: levels("claude"),
+    };
+    let codex_spec = RunSpec {
+        efforts: levels("codex"),
+        ..spec
     };
     let claude = Agent {
         harness: "claude".into(),
@@ -443,6 +471,7 @@ fn argv_for_claude_and_codex_is_exact() {
             read_only: &[],
             read_dirs: &[],
             skills: &[],
+            efforts: levels("claude"),
         }
     };
     let argv = harness_argv(&claude, &with_grants).unwrap();
@@ -469,6 +498,7 @@ fn argv_for_claude_and_codex_is_exact() {
             read_only: &[],
             read_dirs: &[],
             skills: &[],
+            efforts: levels("claude"),
         }
     };
     let argv = harness_argv(&claude, &dry_with_grants).unwrap();
@@ -496,7 +526,7 @@ fn argv_for_claude_and_codex_is_exact() {
         extra_args: vec!["--ephemeral".into()],
     };
     assert_eq!(
-        harness_argv(&codex, &spec).unwrap(),
+        harness_argv(&codex, &codex_spec).unwrap(),
         [
             "exec",
             "--ignore-user-config",
@@ -519,16 +549,27 @@ fn argv_for_claude_and_codex_is_exact() {
     // xhigh and max are Claude only.
     let mut c = codex.clone();
     c.effort = Some("xhigh".into());
-    assert!(harness_argv(&c, &spec).is_err());
+    assert!(harness_argv(&c, &codex_spec).is_err());
     // Codex has no extra readable folders to give.
     let codex_dirs = RunSpec {
         read_dirs: &dirs,
-        ..spec
+        ..codex_spec
     };
     assert!(harness_argv(&codex, &codex_dirs).is_err());
     let mut cl = claude.clone();
     cl.effort = Some("max".into());
     assert!(harness_argv(&cl, &spec).is_ok());
+    // A level the harness does not offer is refused, and an empty list refuses every one.
+    let mut high = claude.clone();
+    high.effort = Some("high".into());
+    assert!(harness_argv(
+        &high,
+        &RunSpec {
+            efforts: &[],
+            ..spec
+        }
+    )
+    .is_err());
     // A dry run is an allowlist, not a list of known writes.
     let dry = RunSpec {
         dry_run: true,
@@ -612,6 +653,7 @@ fn spec_with<'a>(dry_run: bool, skills: &'a [String]) -> RunSpec<'a> {
         read_only: &[],
         read_dirs: &[],
         skills,
+        efforts: levels("claude"),
     }
 }
 
@@ -1245,6 +1287,12 @@ fn validate_rejects_what_the_daemon_would_stumble_on() {
         r["agent"]["harness"] = json!("codex");
     });
     assert!(fields(&v).contains(&"agent.effort".to_string()));
+    // The list is the harness's own: the same level Claude offers is refused for Codex above
+    // and accepted here, and a level neither offers is refused for both.
+    assert!(!fields(&check(&|r| r["agent"]["effort"] = json!("max")))
+        .contains(&"agent.effort".to_string()));
+    assert!(fields(&check(&|r| r["agent"]["effort"] = json!("ultra")))
+        .contains(&"agent.effort".to_string()));
     for bad in [
         json!(["--dangerously-skip-permissions"]),
         json!(["--add-dir", "/etc"]),

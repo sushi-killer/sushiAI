@@ -182,7 +182,13 @@ pub fn check_multi_project(routine: &Routine) -> Result<(), String> {
 
 /// Validates `routine` and `brief`. `routine_dir` is the folder the routine lives (or will
 /// live) in; `--add-dir` may point only inside its `work/` folder.
-pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: &Path) -> Report {
+pub fn validate(
+    routine: &Routine,
+    brief: &str,
+    catalog: &Catalog,
+    routine_dir: &Path,
+    efforts: &[String],
+) -> Report {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut err = |field: &str, message: String| {
@@ -272,6 +278,7 @@ pub fn validate(routine: &Routine, brief: &str, catalog: &Catalog, routine_dir: 
             read_only: &[],
             read_dirs: &[],
             skills: &routine.skills,
+            efforts,
         };
         if let Err(m) = harness_argv(&routine.agent, &probe) {
             err("agent.effort", m);

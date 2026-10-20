@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sushiai_agents::harness;
 use sushiai_daemon::{BoxFuture, Home, Module, ModuleNotify, ModuleSlot, Reply};
 use sushiai_protocol::code;
 use sushiai_routines::service::{CallError, Config, Connector, Git, Routines};
@@ -371,6 +372,12 @@ impl RoutinesModule {
             now_ms: Arc::new(now_ms),
             run_path: run_path(),
             poll: POLL,
+            // The levels a routine may ask for. The module crate may not depend on
+            // `sushiai-agents`, so its one catalog is read here and handed in as data.
+            builder_efforts: harness::catalogs(&harness::catalog::Facts::default())
+                .into_iter()
+                .map(|agent| (agent.id, agent.builder_efforts))
+                .collect(),
         });
         let listener = svc.clone();
         let spawned = std::thread::Builder::new()

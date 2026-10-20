@@ -8,7 +8,11 @@ use crate::task::AnsweredQuestion;
 #[cfg(test)]
 use crate::task::Attempt;
 #[cfg(test)]
+use crate::task::FindingRecord;
+#[cfg(test)]
 use crate::task::PlanFinding;
+#[cfg(test)]
+use crate::task::ReviewResult;
 #[cfg(test)]
 use serde_json::json;
 
@@ -20,6 +24,7 @@ use crate::engine::state::App;
 use crate::engine::test_support::task_with_status;
 use crate::store;
 use crate::store::overseer;
+use crate::task::review::severity_of;
 use crate::task::AnsweredBy;
 use crate::task::AttemptStatus;
 use crate::task::Failure;
@@ -46,27 +51,59 @@ fn children<'a>(task: &Task, all: &'a [Task]) -> Vec<&'a Task> {
         .collect()
 }
 
-fn owner_answered(task: &Task) -> bool {
-    task.question_history
-        .iter()
-        .any(|q| q.answered_by == AnsweredBy::Owner)
+/// Whether a review finding blocks: every severity but P3 does, and a finding
+/// that names none counts as blocking.
+fn blocks(severity: Option<u8>) -> bool {
+    severity != Some(3)
 }
 
-fn solo_first_pass(task: &Task) -> bool {
-    task.status == TaskStatus::Done && implement_attempt_count(task) == 1 && !owner_answered(task)
-}
-
-/// A task is first-pass when it is done with exactly one implement attempt
-/// and no question the owner answered. A parent is first-pass when every
-/// subtask is and it ran no implement attempt of its own.
-pub(super) fn first_pass(task: &Task, children: &[&Task]) -> bool {
-    if children.is_empty() {
-        return solo_first_pass(task);
+/// A leaf is first-pass when it is done, ran one implement attempt that
+/// passed, and neither any attempt's review nor the finding registry holds a
+/// blocking finding.
+fn leaf_first_pass(task: &Task) -> bool {
+    if task.status != TaskStatus::Done || implement_attempt_count(task) != 1 {
+        return false;
     }
-    task.status == TaskStatus::Done
-        && implement_attempt_count(task) == 0
-        && !owner_answered(task)
-        && children.iter().all(|c| solo_first_pass(c))
+    let implement_passed = task
+        .attempts
+        .iter()
+        .any(|a| a.stage == Stage::Implement && a.status == AttemptStatus::Passed);
+    let review_blocks = task
+        .attempts
+        .iter()
+        .filter_map(|a| a.review.as_ref())
+        .any(|r| (0..r.findings.len()).any(|i| blocks(r.severities.get(i).copied().flatten())));
+    // A record stored before severities were typed carries its level only in its text.
+    let registry_blocks = task
+        .findings
+        .iter()
+        .any(|f| blocks(f.severity.or_else(|| severity_of(&f.text))));
+    implement_passed && !review_blocks && !registry_blocks
+}
+
+fn first_pass_on_path<'a>(task: &'a Task, all: &'a [Task], path: &mut Vec<&'a str>) -> bool {
+    if path.contains(&task.id.as_str()) {
+        return false;
+    }
+    let kids = children(task, all);
+    if kids.is_empty() {
+        return leaf_first_pass(task);
+    }
+    if task.status != TaskStatus::Done || implement_attempt_count(task) != 0 {
+        return false;
+    }
+    path.push(task.id.as_str());
+    let ok = kids.iter().all(|c| first_pass_on_path(c, all, path));
+    path.pop();
+    ok
+}
+
+/// First-pass, the same definition as the eval export's. A leaf is done with
+/// one passed implement attempt and no blocking finding (any review or the
+/// finding registry; only P3 does not block). A parent is done, ran no
+/// implement attempt of its own, and every subtask is first-pass in turn.
+pub(super) fn first_pass(task: &Task, all: &[Task]) -> bool {
+    first_pass_on_path(task, all, &mut Vec::new())
 }
 
 /// Owner-answered questions plus `Amended: ` decision lines, over the task
@@ -201,7 +238,7 @@ pub(super) fn compute(task: &Task, all: &[Task], records: &[CostRecord], now: i6
         .chain(kids.iter().map(|c| c.id.as_str()))
         .collect();
     TaskMetrics {
-        first_pass: first_pass(task, &kids),
+        first_pass: first_pass(task, all),
         owner_touches: owner_touches(task, &kids),
         cost_by_phase: cost_by_phase(records, &ids),
         failure_cause: failure_cause(task, &kids),
@@ -447,15 +484,124 @@ mod tests {
         assert_eq!(cause(&t), Some(FailureCause::ReviewLoop));
     }
 
-    #[test]
-    fn first_pass_needs_one_implement_attempt_and_no_owner_answer() {
+    fn done_with(attempts: Vec<Attempt>) -> Task {
         let mut t = task_with_status(TaskStatus::Done);
-        t.fixture_data().attempts =
-            vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 10)];
+        t.fixture_data().attempts = attempts;
+        t
+    }
+
+    fn passed() -> Attempt {
+        attempt(Stage::Implement, AttemptStatus::Passed, None, 10)
+    }
+
+    fn review_with(findings: &[&str], severities: Vec<Option<u8>>) -> ReviewResult {
+        serde_json::from_value(json!({
+            "verdict": "PASS",
+            "findings": findings,
+            "severities": severities,
+        }))
+        .unwrap()
+    }
+
+    fn finding(text: &str) -> FindingRecord {
+        serde_json::from_value(json!({
+            "id": "F-000001", "text": text, "status": "open", "attempt": 1, "round": 1,
+        }))
+        .unwrap()
+    }
+
+    fn child_of(parent: &Task, mut t: Task) -> Task {
+        t.fixture_data().parent = Some(parent.id.clone());
+        t
+    }
+
+    #[test]
+    fn first_pass_needs_one_passed_implement_attempt() {
+        let mut t = done_with(vec![passed()]);
         assert!(first_pass(&t, &[]));
         assert_eq!(owner_touches(&t, &[]), 0);
         t.record_decision("Amended: verify".into());
         assert_eq!(owner_touches(&t, &[]), 1);
+        t.fixture_data().attempts.push(passed());
+        assert!(!first_pass(&t, &[]));
+        let failed_once = done_with(vec![attempt(
+            Stage::Implement,
+            AttemptStatus::Failed,
+            None,
+            10,
+        )]);
+        assert!(!first_pass(&failed_once, &[]));
+        let mut stopped = done_with(vec![passed()]);
+        stopped.resume_phase(TaskStatus::Stopped, 1);
+        assert!(!first_pass(&stopped, &[]));
+    }
+
+    #[test]
+    fn a_blocking_review_finding_in_any_attempt_blocks_first_pass() {
+        let mut t = done_with(vec![passed()]);
+        t.fixture_data().attempts[0].review = Some(review_with(&["P2: x"], vec![Some(2)]));
+        assert!(!first_pass(&t, &[]));
+        t.fixture_data().attempts[0].review = Some(review_with(&["P3: x"], vec![Some(3)]));
+        assert!(first_pass(&t, &[]));
+        t.fixture_data().attempts[0].review = Some(review_with(&["x"], vec![]));
+        assert!(!first_pass(&t, &[]));
+        t.fixture_data().attempts[0].review = Some(review_with(&["x"], vec![None]));
+        assert!(!first_pass(&t, &[]));
+        t.fixture_data().attempts[0].review = Some(review_with(&["P3: x", "y"], vec![Some(3)]));
+        assert!(!first_pass(&t, &[]));
+    }
+
+    #[test]
+    fn a_blocking_registry_finding_blocks_first_pass() {
+        let mut t = done_with(vec![passed()]);
+        t.fixture_data().findings = vec![finding("P3: x")];
+        assert!(first_pass(&t, &[]));
+        t.fixture_data().findings = vec![finding("P1: x")];
+        assert!(!first_pass(&t, &[]));
+    }
+
+    // An object-form finding's text does not start with its severity, so the
+    // registry must keep the level the review parsed.
+    #[test]
+    fn an_object_form_p3_finding_stays_clean_through_the_registry() {
+        for (level, clean) in [("P3", true), ("P2", false)] {
+            let mut t = done_with(vec![passed()]);
+            let reply = json!({
+                "verdict": "PASS",
+                "findings": [{"severity": level, "file": "a.rs", "issue": "typo"}],
+            })
+            .to_string();
+            let mut review = crate::verify::review::reply::parse_review(&reply).unwrap();
+            crate::task::findings::register_findings(&mut t, 1, 1, &mut review);
+            t.fixture_data().attempts[0].review = Some(review);
+            assert_eq!(first_pass(&t, &[]), clean, "{level}");
+        }
+    }
+
+    // A later round that names the same finding at a lower level does not erase
+    // the blocker an earlier round raised.
+    #[test]
+    fn a_finding_downgraded_on_a_later_round_still_blocks() {
+        let mut t = done_with(vec![passed()]);
+        let round = |finding: serde_json::Value| {
+            crate::verify::review::reply::parse_review(
+                &json!({"verdict": "PASS", "findings": [finding]}).to_string(),
+            )
+            .unwrap()
+        };
+        let mut first = round(json!({"severity": "P1", "issue": "x"}));
+        crate::task::findings::register_findings(&mut t, 1, 1, &mut first);
+        let id = t.findings[0].id.clone();
+        let mut second = round(json!({"id": id, "severity": "P3", "issue": "x"}));
+        crate::task::findings::register_findings(&mut t, 1, 2, &mut second);
+        assert_eq!(t.findings.len(), 1);
+        t.fixture_data().attempts[0].review = Some(second);
+        assert!(!first_pass(&t, &[]));
+    }
+
+    #[test]
+    fn an_owner_answered_question_does_not_matter() {
+        let mut t = done_with(vec![passed()]);
         t.fixture_data().question_history.push(AnsweredQuestion {
             question: "q".into(),
             options: vec![],
@@ -468,29 +614,117 @@ mod tests {
             failure_signature: None,
             commands: Vec::new(),
         });
-        assert!(!first_pass(&t, &[]));
-        assert_eq!(owner_touches(&t, &[]), 2);
-        t.fixture_data().question_history[0].answered_by = AnsweredBy::Policy;
         assert!(first_pass(&t, &[]));
-        t.fixture_data()
-            .attempts
-            .push(attempt(Stage::Implement, AttemptStatus::Passed, None, 11));
-        assert!(!first_pass(&t, &[]));
+        assert_eq!(owner_touches(&t, &[]), 1);
     }
 
     #[test]
-    fn a_parent_is_first_pass_when_every_subtask_is() {
-        let mut part = task_with_status(TaskStatus::Done);
-        part.fixture_data().attempts =
-            vec![attempt(Stage::Implement, AttemptStatus::Passed, None, 1)];
-        let mut other = part.clone();
+    fn a_parent_is_first_pass_when_every_descendant_is() {
         let parent = task_with_status(TaskStatus::Done);
-        assert!(first_pass(&parent, &[&part, &other]));
-        other.fixture_data().attempts.push(part.attempts[0].clone());
-        assert!(!first_pass(&parent, &[&part, &other]));
+        let part = child_of(&parent, done_with(vec![passed()]));
+        let mut other = child_of(&parent, done_with(vec![passed()]));
+        let all = |kids: &[&Task]| {
+            let mut v = vec![parent.clone()];
+            v.extend(kids.iter().map(|t| (*t).clone()));
+            v
+        };
+        assert!(first_pass(&parent, &all(&[&part, &other])));
+        other.fixture_data().attempts.push(passed());
+        assert!(!first_pass(&parent, &all(&[&part, &other])));
         let mut own = parent.clone();
-        own.fixture_data().attempts = part.attempts.clone();
-        assert!(!first_pass(&own, &[&part]));
+        own.fixture_data().attempts = vec![passed()];
+        assert!(!first_pass(&own, &all(&[&part])));
+        let mut open = part.clone();
+        open.resume_phase(TaskStatus::Queued, 1);
+        assert!(!first_pass(&parent, &all(&[&open])));
+    }
+
+    #[test]
+    fn a_bad_grandchild_makes_the_grandparent_not_first_pass() {
+        let grand = task_with_status(TaskStatus::Done);
+        let parent = child_of(&grand, task_with_status(TaskStatus::Done));
+        let leaf = child_of(&parent, done_with(vec![passed()]));
+        let mut all = vec![grand.clone(), parent.clone(), leaf.clone()];
+        assert!(first_pass(&grand, &all));
+        all[2].fixture_data().attempts = vec![
+            attempt(Stage::Implement, AttemptStatus::Failed, None, 5),
+            passed(),
+        ];
+        assert!(!first_pass(&grand, &all));
+        assert!(!first_pass(&parent, &all));
+    }
+
+    #[test]
+    fn a_parent_cycle_is_not_first_pass() {
+        let mut a = task_with_status(TaskStatus::Done);
+        let mut b = task_with_status(TaskStatus::Done);
+        a.fixture_data().parent = Some(b.id.clone());
+        b.fixture_data().parent = Some(a.id.clone());
+        let all = vec![a.clone(), b];
+        assert!(!first_pass(&a, &all));
+    }
+
+    // The shapes are copied from the eval export self-check and must change
+    // together with it. Two differ on purpose, by the owner's P3 rule: `p3` (a
+    // P3-only review is clean) and `tfind` (the export's task-level finding is
+    // "P3", here "P2", because a P3 registry finding does not block).
+    #[test]
+    fn first_pass_matches_the_eval_export_shapes() {
+        let plan = || attempt(Stage::Plan, AttemptStatus::Passed, None, 1);
+        let bad = || attempt(Stage::Implement, AttemptStatus::Failed, None, 2);
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut add = |name: &str, status: TaskStatus, parent: Option<&str>, a: Vec<Attempt>| {
+            let mut t = task_with_status(status);
+            let d = t.fixture_data();
+            d.id = name.into();
+            d.parent = parent.map(String::from);
+            d.attempts = a;
+            tasks.push(t);
+        };
+        use TaskStatus::{Done, Queued, Stopped};
+        add("ok", Done, None, vec![plan(), passed()]);
+        add("twice", Done, None, vec![bad(), passed()]);
+        add("review", Done, None, vec![passed()]);
+        add("p3", Done, None, vec![passed()]);
+        add("tfind", Done, None, vec![passed()]);
+        add("notdone", Stopped, None, vec![passed()]);
+        add("firstfail", Done, None, vec![bad()]);
+        add("p_ok", Done, None, vec![plan()]);
+        add("p_ok_a", Done, Some("p_ok"), vec![passed()]);
+        add("p_ok_b", Done, Some("p_ok"), vec![passed()]);
+        add("p_bad", Done, None, vec![]);
+        add("p_bad_a", Done, Some("p_bad"), vec![passed()]);
+        add("p_bad_b", Done, Some("p_bad"), vec![bad(), passed()]);
+        add("p_own", Done, None, vec![passed()]);
+        add("p_own_a", Done, Some("p_own"), vec![passed()]);
+        add("p_open", Done, None, vec![]);
+        add("p_open_a", Queued, Some("p_open"), vec![]);
+        add("orphan", Done, Some("gone"), vec![passed()]);
+        for t in &mut tasks {
+            match t.id.as_str() {
+                "review" => {
+                    t.fixture_data().attempts[0].review =
+                        Some(review_with(&["P2: x"], vec![Some(2)]));
+                }
+                "p3" => {
+                    t.fixture_data().attempts[0].review =
+                        Some(review_with(&["P3: x"], vec![Some(3)]));
+                }
+                "tfind" => t.fixture_data().findings = vec![finding("P2: x")],
+                _ => {}
+            }
+        }
+        let got: std::collections::BTreeSet<&str> = tasks
+            .iter()
+            .filter(|t| first_pass(t, &tasks))
+            .map(|t| t.id.as_str())
+            .collect();
+        let want: std::collections::BTreeSet<&str> = [
+            "ok", "p3", "p_ok", "p_ok_a", "p_ok_b", "p_bad_a", "p_own_a", "orphan",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
     }
 
     fn record(task: &str, stage: &str, usd: f64) -> CostRecord {

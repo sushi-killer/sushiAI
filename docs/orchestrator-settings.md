@@ -309,9 +309,11 @@ configured, a duplicate or built-in id, `maxAttempts` of 0, and a
   `first pass: yes|no; owner touches: N; cause: none|env|plan|impl|review_loop; cost: plan $0.02, implement $0.01`
   (only nonzero phases, in the order plan, implement, review, triage,
   advisor, finding_judge, answer_judge, pick; `cost: $0.00` with no spend).
-  First pass means done with exactly one implement attempt and no question the
-  owner answered; a parent is first pass when every subtask is and it ran no
-  attempt of its own. Owner touches count owner-answered questions plus
+  First pass means done with exactly one implement attempt, that attempt
+  passed, and no review or registered finding other than P3 (a finding with no
+  severity counts as blocking). A parent is first pass when it ran no
+  implement attempt of its own and every subtask is first pass by the same
+  rule, at every depth. Owner answers do not change it. Owner touches count owner-answered questions plus
   `Amended: ` decision lines. The cause comes from the last failure: errors,
   cost budget, a missing harness and base-check failures are `env`; a failed plan
   stage or a plan-gate drop is `plan`; verify, held-out, loop, stall,

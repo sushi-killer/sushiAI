@@ -16,6 +16,7 @@ async fn an_owner_edit_during_a_scenario_keeps_the_finding_out_of_the_contract()
         id: "F-1".into(),
         text: "P1 failure".into(),
         status: FindingStatus::Open,
+        severity: None,
         attempt: 1,
         round: 1,
         repeats: 1,

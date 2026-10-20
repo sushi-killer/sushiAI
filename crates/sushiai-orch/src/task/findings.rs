@@ -17,6 +17,15 @@ fn strip_finding_id(text: &str) -> &str {
     t
 }
 
+/// The more severe of two levels (P0 is the most severe); a review that names
+/// none keeps the level an earlier one gave.
+fn most_severe(a: Option<u8>, b: Option<u8>) -> Option<u8> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 fn with_id(text: &str, id: &str) -> String {
     format!("{} [{id}]", strip_finding_id(text))
 }
@@ -99,6 +108,7 @@ pub(crate) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
     let mut present: Vec<String> = Vec::new();
     for i in 0..own {
         let raw = strip_finding_id(&r.findings[i]).to_string();
+        let severity = r.severities[i];
         let run = r.details[i].scenario.as_ref().map(|s| s.run.clone());
         let named = r.details[i].id.as_deref().and_then(|id| {
             let pos = task.findings.iter().position(|f| f.id == id)?;
@@ -113,6 +123,7 @@ pub(crate) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
                     rec.scenarios.push(run);
                 }
                 rec.status = FindingStatus::Open;
+                rec.severity = most_severe(rec.severity, severity);
                 rec.attempt = attempt_n;
                 rec.round = round;
                 rec.repeats = rec.repeats.max(HANDLE_AT_REPEATS);
@@ -126,6 +137,7 @@ pub(crate) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
             Some(pos) => {
                 let rec = &mut task.findings[pos];
                 repeat = rec.attempt < attempt_n || rec.round < round;
+                rec.severity = most_severe(rec.severity, severity);
                 if rec.attempt < attempt_n {
                     rec.repeats += 1;
                 }
@@ -142,6 +154,7 @@ pub(crate) fn register_findings(task: &mut Task, attempt_n: u32, round: u32, r: 
                     id: id.clone(),
                     text: raw.clone(),
                     status: FindingStatus::Open,
+                    severity,
                     attempt: attempt_n,
                     round,
                     repeats: 0,
@@ -221,7 +234,9 @@ pub(crate) fn apply_declines(
         }
         // Put the registered finding back among the reviewer's own findings.
         let at = r.severities.len().min(r.findings.len());
-        let severity = crate::task::review::severity_of(&text);
+        let severity = task.findings[pos]
+            .severity
+            .or_else(|| crate::task::review::severity_of(&text));
         if r.details.len() < at {
             r.details.resize(at, Default::default());
         }

@@ -337,6 +337,7 @@ const CORE_SHARED = new Set(
     "connections",
     "terminal-flow",
     "harness",
+    "agent-catalog",
     "agent-models",
     "worktree",
     "project-git",

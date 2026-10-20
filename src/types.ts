@@ -515,17 +515,26 @@ export type ClaudePlugin = {
   sourceLabel: string;
   disabled: boolean;
 };
-export type ChatModels = Record<
-  string,
-  {
-    models: ChatModel[];
-    efforts: string[];
-    defaultModel: string;
-    defaultModelId?: string;
-    defaultContext?: number;
-    defaultEffort?: string;
-  }
->;
+/** One agent of `agents.catalog`, as the daemon serves it. The table itself is
+ * Rust (`sushiai-agents/src/harness/catalog.rs`). */
+export type AgentCatalog = {
+  id: string;
+  label: string;
+  models: ChatModel[];
+  /** The levels the chat composer offers. */
+  efforts: string[];
+  /** The smaller set the routine builder offers. */
+  builderEfforts: string[];
+  /** The permission modes the CLI accepts. */
+  permissions: string[];
+  /** The model the CLI uses when the caller names none: the id to pass back. */
+  defaultModel: string;
+  /** That model as a person reads it; the id again when the CLI lists no label. */
+  defaultModelLabel: string;
+  defaultEffort: string;
+  defaultContext: number;
+};
+export type ChatModels = Record<string, AgentCatalog>;
 export type UpdateSettings = {
   autoCheck: boolean;
   autoDownload: boolean;

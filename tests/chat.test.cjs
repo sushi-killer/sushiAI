@@ -1,13 +1,17 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { harnessFor, chatPrompt } = require("../electron/harness.cjs");
-const chatArgs = (agent, options) => harnessFor(agent).chatArgs(options);
+// What the daemon's `agents.catalog` serves for one agent. `chatArgs` refuses
+// anything outside it, so a catalog that has not arrived refuses everything.
+const OFFERED = {
+  efforts: ["low", "high"],
+  permissions: ["default", "acceptEdits"],
+  defaultModel: "the-default",
+};
+const chatArgs = (agent, options) =>
+  harnessFor(agent).chatArgs(options, OFFERED);
 const claudeEvent = harnessFor("claude").chatEvent;
 const codexEvent = harnessFor("codex").chatEvent;
-const {
-  parseCodexCache,
-  parseTomlRoot,
-} = require("../electron/agent-models.cjs");
 const threads = import("../src/chat-threads.ts");
 
 const CLAUDE_BASE = [
@@ -141,48 +145,33 @@ test("attachments: claude add-dir stays last, codex images precede flags", () =>
     /^user: look\n\[Attached[^\]]*\/p\/i\.png, \/p\/dir\]\n\nassistant: ok$/,
   );
 });
-test("reasoning levels follow the CLI that offers them", () => {
-  assert.ok(chatArgs("claude", { effort: "max" }).includes("max"));
-  assert.throws(
-    () => chatArgs("claude", { effort: "ultra" }),
-    /Invalid effort/,
-  );
+test("reasoning levels follow the catalog the daemon serves", () => {
+  assert.ok(chatArgs("claude", { effort: "high" }).includes("high"));
   assert.ok(
-    chatArgs("codex", { effort: "ultra" }).includes(
-      'model_reasoning_effort="ultra"',
+    chatArgs("codex", { effort: "high" }).includes(
+      'model_reasoning_effort="high"',
     ),
   );
-});
-test("codex model cache keeps listed models in priority order", () => {
-  const models = parseCodexCache({
-    models: [
-      {
-        slug: "b",
-        display_name: "B",
-        visibility: "list",
-        priority: 9,
-        context_window: 128000,
-        default_reasoning_level: "high",
-        supported_reasoning_levels: [{ effort: "low" }, { effort: "nope" }],
-      },
-      { slug: "hidden", visibility: "hide", priority: 1 },
-      { slug: "a", display_name: "A", visibility: "list", priority: 2 },
-    ],
-  });
-  assert.deepEqual(
-    models.map((m) => m.id),
-    ["a", "b"],
+  // A level the agent's catalog does not offer is refused before a process runs.
+  assert.throws(() => chatArgs("claude", { effort: "max" }), /Invalid effort/);
+  assert.throws(() => chatArgs("codex", { effort: "ultra" }), /Invalid effort/);
+  // So is a mode, and so is anything at all while the catalog is empty.
+  assert.throws(
+    () => chatArgs("claude", { permission: "plan" }),
+    /Invalid permission mode/,
   );
-  assert.deepEqual(models[1].efforts, ["low"]);
-  assert.equal(models[1].defaultEffort, "high");
-  assert.equal(models[1].context, 128000);
-  assert.deepEqual(parseCodexCache({}), []);
-  assert.equal(
-    parseTomlRoot('model = "gpt-6"\n[x]\nmodel = "no"', "model"),
-    "gpt-6",
+  const bare = (agent, options) =>
+    harnessFor(agent).chatArgs(options, undefined);
+  assert.throws(() => bare("claude", { effort: "high" }), /Invalid effort/);
+  assert.throws(
+    () => bare("claude", { permission: "default" }),
+    /Invalid permission mode/,
   );
-  assert.equal(parseTomlRoot('[x]\nmodel = "no"', "model"), "");
+  // A model that names no level needs no catalog.
+  assert.ok(bare("claude", {}).includes("--print"));
 });
+// The Codex cache and config.toml parse moved into the Rust catalog of
+// sushiai-agents (harness/catalog.rs), which tests it there.
 test("codex events become answer text, progress notes, usage and errors", () => {
   const answer = {
     type: "item.completed",

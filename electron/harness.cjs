@@ -4,28 +4,30 @@
 // in HARNESSES with the same interface; adding a harness means adding one
 // object here. Callers use harnessFor(name) and never branch on a name.
 //
-//   name, efforts            chat effort levels the CLI accepts
-//   builderEfforts           effort levels the headless builder offers
+//   name, builderEfforts     effort levels the headless builder offers
 //   login                    argv words of the harness's own login
 //   modelFromEvents          true when chat events report the resolved model
-//   chatArgs(options)        argv of a one-shot chat turn (validated)
+//   chatArgs(options, agent) argv of a one-shot chat turn (validated)
 //   chatEvent(event)         one stream event as a chat update, or null
 //   mcpArgs(server)          flags that attach an MCP server
 //   headlessTurnArgs(opts)   flags of one headless builder turn
 //   parseTurn(screenText)    {state: running|done|failed, text, session}
 //
-// Values come from the renderer, so each is validated before it reaches a
-// process (locally argv, remotely a quoted ssh line).
-const { CLAUDE_EFFORTS, CODEX_EFFORTS } = require("./agent-models.cjs");
+// What a chat may ask for - the models, their reasoning levels and the
+// permission modes - is not here: it is the agent's catalog entry, which the
+// daemon serves as `agents.catalog`. `chatArgs` takes that entry and refuses
+// anything outside it. Values come from the renderer, so each is validated
+// before it reaches a process (locally argv, remotely a quoted ssh line).
 
-const PERMISSIONS = ["default", "acceptEdits", "plan", "bypassPermissions"];
-
-function checkChatOptions(harness, { model, effort, permission }) {
+/** `agent` is one entry of `agents.catalog` (its `efforts` and `permissions`).
+ * A catalog that has not arrived yet has neither, so nothing is accepted: an
+ * empty list refuses rather than passes. */
+function checkChatOptions(agent, { model, effort, permission }) {
   if (model && !/^[\w.:-]{1,64}$/.test(model)) throw new Error("Invalid model");
   // Each CLI publishes its own reasoning levels; Codex adds "ultra", Claude does not.
-  if (effort && !harness.efforts.includes(effort))
+  if (effort && !(agent?.efforts || []).includes(effort))
     throw new Error("Invalid effort");
-  if (permission && !PERMISSIONS.includes(permission))
+  if (permission && !(agent?.permissions || []).includes(permission))
     throw new Error("Invalid permission mode");
 }
 
@@ -198,12 +200,11 @@ function codexEvent(event) {
 
 const claude = {
   name: "claude",
-  efforts: CLAUDE_EFFORTS,
   builderEfforts: ["low", "medium", "high", "xhigh", "max"],
   login: ["claude", "/login"],
   modelFromEvents: true,
-  chatArgs(options = {}) {
-    checkChatOptions(this, options);
+  chatArgs(options = {}, agent) {
+    checkChatOptions(agent, options);
     const { model, effort, permission, dirs = [] } = options;
     // Streamed JSON instead of plain text: it carries tool activity, the model
     // Claude actually resolved to, real token counts and its context window.
@@ -286,12 +287,11 @@ const claude = {
 };
 const codex = {
   name: "codex",
-  efforts: CODEX_EFFORTS,
   builderEfforts: ["low", "medium", "high"],
   login: ["codex", "login"],
   modelFromEvents: false,
-  chatArgs(options = {}) {
-    checkChatOptions(this, options);
+  chatArgs(options = {}, agent) {
+    checkChatOptions(agent, options);
     const { model, effort, permission, images = [] } = options;
     // ponytail: codex has no interactive approvals in exec; map modes onto its sandbox.
     // Its read-only sandbox already reads the whole disk, so attachments need no --add-dir.
@@ -390,5 +390,4 @@ module.exports = {
   screenObjects,
   chatPrompt,
   IMAGE,
-  PERMISSIONS,
 };

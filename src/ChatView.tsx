@@ -40,12 +40,13 @@ const EFFORT_LABELS: Record<string, string> = {
   ultra: "Ultra",
 };
 const effortName = (id: string) => EFFORT_LABELS[id] || id;
-const PERMISSIONS = [
-  { id: "default", label: "Ask before edits" },
-  { id: "acceptEdits", label: "Auto-accept edits" },
-  { id: "plan", label: "Plan mode" },
-  { id: "bypassPermissions", label: "Bypass permissions" },
-];
+// The ids are the catalog's; the wording is ours.
+const PERMISSION_LABELS: Record<string, string> = {
+  default: "Ask before edits",
+  acceptEdits: "Auto-accept edits",
+  plan: "Plan mode",
+  bypassPermissions: "Bypass permissions",
+};
 const SUGGESTIONS = [
   "Explain this project",
   "Review recent changes",
@@ -115,10 +116,24 @@ export function ChatView({
       .catch(() => setBranch(""));
   }, [active.cwd, active.connection]);
   useEffect(() => {
-    window.bridge
-      ?.chatModels()
-      .then(setCatalog)
-      .catch(() => setCatalog({}));
+    let live = true;
+    // The models, levels and modes are the daemon's agent catalog. It is empty
+    // until the daemon is up, so an empty answer never replaces a good one.
+    const load = () =>
+      window.bridge
+        ?.chatModels()
+        .then((value) => {
+          if (live && Object.keys(value || {}).length) setCatalog(value);
+        })
+        .catch(() => {});
+    load();
+    const off = window.bridge?.onDaemonState?.((state) => {
+      if (state.host === "local" && state.state === "ready") load();
+    });
+    return () => {
+      live = false;
+      off?.();
+    };
   }, []);
 
   function open(workspaceId: string, panelId: string) {
@@ -171,8 +186,8 @@ export function ChatView({
   const modelLabel =
     chosen?.label ||
     current?.model ||
-    (provider?.defaultModel
-      ? `Default · ${provider.defaultModel}`
+    (provider?.defaultModelLabel
+      ? `Default · ${provider.defaultModelLabel}`
       : "Default model");
   const effortLabel = current?.effort
     ? effortName(current.effort)
@@ -205,9 +220,14 @@ export function ChatView({
       .filter((m) => m.role === "assistant" && m.model)
       .map((m) => m.model),
   );
+  // The CLI's own modes, from the catalog; the first is the fallback.
+  const permissions = (provider?.permissions || []).map((id) => ({
+    id,
+    label: PERMISSION_LABELS[id] || id,
+  }));
   const permissionLabel = (
-    PERMISSIONS.find((p) => p.id === (current?.permission || "default")) ||
-    PERMISSIONS[0]
+    permissions.find((p) => p.id === (current?.permission || "default")) ||
+    permissions[0] || { id: "default", label: PERMISSION_LABELS.default }
   ).label;
   const item = ({
     workspace,
@@ -562,8 +582,8 @@ export function ChatView({
               options={[
                 {
                   value: "",
-                  label: provider?.defaultModel
-                    ? `Default · ${provider.defaultModel}`
+                  label: provider?.defaultModelLabel
+                    ? `Default · ${provider.defaultModelLabel}`
                     : "Default model",
                 },
                 ...models.map((m) => ({
@@ -604,7 +624,7 @@ export function ChatView({
                   permission: value,
                 })
               }
-              options={PERMISSIONS.map((p) => ({
+              options={permissions.map((p) => ({
                 value: p.id,
                 label: p.label,
               }))}

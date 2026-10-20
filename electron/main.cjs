@@ -354,6 +354,7 @@ const chatIpc = registerChatIpc({
   handle,
   send,
   getConnections: () => connections,
+  getManager: () => daemonManager,
   executable,
   directory,
   id,

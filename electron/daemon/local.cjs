@@ -42,6 +42,9 @@ const REQUIRED_CAPABILITIES = [
   "hibernate",
   "schedules",
   "ownerAsk",
+  // The composer's models, levels and modes are the daemon's agent catalog: a
+  // daemon without it shows an empty picker, so it is asked to update instead.
+  "agentsCatalog",
 ];
 // A failed "incompatible" connect is looked at again on this steady beat.
 const INCOMPATIBLE_RETRY_MS = 30000;

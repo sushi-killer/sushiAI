@@ -4,17 +4,26 @@ const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { quote } = require("../connections.cjs");
 const { harnessFor, isHarness, chatPrompt, IMAGE } = require("../harness.cjs");
-const { chatModels } = require("../agent-models.cjs");
+const { createAgentCatalog } = require("../agent-catalog.cjs");
 
 function registerChatIpc({
   handle,
   send,
   getConnections,
+  getManager,
   executable,
   directory,
   id,
   chats,
 }) {
+  const catalogs = createAgentCatalog({ getManager });
+  /** The daemon manager's name for a chat's endpoint. */
+  const hostOf = (endpoint) =>
+    endpoint?.startsWith("ssh:") ? endpoint.slice(4) : "local";
+  /** This agent's catalog entry of the host a chat runs on; `{}` when the
+   * host's daemon cannot answer, which refuses every model and effort. */
+  const agentOf = async (agent, endpoint) =>
+    (await catalogs.of(hostOf(endpoint)))[agent] || {};
   function stop(panelId) {
     const proc = chats.get(panelId);
     if (!proc) return;
@@ -28,7 +37,7 @@ function registerChatIpc({
   handle("chat-cancel", (panelId) => stop(id(panelId)));
   handle(
     "chat",
-    ({
+    async ({
       panelId,
       cwd,
       agent,
@@ -102,7 +111,11 @@ function registerChatIpc({
       const prompt = chatPrompt(messages);
       if (prompt.length > 200000)
         throw new Error("Conversation is too long. Start a new chat.");
-      let args = harness.chatArgs({ model, effort, permission, dirs, images });
+      const offered = await agentOf(agent, endpoint);
+      let args = harness.chatArgs(
+        { model, effort, permission, dirs, images },
+        offered,
+      );
       if (remote)
         args = [
           ...connections.args(remote),
@@ -116,10 +129,12 @@ function registerChatIpc({
         detached: true,
       });
       chats.set(panelId, proc);
+      // Codex reports no model of its own, so the composer keeps showing the
+      // one it asked for, or the CLI's configured default.
       if (!harness.modelFromEvents)
         send("chat-data", {
           panelId,
-          model: model || chatModels().codex.defaultModelId || "",
+          model: model || offered.defaultModel || "",
         });
       const parse = harness.chatEvent;
       let buffered = "",
@@ -191,7 +206,9 @@ function registerChatIpc({
       return { started: true };
     },
   );
-  handle("chat-models", () => chatModels());
+  // The composer's models, levels and modes come from the host's daemon, which
+  // reads the one catalog in sushiai-agents. No daemon, no list.
+  handle("chat-models", (endpoint) => catalogs.of(hostOf(endpoint)));
 
   return {
     stop,

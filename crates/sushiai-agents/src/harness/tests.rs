@@ -285,5 +285,11 @@ fn the_app_agent_list_matches_the_registry() {
             "{} native flag",
             harness.id()
         );
+        assert_eq!(
+            entry["provider"],
+            serde_json::json!(harness.provider()),
+            "{} provider",
+            harness.id()
+        );
     }
 }

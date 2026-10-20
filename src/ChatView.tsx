@@ -207,10 +207,13 @@ export function ChatView({
     id,
     label: PERMISSION_LABELS[id] || id,
   }));
-  const permissionLabel = (
-    permissions.find((p) => p.id === (current?.permission || "default")) ||
-    permissions[0] || { id: "default", label: PERMISSION_LABELS.default }
-  ).label;
+  // The mode the panel sends, named as it is even when the catalog does not
+  // list it (an old daemon lists none).
+  const currentPermission = current?.permission || "default";
+  const permissionLabel =
+    permissions.find((p) => p.id === currentPermission)?.label ||
+    PERMISSION_LABELS[currentPermission] ||
+    currentPermission;
   const item = ({
     workspace,
     panel,

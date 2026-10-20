@@ -10,3 +10,7 @@
 - The routines page takes its models, levels and model notes from that catalog.
   An ssh host's Codex models come from the daemon on that host, not from a file
   read over ssh.
+- A sushiAI daemon older than this build (a local one kept running across an
+  update, or one on an ssh host) shows empty model, level and mode pickers until
+  it is restarted or updated. The app flags it as needing an update. Chats still
+  run: the agent CLI itself judges the model, level and mode that were picked.

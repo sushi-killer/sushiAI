@@ -3,10 +3,11 @@ const fs = require("node:fs/promises");
 const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 
-// A skill row names its agent by the catalog label (Rust serializes it so).
-const codexProvider = require("./agents.json").find(
-  (agent) => agent.id === "codex",
-).label;
+// A skill row names its agent by the registry's provider (Rust `provider()`).
+const providerOf = (id) =>
+  require("./agents.json").find((agent) => agent.id === id).provider;
+const claudeProvider = providerOf("claude");
+const codexProvider = providerOf("codex");
 const ACTIONS = new Set(["enable", "disable", "delete"]);
 const PLUGIN_KEY =
   /^[A-Za-z0-9][A-Za-z0-9._:/-]*@[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
@@ -380,7 +381,7 @@ async function manageSkill({
   if (item.source === "Plugin") {
     if (typeof item.plugin !== "string" || !PLUGIN_KEY.test(item.plugin))
       throw new Error("This plugin has no safe provider identifier.");
-    if (item.provider === "Claude") {
+    if (item.provider === claudeProvider) {
       const command = executable?.("claude");
       if (!command) throw new Error("Claude CLI was not found on this device.");
       if (action === "delete") {
@@ -455,7 +456,7 @@ async function manageSkill({
     };
   }
   const filePath = await validateLocalSkillPath(resolvedHome, item);
-  if (item.provider === "Claude")
+  if (item.provider === claudeProvider)
     await updateClaudeSkillOverride(
       resolvedHome,
       item.name,

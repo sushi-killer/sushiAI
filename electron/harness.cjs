@@ -14,19 +14,29 @@
 //   parseTurn(screenText)    {state: running|done|failed, text, session}
 //
 // Models, reasoning levels and permission modes are the agent's catalog entry
-// (`agents.catalog`), which `chatArgs` takes and refuses anything outside of.
+// (`agents.catalog`); `chatArgs` refuses a level or mode outside it, and without
+// an entry checks only the format (`validWord`).
 // Values come from the renderer, so each is validated before it reaches a
 // process (locally argv, remotely a quoted ssh line).
 
-/** `agent` is one entry of `agents.catalog` (its `efforts` and `permissions`).
- * A catalog that has not arrived yet has neither, so nothing is accepted: an
- * empty list refuses rather than passes. */
+/** A level or mode in a shape the CLI can only take as a value, never a flag. */
+const validWord = (value) =>
+  typeof value === "string" && /^[A-Za-z]{1,32}$/.test(value);
+
+/** `agent` is one entry of `agents.catalog` (its `efforts` and `permissions`),
+ * or undefined when the host's daemon cannot answer (offline or older than this
+ * build). With an entry a value outside it is refused; without one only the
+ * format is checked and the CLI refuses an unknown value itself. */
 function checkChatOptions(agent, { model, effort, permission }) {
-  if (model && !/^[\w.:-]{1,64}$/.test(model)) throw new Error("Invalid model");
+  // No leading dash: the next argv word would read as a flag.
+  if (model && !/^[\w.:][\w.:-]{0,63}$/.test(model))
+    throw new Error("Invalid model");
+  const offered = (list, value) =>
+    agent ? (list || []).includes(value) : validWord(value);
   // Each CLI publishes its own reasoning levels; Codex adds "ultra", Claude does not.
-  if (effort && !(agent?.efforts || []).includes(effort))
+  if (effort && !offered(agent?.efforts, effort))
     throw new Error("Invalid effort");
-  if (permission && !(agent?.permissions || []).includes(permission))
+  if (permission && !offered(agent?.permissions, permission))
     throw new Error("Invalid permission mode");
 }
 
@@ -384,6 +394,7 @@ const isHarness = (name) => Object.hasOwn(HARNESSES, name);
 module.exports = {
   harnessFor,
   isHarness,
+  validWord,
   screenObjects,
   chatPrompt,
   IMAGE,

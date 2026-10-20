@@ -1,6 +1,16 @@
 [
-  { "id": "claude", "label": "Claude Code", "native": true },
-  { "id": "codex", "label": "Codex", "native": true },
-  { "id": "gemini", "label": "Gemini CLI", "native": false },
-  { "id": "cursor-agent", "label": "Cursor Agent", "native": false }
+  {
+    "id": "claude",
+    "label": "Claude Code",
+    "native": true,
+    "provider": "Claude"
+  },
+  { "id": "codex", "label": "Codex", "native": true, "provider": "Codex" },
+  { "id": "gemini", "label": "Gemini CLI", "native": false, "provider": null },
+  {
+    "id": "cursor-agent",
+    "label": "Cursor Agent",
+    "native": false,
+    "provider": null
+  }
 ]

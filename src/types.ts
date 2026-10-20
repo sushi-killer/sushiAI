@@ -460,8 +460,8 @@ export type ChatModel = {
   defaultEffort: string;
   context: number;
 };
-// agent label key: the skill store is named by this provider value, not shown as an agent name
-export type SkillProvider = "Codex" | "Claude";
+/** A skill row's provider; the known values are `PROVIDERS` (agent-title). */
+export type SkillProvider = string;
 export type SkillUsage = {
   provider?: SkillProvider;
   at: number;

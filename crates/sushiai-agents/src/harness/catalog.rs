@@ -44,33 +44,42 @@ pub(super) fn words(list: &[&str]) -> Vec<String> {
 /// Codex's model cache (`models_cache.json`) shaped for a picker. A hidden model
 /// stays out; a broken or missing cache is an empty list.
 pub(super) fn codex_models(cache: Option<&str>, levels: &[&str]) -> Vec<Model> {
+    /// An explicit `null` reads as the field's default, like a missing key.
+    fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: Deserialize<'de> + Default,
+    {
+        Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    }
+    /// Rows stay raw so one broken row is skipped alone, not the whole list.
     #[derive(Deserialize)]
     struct Cache {
-        #[serde(default)]
-        models: Vec<Raw>,
+        #[serde(default, deserialize_with = "or_default")]
+        models: Vec<serde_json::Value>,
     }
     #[derive(Deserialize)]
     struct Raw {
         /// A missing `slug` drops the row; an empty one does not, as before.
         slug: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         display_name: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         description: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         visibility: String,
         #[serde(default)]
         priority: Option<i64>,
         #[serde(default)]
         context_window: Option<u64>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         default_reasoning_level: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         supported_reasoning_levels: Vec<Level>,
     }
     #[derive(Deserialize)]
     struct Level {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_default")]
         effort: String,
     }
 
@@ -83,6 +92,7 @@ pub(super) fn codex_models(cache: Option<&str>, levels: &[&str]) -> Vec<Model> {
     let mut rows: Vec<(i64, Model)> = cache
         .models
         .into_iter()
+        .filter_map(|row| serde_json::from_value::<Raw>(row).ok())
         .filter(|m| m.visibility == "list")
         .filter_map(|m| {
             let slug = m.slug?;
@@ -149,6 +159,12 @@ mod tests {
     const CACHE: &str = r#"{
       "models": [
         {"slug":"hidden","visibility":"hide","priority":1},
+        {"slug":7,"visibility":"list"},
+        {"slug":"nulls","display_name":null,"description":null,"visibility":"list",
+         "priority":3,"default_reasoning_level":null,
+         "supported_reasoning_levels":[{"effort":null},{"effort":"low"}]},
+        {"slug":"null-levels","visibility":"list","priority":4,
+         "supported_reasoning_levels":null},
         {"visibility":"list","slug":"no-priority"},
         {"slug":"b","display_name":"B","visibility":"list","priority":2,
          "default_reasoning_level":"bogus",
@@ -164,7 +180,8 @@ mod tests {
         let models = codex_models(Some(CACHE), CODEX_EFFORTS);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         // The row with no priority sorts last; the hidden and slugless rows are gone.
-        assert_eq!(ids, ["a", "b", "no-priority"]);
+        // A row with a non-string slug is skipped alone; explicit nulls read as empty.
+        assert_eq!(ids, ["a", "b", "nulls", "null-levels", "no-priority"]);
         assert_eq!(
             (models[0].efforts.as_slice(), models[0].context),
             (&["high".to_owned(), "low".to_owned()][..], 2000)
@@ -173,7 +190,10 @@ mod tests {
         assert_eq!(models[1].efforts, ["low"]);
         assert_eq!(models[1].default_effort, "");
         // No display name shows the slug.
-        assert_eq!(models[2].label, "no-priority");
+        assert_eq!(models[4].label, "no-priority");
+        assert_eq!(models[2].label, "nulls");
+        assert_eq!(models[2].efforts, ["low"]);
+        assert!(models[3].efforts.is_empty());
         for broken in [None, Some("not json"), Some("{}")] {
             assert!(codex_models(broken, CODEX_EFFORTS).is_empty());
         }

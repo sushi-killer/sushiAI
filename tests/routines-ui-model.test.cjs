@@ -341,6 +341,14 @@ test("the agent picker offers only the models of that host's harness", () => {
     "local",
   );
   assert.equal(kept.agent.model, "gpt-local");
+  // A host with no model list (its daemon has not answered) keeps the model.
+  const unknown = withAgent(
+    routine({ agent: { harness: "claude", model: "sonnet", extraArgs: [] } }),
+    { effort: "high" },
+    null,
+    "local",
+  );
+  assert.equal(unknown.agent.model, "sonnet");
   for (const harness of ["claude", "codex"])
     assert.deepEqual(effortsFor(harness, CATALOG), CATALOG.efforts[harness]);
   // No catalog offers nothing; the picker then keeps the current level.

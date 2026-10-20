@@ -273,7 +273,12 @@ export function withAgent(
 ): Routine {
   const agent = { ...routine.agent, ...patch };
   const models = modelsFor(catalog, hostId, agent.harness);
-  if (agent.model && !models.some((model) => model.id === agent.model))
+  // An empty list is a host that has not answered, not a host that offers none.
+  if (
+    agent.model &&
+    models.length &&
+    !models.some((model) => model.id === agent.model)
+  )
     agent.model = "";
   const levels = effortsFor(agent.harness, catalog);
   if (agent.effort && levels.length && !levels.includes(agent.effort))

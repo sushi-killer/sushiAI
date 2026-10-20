@@ -506,6 +506,9 @@ test("builder settings repair an effort the harness lacks and a bad host", () =>
   );
   assert.equal(value.effort, "medium");
   assert.equal(value.host, "local");
+  // With no catalog only the format is checked.
+  assert.equal(builderSettings({ effort: "max" }, {}).effort, "max");
+  assert.equal(builderSettings({ effort: "-x" }, {}).effort, "medium");
   assert.deepEqual(
     builderArgs({ harness: "claude", effort: "max" }).slice(2, 4),
     ["--effort", "max"],

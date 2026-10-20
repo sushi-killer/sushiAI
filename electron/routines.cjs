@@ -18,7 +18,7 @@ const {
   ROUTINES_SKILL,
 } = require("./extensions/builtin-routines.cjs");
 const { assembleCatalog, daemonCatalog } = require("./routines-catalog.cjs");
-const { harnessFor, isHarness } = require("./harness.cjs");
+const { harnessFor, isHarness, validWord } = require("./harness.cjs");
 
 const CAPABILITY = "routines";
 const EVENT = "routines.event";
@@ -100,13 +100,15 @@ const hostIdOf = (managerHost) =>
   managerHost === LOCAL ? LOCAL : `ssh:${managerHost}`;
 
 /** The saved settings of the builder, repaired to something launchable.
- * `agents` is this Mac's agent catalog (keyed by agent id); with no catalog the
- * effort is kept, so a level the CLI refuses is never invented here. */
+ * `agents` is this Mac's agent catalog (keyed by agent id); with no catalog only
+ * the effort's format is checked and the CLI judges the level. */
 function builderSettings(stored, agents) {
   const value = { ...DEFAULT_SETTINGS, ...(stored || {}) };
   if (!isHarness(value.harness)) value.harness = DEFAULT_SETTINGS.harness;
   const levels = agents?.[value.harness]?.builderEfforts;
-  if (levels?.length && !levels.includes(value.effort))
+  if (
+    levels?.length ? !levels.includes(value.effort) : !validWord(value.effort)
+  )
     value.effort = DEFAULT_SETTINGS.effort;
   value.model = typeof value.model === "string" ? value.model : "";
   value.accountId = typeof value.accountId === "string" ? value.accountId : "";

@@ -22,5 +22,12 @@ export const AGENTS = agents.map((agent) => agent.id);
 export const HARNESSES = ["claude", "codex"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
+/** The skill stores an agent owns: the `provider` its skill rows carry (from
+ * the registry's `Harness::provider`), with the agent id for its colour dot.
+ * Agents without a skill store are left out. */
+export const PROVIDERS = agents.flatMap((agent) =>
+  agent.provider ? [{ id: agent.id, provider: agent.provider }] : [],
+);
+
 /** The name to show for an agent id; the id itself for anything unknown. */
 export const agentTitle = (name: string) => AGENT_NAMES[name] || name;

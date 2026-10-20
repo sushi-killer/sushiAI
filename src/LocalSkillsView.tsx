@@ -17,7 +17,7 @@ import type {
   SkillProvider,
 } from "./types";
 import { SkillEditorPanel } from "./SkillEditorDrawer";
-import { agentTitle } from "./lib/agent-title.ts";
+import { agentTitle, PROVIDERS } from "./lib/agent-title.ts";
 
 type StatusFilter =
   | "all"
@@ -30,15 +30,11 @@ type StatusFilter =
 type ScopeFilter = "all" | SkillProvider;
 type AvailabilityFilter = "all" | "active" | "disabled";
 
-const skillGroups: {
-  id: SkillProvider;
-  label: string;
-  dot: string;
-}[] = [
-  // agent label key: the skill store is named by this provider value, not shown as an agent name
-  { id: "Codex", label: agentTitle("codex"), dot: "codex" },
-  { id: "Claude", label: "Claude", dot: "claude" },
-];
+const skillGroups = PROVIDERS.map(({ id, provider }) => ({
+  id: provider,
+  label: provider,
+  dot: id,
+}));
 
 const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -49,8 +45,7 @@ const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "unused", label: "Unused" },
   { id: "stale", label: "Stale" },
 ];
-// agent label key: the skill store is named by this provider value, not shown as an agent name
-const providers: SkillProvider[] = ["Codex", "Claude"];
+const providers: SkillProvider[] = PROVIDERS.map((item) => item.provider);
 const INITIAL_SKILLS_BATCH = 96;
 const SKILLS_BATCH_SIZE = 96;
 const day = 24 * 60 * 60 * 1000;
@@ -231,7 +226,9 @@ export function LocalSkillsView({
     return { total, unused };
   }, [items]);
   const scopeCounts = React.useMemo(() => {
-    const counts: Record<SkillProvider, number> = { Codex: 0, Claude: 0 };
+    const counts: Record<SkillProvider, number> = Object.fromEntries(
+      providers.map((provider) => [provider, 0]),
+    );
     for (const item of queryMatches)
       if (item.provider) counts[item.provider] += 1;
     return counts;

@@ -44,7 +44,8 @@ pub(super) fn configure_command(
         } else {
             app.settings.read().unwrap().sandbox
         };
-        if let Some(line) = apply_agent_cache(cmd, cache.as_ref(), req, sandbox) {
+        let owner_wrapper = std::env::var_os("RUSTC_WRAPPER").is_some();
+        if let Some(line) = apply_agent_cache(cmd, cache.as_ref(), req, sandbox, owner_wrapper) {
             record_once(app, task_id, line);
         }
     }

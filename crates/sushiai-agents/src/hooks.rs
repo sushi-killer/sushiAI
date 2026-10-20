@@ -50,7 +50,9 @@ pub enum HookEvent {
     SessionStart {
         source: Option<String>,
     },
-    UserPromptSubmit,
+    UserPromptSubmit {
+        prompt: Option<String>,
+    },
     PreToolUse {
         tool_name: Option<String>,
     },
@@ -104,11 +106,44 @@ pub const READ_FIELDS: &[&str] = &[
     "tool_input",
     "tool_use_id",
     "source",
+    "prompt",
     "notification_type",
     "message",
     "error",
     "reason",
 ];
+
+const TITLE_MAX: usize = 40;
+
+/// The short session name a prompt gives: its first line that says something, at most
+/// `TITLE_MAX` characters including the "…" that marks a cut, cut at a word boundary.
+/// Lines that are wholly a bracketed note (`[...]`, such as an attachment tag or a note
+/// a client prepends) and the tags Claude writes for a skill invocation are skipped; the
+/// skill's own arguments are taken when present. `None` when nothing is left.
+pub fn prompt_title(prompt: &str) -> Option<String> {
+    let line = prompt.lines().map(str::trim).find_map(|l| {
+        let text = if let Some(args) = l.strip_prefix("<command-args>") {
+            args.trim_end_matches("</command-args>").trim()
+        } else if l.starts_with("<command-message>")
+            || l.starts_with("<command-name>")
+            || (l.starts_with('[') && l.ends_with(']'))
+        {
+            ""
+        } else {
+            l
+        };
+        (!text.is_empty()).then_some(text)
+    })?;
+    if line.chars().count() <= TITLE_MAX {
+        return Some(line.to_owned());
+    }
+    let head: String = line.chars().take(TITLE_MAX - 1).collect();
+    let cut = match head.rfind(' ') {
+        Some(at) if at > 0 => &head[..at],
+        _ => &head,
+    };
+    Some(format!("{}…", cut.trim_end()))
+}
 
 pub fn parse(bytes: &[u8]) -> Result<HookPayload, ParseError> {
     let v: Value = serde_json::from_slice(bytes)?;
@@ -131,7 +166,9 @@ pub fn parse(bytes: &[u8]) -> Result<HookPayload, ParseError> {
         "SessionStart" => HookEvent::SessionStart {
             source: string(&v, "source"),
         },
-        "UserPromptSubmit" => HookEvent::UserPromptSubmit,
+        "UserPromptSubmit" => HookEvent::UserPromptSubmit {
+            prompt: string(&v, "prompt"),
+        },
         "PreToolUse" => HookEvent::PreToolUse { tool_name: tool() },
         "PostToolUse" => HookEvent::PostToolUse { tool_name: tool() },
         "PostToolUseFailure" => HookEvent::PostToolUseFailure { tool_name: tool() },

@@ -34,7 +34,14 @@ fn claude_session_start_startup_and_resume() {
 #[test]
 fn claude_turn_and_tool_events() {
     let p = parse(&fixture("claude", "UserPromptSubmit")).unwrap();
-    assert_eq!(p.event, HookEvent::UserPromptSubmit);
+    assert_eq!(
+        p.event,
+        HookEvent::UserPromptSubmit {
+            prompt: Some(
+                "Run the shell command: touch probe.txt. Then reply with the word ok.".into()
+            )
+        }
+    );
     assert_eq!(p.common.permission_mode.as_deref(), Some("auto"));
     let p = parse(&fixture("claude", "PreToolUse-bash")).unwrap();
     assert_eq!(
@@ -270,4 +277,55 @@ fn every_field_the_parser_reads_appears_in_a_real_fixture() {
             "field {f}: captured={captured}, listed as not captured={guess}"
         );
     }
+}
+
+#[test]
+fn prompt_title_is_the_first_line_cut_at_a_word() {
+    use sushiai_agents::hooks::prompt_title;
+    assert_eq!(
+        prompt_title("  Fix the login form \n").as_deref(),
+        Some("Fix the login form")
+    );
+    assert_eq!(
+        prompt_title("\n\nAdd a retry\r\nthen tests").as_deref(),
+        Some("Add a retry")
+    );
+    assert_eq!(prompt_title("  \n "), None);
+    let long =
+        prompt_title("Refactor the synthetic billing module so every invoice shares one formatter")
+            .unwrap();
+    assert_eq!(long, "Refactor the synthetic billing module…");
+    let word = prompt_title(&"x".repeat(100)).unwrap();
+    assert_eq!(word.chars().count(), 40);
+    assert!(word.ends_with('…'));
+    let wide = prompt_title(&"é".repeat(100)).unwrap();
+    assert_eq!(wide.chars().count(), 40);
+}
+
+#[test]
+fn prompt_title_skips_bracketed_notes_and_skill_tags() {
+    use sushiai_agents::hooks::prompt_title;
+    assert_eq!(
+        prompt_title("[Client: synthetic note about the sender. Keep it short.]\nFix the form")
+            .as_deref(),
+        Some("Fix the form")
+    );
+    assert_eq!(
+        prompt_title("[Image #1]\n[Image #2]\n\nDescribe these").as_deref(),
+        Some("Describe these")
+    );
+    assert_eq!(prompt_title("[Image #1]"), None);
+    assert_eq!(
+        prompt_title("[not a note] but text").as_deref(),
+        Some("[not a note] but text")
+    );
+    let skill = "<command-message>demo</command-message>\n<command-name>/demo</command-name>\n<command-args>tidy the synthetic notes</command-args>";
+    assert_eq!(
+        prompt_title(skill).as_deref(),
+        Some("tidy the synthetic notes")
+    );
+    assert_eq!(
+        prompt_title("<command-message>demo</command-message>\n<command-name>/demo</command-name>"),
+        None
+    );
 }

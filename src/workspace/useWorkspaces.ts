@@ -425,11 +425,12 @@ export function useWorkspaces({
             operationId: operation,
             endpoint,
             cwd: current.cwd,
-            // The session title: the panel's own, or the new worktree workspace's.
+            // The session title: the new worktree workspace's, or "zsh". An agent
+            // session has none: the daemon names it after its first prompt.
             label: worktree
               ? `${current.name} · ${worktree.branch}`
               : kind === "agent"
-                ? modelProfile?.label || agentTitle(agent)
+                ? ""
                 : "zsh",
             kind: kind === "agent" ? "agent" : "terminal",
             agent: kind === "agent" ? agent : undefined,

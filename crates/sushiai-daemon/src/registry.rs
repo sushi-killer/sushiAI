@@ -513,6 +513,30 @@ impl Registry {
     /// stored as given. `None` means no such session.
     pub fn update_session(&self, update: SessionUpdate) -> Option<SessionInfo> {
         let mut catalog = self.catalog();
+        self.update_locked(&mut catalog, update)
+    }
+
+    /// Gives a session the title `title` only while it has none (never set, or cleared by the
+    /// owner), under the same lock as the check, so an owner rename is never overwritten.
+    pub fn name_if_unset(&self, id: &str, title: &str) {
+        let mut catalog = self.catalog();
+        if catalog
+            .sessions
+            .get(id)
+            .is_some_and(|e| e.info.title.is_none())
+        {
+            let update = SessionUpdate {
+                id: id.to_owned(),
+                title: Some(title.to_owned()),
+                project: None,
+                group: None,
+                pinned: None,
+            };
+            self.update_locked(&mut catalog, update);
+        }
+    }
+
+    fn update_locked(&self, catalog: &mut Catalog, update: SessionUpdate) -> Option<SessionInfo> {
         let entry = catalog.sessions.get_mut(&update.id)?;
         let mut next = entry.info.clone();
         if let Some(project) = update.project {
@@ -532,7 +556,7 @@ impl Registry {
         }
         entry.info = next;
         let info = public(&entry.info);
-        self.save(&catalog);
+        self.save(catalog);
         self.notify(method::SESSION_UPDATED, &info);
         Some(info)
     }
@@ -770,6 +794,44 @@ mod tests {
             background: false,
             agent: Default::default(),
         }
+    }
+
+    fn named(id: &str, title: Option<&str>) -> (tempfile::TempDir, Registry) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::new(Home::new(dir.path().to_path_buf()));
+        let mut info = exited(1);
+        info.id = id.into();
+        info.title = title.map(str::to_owned);
+        registry.update(info);
+        (dir, registry)
+    }
+
+    fn title_of(registry: &Registry, id: &str) -> Option<String> {
+        registry.list().into_iter().find(|i| i.id == id)?.title
+    }
+
+    #[test]
+    fn an_unnamed_session_takes_the_first_prompt_name_and_keeps_it() {
+        let (_dir, registry) = named("s001", None);
+        let mut events = registry.events.subscribe();
+        registry.name_if_unset("s001", "Fix the login form");
+        assert_eq!(
+            title_of(&registry, "s001").as_deref(),
+            Some("Fix the login form")
+        );
+        assert!(events.try_recv().is_ok(), "session.updated fires");
+        registry.name_if_unset("s001", "Second prompt");
+        assert_eq!(
+            title_of(&registry, "s001").as_deref(),
+            Some("Fix the login form")
+        );
+    }
+
+    #[test]
+    fn an_owner_title_is_never_replaced_by_a_prompt_name() {
+        let (_dir, registry) = named("s001", Some("Release prep"));
+        registry.name_if_unset("s001", "Fix the login form");
+        assert_eq!(title_of(&registry, "s001").as_deref(), Some("Release prep"));
     }
 
     #[test]

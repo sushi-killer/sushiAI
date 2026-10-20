@@ -46,7 +46,7 @@ flowchart TB
       terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, output batched per tick and per frame,<br/>bounded output credit + xterm acknowledgements"]
       hostInstall["host-install.cjs, host-setup.cjs<br/>install and update sushiai on a host"]
       projectStore[("sushiai.db<br/>projects, folders, safeStorage secrets")]
-      vaultReader["vault.cjs + extensions/builtin-vault.cjs<br/>built-in Vault module: read-only KV v2 reader, token in safeStorage,<br/>one address in its own app-db store, per-project mount and paths in another,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice"]
+      vaultReader["vault.cjs + extensions/builtin-vault.cjs<br/>built-in Vault module: read-only KV v2 reader, token in safeStorage,<br/>one address in its own app-db store, per-project mount and paths in another,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice;<br/>vault-token.cjs looks the token up and renews it on one timer, with a notice before it dies"]
       gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]

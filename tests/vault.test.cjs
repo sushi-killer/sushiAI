@@ -55,6 +55,15 @@ const MERGED = {
   SECRET_VALUE: SYNTHETIC,
 };
 
+// No address is set in these tests, so a saved token is never looked up.
+const NO_TOKEN_STATUS = {
+  saved: false,
+  state: "none",
+  expiresAt: null,
+  autoRenews: false,
+};
+const SAVED_STATUS = { ...NO_TOKEN_STATUS, saved: true, state: "unchecked" };
+
 /** A safeStorage stand-in whose ciphertext never holds the plain bytes. */
 function fakeSafeStorage(overrides = {}) {
   const flip = (buffer) => Buffer.from(buffer.map((byte) => byte ^ 0xa5));
@@ -120,6 +129,10 @@ async function closedAddress() {
   await new Promise((resolve) => server.close(resolve));
   return `http://127.0.0.1:${port}`;
 }
+
+/** The failure notices of projects; the token has its own notice. */
+const projectNotices = (notices) =>
+  notices.published.filter((notice) => notice.key !== "vault:token");
 
 function fakeNotices() {
   return {
@@ -297,7 +310,7 @@ for (const [name, configure, body] of [
     assert.deepEqual(pushed[0].params.projectMcp[project.id], {
       HAND: "hand-value",
     });
-    assert.deepEqual(notices.published, [
+    assert.deepEqual(projectNotices(notices), [
       {
         source: VAULT_MANIFEST.id,
         key: `vault:${project.id}`,
@@ -312,7 +325,7 @@ for (const [name, configure, body] of [
         await projects.environmentFor(project.id, stage, "local"),
         { HAND: "hand-value" },
       );
-    assert.equal(notices.published.length, 1);
+    assert.equal(projectNotices(notices).length, 1);
   });
 
 test("each failure has its own reason, and a good read retracts the notice", async (t) => {
@@ -389,7 +402,7 @@ test("project.names gives sorted names, reuses a good read and re-reads a failed
   assert.equal(vault.count(PATHS[0]), failed + 1);
   await projects.environmentFor(project.id, "agent", "local");
   assert.equal(vault.count(PATHS[0]), failed + 1, "the new read is cached");
-  assert.deepEqual(notices.published, [], "names never publish a notice");
+  assert.deepEqual(projectNotices(notices), [], "names never publish a notice");
 });
 
 test("project.names retracts the failure notice once a read is good", async (t) => {
@@ -550,12 +563,10 @@ test("no Vault value or token reaches disk, logs, notices or IPC replies", async
 
 test("the token store holds only safeStorage ciphertext and clear deletes it", async (t) => {
   const { home, ipc } = await setup(t, { token: null });
-  assert.deepEqual(await ipc("token.status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), NO_TOKEN_STATUS);
   for (const bad of ["", "   ", 42, "has space", "x".repeat(5000)])
     await assert.rejects(ipc("token.set", bad), /Enter a Vault token/);
-  assert.deepEqual(await ipc("token.set", `  ${TOKEN}\n`), {
-    saved: true,
-  });
+  assert.deepEqual(await ipc("token.set", `  ${TOKEN}\n`), SAVED_STATUS);
   const stored = readStore(home, STORE);
   assert.deepEqual(Object.keys(stored), ["token"]);
   assert.deepEqual(Object.keys(stored.token).sort(), ["ct", "v"]);
@@ -566,19 +577,22 @@ test("the token store holds only safeStorage ciphertext and clear deletes it", a
     fakeSafeStorage().decryptString(Buffer.from(stored.token.ct, "base64")),
     TOKEN,
   );
-  assert.deepEqual(await ipc("token.status"), { saved: true });
-  assert.deepEqual(await ipc("token.clear"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), SAVED_STATUS);
+  assert.deepEqual(await ipc("token.clear"), NO_TOKEN_STATUS);
   assert.equal(
     appDb(home)
       .prepare("SELECT COUNT(*) AS n FROM store WHERE name = ?")
       .get(STORE).n,
     0,
   );
-  assert.deepEqual(await ipc("token.status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), NO_TOKEN_STATUS);
 
-  // A token that no longer decrypts counts as none.
+  // A token that no longer decrypts is saved but unreadable, not "none".
   writeStore(home, STORE, { token: { v: 1, ct: "bm90LWZha2U=" } });
-  assert.deepEqual(await ipc("token.status"), { saved: false });
+  assert.deepEqual(await ipc("token.status"), {
+    ...SAVED_STATUS,
+    state: "unreadable",
+  });
 });
 
 for (const [name, overrides] of [

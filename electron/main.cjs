@@ -443,7 +443,7 @@ notices.register("app", async (_key, actionId) => {
   app.quit();
 });
 const moduleIpc = createModuleIpc({ handle });
-require("./vault.cjs").registerVault({
+const vault = require("./vault.cjs").registerVault({
   moduleIpc,
   projects,
   notices,
@@ -844,6 +844,7 @@ app.on("before-quit", (event) => {
     if (!window.isDestroyed()) window.hide();
   preview?.close();
   catalogSync?.stop();
+  vault.stop();
   daemonManager?.close();
   chatIpc.close();
   Promise.allSettled([

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import { DEVTOOLS_FLAGS, publishDevtools } from "./lib/devtools-endpoint.mjs";
 import { createServer } from "vite";
 
 const { exitAction } = createRequire(import.meta.url)(
@@ -107,10 +108,15 @@ function seedAppData(dir, installed) {
 }
 
 function start() {
-  electron = spawn("node_modules/.bin/electron", ["."], {
-    stdio: "inherit",
-    env: devEnv(),
+  const vars = devEnv();
+  // Dev only: local agents attach to this live window. Chromium picks the
+  // port and binds it to loopback; the endpoint goes to
+  // $SUSHIAI_HOME/devtools.json (0600) and is deleted when Electron exits.
+  electron = spawn("node_modules/.bin/electron", [...DEVTOOLS_FLAGS, "."], {
+    stdio: ["inherit", "inherit", "pipe"],
+    env: vars,
   });
+  publishDevtools(electron, vars.SUSHIAI_HOME || join(homedir(), ".sushiai"));
   electron.on("exit", async (code) => {
     if (exitAction(code) === "respawn") {
       console.log("\n[dev] restarting Electron\n");

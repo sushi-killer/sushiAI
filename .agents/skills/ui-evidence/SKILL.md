@@ -1,6 +1,6 @@
 ---
 name: ui-evidence
-description: "Produce measured, looked-at evidence of the built sushiAI UI: drive the real Electron app with Playwright against a throwaway profile, measure geometry, capture screenshots and read them. Use whenever a change touches what a screen shows, including a second SSH host, before claiming it looks right."
+description: "Produce measured, looked-at evidence of the sushiAI UI: attach to the owner's running `npm run dev` window (first choice), or drive the built Electron app with Playwright against a throwaway profile; measure geometry, capture screenshots and read them. Use whenever a change touches what a screen shows, including a second SSH host, before claiming it looks right."
 ---
 
 # UI evidence
@@ -8,7 +8,48 @@ description: "Produce measured, looked-at evidence of the built sushiAI UI: driv
 Green tests do not prove a screen looks right. Measure it, photograph it, and
 open every image you produced before you describe it.
 
-## Run
+## First choice: attach to the owner's running dev app
+
+When the owner runs `npm run dev`, look at that window with its real data
+instead of a throwaway profile; problems of the live app show only there.
+`scripts/dev.mjs` starts Electron with `--remote-debugging-port=0` bound to
+`127.0.0.1` (dev only, never in the packaged app) and writes
+`$SUSHIAI_HOME/devtools.json` (`{port, wsEndpoint, pid}`, mode 0600, default
+home `~/.sushiai-dev`); the file is deleted when Electron exits. A missing or
+stale file means no dev app is running: fall back to the steps below.
+
+```
+node .agents/skills/ui-evidence/scripts/attach.mjs shot <out.png> [--selector css] [--full]
+node .agents/skills/ui-evidence/scripts/attach.mjs measure <css...>   # JSON boxes, scroll sizes, computed styles
+node .agents/skills/ui-evidence/scripts/attach.mjs eval <expr>        # read-only expressions only
+node .agents/skills/ui-evidence/scripts/attach.mjs click <css>
+node .agents/skills/ui-evidence/scripts/attach.mjs type <css> <text>
+node .agents/skills/ui-evidence/scripts/attach.mjs key <combo>
+```
+
+- It picks the main app window, not DevTools or the mascot, and never resizes
+  or moves it unless you pass `--viewport WxH`. Resize only on request, and say
+  so: it changes the owner's window until the next attach resets it.
+- `shot` and `measure` are free. `click`, `type` and `key` act on the owner's
+  live data: ask before any that sends, deletes or archives. `eval` must not
+  mutate state. There is no route API, so there is no `goto`.
+- Open every PNG with the Read tool, as in step 5 below.
+
+### As the ui-match `app.cdp` source
+
+The kit's `ui-match` tool attaches to a running app through `app.cdp`
+(an http endpoint). Read the port from `devtools.json` and put it in the spec:
+
+```json
+{ "app": { "cdp": "http://127.0.0.1:<port from devtools.json>" } }
+```
+
+For example `jq .port ~/.sushiai-dev/devtools.json` gives the number. The
+port changes on every dev start, so write the spec after the app is up. An
+attached app is not reloaded: write the state steps to reach each state from
+the previous one, and ask before steps that change data.
+
+## Run (throwaway profile)
 
 1. **Build.** `npm run build` - the driver launches `dist/`, not the sources.
    **Done when:** the build exits 0 after your last edit.
@@ -192,7 +233,8 @@ It also writes `artifacts/builder-<state>.measure.json` at 1440.
 - Drivers launch with `SUSHIAI_TEST_WINDOW=hidden`; a visible window is an
   explicit per-driver opt-out (`"visible"` plus a comment saying why).
 - The driver launches its own Electron with a temporary `BRIDGE_DATA_DIR`.
-  Never attach to, restart or kill the owner's running app or dev server.
+  Only `attach.mjs` touches the owner's running dev app, and only through its
+  devtools endpoint. Never restart or kill the owner's app or dev server.
 - Keep the template's `SUSHIAI_HOME=<profile>/sushiai`: the app then starts a
   daemon in the throwaway profile. Without it the test app does not start a
   daemon, and pointing it at `~/.sushiai` would show the owner's real sessions.

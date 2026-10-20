@@ -1,21 +1,14 @@
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
-import { Tag } from "../ui";
-import { projectGet, projectSet, projectCheck, type Config } from "./client";
+import { addressGet, projectGet, projectSet, type Config } from "./client";
 import "./vault.css";
 
-type Draft = { address: string; mount: string; paths: string[] };
-type Check =
-  | { phase: "idle" }
-  | { phase: "running" }
-  | { phase: "ok"; names: string[]; count: number }
-  | { phase: "failed"; reason: string };
+type Draft = { mount: string; paths: string[] };
 
-const PLACEHOLDERS = ["royal-ark/shared", "royal-ark/herald"];
+const PLACEHOLDERS = ["team/shared", "team/app"];
 
 function draftOf(vault: Config | null): Draft {
   return {
-    address: vault?.address ?? "",
     mount: vault?.mount ?? "",
     paths: vault?.paths.length ? [...vault.paths] : [""],
   };
@@ -23,7 +16,6 @@ function draftOf(vault: Config | null): Draft {
 
 function same(a: Draft, b: Draft): boolean {
   return (
-    a.address === b.address &&
     a.mount === b.mount &&
     a.paths.length === b.paths.length &&
     a.paths.every((path, index) => path === b.paths[index])
@@ -37,17 +29,18 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(null));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [check, setCheck] = useState<Check>({ phase: "idle" });
+  const [address, setAddress] = useState<string | null>(null);
   const dirty = !same(draft, draftOf(saved));
-  const savedPaths = saved?.paths.length ?? 0;
 
   // Show what is stored for this project.
   useEffect(() => {
     let live = true;
     setSaved(null);
     setDraft(draftOf(null));
-    setCheck({ phase: "idle" });
-    if (window.bridge)
+    if (window.bridge) {
+      addressGet()
+        .then((value) => live && setAddress(value.address))
+        .catch(() => {});
       projectGet(projectId)
         .then((config) => {
           if (!live) return;
@@ -55,6 +48,7 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
           setDraft(draftOf(config));
         })
         .catch(() => {});
+    }
     return () => {
       live = false;
     };
@@ -62,7 +56,6 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
 
   function edit(next: Partial<Draft>) {
     setDraft((current) => ({ ...current, ...next }));
-    setCheck({ phase: "idle" });
   }
   function editPath(index: number, value: string) {
     edit({
@@ -80,18 +73,14 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
     setBusy(true);
     setError("");
     try {
-      const address = draft.address.trim();
       const mount = draft.mount.trim();
       const paths = draft.paths.map((path) => path.trim()).filter(Boolean);
       const config = await projectSet(
         projectId,
-        !address && !paths.length
-          ? null
-          : { address, ...(mount ? { mount } : {}), paths },
+        !paths.length ? null : { ...(mount ? { mount } : {}), paths },
       );
       setSaved(config);
       setDraft(draftOf(config));
-      setCheck({ phase: "idle" });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -99,41 +88,17 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
     }
   }
 
-  async function runCheck() {
-    if (!window.bridge) return;
-    setCheck({ phase: "running" });
-    try {
-      const result = await projectCheck(projectId);
-      setCheck(
-        result.ok
-          ? { phase: "ok", names: result.names, count: result.count }
-          : { phase: "failed", reason: result.reason },
-      );
-    } catch (reason) {
-      setCheck({
-        phase: "failed",
-        reason: reason instanceof Error ? reason.message : String(reason),
-      });
-    }
-  }
-
   return (
     <section className="pd-vault" aria-label="Vault">
       <h3 className="pd-vault-title">Vault</h3>
       <p className="pd-vault-hint">
-        Variables read from HashiCorp Vault (KV v2) on This Mac. A variable you
-        enter by hand overrides Vault.
+        Vault names show in the table above with a Vault tag. A variable you add
+        here wins over Vault. Set the address and token in Settings → Vault.
       </p>
+      {address === "" && (
+        <p className="pd-vault-hint">No Vault address is set yet.</p>
+      )}
       <div className="pd-vault-fields">
-        <label className="pd-vault-field">
-          <span>Address</span>
-          <input
-            className="pd-input pd-mono"
-            placeholder="https://vault.example.com"
-            value={draft.address}
-            onChange={(event) => edit({ address: event.target.value })}
-          />
-        </label>
         <label className="pd-vault-field">
           <span>Mount</span>
           <input
@@ -213,44 +178,7 @@ export function ProjectVaultBlock({ projectId }: { projectId: string }) {
         >
           {busy ? "Saving…" : "Save"}
         </button>
-        <button
-          type="button"
-          className="ui-button secondary"
-          disabled={busy || dirty || !savedPaths || check.phase === "running"}
-          title={
-            dirty
-              ? "Save your changes first"
-              : !savedPaths
-                ? "Save at least one path first"
-                : undefined
-          }
-          onClick={() => void runCheck()}
-        >
-          {check.phase === "running" ? "Checking…" : "Check"}
-        </button>
       </div>
-      {check.phase === "failed" && (
-        <p role="alert" className="pd-alert">
-          {check.reason}
-        </p>
-      )}
-      {check.phase === "ok" && (
-        <div className="pd-vault-result" role="status">
-          <p>
-            {check.count} {check.count === 1 ? "variable" : "variables"} found.
-          </p>
-          <ul>
-            {check.names.map((name) => (
-              <li key={name}>
-                <span className="pd-mono">{name}</span>
-                <Tag tone="info" dot={false}>
-                  from Vault
-                </Tag>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </section>
   );
 }

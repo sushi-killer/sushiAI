@@ -161,6 +161,10 @@
   max-height: 100%;
   object-fit: contain;
 }
+.pv-video {
+  max-width: 100%;
+  max-height: 100%;
+}
 .pv-text {
   height: 100%;
   margin: 0;

@@ -39,6 +39,7 @@ const allowed = new Set([
   ".ttf",
   ".mp4",
   ".webm",
+  ".mov",
   ".txt",
   ".pdf",
   ".avif",
@@ -120,9 +121,28 @@ class PreviewServer {
         relative.endsWith(".js") || relative.endsWith(".mjs")
           ? "text/javascript"
           : data.mime;
-      res.writeHead(200, {
+      // A video player seeks with byte ranges; without a 206 it cannot.
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+      let start = 0,
+        end = body.length - 1;
+      if (range && (range[1] || range[2])) {
+        start = range[1] ? Number(range[1]) : body.length - Number(range[2]);
+        end = range[1] && range[2] ? Number(range[2]) : body.length - 1;
+        end = Math.min(end, body.length - 1);
+        start = Math.max(start, 0);
+        if (start > end) {
+          res.writeHead(416, { "Content-Range": `bytes */${body.length}` });
+          return res.end();
+        }
+      }
+      const partial = !!range && (start > 0 || end < body.length - 1);
+      res.writeHead(partial ? 206 : 200, {
+        ...(partial
+          ? { "Content-Range": `bytes ${start}-${end}/${body.length}` }
+          : {}),
+        "Accept-Ranges": "bytes",
         "Content-Type": mime,
-        "Content-Length": body.length,
+        "Content-Length": end - start + 1,
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "no-store",
         "Referrer-Policy": "no-referrer",
@@ -137,7 +157,9 @@ class PreviewServer {
             }
           : {}),
       });
-      res.end(req.method === "HEAD" ? undefined : body);
+      res.end(
+        req.method === "HEAD" ? undefined : body.subarray(start, end + 1),
+      );
     } catch {
       res.writeHead(404);
       res.end("File not found or unavailable");

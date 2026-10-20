@@ -101,7 +101,12 @@ export function PreviewView(props: CoreViewProps) {
   const [previewUrl, setPreviewUrl] = useState("");
   useEffect(() => {
     setPreviewUrl("");
-    if (!path || (kind !== "html" && kind !== "pdf") || !window.bridge) return;
+    if (
+      !path ||
+      (kind !== "html" && kind !== "pdf" && kind !== "video") ||
+      !window.bridge
+    )
+      return;
     let disposed = false;
     window.bridge
       .projectPreview(
@@ -625,6 +630,19 @@ export function PreviewView(props: CoreViewProps) {
               src={previewUrl}
               sandbox={kind === "html" ? "allow-scripts" : undefined}
             />
+          ) : (
+            <div className="loading">Loading…</div>
+          )
+        ) : kind === "video" ? (
+          previewUrl ? (
+            <div className="pv-image">
+              <video
+                key={previewUrl}
+                className="pv-video"
+                src={previewUrl}
+                controls
+              />
+            </div>
           ) : (
             <div className="loading">Loading…</div>
           )

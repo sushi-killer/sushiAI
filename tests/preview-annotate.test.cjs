@@ -222,3 +222,33 @@ test("a page under a dot-folder opens, and its grant stays in the page's folder"
     server.server.close();
   }
 });
+
+test("a video is served with its type and byte ranges so the player can seek", async () => {
+  const bytes = Buffer.from("0123456789");
+  const server = new PreviewServer({
+    inspect: async () => ({
+      base64: bytes.toString("base64"),
+      mime: "video/quicktime",
+    }),
+  });
+  await server.start();
+  try {
+    const url = server.grant(undefined, "/r", "clip.mov");
+    const whole = await fetch(url);
+    assert.equal(whole.status, 200);
+    assert.equal(whole.headers.get("accept-ranges"), "bytes");
+    assert.equal(whole.headers.get("content-type"), "video/quicktime");
+    const part = await fetch(url, { headers: { range: "bytes=2-4" } });
+    assert.equal(part.status, 206);
+    assert.equal(part.headers.get("content-range"), "bytes 2-4/10");
+    assert.equal(await part.text(), "234");
+    const tail = await fetch(url, { headers: { range: "bytes=7-" } });
+    assert.equal(await tail.text(), "789");
+    const last = await fetch(url, { headers: { range: "bytes=-3" } });
+    assert.equal(await last.text(), "789");
+    const bad = await fetch(url, { headers: { range: "bytes=50-60" } });
+    assert.equal(bad.status, 416);
+  } finally {
+    server.close();
+  }
+});

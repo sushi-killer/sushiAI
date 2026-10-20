@@ -55,7 +55,7 @@ export function usePreviewFile(
         });
         if (disposed || data.hash === hash.current) return;
         hash.current = data.hash;
-        const binary = kind === "image" || kind === "pdf";
+        const binary = kind === "image" || kind === "pdf" || kind === "video";
         let text = "";
         if (!binary) {
           const bytes = Uint8Array.from(atob(data.base64), (c) =>

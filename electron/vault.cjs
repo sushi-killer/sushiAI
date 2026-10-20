@@ -9,6 +9,7 @@
  */
 const { readStore, writeStore } = require("./app-db.cjs");
 const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
+const { createTokenWatch, vaultFetch } = require("./vault-token.cjs");
 
 const STORE = "vault-token";
 // The per-project config (mount and paths), keyed by project id.
@@ -20,7 +21,6 @@ const MAX_NOTICE_BODY = 2000;
 const MAX_NOTICE_PROJECTS = 5;
 const MAX_PATHS = 10;
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const TIMEOUT_MS = 5000;
 const MAX_TOKEN = 4096;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -29,6 +29,7 @@ const NO_TOKEN = "Vault: no token saved";
 const UNREACHABLE = "Vault: unreachable";
 const TIMED_OUT = "Vault: timed out";
 const UNREADABLE = "Vault: unreadable reply";
+const TOKEN_UNREADABLE = "Vault: saved token cannot be read";
 
 /** What a failed status means to the owner; never the reply itself. */
 function statusReason(status) {
@@ -43,18 +44,13 @@ const timedOut = (error) =>
 /** `a/b c` -> `a/b%20c`: each segment encoded, the slashes kept. */
 const segments = (value) => value.split("/").map(encodeURIComponent).join("/");
 
-/** The values of one KV v2 path, or the reason it could not be read. A
- * redirect is not followed: the token would go to wherever it points. */
+/** The values of one KV v2 path, or the reason it could not be read. */
 async function readPath(token, { address, mount }, secretPath) {
   let response;
   try {
-    response = await fetch(
+    response = await vaultFetch(
+      token,
       `${address}/v1/${segments(mount)}/data/${segments(secretPath)}`,
-      {
-        headers: { "X-Vault-Token": token },
-        redirect: "manual",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      },
     );
   } catch (error) {
     return { ok: false, reason: timedOut(error) ? TIMED_OUT : UNREACHABLE };
@@ -199,6 +195,11 @@ function registerVault({
   safeStorage,
   userDataDir,
   isEnabled,
+  now,
+  setTimer,
+  clearTimer,
+  whenReady = Promise.resolve(),
+  onResume,
 }) {
   // address+mount+paths -> { at, result: Promise, notified: Set<projectId> }
   const cache = new Map();
@@ -233,17 +234,61 @@ function registerVault({
     paths,
   });
 
-  function readToken() {
+  /** The saved token. A stored token that does not decrypt is `unreadable`,
+   * a state of its own: it is not the same as no token. */
+  function loadToken() {
     const stored = readStore(userDataDir, STORE).token;
-    if (typeof stored?.ct !== "string") return null;
+    if (typeof stored?.ct !== "string")
+      return { token: null, unreadable: false };
     try {
-      return (
-        safeStorage.decryptString(Buffer.from(stored.ct, "base64")) || null
-      );
+      const token = safeStorage.decryptString(Buffer.from(stored.ct, "base64"));
+      return token
+        ? { token, unreadable: false }
+        : { token: null, unreadable: true };
     } catch {
-      return null;
+      // Before the app is ready the store throws for any token: only a store
+      // that says it works and still fails makes the token unreadable.
+      return safeStorage.isEncryptionAvailable?.()
+        ? { token: null, unreadable: true }
+        : { token: null, unreadable: false, unavailable: true };
     }
   }
+
+  /** Whether the token reads the first configured project path: true, false
+   * when Vault refuses it, null when there is nothing to ask or no answer. */
+  async function isTokenAccepted(token, address) {
+    const stored = Object.values(readStore(userDataDir, PROJECTS_STORE)).find(
+      (config) => config?.paths?.length,
+    );
+    if (!stored) return null;
+    const result = await readPath(
+      token,
+      { address, mount: stored.mount },
+      stored.paths[0],
+    );
+    if (result.ok) return true;
+    return result.reason === statusReason(403) ? false : null;
+  }
+
+  /** Every path of the config read with the saved token. */
+  function readConfig(config) {
+    const { token, unreadable } = loadToken();
+    return unreadable
+      ? Promise.resolve({ ok: false, reason: TOKEN_UNREADABLE })
+      : readAll(token, config);
+  }
+
+  const tokenWatch = createTokenWatch({
+    loadToken,
+    isTokenAccepted,
+    getAddress: () => readAddress(),
+    isEnabled,
+    notices,
+    source: VAULT_MANIFEST.id,
+    now,
+    setTimer,
+    clearTimer,
+  });
 
   function setToken(token) {
     if (typeof token !== "string") throw new Error("Enter a Vault token.");
@@ -263,14 +308,16 @@ function registerVault({
     });
     generation += 1;
     cache.clear();
-    return { saved: true };
+    // The old token's state and notice go before the new one is looked at.
+    tokenWatch.clear();
   }
 
   function clearToken() {
     writeStore(userDataDir, STORE, {});
     generation += 1;
     cache.clear();
-    return { saved: false };
+    tokenWatch.clear();
+    return tokenWatch.status();
   }
 
   function entryFor(config) {
@@ -279,7 +326,7 @@ function registerVault({
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached;
     const entry = {
       at: Date.now(),
-      result: readAll(readToken(), config),
+      result: readConfig(config),
       notified: new Set(),
     };
     cache.set(key, entry);
@@ -409,6 +456,17 @@ function registerVault({
       console.warn("Vault: could not move the Vault address");
     }),
   );
+  // Looks at the saved token once the address is known and secure storage
+  // works (after the app is ready), off the ready path; a wake from sleep
+  // looks again.
+  Promise.all([ready, whenReady])
+    .then(() => {
+      onResume?.(() => tokenWatch.check());
+      return tokenWatch.check();
+    })
+    .catch(() => {
+      console.warn("Vault: token watch did not start");
+    });
 
   projects.addEnvironmentProvider({
     /** The project's Vault values, {} when they cannot all be read. */
@@ -427,8 +485,12 @@ function registerVault({
   notices.register(NOTICE_SOURCE, async () => {});
 
   moduleIpc.register(VAULT_MANIFEST.id, {
-    "token.status": () => ({ saved: Boolean(readToken()) }),
-    "token.set": (token) => setToken(token),
+    "token.status": () => tokenWatch.status(),
+    "token.set": async (token) => {
+      setToken(token);
+      await tokenWatch.check();
+      return tokenWatch.status();
+    },
     "token.clear": () => clearToken(),
     "address.get": async () => {
       await ready;
@@ -443,6 +505,7 @@ function registerVault({
       generation += 1;
       cache.clear();
       projects.environmentChanged();
+      void tokenWatch.check();
       return reply;
     },
     "address.dismiss": async () => {
@@ -489,7 +552,7 @@ function registerVault({
           : null;
       if (!result?.ok) {
         const started = generation;
-        result = await readAll(readToken(), config);
+        result = await readConfig(config);
         if (started === generation)
           cache.set(key, {
             at: Date.now(),
@@ -504,7 +567,7 @@ function registerVault({
       return { ok: true, names: Object.keys(result.values).sort() };
     },
   });
-  return { ready };
+  return { ready, stop: () => tokenWatch.stop() };
 }
 
 module.exports = {

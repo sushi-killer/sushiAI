@@ -6,7 +6,9 @@ import {
   tokenStatus,
   tokenSet,
   tokenClear,
+  type TokenStatus,
 } from "./client";
+import { tokenStateText } from "./tokenState";
 import "./vault.css";
 
 function VaultAddress() {
@@ -104,7 +106,8 @@ function VaultAddress() {
 }
 
 function VaultToken() {
-  const [saved, setSaved] = useState(false);
+  const [status, setStatus] = useState<TokenStatus | null>(null);
+  const saved = Boolean(status?.saved);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -112,17 +115,17 @@ function VaultToken() {
     let live = true;
     if (window.bridge)
       tokenStatus()
-        .then((status) => live && setSaved(status.saved))
+        .then((value) => live && setStatus(value))
         .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
-  async function run(action: () => Promise<{ saved: boolean }>) {
+  async function run(action: () => Promise<TokenStatus>) {
     setBusy(true);
     setError("");
     try {
-      setSaved((await action()).saved);
+      setStatus(await action());
       setToken("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -140,7 +143,15 @@ function VaultToken() {
     >
       <div className="vault-token-head">
         <strong>Vault token</strong>
-        {saved && <span className="vault-token-state">Saved</span>}
+        {status?.saved && (
+          <span
+            className="vault-token-state"
+            data-state={status.state}
+            role="status"
+          >
+            {tokenStateText(status)}
+          </span>
+        )}
       </div>
       <div className="vault-token-row">
         <input

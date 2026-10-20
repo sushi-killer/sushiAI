@@ -39,27 +39,33 @@ export function addressDismiss(): Promise<AddressState> {
   ) as Promise<AddressState>;
 }
 
-export function tokenStatus(): Promise<{ saved: boolean }> {
+/** What the Settings tab shows of the saved token; never the token. */
+export type TokenStatus = {
+  saved: boolean;
+  state:
+    | "none"
+    | "unchecked"
+    | "valid"
+    | "limited"
+    | "refused"
+    | "expired"
+    | "unreachable"
+    | "unreadable";
+  expiresAt: number | null;
+  autoRenews: boolean;
+};
+
+function tokenCall(method: string, ...args: unknown[]): Promise<TokenStatus> {
   return window.bridge!.moduleInvoke(
     VAULT_EXTENSION_ID,
-    "token.status",
-  ) as Promise<{ saved: boolean }>;
+    method,
+    ...args,
+  ) as Promise<TokenStatus>;
 }
 
-export function tokenSet(token: string): Promise<{ saved: true }> {
-  return window.bridge!.moduleInvoke(
-    VAULT_EXTENSION_ID,
-    "token.set",
-    token,
-  ) as Promise<{ saved: true }>;
-}
-
-export function tokenClear(): Promise<{ saved: false }> {
-  return window.bridge!.moduleInvoke(
-    VAULT_EXTENSION_ID,
-    "token.clear",
-  ) as Promise<{ saved: false }>;
-}
+export const tokenStatus = () => tokenCall("token.status");
+export const tokenSet = (token: string) => tokenCall("token.set", token);
+export const tokenClear = () => tokenCall("token.clear");
 
 export function projectGet(id: string): Promise<Config | null> {
   return window.bridge!.moduleInvoke(

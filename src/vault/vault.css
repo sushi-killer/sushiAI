@@ -126,3 +126,8 @@
   align-items: center;
   gap: 6px;
 }
+.vault-token-state[data-state="expired"],
+.vault-token-state[data-state="refused"],
+.vault-token-state[data-state="unreadable"] {
+  color: var(--danger);
+}

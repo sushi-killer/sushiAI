@@ -73,6 +73,20 @@ function formatSize(value?: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** About four characters per token; shown as "~N tokens". */
+function tokensOf(item: SkillCatalogItem) {
+  return Math.ceil((item.descriptionChars ?? item.description.length) / 4);
+}
+
+function usageText(item: SkillCatalogItem) {
+  if (!item.usageIndexedAt) return "Usage not indexed yet";
+  if (!item.usageCount) return "No uses in 90 days";
+  const uses = item.usageCount.toLocaleString();
+  return `${uses} ${item.usageCount === 1 ? "use" : "uses"} in 90 days${
+    item.lastUsedAt ? ` · last ${relativeDate(item.lastUsedAt)}` : ""
+  }`;
+}
+
 function matchesStatus(item: SkillCatalogItem, filter: StatusFilter) {
   if (filter === "all") return true;
   if (filter === "needs-review") return Boolean(item.needsReview);
@@ -108,7 +122,7 @@ function recommendation(item: SkillCatalogItem) {
       : `${item.harness || item.provider} sees this name more than once · choose the copy you want to keep.`;
   }
   if (item.isUnused)
-    return "No usage signal for 180+ days · candidate for cleanup.";
+    return "No uses in the last 90 days · candidate for cleanup.";
   if (item.isStale)
     return "Not modified for 180+ days · review before keeping it.";
   return "No cleanup action suggested.";
@@ -173,11 +187,13 @@ export function LocalSkillsView({
     () =>
       searchable
         .filter((item) => matchesStatus(item, statusFilter))
-        .sort(
-          (a, b) =>
-            Number(Boolean(b.needsReview)) - Number(Boolean(a.needsReview)) ||
-            (b.lastUsedAt || 0) - (a.lastUsedAt || 0) ||
-            a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        .sort((a, b) =>
+          statusFilter === "unused"
+            ? tokensOf(b) - tokensOf(a) ||
+              a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+            : Number(Boolean(b.needsReview)) - Number(Boolean(a.needsReview)) ||
+              (b.lastUsedAt || 0) - (a.lastUsedAt || 0) ||
+              a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
         ),
     [searchable, statusFilter],
   );
@@ -201,6 +217,16 @@ export function LocalSkillsView({
     }
     return counts;
   }, [searchable]);
+  const weight = React.useMemo(() => {
+    let total = 0;
+    let unused = 0;
+    for (const item of items) {
+      if (item.availability === "disabled") continue;
+      total += tokensOf(item);
+      if (item.isUnused) unused += tokensOf(item);
+    }
+    return { total, unused };
+  }, [items]);
   const scopeCounts = React.useMemo(() => {
     const counts: Record<SkillProvider, number> = { Codex: 0, Claude: 0 };
     for (const item of queryMatches)
@@ -279,6 +305,12 @@ export function LocalSkillsView({
               <RefreshCw size={15} className={loading ? "spin" : ""} />
               <span>{loading ? "Scanning…" : "Refresh"}</span>
             </button>
+          </div>
+          <div className="skill-meta">
+            <span>
+              Descriptions of active skills: ~{weight.total.toLocaleString()}{" "}
+              tokens, ~{weight.unused.toLocaleString()} unused
+            </span>
           </div>
           <div className="skills-filter-row">
             <div
@@ -370,10 +402,8 @@ export function LocalSkillsView({
             </span>
           </div>
           <p className="skills-note">
-            <Clock3 size={13} /> Last used comes from local skill events when
-            available; calls are counted from local events or the usage cache.
-            Otherwise the file access time is only a fallback. macOS may not
-            update that signal on every read. Active skills are loadable by the
+            <Clock3 size={13} /> Usage is counted from Claude Code and Codex
+            transcripts over the last 90 days. Active skills are loadable by the
             owner harness; disabled skills are shown for cleanup context. Only
             Claude Code and Codex skills are listed, each file once per harness.
             Cache-only plugin files are excluded.
@@ -452,19 +482,12 @@ export function LocalSkillsView({
                             )}
                           </div>
                           <div className="skill-meta">
-                            <span
-                              title={
-                                item.lastUsedSource === "skill event"
-                                  ? "Read from a local skill event"
-                                  : item.lastUsedSource === "usage cache"
-                                    ? "Read from the local usage cache"
-                                    : "Inferred from filesystem access time"
-                              }
-                            >
+                            <span title="Counted from the agents' session transcripts">
                               <Clock3 size={12} />
-                              {item.lastUsedAt
-                                ? `Last used ${relativeDate(item.lastUsedAt)}`
-                                : "Last used never recorded"}
+                              {usageText(item)}
+                            </span>
+                            <span title="Size of the description every session loads">
+                              ~{tokensOf(item).toLocaleString()} tokens
                             </span>
                             <span>
                               <CalendarClock size={12} /> Updated{" "}

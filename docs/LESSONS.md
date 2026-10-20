@@ -22,6 +22,11 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
+## 2026-10-19 — orch tests wrote a hook into the machine's global hooks folder
+
+Root cause: tests resolve `git rev-parse --git-path hooks`, which follows a global `core.hooksPath`; every repo on the Mac then ran the test hook.
+Rule: test repos pin `core.hooksPath` to their own `.git/hooks` or run with `GIT_CONFIG_GLOBAL` set to a temp file.
+
 ## 2026-10-15 — a rejected continuation lost paid usage during fresh fallback
 
 Root cause: the fresh result replaced the rejected outcome, restoring the attempt allowance and dropping spend from task totals.
@@ -49,16 +54,11 @@ Rule: compare owner authority at publication; retain paid observations, then rel
 - 2026-10-13 PR commits require a noreply author. `check-conventions.mjs`.
 - 2026-10-13 Planner tests that failed the repo formatter stalled tasks → a repo `format` command runs before they are committed. `protected.rs`.
 - 2026-10-13 Node 22 host: unref'd awaited timer failed `npm run ci` on main → `node-floor` CI job.
-- 2026-10-12 Read-only git polls use `--no-optional-locks` to avoid index.lock.
 - 2026-10-16 Codex strict output rejected a loose result schema; fakes hid it → live smoke per harness, strict schema + `from_codex`. `a_codex_answer_is_normalised_to_v1`.
-- 2026-10-11 Checks starved at inherited background priority → `leave_background_priority`.
 - 2026-10-11 Electron 44 has no postinstall; a fresh `npm ci` raced parallel tests into EEXIST → `install-electron` in our postinstall.
 - 2026-10-10 An agent answer counted as the owner's → authority from the source. `an_mcp_accept_is_refused_and_mcp_continues_stop_at_the_cap`.
 - 2026-10-07 Build before real-daemon tests; CI must reject skipped smoke. `tests/helpers/real-daemon.cjs`.
 - 2026-10-07 A new session's first `hook.open` came before its actor and was refused → wait for every live session without an actor. `a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not`.
 - 2026-10-07 A restart clamped saved bounds to a small CI screen → hidden test windows skip saved bounds. `smoke.mjs`.
 - 2026-10-07 Isolated test launchers must set `SUSHIAI_HOME`, `HOME` and `CODEX_HOME`. `check-conventions.mjs`.
-- 2026-10-06 Agent-shell markers leaked into sessions → daemon strips them (lifecycle.rs test).
-- 2026-10-06 Codex TUI hooks ran in a shared server → `--no-daemon` (launch_spec).
-- 2026-10-02 Duplicate project rows survived three point fixes → data-model fix, not another patch.
 - 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.

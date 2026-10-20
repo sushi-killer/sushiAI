@@ -96,52 +96,113 @@ test("a missing binary is an error, not an empty catalog", async () => {
   await assert.rejects(scanLocalSkills({ binary: null }), /binary/);
 });
 
-test("uses Claude usage events and marks recent, stale, unused and changed skills", async () => {
+test("maps the row's transcript usage and marks recent, stale, unused and changed skills", async () => {
   const home = await fixture();
   const snapshotFile = path.join(home, "app", "skills.json");
   const now = Date.now();
   const old = now - 200 * DAY;
+  const at = new Date(now - 2 * 3600 * 1000).toISOString();
+  const indexedAt = new Date(now - 60 * 1000).toISOString();
   let hash = "first";
   const { run } = fakeBinary(() => [
     row(home, ".claude/skills/shared", {
       updatedAt: old,
       contentHash: hash,
+      description: "x".repeat(40),
+      usage: {
+        uses90d: 4,
+        lastUsedAt: at,
+        events: [{ at, project: "/work/app", session: "s1" }],
+        indexedAt,
+      },
     }),
     row(home, ".codex/skills/unused", {
       harness: "Codex",
       provider: "Codex",
       updatedAt: old,
+      usage: { uses90d: 0, lastUsedAt: null, events: [], indexedAt },
+    }),
+    row(home, ".codex/skills/fresh", {
+      harness: "Codex",
+      provider: "Codex",
+      usage: { uses90d: 0, lastUsedAt: null, events: [], indexedAt: null },
     }),
   ]);
-  await fs.mkdir(path.join(home, ".claude/coach"), { recursive: true });
-  await fs.writeFile(
-    path.join(home, ".claude/skill-events.jsonl"),
-    JSON.stringify({
-      ts: Math.floor((now - 2 * 3600 * 1000) / 1000),
-      skill: "shared",
-    }) + "\n",
-  );
-  await fs.writeFile(
-    path.join(home, ".claude/coach/skill-usage-cache.json"),
-    JSON.stringify({
-      usage: { shared: { calls: 4, lastUsed: (now - 3 * 3600 * 1000) / 1000 } },
-    }),
-  );
   const options = { binary: "/bin/sushiai", home, snapshotFile, now, run };
   const first = await scanLocalSkills(options);
   const shared = first.find((item) => item.name === "shared");
-  assert.equal(shared.lastUsedSource, "skill event");
+  assert.equal(shared.lastUsedSource, "transcripts");
+  assert.equal(shared.lastUsedAt, Date.parse(at));
   assert.equal(shared.usageCount, 4);
-  assert.equal(shared.recentUses.length, 1);
+  assert.equal(shared.usageIndexedAt, Date.parse(indexedAt));
+  assert.equal(shared.descriptionChars, 40);
+  assert.deepEqual(shared.recentUses, [
+    {
+      provider: "Claude",
+      at: Date.parse(at),
+      calls: 1,
+      source: "transcripts",
+      project: "/work/app",
+      session: "s1",
+    },
+  ]);
   assert.equal(shared.isRecent, true);
+  assert.equal(shared.isUnused, false);
   assert.equal(shared.changed, false);
   const unused = first.find((item) => item.name === "unused");
   assert.ok(unused.isUnused);
   assert.ok(unused.isStale);
+  assert.equal(unused.lastUsedAt, undefined);
+  // Before the first index nothing is called unused.
+  const fresh = first.find((item) => item.name === "fresh");
+  assert.equal(fresh.isUnused, false);
+  assert.equal(fresh.usageIndexedAt, undefined);
 
   hash = "second";
   const second = await scanLocalSkills(options);
   const changed = second.find((item) => item.name === "shared");
   assert.equal(changed.changed, true);
   assert.equal(changed.needsReview, true);
+});
+
+test("a row without usage still scans", async () => {
+  const home = await fixture();
+  const { run } = fakeBinary(() => [row(home, ".claude/skills/bare")]);
+  const [bare] = await scanLocalSkills({ binary: "/bin/sushiai", home, run });
+  assert.equal(bare.usageCount, 0);
+  assert.deepEqual(bare.recentUses, []);
+});
+
+test("indexing runs after the catalog, has no timeout, never overlaps, and reports back", async () => {
+  const home = await fixture();
+  const calls = [];
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const run = async (binary, args, options) => {
+    calls.push({ args, timeout: options.timeout });
+    if (args[1] === "usage") {
+      await gate;
+      return JSON.stringify({ events: 3 });
+    }
+    return JSON.stringify([row(home, ".claude/skills/one")]);
+  };
+  let indexed = 0;
+  const scan = () =>
+    scanLocalSkills({
+      binary: "/bin/sushiai",
+      home,
+      run,
+      indexUsage: true,
+      onIndexed: () => (indexed += 1),
+    });
+  await scan();
+  await scan();
+  const indexRuns = calls.filter((call) => call.args[1] === "usage");
+  assert.equal(indexRuns.length, 1);
+  assert.deepEqual(indexRuns[0].args, ["skills", "usage", "--index", "--json"]);
+  assert.equal(indexRuns[0].timeout, 0);
+  assert.equal(indexed, 0);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(indexed, 2);
 });

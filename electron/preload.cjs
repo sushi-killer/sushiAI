@@ -121,6 +121,11 @@ contextBridge.exposeInMainWorld("nativeBridge", {
   chatModels: invoke("chat-models"),
   cancelChat: invoke("chat-cancel"),
   catalog: invoke("catalog"),
+  onSkillsUsageIndexed: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("skills-usage-indexed", listener);
+    return () => ipcRenderer.removeListener("skills-usage-indexed", listener);
+  },
   skillsManage: invoke("skills-manage"),
   claudeMcpList: invoke("claude-mcp-list"),
   claudeMcpUsage: invoke("claude-mcp-usage"),

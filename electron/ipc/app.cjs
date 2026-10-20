@@ -22,6 +22,7 @@ function registerAppIpc({
 }) {
   let skillsCatalogCache;
   let skillsCatalogScan;
+  let skillsIndexStarted = false;
 
   const connections = () => {
     const value = getConnections();
@@ -111,14 +112,36 @@ function registerAppIpc({
 
   // The main process keeps the last scan: a skill change is checked against
   // that row, never against what the renderer sends back.
-  const skillsCatalog = (force) => {
+  const skillsCatalog = (force, { allowIndex = true } = {}) => {
     const snapshotFile = path.join(userDataDir(), "skills-catalog.json");
     if (!force && skillsCatalogCache?.snapshotFile === snapshotFile)
       return skillsCatalogCache.items;
     if (skillsCatalogScan) return skillsCatalogScan;
-    skillsCatalogScan = Promise.resolve(scanLocalSkills({ snapshotFile }))
+    // Transcript usage is indexed in the background once the catalog is
+    // served (on the first catalog and on every forced refresh), then the
+    // catalog is read again, without indexing, so the screen shows it. Test
+    // launches never index.
+    const indexUsage =
+      allowIndex &&
+      !process.env.SUSHIAI_TEST_WINDOW &&
+      (force || !skillsIndexStarted);
+    skillsCatalogScan = Promise.resolve(
+      scanLocalSkills({
+        snapshotFile,
+        indexUsage,
+        onIndexed: () =>
+          skillsCatalog(true, { allowIndex: false })
+            .then(() => {
+              const win = getMainWindow();
+              if (win && !win.isDestroyed())
+                win.webContents.send("skills-usage-indexed");
+            })
+            .catch(() => {}),
+      }),
+    )
       .then((items) => {
         skillsCatalogCache = { snapshotFile, items };
+        skillsIndexStarted ||= indexUsage;
         return items;
       })
       .finally(() => {

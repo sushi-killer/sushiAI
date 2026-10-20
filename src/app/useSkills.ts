@@ -20,6 +20,8 @@ const catalogFingerprint = (items: SkillCatalogItem[]) =>
         item.lastUsedAt,
         item.lastUsedSource,
         item.usageCount,
+        item.usageIndexedAt,
+        item.descriptionChars,
         item.isRecent,
         item.isUnused,
         item.isStale,
@@ -82,6 +84,11 @@ export function useSkills(section: string, notify: (text: string) => void) {
     setSearch("");
     if (section === "Skills" && !loadedRef.current) void load();
   }, [section, load]);
+
+  useEffect(
+    () => window.bridge?.onSkillsUsageIndexed?.(() => void load(false)),
+    [load],
+  );
 
   return { catalog, loading, search, setSearch, refresh, manageSkill };
 }

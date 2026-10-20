@@ -273,3 +273,67 @@ fn a_disabled_plugin_skill_is_listed_disabled_and_never_a_duplicate() {
     assert!(twins.iter().all(|r| r["isDuplicate"] == true));
     assert!(twins.iter().all(|r| r["duplicateKind"] == "name"));
 }
+
+#[test]
+fn the_catalog_reads_the_usage_cache_and_only_the_index_command_fills_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    write(
+        &home.join(".claude/skills").join(NAME).join("SKILL.md"),
+        &skill(NAME, "Artifacts"),
+    );
+    // A day ago, so the use stays inside the 90 day window whenever the test runs.
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        - 86_400_000;
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let line = serde_json::json!({"type":"assistant","timestamp":at,"cwd":"/work/app","sessionId":"s1",
+        "message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":NAME}}]}});
+    write(
+        &home.join(".claude/projects/-p/a.jsonl"),
+        &format!("{line}\n"),
+    );
+    let run = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("HOME", home)
+            .env("SUSHIAI_HOME", home.join(".sushiai"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let usage = |rows: &Value| rows.as_array().unwrap()[0]["usage"].clone();
+
+    let before = run(&["skills", "--json", "--catalog"]);
+    assert_eq!(usage(&before)["uses90d"], 0);
+    assert!(usage(&before)["lastUsedAt"].is_null());
+    assert!(usage(&before)["indexedAt"].is_null());
+    assert!(before[0].get("accessedAt").is_none());
+
+    let stats = run(&["skills", "usage", "--index", "--json"]);
+    assert_eq!(stats["scannedFiles"], 1);
+    assert_eq!(stats["skippedFiles"], 0);
+    assert_eq!(stats["events"], 1);
+    assert!(stats["readBytes"].as_u64().unwrap() > 0);
+    assert!(stats["durationMs"].is_u64());
+    assert_eq!(
+        run(&["skills", "usage", "--index", "--json"])["readBytes"],
+        0
+    );
+
+    let after = run(&["skills", "--json", "--catalog"]);
+    let u = usage(&after);
+    assert_eq!(u["lastUsedAt"], at.as_str());
+    assert_eq!(u["events"][0]["project"], "/work/app");
+    assert!(u["indexedAt"].is_string());
+    // The routines listing keeps its shape.
+    let list = run(&["skills", "--json"]);
+    assert!(list[0].get("usage").is_none());
+}

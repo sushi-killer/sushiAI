@@ -29,7 +29,7 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
   Threads, no async runtime.
 - `sushiai`: the binary. Parses arguments and calls the libraries.
-  Subcommands: `daemon`, `status`, `projects`, `hosts`, `routines`, `routine`, `ask`, `propose` (routines module), `skills [--project DIR] [--json] [--catalog]` and `skills install|remove NAME` (`skills_cli.rs`, which resolves `CLAUDE_CONFIG_DIR`/`CODEX_HOME` for `sushiai_agents::skills`), `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
+  Subcommands: `daemon`, `status`, `projects`, `hosts`, `routines`, `routine`, `ask`, `propose` (routines module), `skills [--project DIR] [--json] [--catalog]` and `skills install|remove NAME`, `skills usage --index [--json]` (transcript usage cache) (`skills_cli.rs`, which resolves `CLAUDE_CONFIG_DIR`/`CODEX_HOME` for `sushiai_agents::skills`), `proc PID` (native process identity), `shutdown` (daemon and sessions), `hook EVENT` (run by agents), `hooks install|uninstall`,
   `hold` (internal, started by the daemon).
 
 `scripts/check-crate-deps.mjs` enforces the arrows above in CI.

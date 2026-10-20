@@ -3,7 +3,7 @@
 //! the Claude Code and Codex skill folders.
 //!
 //! Pure: no tokio, no network, no process spawning, no clock. The only file
-//! IO is `codex_hooks::install` / `uninstall` and `skills`. Times and sequence
+//! IO is `codex_hooks::install` / `uninstall`, `skills` and `skill_usage`. Times and sequence
 //! numbers come in as parameters.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
@@ -12,6 +12,7 @@ pub mod codex_trust;
 pub mod heuristic;
 pub mod hooks;
 pub mod launch;
+pub mod skill_usage;
 pub mod skills;
 pub mod status;
 

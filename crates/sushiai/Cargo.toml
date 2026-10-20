@@ -25,6 +25,7 @@ toml_edit = "0.22"
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true
 sha2 = "0.10"
 serde.workspace = true

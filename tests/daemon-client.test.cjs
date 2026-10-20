@@ -9,6 +9,7 @@ const {
   RpcError,
 } = require("../electron/daemon/client.cjs");
 const { createDecoder, encode } = require("../electron/daemon/frame.cjs");
+const { until } = require("./helpers/deadline.cjs");
 
 // Everything a test opens is closed after it, so a failed assertion cannot hang the run.
 const cleanups = [];
@@ -82,6 +83,14 @@ async function startDaemon(handler = () => {}) {
     log,
     stop,
   };
+}
+
+// Frames of one connection reach the client in order, so the marker arriving
+// means everything the daemon wrote before it has been processed.
+function drained(client, conn) {
+  const marker = new Promise((resolve) => client.once("test.drained", resolve));
+  conn.json({ method: "test.drained", params: {} });
+  return marker;
 }
 
 const snapshotResult = (text, seq) => ({
@@ -218,7 +227,7 @@ test("a request that gets no answer times out and a late answer is ignored", asy
   );
   assert.equal(client.pendingCount(), 0);
   late();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await drained(client, daemon.conns[0]);
   assert.equal(client.pendingCount(), 0);
   client.close();
   await daemon.stop();
@@ -257,7 +266,7 @@ test("attach delivers the snapshot first, then bytes in order, dropping stale on
   const attached = await client.attach("s1", (data, info) =>
     chunks.push([data.toString(), info.snapshot]),
   );
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await drained(client, daemon.conns[0]);
   assert.equal(attached.seq, 10n);
   assert.deepEqual(chunks, [
     ["SNAP", true],
@@ -280,7 +289,7 @@ test("attach drops output entirely below the snapshot seq", async () => {
   });
   const chunks = [];
   await client.attach("s1", (data) => chunks.push(data.toString()));
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await drained(client, daemon.conns[0]);
   assert.deepEqual(chunks, ["S", "fresh"]);
   client.close();
   await daemon.stop();
@@ -301,7 +310,7 @@ test("a gap in seq is reported once and delivery continues", async () => {
   client.on("protocol-error", (error) => errors.push(error.message));
   const chunks = [];
   await client.attach("s1", (data) => chunks.push(data.toString()));
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await drained(client, daemon.conns[0]);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /expected 3, got 50/);
   assert.deepEqual(chunks, ["S1", "abc", "gap1", "gap2"]);
@@ -358,7 +367,7 @@ test("a second attach for the same session is rejected, the first stays live", a
     /already attached/,
   );
   daemon.conns[0].bytes("s1", 0, "x");
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await drained(client, daemon.conns[0]);
   assert.deepEqual(first, ["S", "x"]);
   await handle.detach();
   const again = [];
@@ -384,7 +393,7 @@ test("a detached session receives no bytes or snapshots", async () => {
     method: "session.snapshot",
     params: { id: "s1", ...snapshotResult("S2", 9) },
   });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await drained(client, daemon.conns[0]);
   assert.deepEqual(chunks, ["S"]);
 });
 
@@ -443,7 +452,7 @@ test("a session.snapshot notification replaces the stream for an attached sessio
   });
   await seen;
   daemon.conns[0].bytes("s1", 500, "go");
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await drained(client, daemon.conns[0]);
   assert.deepEqual(chunks, [
     ["S1", true],
     ["S9", true],
@@ -464,7 +473,10 @@ test("a dropped connection rejects pending requests and emits disconnect", async
   );
   const inflight = client.request("session.list", {}, { timeoutMs: 5000 });
   const settled = assert.rejects(inflight, /lost|closed/);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until(
+    () => daemon.log.some((m) => m.method === "session.list"),
+    "the daemon to receive the request",
+  );
   daemon.conns[0].socket.destroy();
   await settled;
   await disconnected;
@@ -497,7 +509,13 @@ test("close() rejects pending requests without a disconnect event", async () => 
   const inflight = client.request("session.list", {}, { timeoutMs: 5000 });
   client.close();
   await assert.rejects(inflight, /closed/);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The client's socket closes before the daemon's does, so a disconnect
+  // event would have fired by now.
+  await new Promise((resolve) =>
+    daemon.conns[0].socket.destroyed
+      ? resolve()
+      : daemon.conns[0].socket.once("close", resolve),
+  );
   assert.equal(disconnects, 0);
   await daemon.stop();
 });

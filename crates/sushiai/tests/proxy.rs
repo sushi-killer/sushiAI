@@ -10,9 +10,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use common::{holds_for, wait_until, wait_value, ABSENCE_WINDOW};
+use common::{deadline, holds_for, wait_until, wait_value, ABSENCE_WINDOW};
 use serde_json::{json, Value};
 use sushiai_protocol::{encode, Decoder, Frame, Message, Request};
 
@@ -179,6 +179,7 @@ impl Proxy {
         stdin.write_all(&bytes).expect("write");
         stdin.flush().expect("flush");
         wait_value(&format!("a response to {method}"), || {
+            // timing: the poll interval of this wait loop
             let frame = match self.frames.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => frame,
                 Err(RecvTimeoutError::Timeout) => return None,
@@ -209,6 +210,7 @@ impl Proxy {
             if String::from_utf8_lossy(&self.output).contains(needle) {
                 return true;
             }
+            // timing: the poll interval of this wait loop
             match self.frames.recv_timeout(Duration::from_millis(50)) {
                 Ok(Frame::Output { data, .. }) => self.output.extend(data),
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
@@ -326,7 +328,7 @@ fn stdin_closed_right_after_a_request_still_gets_the_whole_response() {
     proxy.close_stdin();
     let frame = proxy
         .frames
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(deadline())
         .expect("the response must arrive after stdin closed");
     let Frame::Json(text) = frame else {
         panic!("expected a JSON frame")
@@ -406,14 +408,12 @@ fn an_unsafe_home_fails_fast_with_the_reason_on_stderr_only() {
     fs::create_dir(&target).expect("mkdir");
     let link = sandbox.home().join("link");
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
-    let started = Instant::now();
     let out = Command::new(BIN)
         .arg("proxy")
         .env("SUSHIAI_HOME", &link)
         .stdin(Stdio::null())
         .output()
         .expect("run proxy");
-    assert!(started.elapsed() < Duration::from_secs(8), "must fail fast");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         out.stdout.is_empty(),

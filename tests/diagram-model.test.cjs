@@ -331,6 +331,11 @@ const bare = (n) => ({
   notes: [],
 });
 const nd = (id, extra = {}) => ({ id, kind: "app", title: id, ...extra });
+// Slot checks are the work placeNodes does; the count does not depend on load.
+function placeCounting(placeNodes, d) {
+  const stats = { checks: 0 };
+  return { pos: placeNodes(d, stats), checks: stats.checks };
+}
 const rectOf = (p) => ({ x: p.x, y: p.y, w: 170, h: 62 });
 function assertNoOverlap(pos) {
   const all = [...pos.values()].map(rectOf);
@@ -570,9 +575,9 @@ test("parseDiagram rejects more than 1000 items", async () => {
 test("1000 unplaced nodes place fast without overlap", async () => {
   const { placeNodes } = await model;
   const d = bare(Array.from({ length: 1000 }, (_, i) => nd(`n${i}`)));
-  const t = Date.now();
-  const pos = placeNodes(d);
-  assert.ok(Date.now() - t < 500, `took ${Date.now() - t} ms`);
+  const { pos, checks } = placeCounting(placeNodes, d);
+  // Linear work is about 2 slot checks per node (1999 measured); a rescan from slot 0 per node is quadratic.
+  assert.ok(checks > 0 && checks <= 1000 * 4, `${checks} slot checks`);
   assert.equal(pos.size, 1000);
   assertNoOverlap(pos);
 });
@@ -675,36 +680,44 @@ test("routeEdge dodges avoid rects and groupLabelRect sizes the label", async ()
   }
 });
 
-test("coordinates out of range are refused and cannot stall placement", async () => {
-  const { parseDiagram, placeNodes } = await model;
-  const doc = (n) => file([n]);
-  assert.match(
-    parseDiagram(doc(textNode("a", { x: 1e20, y: 0 }))).error,
-    /nodes\[0\] \(a\)/,
-  );
-  assert.ok(parseDiagram(doc(textNode("a", { x: 1e5, y: -1e5 }))).diagram);
-  const g = (extra) => file([{ id: "g", type: "group", label: "G", ...extra }]);
-  assert.match(
-    parseDiagram(g({ x: 0, y: 0, width: 0, height: 5 })).error,
-    /nodes\[0\]/,
-  );
-  assert.match(
-    parseDiagram(g({ x: 0, y: 0, width: 5, height: 1e9 })).error,
-    /nodes\[0\]/,
-  );
-  const note = textNode("n", { x: 1e9, y: 0, sushiai: { note: true } });
-  assert.match(parseDiagram(file([note])).error, /nodes\[0\]/);
+test(
+  "coordinates out of range are refused and cannot stall placement",
+  async () => {
+    const { parseDiagram, placeNodes } = await model;
+    const doc = (n) => file([n]);
+    assert.match(
+      parseDiagram(doc(textNode("a", { x: 1e20, y: 0 }))).error,
+      /nodes\[0\] \(a\)/,
+    );
+    assert.ok(parseDiagram(doc(textNode("a", { x: 1e5, y: -1e5 }))).diagram);
+    const g = (extra) =>
+      file([{ id: "g", type: "group", label: "G", ...extra }]);
+    assert.match(
+      parseDiagram(g({ x: 0, y: 0, width: 0, height: 5 })).error,
+      /nodes\[0\]/,
+    );
+    assert.match(
+      parseDiagram(g({ x: 0, y: 0, width: 5, height: 1e9 })).error,
+      /nodes\[0\]/,
+    );
+    const note = textNode("n", { x: 1e9, y: 0, sushiai: { note: true } });
+    assert.match(parseDiagram(file([note])).error, /nodes\[0\]/);
 
-  const t = Date.now();
-  const pos = placeNodes(bare([nd("a", { x: 1e20, y: 0 }), nd("b"), nd("c")]));
-  assert.ok(Date.now() - t < 500);
-  assert.equal(pos.size, 3);
-  const wide = {
-    ...bare([nd("m", { group: "g" })]),
-    groups: [{ id: "g", label: "G", x: 0, y: 0, w: 1e20, h: 1e20 }],
-  };
-  assert.equal(placeNodes(wide).size, 1);
-});
+    const { pos, checks } = placeCounting(
+      placeNodes,
+      bare([nd("a", { x: 1e20, y: 0 }), nd("b"), nd("c")]),
+    );
+    // 3 measured: one slot per node, the far-off one keeps its place.
+    assert.ok(checks > 0 && checks < 100, `${checks} slot checks`);
+    assert.equal(pos.size, 3);
+    const wide = {
+      ...bare([nd("m", { group: "g" })]),
+      groups: [{ id: "g", label: "G", x: 0, y: 0, w: 1e20, h: 1e20 }],
+    };
+    assert.equal(placeNodes(wide).size, 1);
+  },
+  { timeout: 30000 },
+);
 
 test("500 groups tiling the lattice do not stall placeNodes", async () => {
   const { placeNodes } = await model;
@@ -720,9 +733,9 @@ test("500 groups tiling the lattice do not stall placeNodes", async () => {
     ...bare(Array.from({ length: 499 }, (_, i) => nd(`n${i}`))),
     groups,
   };
-  const t = Date.now();
-  const pos = placeNodes(d);
-  assert.ok(Date.now() - t < 300, `took ${Date.now() - t} ms`);
+  const { pos, checks } = placeCounting(placeNodes, d);
+  // 21997 measured; twice that leaves room for tuning but not for a rescan per node.
+  assert.ok(checks > 0 && checks <= 44000, `${checks} slot checks`);
   assert.equal(pos.size, 499);
   assertNoOverlap(pos);
 });

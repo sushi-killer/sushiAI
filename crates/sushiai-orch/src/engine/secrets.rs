@@ -206,7 +206,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_run_after_a_restart_waits_for_the_app_values_instead_of_failing() {
         let (app, dir) = test_app();
         let mut task = task_with_status(TaskStatus::Running);
@@ -219,7 +219,7 @@ mod tests {
         let sender = app.clone();
         let repo = task.repo.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await; // wait-allow: the owner's values arrive late, after the run began to wait; the wait has no observable "started" signal
+            tokio::time::sleep(Duration::from_millis(300)).await; // timing: the owner's values arrive late, after the run began to wait; the wait has no observable "started" signal
             sender
                 .handle_secrets_set(json!({
                     "projects": {"mine": {"KEY": "invented-value"}},
@@ -228,10 +228,17 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let started = std::time::Instant::now();
-        crate::engine::attempts::secrets::wait_for_app_secrets(&app, &task.id, &CancelToken::new())
-            .await;
-        assert!(started.elapsed() < Duration::from_secs(10));
+        // The values must end the wait, not its 120 s limit: half of it is virtual time here.
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            crate::engine::attempts::secrets::wait_for_app_secrets(
+                &app,
+                &task.id,
+                &CancelToken::new(),
+            ),
+        )
+        .await
+        .expect("the wait ended on the values, not on its limit");
         assert_eq!(
             run_secrets(&app, &task.id).unwrap().env.get("KEY").unwrap(),
             "invented-value"

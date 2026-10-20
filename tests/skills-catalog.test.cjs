@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { scanLocalSkills } = require("../electron/skills-catalog.cjs");
+const { until } = require("./helpers/deadline.cjs");
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -203,6 +204,6 @@ test("indexing runs after the catalog, has no timeout, never overlaps, and repor
   assert.equal(indexRuns[0].timeout, 0);
   assert.equal(indexed, 0);
   release();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until(() => indexed >= 2, "both scans to be indexed");
   assert.equal(indexed, 2);
 });

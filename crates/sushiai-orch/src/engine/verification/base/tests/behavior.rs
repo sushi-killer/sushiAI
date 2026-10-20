@@ -221,18 +221,18 @@ mod cases {
             .clone();
         let _busy = lock.lock().await;
         let cancel = CancelToken::new();
-        let stopper = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await; // wait-allow: the repo lock is held for a measured window; the test asserts the waiter stayed blocked that long
-            stopper.cancel();
-        });
-        let started = std::time::Instant::now();
         // Another pair of the same repo is running: this one waits for it
         // (here until it is cancelled) instead of running beside it.
         let mut task = task;
-        let failed = failing_twice_on_base(&app, &mut task, &["true".to_string()], &cancel).await;
+        let commands = ["true".to_string()];
+        let call = failing_twice_on_base(&app, &mut task, &commands, &cancel);
+        tokio::pin!(call);
+        // timing: an absence window; a call that ignored the held lock would finish inside it
+        let early = tokio::time::timeout(Duration::from_millis(150), &mut call).await;
+        assert!(early.is_err(), "it ran beside the lock holder");
+        cancel.cancel();
+        let failed = call.await;
         assert!(failed.is_empty());
-        assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(
             !dir.path().join("data/base-runs").exists(),
             "it never started"

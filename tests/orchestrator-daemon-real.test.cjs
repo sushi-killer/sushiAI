@@ -387,6 +387,7 @@ test(
     await until(() => !alive(pgid), "the agent to end");
     // The queued task never got its turn: one agent ever started. This sleep
     // gives a forbidden second start time to happen.
+    // timing: absence window for a second agent start in a real daemon
     await new Promise((resolve) => setTimeout(resolve, 1000));
     assert.equal(
       fs.readFileSync(path.join(bin, "starts"), "utf8").trim(),

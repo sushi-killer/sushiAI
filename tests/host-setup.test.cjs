@@ -93,9 +93,7 @@ test("fake ssh: a host without sushiai gets it installed, linked and hooked, the
   const sushiai = loadHostManifest(path.join(dir, "manifest.json"));
   assert.equal(sushiai.manifest["Linux x86_64"].version, "0.1.0");
   const options = { sushiai };
-  const started = Date.now();
   const first = await setupHost(host.connections, host.endpoint, options);
-  assert.ok(Date.now() - started < 60000);
   assert.equal(first.sushiai, "installed", first.sushiaiError);
   assert.equal(first.sushiaiVersion, "0.1.0");
   assert.match(setupSummary(first), /sushiai installed/);

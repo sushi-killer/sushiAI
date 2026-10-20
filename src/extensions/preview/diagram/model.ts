@@ -1272,7 +1272,11 @@ function rectIndex() {
   };
 }
 
-export function placeNodes(d: Diagram): Map<string, Point> {
+/** `stats`, when given, receives the number of lattice slots tried. */
+export function placeNodes(
+  d: Diagram,
+  stats?: { checks: number },
+): Map<string, Point> {
   const pos = new Map<string, Point>();
   for (const n of d.nodes) {
     if (hasPos(n)) pos.set(n.id, { x: n.x as number, y: n.y as number });
@@ -1329,6 +1333,7 @@ export function placeNodes(d: Diagram): Map<string, Point> {
     const r = nodeRect(at, n);
     nodeIdx.add(r);
   }
+  if (stats) stats.checks = checks;
   return pos;
 }
 

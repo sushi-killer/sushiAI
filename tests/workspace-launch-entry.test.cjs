@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { createRequire } = require("node:module");
 const ts = require("typescript");
+const { until } = require("./helpers/deadline.cjs");
 const { sessionPanelId } = require("../src/daemonSessions.ts");
 const {
   launchTarget,
@@ -847,7 +848,10 @@ test("a panel that never ran starts through the daemon in its own slot", async (
     },
   ]);
   app.ws.startPanel("starter");
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until(
+    () => app.current()[0].panels[0].sessionId,
+    "the panel to get its session",
+  );
   assert.equal(server.requests.length, 1);
   assert.equal(server.requests[0].agent, "codex");
   const [panel] = app.current()[0].panels;

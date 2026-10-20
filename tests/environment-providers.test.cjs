@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { closeAppDb } = require("../electron/app-db.cjs");
 const { Projects } = require("../electron/projects.cjs");
+const { untilTurns } = require("./helpers/deadline.cjs");
 
 const safeStorage = {
   isEncryptionAvailable: () => true,
@@ -82,20 +83,29 @@ test("a throwing or rejecting provider is skipped", async (t) => {
   );
 });
 
-test("a provider that hangs is skipped after the timeout", async (t) => {
-  const { projects, project } = await fixture(t, { providerTimeoutMs: 40 });
-  projects.addEnvironmentProvider({ values: () => new Promise(() => {}) });
-  projects.addEnvironmentProvider(provider({ OK: "yes" }));
-  const started = Date.now();
-  assert.deepEqual(
-    await projects.environmentFor(project.id, "agent", "local"),
-    {
-      OK: "yes",
-      HAND: "hand-value",
-    },
-  );
-  assert.ok(Date.now() - started < 5000);
-});
+test(
+  "a provider that hangs is skipped after the timeout",
+  { timeout: 30000 },
+  async (t) => {
+    const { projects, project } = await fixture(t, { providerTimeoutMs: 40 });
+    let asked = false;
+    projects.addEnvironmentProvider({
+      values: () => {
+        asked = true;
+        return new Promise(() => {});
+      },
+    });
+    projects.addEnvironmentProvider(provider({ OK: "yes" }));
+    // The provider timeout runs on a mocked clock. Only the 40 ms option, not
+    // the 30 s default, lets this one tick reach it.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const result = projects.environmentFor(project.id, "agent", "local");
+    // The timer is set just before the provider is asked.
+    await untilTurns(() => asked, "the hanging provider to be asked");
+    t.mock.timers.tick(40);
+    assert.deepEqual(await result, { OK: "yes", HAND: "hand-value" });
+  },
+);
 
 test("no provider is asked for a withheld host", async (t) => {
   const { projects, project } = await fixture(t);

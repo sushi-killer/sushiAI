@@ -107,7 +107,7 @@ test(
         { id, data: "echo late\r" },
         timeout,
       );
-      // Gives a forbidden delivery after detach time to happen.
+      // timing: absence window, gives a forbidden delivery after detach time to happen
       await wait(200);
       assert.equal(sent.length, count, "nothing is delivered after detach");
 

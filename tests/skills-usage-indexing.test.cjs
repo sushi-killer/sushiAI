@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const Module = require("node:module");
 const test = require("node:test");
+const { turn } = require("./helpers/deadline.cjs");
 
 const originalLoad = Module._load;
 Module._load = function (request, ...rest) {
@@ -31,8 +32,6 @@ function setup() {
   });
   return { catalog: handlers.catalog, sent, scans };
 }
-
-const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 async function withEnv(value, run) {
   const before = process.env.SUSHIAI_TEST_WINDOW;
@@ -75,8 +74,8 @@ test("the rescan after indexing does not index again and the window hears of it"
     const { catalog, scans, sent } = setup();
     await catalog("skills");
     scans[0].onIndexed();
-    await tick();
-    await tick();
+    await turn();
+    await turn();
     assert.equal(scans.length, 2);
     assert.equal(scans[1].indexUsage, false);
     assert.deepEqual(sent, ["skills-usage-indexed"]);

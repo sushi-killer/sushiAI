@@ -29,6 +29,20 @@ async function until(check, what, { deadlineMs: limit = DEADLINE_MS } = {}) {
   }
 }
 
+/** One event-loop turn: every callback already queued has run. */
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
+/** Like `until`, counted in event-loop turns instead of time, for tests that
+ * mock setTimeout (the `until` poll would never fire). Throws after `turns`. */
+async function untilTurns(check, what, { turns = 1000 } = {}) {
+  for (let i = 0; i < turns; i++) {
+    const value = await check();
+    if (value) return value;
+    await turn();
+  }
+  throw new Error(`no ${what} after ${turns} event-loop turns`);
+}
+
 function isAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -96,6 +110,8 @@ module.exports = {
   DEADLINE_MS,
   deadlineMs,
   until,
+  turn,
+  untilTurns,
   pidStart,
   stopPid,
   removeDir,

@@ -12,7 +12,6 @@ use std::os::unix::net::UnixListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use common::*;
 use serde_json::{json, Value};
@@ -120,7 +119,7 @@ impl Mcp {
         writeln!(stdin, "{line}").expect("write");
         let text = self
             .lines
-            .recv_timeout(Duration::from_secs(20))
+            .recv_timeout(deadline())
             .unwrap_or_else(|_| panic!("no answer to {method}"));
         let answer: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(answer["id"], id);

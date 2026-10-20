@@ -294,7 +294,7 @@ pub(crate) async fn wait_async(what: &str, mut ok: impl FnMut() -> bool) {
             std::time::Instant::now() < end,
             "timed out waiting for {what}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await; // wait-allow: the poll interval of the shared wait
+        tokio::time::sleep(Duration::from_millis(10)).await; // timing: the poll interval of the shared wait
     }
 }
 
@@ -307,6 +307,6 @@ pub(crate) async fn holds_for_async(what: &str, window: Duration, mut still: imp
         if std::time::Instant::now() >= end {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await; // wait-allow: the poll interval of the shared absence check
+        tokio::time::sleep(Duration::from_millis(10)).await; // timing: the poll interval of the shared absence check
     }
 }

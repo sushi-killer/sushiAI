@@ -146,7 +146,7 @@ fn a_child_that_does_not_read_cannot_stall_the_daemon() {
                 refused += 1;
             }
         }
-        // A call that waited for the stuck holder would take the whole answer timeout.
+        // timing: a stalled call takes the daemon's whole ANSWER_TIMEOUT
         assert!(started.elapsed() < ANSWER_TIMEOUT, "an input call hung");
     }
     assert!(refused > 0, "no input call was refused");
@@ -158,12 +158,13 @@ fn a_child_that_does_not_read_cannot_stall_the_daemon() {
         other.call("session.list", Value::Null)[0]["id"],
         id.as_str()
     );
+    // timing: a stalled call takes the daemon's whole ANSWER_TIMEOUT
     assert!(began.elapsed() < ANSWER_TIMEOUT);
 
     let closing = Instant::now();
     client.call("session.close", json!({"id": id, "graceful": false}));
     wait_until("the stuck shell to die", || !alive(shell));
-    // A forced close must not wait out the grace period of a graceful one.
+    // timing: a forced close must not wait out the grace period of a graceful one
     assert!(closing.elapsed() < TERM_GRACE);
 }
 
@@ -348,6 +349,7 @@ fn graceful_close_escalates_to_kill_after_the_grace_period() {
     );
     wait_until("KILL after the grace period", || !alive(target));
     let took = closing.elapsed();
+    // timing: KILL may only come after the daemon's own grace constant
     assert!(took >= TERM_GRACE, "KILL came after {took:?}");
 }
 

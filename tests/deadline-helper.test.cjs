@@ -8,6 +8,7 @@ const {
   DEADLINE_MS,
   deadlineMs,
   until,
+  untilTurns,
   pidStart,
   stopPid,
   removeDir,
@@ -51,6 +52,18 @@ test("until throws a named timeout after the deadline", async () => {
   await assert.rejects(
     until(() => false, "the thing", { deadlineMs: 100 }),
     { message: "timed out waiting for the thing" },
+  );
+});
+
+test("untilTurns waits event-loop turns and names what never came", async () => {
+  let calls = 0;
+  assert.equal(await untilTurns(() => ++calls >= 3 && "ready", "x"), "ready");
+  assert.equal(calls, 3);
+  await assert.rejects(
+    untilTurns(() => false, "the sync", { turns: 5 }),
+    {
+      message: "no the sync after 5 event-loop turns",
+    },
   );
 });
 

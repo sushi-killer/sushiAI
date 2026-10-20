@@ -1,6 +1,8 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
+const { until } = require("./helpers/deadline.cjs");
+
 const save = import("../src/extensions/preview/diagram/saveOps.ts");
 
 const text = (id, label, x, own = {}) => ({
@@ -152,7 +154,7 @@ test("an op pushed during a write goes out in a second write, nothing dropped", 
   });
   queue.push(move);
   const run = queue.flush();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until(() => !firstWrite, "the first write to start");
   queue.push({ op: "move", id: "db", x: 320, y: 40 });
   // A flush while one runs does nothing; the running loop drains the rest.
   await queue.flush();

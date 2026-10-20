@@ -12,12 +12,33 @@ const {
 } = require("../electron/extensions/companion-process.cjs");
 
 test("spawnPipe: exited resolves when a grandchild keeps the stdio open", async () => {
-  const pipe = spawnPipe("/bin/sh", ["-c", "sleep 3 & exit 3"]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-pipe-"));
+  const pidFile = path.join(dir, "grandchild.pid");
+  // The background sleep holds the stdio open; it outlives the shell on purpose.
+  const pipe = spawnPipe("/bin/sh", [
+    "-c",
+    'sleep 20 & echo $! > "$1"; exit 3',
+    "sh",
+    pidFile,
+  ]);
   pipe.on("error", () => {});
-  const started = Date.now();
-  const exit = await pipe.exited;
-  assert.equal(exit.code, 3);
-  assert.ok(Date.now() - started < 2000, "exited waited for the grandchild");
+  let grandchild;
+  try {
+    const exit = await pipe.exited;
+    grandchild = Number(fs.readFileSync(pidFile, "utf8"));
+    assert.equal(exit.code, 3);
+    // Exit settled while the grandchild still lives: it did not wait for it.
+    assert.doesNotThrow(() => process.kill(grandchild, 0));
+  } finally {
+    if (grandchild) {
+      try {
+        process.kill(grandchild, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    removeDir(dir);
+  }
 });
 
 test("command connector hands the program an allowlisted environment", () => {

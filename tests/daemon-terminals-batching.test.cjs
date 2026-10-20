@@ -6,14 +6,15 @@ const {
   OUTPUT_CREDIT_BYTES,
 } = require("../electron/terminal-flow.cjs");
 const { createTerminalInput } = require("../src/terminal-output.ts");
+const { until, turn } = require("./helpers/deadline.cjs");
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// One attached panel on a fake host. A request takes `latencyMs` to answer;
-// typed input is echoed back half a round trip after it was sent. The renderer
-// side acks what it receives on the next turn, as xterm would.
-async function setup({ latencyMs = 0 } = {}) {
+// One attached panel on a fake host. A request is answered at once, or, with
+// `manual`, when the test settles it: typed input is echoed back as the
+// request is answered. The renderer side acks what it receives on the next
+// turn, as xterm would.
+async function setup({ manual = false } = {}) {
   const sent = [];
+  const requests = [];
   let onBytes;
   const manager = {
     async attach(_host, _id, _options, callback) {
@@ -23,15 +24,18 @@ async function setup({ latencyMs = 0 } = {}) {
     },
     request: (_host, method, params) =>
       new Promise((resolve) => {
-        if (method === "session.input")
-          setTimeout(() => onBytes(Buffer.from(params.data)), latencyMs / 2);
-        setTimeout(() => resolve({}), latencyMs);
+        const answer = () => {
+          if (method === "session.input") onBytes(Buffer.from(params.data));
+          resolve({});
+        };
+        if (manual) requests.push({ method, params, answer });
+        else answer();
       }),
   };
   const handlers = createTerminalHandlers({
     getManager: () => manager,
     send: (_channel, value) => {
-      sent.push({ at: performance.now(), ...value });
+      sent.push(value);
       const text = value.snapshot ?? value.data;
       if (text !== undefined)
         setImmediate(() =>
@@ -46,9 +50,13 @@ async function setup({ latencyMs = 0 } = {}) {
     cols: 80,
     rows: 24,
   });
-  await wait(5);
+  await until(
+    () => sent.some((message) => message.snapshot !== undefined),
+    "the snapshot",
+  );
   return {
     handlers,
+    requests,
     output: (buffer) => onBytes(buffer),
     data: () => sent.filter((message) => message.data !== undefined),
   };
@@ -63,7 +71,10 @@ test("small output frames that arrive together leave main as one message", async
     (_, i) => `line ${String(i).padStart(4, "0")} ok\r\n`,
   );
   for (const line of lines) t.output(Buffer.from(line));
-  await wait(20);
+  await until(
+    () => text(t.data()).length >= lines.join("").length,
+    "all lines",
+  );
   const data = t.data();
   assert.equal(text(data), lines.join(""));
   assert.ok(
@@ -80,8 +91,7 @@ test("a flood leaves main in full messages, cut on whole characters", async () =
   const bytes = Buffer.from(flood);
   for (let at = 0; at < bytes.length; at += 4096)
     t.output(bytes.subarray(at, at + 4096));
-  for (let i = 0; i < 400 && text(t.data()).length < flood.length; i++)
-    await wait(5);
+  await until(() => text(t.data()).length >= flood.length, "the whole flood");
   const data = t.data();
   assert.equal(text(data), flood);
   const limit = Math.ceil(bytes.length / OUTPUT_CHUNK_BYTES) + 2;
@@ -98,40 +108,27 @@ test("a flood leaves main in full messages, cut on whole characters", async () =
   }
 });
 
-test("typing over a 40 ms round trip echoes every key within about one round trip", async () => {
-  const t = await setup({ latencyMs: 40 });
+test("typing sends every key before any answer arrives, and each echoes", async () => {
+  const t = await setup({ manual: true });
   const errors = [];
   const input = createTerminalInput(
     (data) => t.handlers.write("p1", data),
     (message) => errors.push(message),
   );
   const keys = "abcdefghijklmnopqrst";
-  const typed = [];
-  for (const key of keys) {
-    typed.push(performance.now());
-    input.send(key);
-    await wait(5);
-  }
-  const echoed = () => {
-    let seen = "";
-    const times = [];
-    for (const message of t.data())
-      for (const character of message.data) {
-        seen += character;
-        times.push(message.at);
-      }
-    return { seen, times };
-  };
-  for (let i = 0; i < 300 && echoed().seen.length < keys.length; i++)
-    await wait(10);
-  const { seen, times } = echoed();
-  assert.equal(seen, keys);
-  assert.deepEqual(errors, []);
-  const latencies = typed.map((at, i) => times[i] - at);
-  assert.ok(
-    Math.max(...latencies) < 150,
-    `keystroke-to-echo latencies: ${latencies.map(Math.round).join(", ")} ms`,
+  for (const key of keys) input.send(key);
+  await turn();
+  // Nothing is answered yet: a write that waited for the previous answer
+  // would have put out only the first key.
+  const inputs = t.requests.filter((r) => r.method === "session.input");
+  assert.deepEqual(
+    inputs.map((r) => r.params.data),
+    [...keys],
   );
+  for (const request of inputs) request.answer();
+  await until(() => text(t.data()).length >= keys.length, "every echo");
+  assert.equal(text(t.data()), keys);
+  assert.deepEqual(errors, []);
 });
 
 // A renderer that acks only when told to, so the credit can run out.
@@ -163,7 +160,10 @@ async function stalled() {
   });
   const flood = "x".repeat(OUTPUT_CREDIT_BYTES + 3 * OUTPUT_CHUNK_BYTES);
   onBytes(Buffer.from(flood));
-  await wait(5);
+  await until(
+    () => sent.some((message) => message.data !== undefined),
+    "the first window of output",
+  );
   // What the renderer took so far; acking it releases the next window.
   const received = [];
   const ackAll = () => {
@@ -179,15 +179,15 @@ async function stalled() {
 test("an exit waits for the output queued before it while the credit is out", async () => {
   const t = await stalled();
   t.emit({ host: "h1", method: "session.exited", params: { id: "s1" } });
-  await wait(5);
+  await turn();
   assert.ok(
     !t.sent.some((message) => message.exited),
     "the exit must not overtake output still waiting for credit",
   );
-  for (let i = 0; i < 20 && !t.received.some((m) => m.exited); i++) {
+  await until(() => {
     t.ackAll();
-    await wait(5);
-  }
+    return t.received.some((m) => m.exited);
+  }, "the exit");
   const exits = t.received.filter((message) => message.exited);
   assert.equal(exits.length, 1);
   assert.ok(t.received.at(-1).exited, "the exit comes last");

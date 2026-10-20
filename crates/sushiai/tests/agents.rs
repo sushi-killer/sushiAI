@@ -11,7 +11,6 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use common::*;
 use serde_json::{json, Value};
@@ -492,11 +491,7 @@ fn hook_command(event: &str) -> Command {
     command
 }
 
-fn run_hook_with(
-    mut command: Command,
-    payload: &[u8],
-) -> (std::process::ExitStatus, String, Duration) {
-    let start = Instant::now();
+fn run_hook_with(mut command: Command, payload: &[u8]) -> (std::process::ExitStatus, String) {
     let mut child = command.spawn().expect("spawn hook");
     // A hook that refuses its input may exit before reading it: ignore a broken pipe.
     let _ = child.stdin.take().expect("stdin").write_all(payload);
@@ -504,11 +499,10 @@ fn run_hook_with(
     (
         out.status,
         String::from_utf8_lossy(&out.stdout).into_owned(),
-        start.elapsed(),
     )
 }
 
-fn run_hook(command: Command) -> (std::process::ExitStatus, String, Duration) {
+fn run_hook(command: Command) -> (std::process::ExitStatus, String) {
     run_hook_with(command, br#"{"hook_event_name":"Stop"}"#)
 }
 
@@ -530,7 +524,7 @@ fn the_hook_log_names_variables_and_outcomes_but_never_values() {
         .env("SUSHIAI_SESSION_ID", "sess-id-value")
         .env("SUSHIAI_SESSION_TOKEN", secret)
         .env_remove("SUSHIAI_HOME");
-    let (status, stdout, _) = run_hook_with(
+    let (status, stdout) = run_hook_with(
         command,
         br#"{"hook_event_name":"Stop","x":"payload-value"}"#,
     );
@@ -549,7 +543,7 @@ fn the_hook_log_names_variables_and_outcomes_but_never_values() {
     ] {
         command.env_remove(var);
     }
-    let (status, _, _) = run_hook(command);
+    let (status, _) = run_hook(command);
     assert!(status.success());
 
     let text = fs::read_to_string(&log).expect("log");
@@ -580,7 +574,7 @@ fn a_hook_without_session_variables_exits_zero_silently() {
     ] {
         command.env_remove(var);
     }
-    let (status, stdout, _) = run_hook(command);
+    let (status, stdout) = run_hook(command);
     assert!(status.success());
     assert_eq!(stdout, "");
 }
@@ -597,7 +591,7 @@ fn a_hook_with_the_daemon_down_exits_zero_and_prints_nothing() {
         .env("SUSHIAI_SESSION_ID", "s")
         .env("SUSHIAI_SESSION_TOKEN", "t")
         .env("SUSHIAI_AGENT", "claude");
-    let (status, stdout, _) = run_hook(command);
+    let (status, stdout) = run_hook(command);
     assert!(status.success());
     assert_eq!(stdout, "");
 }
@@ -684,7 +678,7 @@ stay();
         .env("SUSHIAI_SESSION_TOKEN", &token)
         .env("SUSHIAI_AGENT", "claude");
     let big = json!({"hook_event_name": "Stop", "pad": "x".repeat(1536 * 1024)}).to_string();
-    let (status, _, _) = run_hook_with(command, big.as_bytes());
+    let (status, _) = run_hook_with(command, big.as_bytes());
     assert!(status.success());
     assert_eq!(list_entry(&mut client, &id)["agentStatus"], "working");
 

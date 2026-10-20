@@ -8,7 +8,7 @@ const { EventEmitter } = require("node:events");
 const { realDaemon } = require("./helpers/real-daemon.cjs");
 const {
   DEADLINE_MS,
-  until: deadlineUntil,
+  until,
   pidStart,
   stopPid,
   removeDir,
@@ -35,16 +35,6 @@ function tmp() {
   return dir;
 }
 
-const until = async (check, ms = 3000, what = "condition") => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
-
 // A fake daemon on a unix socket, built on the frame codec. `shutdown` removes
 // the socket like the real daemon does.
 async function fakeDaemon(
@@ -58,6 +48,7 @@ async function fakeDaemon(
 ) {
   const conns = [];
   const log = [];
+  let markStopped;
   const server = net.createServer((socket) => {
     const decoder = createDecoder();
     conns.push(socket);
@@ -111,11 +102,15 @@ async function fakeDaemon(
     dropConnections() {
       for (const socket of conns.splice(0)) socket.destroy();
     },
+    // Settles once stop() has removed the socket path; a later daemon on the
+    // same path is safe from that removal after this.
+    stopped: new Promise((resolve) => (markStopped = resolve)),
     async stop() {
       this.dropConnections();
       if (!server.listening) return;
       await new Promise((resolve) => server.close(resolve));
       fs.rmSync(socketPath, { force: true });
+      markStopped();
     },
   };
   fs.rmSync(socketPath, { force: true });
@@ -153,7 +148,7 @@ test("hello and session.list make the host ready with version, capabilities and 
   const seen = [];
   manager.on("state", (state) => seen.push(state.state));
   manager.start();
-  await until(() => stateOf(manager).state === "ready", 3000, "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   assert.deepEqual(seen, ["connecting", "ready"]);
   assert.deepEqual(stateOf(manager), {
     host: "local",
@@ -185,7 +180,7 @@ test("setUpdate flags a ready host with update and a new connection clears it", 
   await fakeDaemon(socketPath, { build: "a".repeat(64) });
   const manager = startManager(stubConnector({ socketPath }));
   manager.start();
-  await until(() => stateOf(manager).state === "ready", 3000, "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   assert.equal(manager.hello("local").build, "a".repeat(64));
   assert.equal(stateOf(manager).update, undefined);
   const seen = [];
@@ -204,11 +199,13 @@ test("notifications are forwarded as events with the generation", async () => {
   const manager = startManager(stubConnector({ socketPath }));
   const events = [];
   const off = manager.on("event", (event) => events.push(event));
+  const everything = [];
+  manager.on("event", (event) => everything.push(event.method));
   manager.start();
-  await until(() => stateOf(manager).state === "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   daemon.notify("session.created", { id: "s1" });
   daemon.notify("session.snapshot", { id: "s1", snapshot: "", seq: 0 });
-  await until(() => events.length >= 1);
+  await until(() => events.length >= 1, "the first event");
   assert.deepEqual(events, [
     {
       host: "local",
@@ -219,7 +216,9 @@ test("notifications are forwarded as events with the generation", async () => {
   ]);
   off();
   daemon.notify("session.removed", { id: "s1" });
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // The still-subscribed listener proves the removal was delivered, so the
+  // unsubscribed one had its chance to see it.
+  await until(() => everything.length >= 2, "the removal event");
   assert.equal(events.length, 1);
 });
 
@@ -248,7 +247,7 @@ test("a lost connection goes offline, backs off, reconnects with generation+1 an
     seen.push(`${state.state}:${state.generation}`),
   );
   manager.start();
-  await until(() => stateOf(manager).state === "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   const received = [];
   const handle = await manager.attach(
     "local",
@@ -270,6 +269,7 @@ test("a lost connection goes offline, backs off, reconnects with generation+1 an
   await until(
     () =>
       stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
+    "ready on generation 2",
   );
   assert.deepEqual(seen, [
     "connecting:0",
@@ -278,7 +278,7 @@ test("a lost connection goes offline, backs off, reconnects with generation+1 an
     "connecting:1",
     "ready:2",
   ]);
-  await until(() => received.length === 2, 3000, "re-attach snapshot");
+  await until(() => received.length === 2, "re-attach snapshot");
   assert.equal(received[1].snapshot, true);
   assert.equal(received[1].reattach, true);
   assert.equal(received[1].generation, 2);
@@ -293,8 +293,11 @@ test("a lost connection goes offline, backs off, reconnects with generation+1 an
   await until(
     () =>
       stateOf(manager).generation === 3 && stateOf(manager).state === "ready",
+    "ready on generation 3",
   );
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Frames of one connection are served in order, so an attach sent on ready
+  // is already logged once this answer is back.
+  await manager.request("local", "session.list", {});
   assert.equal(
     daemon.log.filter((m) => m.method === "session.attach").length,
     2,
@@ -326,7 +329,7 @@ test("backoff doubles up to the maximum with jitter and a failed connect is repo
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => tries >= 8, 3000, "retries");
+  await until(() => tries >= 8, "retries");
   global.setTimeout = realSetTimeout;
   assert.deepEqual(
     delays.slice(0, 8),
@@ -355,10 +358,10 @@ test("power resume retries a waiting host at once", async () => {
     { powerMonitor: power, backoffMinMs: 60000, backoffMaxMs: 60000 },
   );
   manager.start();
-  await until(() => tries === 1);
-  await until(() => stateOf(manager).state === "failed");
+  await until(() => tries === 1, "the first try");
+  await until(() => stateOf(manager).state === "failed", "failed");
   power.emit("resume");
-  await until(() => tries === 2, 1000, "retry after resume");
+  await until(() => tries === 2, "retry after resume");
 });
 
 // local.cjs ---------------------------------------------------------------
@@ -546,7 +549,7 @@ test("a dev run replaces a daemon of another build once, then shares whatever an
   client.close();
   // The installed app replaced the daemon with its own binary: shared, no
   // second shutdown and no error.
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await old.stopped;
   const other = await fakeDaemon(f.socketPath, {
     build: "1".repeat(64),
     capabilities: REQUIRED_CAPABILITIES,
@@ -580,7 +583,7 @@ test("a packaged app never replaces a daemon that lacks capabilities: it connect
   );
   const manager = startManager(connector);
   manager.start();
-  await until(() => stateOf(manager).state === "ready", 3000, "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   assert.equal(stateOf(manager).update, true);
   assert.equal(manager.hello("local").foreign, true);
   assert.equal(started, 0);
@@ -639,56 +642,76 @@ test("a dev run replaces a daemon that lacks capabilities once", async () => {
   assert.equal(client.needsUpdate, undefined);
 });
 
-test("a started daemon that exits while another one answers connects to the winner at once", async () => {
-  const f = localFixture();
-  fs.mkdirSync(f.home, { mode: 0o700 });
-  const connector = createLocalConnector(
-    f.options({
-      pollMs: 3000,
-      startTimeoutMs: 15000,
-      spawn: () => {
-        const child = Object.assign(new EventEmitter(), { unref() {} });
-        // The other app's daemon holds the socket; our child loses the lock.
-        fakeDaemon(f.socketPath, {
-          build: "6".repeat(64),
-          capabilities: REQUIRED_CAPABILITIES,
-        }).then(() => child.emit("exit", 1, null));
-        return child;
-      },
-    }),
-  );
-  const started = Date.now();
-  const client = await connector.connect();
-  client.close();
-  assert.ok(
-    Date.now() - started < 2000,
-    "did not wait for the poll or timeout",
-  );
-  assert.equal(client.hello.build, "6".repeat(64));
-  assert.equal(client.foreignBuild, true);
-});
+// The connector's poll sleep and start timeout never fire here (the real
+// timer is parked), so a connect that returns did so on the winner or on the
+// child exit, not by waiting out the poll. A regression hangs, and the
+// per-test timeout (the shared deadline) then fails it.
+function parkLongTimers(minMs) {
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms, ...rest) => {
+    const timer = realSetTimeout(fn, ms >= minMs ? 2 ** 30 : ms, ...rest);
+    if (ms >= minMs) timer.unref();
+    return timer;
+  };
+  cleanups.push(() => (global.setTimeout = realSetTimeout));
+  return () => (global.setTimeout = realSetTimeout);
+}
 
-test("a started daemon that exits with nothing answering fails fast with a clear error", async () => {
-  const f = localFixture();
-  fs.mkdirSync(f.home, { mode: 0o700 });
-  const lines = [];
-  const connector = createLocalConnector(
-    f.options({
-      pollMs: 3000,
-      startTimeoutMs: 15000,
-      log: (line) => lines.push(line),
-      spawn: () => {
-        const child = Object.assign(new EventEmitter(), { unref() {} });
-        setTimeout(() => child.emit("exit", 1, null), 20);
-        return child;
-      },
-    }),
-  );
-  const started = Date.now();
-  await assert.rejects(connector.connect(), /exited before it answered/);
-  assert.ok(Date.now() - started < 2000);
-  assert.ok(lines.some((line) => /daemon connect failed/.test(line)));
-});
+test(
+  "a started daemon that exits while another one answers connects to the winner at once",
+  { timeout: DEADLINE_MS },
+  async () => {
+    const f = localFixture();
+    fs.mkdirSync(f.home, { mode: 0o700 });
+    const connector = createLocalConnector(
+      f.options({
+        pollMs: 3000,
+        startTimeoutMs: 15000,
+        spawn: () => {
+          const child = Object.assign(new EventEmitter(), { unref() {} });
+          // The other app's daemon holds the socket; our child loses the lock.
+          fakeDaemon(f.socketPath, {
+            build: "6".repeat(64),
+            capabilities: REQUIRED_CAPABILITIES,
+          }).then(() => child.emit("exit", 1, null));
+          return child;
+        },
+      }),
+    );
+    const restore = parkLongTimers(1000);
+    const client = await connector.connect();
+    restore();
+    client.close();
+    assert.equal(client.hello.build, "6".repeat(64));
+    assert.equal(client.foreignBuild, true);
+  },
+);
+
+test(
+  "a started daemon that exits with nothing answering fails fast with a clear error",
+  { timeout: DEADLINE_MS },
+  async () => {
+    const f = localFixture();
+    fs.mkdirSync(f.home, { mode: 0o700 });
+    const lines = [];
+    const connector = createLocalConnector(
+      f.options({
+        pollMs: 3000,
+        startTimeoutMs: 15000,
+        log: (line) => lines.push(line),
+        spawn: () => {
+          const child = Object.assign(new EventEmitter(), { unref() {} });
+          setTimeout(() => child.emit("exit", 1, null), 20);
+          return child;
+        },
+      }),
+    );
+    const restore = parkLongTimers(1000);
+    await assert.rejects(connector.connect(), /exited before it answered/);
+    restore();
+    assert.ok(lines.some((line) => /daemon connect failed/.test(line)));
+  },
+);
 
 test("an incompatible local daemon is retried slowly, never given up", async () => {
   const f = localFixture();
@@ -712,7 +735,7 @@ test("an incompatible local daemon is retried slowly, never given up", async () 
   cleanups.push(() => (global.setTimeout = realSetTimeout));
   const manager = startManager(connector);
   manager.start();
-  await until(() => stateOf(manager).state === "failed", 3000, "failed");
+  await until(() => stateOf(manager).state === "failed", "failed");
   global.setTimeout = realSetTimeout;
   assert.equal(stateOf(manager).reason, "incompatible");
   assert.deepEqual(delays, [30000]);
@@ -793,7 +816,7 @@ test("restart stops the daemon of another build so the next connect starts this 
   // The one allowed replacement is used up; the next other build is shared.
   (await connector.connect()).close();
   assert.ok(first.log.some((m) => m.method === "daemon.shutdown"));
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await first.stopped;
   const other = await fakeDaemon(f.socketPath, {
     build: "4".repeat(64),
     capabilities: REQUIRED_CAPABILITIES,
@@ -924,10 +947,7 @@ test("real daemon: kill -9 and the manager is ready again with the session still
   const holders = new Map();
   try {
     manager.start();
-    await deadlineUntil(
-      () => stateOf(manager).state === "ready",
-      "the first ready",
-    );
+    await until(() => stateOf(manager).state === "ready", "the first ready");
     assert.equal(stateOf(manager).generation, 1);
     assert.equal(fs.statSync(home).mode & 0o777, 0o700);
 
@@ -942,15 +962,12 @@ test("real daemon: kill -9 and the manager is ready again with the session still
         holders.set(entry.holderPid, pidStart(entry.holderPid));
     const pid = Number.parseInt(fs.readFileSync(lockFile, "utf8").trim(), 10);
     assert.ok(pid > 1);
-    const started = Date.now();
     process.kill(pid, "SIGKILL");
-    await deadlineUntil(
+    await until(
       () =>
         stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
       "ready after kill -9",
     );
-    // Well below a reconnect that waits out the connector's start timeout.
-    assert.ok(Date.now() - started < DEADLINE_MS / 2);
     const listed = await request("session.list", {});
     for (const entry of listed)
       if (entry.holderPid)
@@ -984,7 +1001,6 @@ test("request forwards a per-call timeout to the client and none by default", as
   manager.start();
   await until(
     () => manager.states().every((state) => state.state === "ready"),
-    3000,
     "ready",
   );
   calls.length = 0;

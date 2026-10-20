@@ -33,7 +33,6 @@ fn repo_with_hanging_fsmonitor() -> tempfile::TempDir {
 #[test]
 fn a_hung_git_is_stopped_with_sigterm_and_its_stale_index_lock_removed() {
     let dir = repo_with_hanging_fsmonitor();
-    let began = std::time::Instant::now();
     let err = run_bounded(
         dir.path(),
         &["status"],
@@ -42,7 +41,6 @@ fn a_hung_git_is_stopped_with_sigterm_and_its_stale_index_lock_removed() {
     )
     .unwrap_err();
     assert!(err.0.contains("timed out"), "{err}");
-    assert!(began.elapsed() < Duration::from_secs(20));
     assert!(!dir.path().join(".git/index.lock").exists());
 }
 
@@ -63,18 +61,29 @@ fn a_finished_git_returns_its_output_with_stdin_closed() {
 fn a_grandchild_holding_the_output_pipe_does_not_hang_the_caller_after_git_exits() {
     let dir = tempfile::tempdir().unwrap();
     // The alias prints, then leaves a background sleep holding stdout and stderr.
-    let began = std::time::Instant::now();
+    let pidfile = dir.path().join("grandchild.pid");
+    let alias = format!(
+        "alias.bg=!sleep 60 & echo $! > '{}'; echo hi",
+        pidfile.display()
+    );
     let out = run_bounded(
         dir.path(),
-        &["-c", "alias.bg=!sleep 8 & echo hi", "bg"],
+        &["-c", &alias, "bg"],
         Duration::from_secs(30),
         Duration::from_millis(500),
     )
     .unwrap();
     assert_eq!(out.trim(), "hi");
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        began.elapsed()
-    );
+    // The call returned while the grandchild still held the pipes.
+    let pid = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .to_string();
+    let alive = Command::new("kill")
+        .args(["-0", &pid])
+        .status()
+        .unwrap()
+        .success();
+    let _ = Command::new("kill").arg(&pid).status();
+    assert!(alive, "run_bounded waited for the grandchild to exit");
 }

@@ -14,13 +14,18 @@ const hello = (version) => ({ host: "h1", version, build: OTHER_BUILD });
 async function updateFlags(answer) {
   const listeners = [];
   const updates = [];
+  let compared;
+  const reachedCompare = new Promise((resolve) => (compared = resolve));
   watchHostTools({
     manager: {
       on: (name, callback) => {
         listeners.push(callback);
         return () => {};
       },
-      hello: () => answer,
+      hello: () => {
+        compared();
+        return answer;
+      },
       setUpdate: (host, flag) => updates.push([host, flag]),
     },
     connections: { hasShell: () => true, exec: async () => "Linux x86_64" },
@@ -29,7 +34,8 @@ async function updateFlags(answer) {
     manifest: () => ({ manifest: { "Linux x86_64": BUNDLED } }),
   });
   listeners[0]({ host: "h1", state: "ready", generation: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // setUpdate runs in the same turn as hello, so it has run once this resumes.
+  await reachedCompare;
   return updates;
 }
 

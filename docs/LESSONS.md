@@ -39,12 +39,13 @@ Rule: compare owner authority at publication; retain paid observations, then rel
 
 ## Promoted
 
+- 2026-10-20 Wall-clock test bounds flaked under load → count work, order events or fake the clock. `check-conventions.mjs`.
 - 2026-10-15 A rejected continuation keeps its paid usage: `resume_fallback`.
 - 2026-10-15 A live amendment's plan is published before its queue is cleared: `amend`.
 - 2026-10-15 Acknowledged amendments survive restart: `an_acknowledged_live_wait_edit_survives_the_daemon_and_applies_after_restart`.
 - 2026-10-14 New agent turns require matching fakes: parent landing route-review replay and `tests/common`.
 - 2026-10-06 Build one real caller before generalizing: `AGENTS.md`, Core stays generic.
-- 2026-10-07 Test daemons must isolate inherited homes: `tests/helpers/real-daemon.cjs`; isolation checks in `check-conventions.mjs`.
+- 2026-10-07 Test daemons and launchers isolate `SUSHIAI_HOME`, `HOME` and `CODEX_HOME`: `tests/helpers/real-daemon.cjs`, `check-conventions.mjs`.
 
 - 2026-10-14 PR delivery must carry onto the newest base and recheck before push: `a_done_task_whose_base_moved_is_carried_onto_the_new_base_before_the_push`.
 - 2026-10-14 Fail-fast hid later baseline regressions → use `--no-fail-fast`. `tests/baseline_cargo.rs`.
@@ -57,5 +58,4 @@ Rule: compare owner authority at publication; retain paid observations, then rel
 - 2026-10-07 Build before real-daemon tests; CI must reject skipped smoke. `tests/helpers/real-daemon.cjs`.
 - 2026-10-07 A new session's first `hook.open` came before its actor and was refused → wait for every live session without an actor. `a_new_session_without_its_actor_is_waited_for_and_an_exited_one_is_not`.
 - 2026-10-07 A restart clamped saved bounds to a small CI screen → hidden test windows skip saved bounds. `smoke.mjs`.
-- 2026-10-07 Isolated test launchers must set `SUSHIAI_HOME`, `HOME` and `CODEX_HOME`. `check-conventions.mjs`.
 - 2026-10-09 A reused LAN address sent the Hub `rsync --delete` to another server → check the target runs the service first. Remote `hub-deploy.mjs` preflight.

@@ -16,9 +16,7 @@
 
 use serde::Deserialize;
 
-pub use sushiai_protocol::agents::{
-    AgentCatalog as Catalog, AgentsCatalogQuery as Query, CatalogModel as Model,
-};
+pub use sushiai_protocol::agents::{AgentCatalog as Catalog, CatalogModel as Model};
 
 /// What the caller read from the disk. This crate parses, never reads.
 #[derive(Debug, Default, Clone)]

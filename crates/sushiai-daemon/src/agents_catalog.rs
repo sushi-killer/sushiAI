@@ -8,16 +8,9 @@ use sushiai_agents::harness;
 use sushiai_agents::harness::catalog::Facts;
 use sushiai_protocol::agents::AgentCatalog as Catalog;
 
-/// Params of the method, from the protocol crate where every other method's
-/// types live.
-pub use sushiai_protocol::agents::AgentsCatalogQuery as Query;
-
-/// Codex's config home: the one the caller named, else this process's own
-/// `CODEX_HOME` (the one a Codex it launches would read), else `~/.codex`.
-fn codex_home(named: Option<&str>) -> Option<PathBuf> {
-    if let Some(dir) = named.filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
+/// Codex's config home: this process's own `CODEX_HOME` (the one a Codex it
+/// launches would read), else `~/.codex`.
+fn codex_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
@@ -32,9 +25,13 @@ fn read(path: &Path) -> Option<String> {
 }
 
 /// The catalog of every agent, in registry order.
-pub fn agents(query: &Query) -> Vec<Catalog> {
-    let codex = codex_home(query.config_home.as_deref());
-    let file = |name: &str| codex.as_deref().and_then(|d| read(&d.join(name)));
+pub fn agents() -> Vec<Catalog> {
+    agents_in(codex_home().as_deref())
+}
+
+/// The catalog with Codex's files read from `codex`.
+fn agents_in(codex: Option<&Path>) -> Vec<Catalog> {
+    let file = |name: &str| codex.and_then(|d| read(&d.join(name)));
     harness::catalogs(&Facts {
         codex_cache: file("models_cache.json"),
         codex_config: file("config.toml"),
@@ -49,10 +46,10 @@ mod tests {
         std::fs::write(dir.join(name), text).expect("the fixture is writable");
     }
 
-    /// The named home wins over the environment, and its two files reach the
-    /// table: the cache lists the models, the config names the default.
+    /// The home's two files reach the table: the cache lists the models, the
+    /// config names the default.
     #[test]
-    fn a_named_codex_home_is_read() {
+    fn a_codex_home_is_read() {
         let dir = tempfile::tempdir().expect("a temp dir");
         write(
             dir.path(),
@@ -62,10 +59,7 @@ mod tests {
                  "supported_reasoning_levels":[{"effort":"high"}]}]}"#,
         );
         write(dir.path(), "config.toml", "model = \"gpt-x\"\n");
-        let query = Query {
-            config_home: Some(dir.path().to_string_lossy().into_owned()),
-        };
-        let codex = agents(&query)
+        let codex = agents_in(Some(dir.path()))
             .into_iter()
             .find(|c| c.id == "codex")
             .expect("codex is registered");
@@ -73,7 +67,7 @@ mod tests {
         assert_eq!(codex.default_model, "gpt-x");
         assert_eq!(codex.default_context, 400_000);
         // Every other agent is unaffected by a Codex home.
-        let claude = agents(&query)
+        let claude = agents_in(Some(dir.path()))
             .into_iter()
             .find(|c| c.id == "claude")
             .expect("claude is registered");
@@ -84,10 +78,7 @@ mod tests {
     #[test]
     fn a_home_without_files_still_answers() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let query = Query {
-            config_home: Some(dir.path().to_string_lossy().into_owned()),
-        };
-        let codex = agents(&query)
+        let codex = agents_in(Some(dir.path()))
             .into_iter()
             .find(|c| c.id == "codex")
             .expect("codex is registered");

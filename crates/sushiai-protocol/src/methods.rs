@@ -108,9 +108,9 @@ pub mod method {
     // The agent catalog (additive). Unrelated to `catalog.get`, which is the
     // projects and groups of this host.
     /// Request: what each agent CLI on this host offers — its models, their
-    /// reasoning levels, the permission modes and the defaults. Params:
-    /// `{configHome?}`; none reads the daemon's own Codex home. Result: one
-    /// `Catalog` per agent, in registry order.
+    /// reasoning levels, the permission modes and the defaults. No params: it
+    /// reads the daemon's own Codex home. Result: one `AgentCatalog` per agent,
+    /// in registry order.
     pub const AGENTS_CATALOG: &str = "agents.catalog";
 }
 

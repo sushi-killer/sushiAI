@@ -3,7 +3,7 @@
 //! the permission modes. The table is `sushiai_agents::harness::catalog`; the
 //! daemon's reader supplies this host's own Codex files. Needs no daemon.
 
-use sushiai_daemon::agents_catalog::{self, Query};
+use sushiai_daemon::agents_catalog;
 
 pub fn run(args: impl Iterator<Item = String>) -> i32 {
     let args: Vec<String> = args.collect();
@@ -21,7 +21,7 @@ pub fn run(args: impl Iterator<Item = String>) -> i32 {
 }
 
 fn print(args: &[String]) -> Result<(), String> {
-    let catalogs = agents_catalog::agents(&Query::default());
+    let catalogs = agents_catalog::agents();
     if args.iter().any(|a| a == "--json") {
         let text = serde_json::to_string_pretty(&catalogs).map_err(|e| e.to_string())?;
         println!("{text}");

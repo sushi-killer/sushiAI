@@ -44,13 +44,3 @@ pub struct AgentCatalog {
     /// The window of the default model; 0 when it is unknown.
     pub default_context: u64,
 }
-
-/// Params of `agents.catalog`: which Codex home to read. The caller's own
-/// (`CODEX_HOME`, else `~/.codex`) when it names none. The result is one
-/// [`AgentCatalog`] per agent, in registry order.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentsCatalogQuery {
-    #[serde(default)]
-    pub config_home: Option<String>,
-}

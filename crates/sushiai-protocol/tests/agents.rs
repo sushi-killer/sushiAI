@@ -2,7 +2,7 @@
 //! this same JSON, so a renamed key is a broken client.
 
 use serde_json::json;
-use sushiai_protocol::agents::{AgentCatalog, AgentsCatalogQuery};
+use sushiai_protocol::agents::AgentCatalog;
 use sushiai_protocol::CAPABILITIES;
 
 #[test]
@@ -48,31 +48,6 @@ fn the_catalog_carries_every_field_a_client_reads() {
         assert!(back.get(key).is_some(), "no {key}");
     }
     assert!(back["models"][0].get("defaultEffort").is_some());
-}
-
-/// A caller that sends no params reads its own Codex home; naming one is
-/// optional, so both an absent field and an explicit null are the same thing.
-#[test]
-fn the_params_name_a_codex_home_or_nothing() {
-    assert_eq!(
-        serde_json::from_value::<AgentsCatalogQuery>(json!({}))
-            .expect("parse")
-            .config_home,
-        None
-    );
-    assert_eq!(
-        serde_json::from_value::<AgentsCatalogQuery>(json!({"configHome": null}))
-            .expect("parse")
-            .config_home,
-        None
-    );
-    assert_eq!(
-        serde_json::from_value::<AgentsCatalogQuery>(json!({"configHome": "/work/.codex"}))
-            .expect("parse")
-            .config_home
-            .as_deref(),
-        Some("/work/.codex")
-    );
 }
 
 /// The method is advertised, so a client can tell a daemon that serves it from

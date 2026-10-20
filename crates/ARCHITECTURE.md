@@ -178,7 +178,7 @@ full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A part
   writer thread as `state.json`. A catalog file that cannot be read is renamed to
   `catalog.json.unreadable-<ts>` and the desktop syncs again. Bindings are opaque
   to the daemon (below), so a lost or unsynced catalog never blocks a launch.
-- **Agent catalog.** `agents.catalog {configHome?}` (capability `agentsCatalog`)
+- **Agent catalog.** `agents.catalog` (capability `agentsCatalog`)
   answers one catalog per agent, in registry order: its models, their reasoning
   levels, the levels the routine builder offers, the permission modes and the
   defaults. The table is `sushiai_agents::harness::catalog`; `agents_catalog` only

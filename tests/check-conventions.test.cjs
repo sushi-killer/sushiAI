@@ -565,6 +565,32 @@ test("a module directory may not import the shell", () => {
   fs.rmSync(tree, { recursive: true, force: true });
 });
 
+test("a list of reasoning levels in the app fails; Hermes keeps its own", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "effort-list-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  const levels = 'export const levels = ["low", "high", "xhigh"];\n';
+  write("electron/agents/hermes-addons.cjs", levels);
+  write("src/routines/picker.ts", "export const levels = catalog.efforts;\n");
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/routines/copy.ts", levels);
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/routines\/copy\.ts writes an agent's reasoning levels/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});
+
 test("a test that reads a document to assert its wording fails", () => {
   const fs = require("node:fs");
   const os = require("node:os");

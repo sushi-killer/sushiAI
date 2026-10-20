@@ -14,7 +14,6 @@ const KIND_LABEL: Record<ModelProviderKind, string> = {
   "opencode-go": "OpenCode Go",
   custom: "Custom",
 };
-const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const CONTEXT_PRESETS = [
   { value: 0, label: "Model default" },
   { value: 128000, label: "128K" },
@@ -64,9 +63,22 @@ function ProfileForm({
   );
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  // A profile runs Claude Code, so it offers Claude's levels from the daemon's
+  // agent catalog. A saved level stays selectable while the catalog is away.
+  const [efforts, setEfforts] = useState<string[]>([]);
   useEffect(() => {
     window.bridge?.providersModels(provider.id).then(setModels);
   }, [provider.id]);
+  useEffect(() => {
+    window.bridge
+      ?.chatModels()
+      .then((catalog) => setEfforts(catalog?.claude?.efforts || []));
+  }, []);
+  const effortOptions = [
+    "",
+    ...efforts,
+    ...(effort && !efforts.includes(effort) ? [effort] : []),
+  ];
   return (
     <form
       className="model-profile-form"
@@ -149,7 +161,7 @@ function ProfileForm({
             value={effort}
             onChange={(event) => setEffort(event.target.value)}
           >
-            {EFFORTS.map((e) => (
+            {effortOptions.map((e) => (
               <option key={e} value={e}>
                 {e || "Default"}
               </option>

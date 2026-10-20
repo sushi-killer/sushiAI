@@ -128,10 +128,10 @@ fn replace_file(path: &Path, text: &str) -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     if path.exists() {
-        sushiai_agents::codex_hooks::backup_file(path, ts)
+        sushiai_agents::file::backup_file(path, ts)
             .with_context(|| format!("cannot back up {}", path.display()))?;
     }
-    sushiai_agents::codex_hooks::write_text_atomic(path, text, ts)
+    sushiai_agents::file::write_atomic(path, text.as_bytes(), false)
         .with_context(|| format!("cannot replace {}", path.display()))
 }
 

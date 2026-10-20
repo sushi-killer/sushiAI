@@ -16,7 +16,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use toml_edit::{value, DocumentMut, Item, Table};
 
-use crate::codex_hooks::{backup_file, io_err, is_ours, write_text_atomic, HooksFileError};
+use super::hooks::{io_err, is_ours, HooksFileError};
+use crate::file;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrustError {
@@ -306,10 +307,10 @@ fn rewrite_config(
         });
     }
     let backup = match current {
-        Some(_) => Some(backup_file(path, ts)?),
+        Some(_) => Some(file::backup_file(path, ts).map_err(io_err(path))?),
         None => None,
     };
-    write_text_atomic(path, &next, ts)?;
+    file::write_atomic(path, next.as_bytes(), false).map_err(io_err(path))?;
     let written = fs::read_to_string(path).map_err(io_err(path))?;
     verify(&parse_doc(&written)?)?;
     Ok(TrustOutcome {
@@ -319,7 +320,7 @@ fn rewrite_config(
 }
 
 /// Trust our handlers in `hooks_path` by writing `config_path`. Call after
-/// `codex_hooks::install` (indices come from the file as it is now). Backs up
+/// `hooks::install` (indices come from the file as it is now). Backs up
 /// config.toml (newest 3 kept), writes atomically and checks the keys.
 pub fn trust(config_path: &Path, hooks_path: &Path, ts: u64) -> Result<TrustOutcome, TrustError> {
     let abs = abs_str(hooks_path)?;
@@ -346,7 +347,7 @@ pub fn trust(config_path: &Path, hooks_path: &Path, ts: u64) -> Result<TrustOutc
 }
 
 /// Remove the trust entries of our handlers. Call BEFORE
-/// `codex_hooks::uninstall`, while `hooks_path` still holds them.
+/// `hooks::uninstall`, while `hooks_path` still holds them.
 pub fn untrust(config_path: &Path, hooks_path: &Path, ts: u64) -> Result<TrustOutcome, TrustError> {
     let abs = abs_str(hooks_path)?;
     let keys: Vec<String> = trust_entries(&read_hooks(hooks_path)?, &abs)

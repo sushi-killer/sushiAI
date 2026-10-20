@@ -5,10 +5,9 @@ use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use sushiai_agents::heuristic::ScreenAgent;
-use sushiai_agents::launch::{self, AgentSession, LaunchParams};
+use sushiai_agents::harness;
+use sushiai_agents::harness::launch::{self, AgentSession, LaunchParams};
 use sushiai_agents::status::{Status, StatusSource as AgentSource};
-use sushiai_agents::Agent;
 use sushiai_protocol::{code, AgentInfo, AgentStatus, Decision, SessionCreate, StatusSource};
 
 use crate::error::Fail;
@@ -56,27 +55,10 @@ fn uuid_v4() -> std::io::Result<String> {
     ))
 }
 
-/// Every agent name the daemon knows. The foreground detection of a hand-started agent
-/// matches these and no others.
-pub const AGENT_NAMES: &[&str] = &["claude", "codex", "gemini", "cursor-agent"];
-
-pub fn agent_of(name: Option<&str>) -> Option<Agent> {
-    match name {
-        Some("claude") => Some(Agent::Claude),
-        Some("codex") => Some(Agent::Codex),
-        _ => None,
-    }
-}
-
-/// The screen heuristic that reads an agent's status: `gemini` and `cursor-agent` send no
-/// hooks at all, and Codex shows some dialogs no hook reports.
-pub fn screen_agent_of(name: Option<&str>) -> Option<ScreenAgent> {
-    match name {
-        Some("gemini") => Some(ScreenAgent::Gemini),
-        Some("cursor-agent") => Some(ScreenAgent::Cursor),
-        Some("codex") => Some(ScreenAgent::Codex),
-        _ => None,
-    }
+/// The agent whose sessions the daemon launches: `claude` and `codex`. Every other name
+/// (gemini, cursor-agent, shell, unknown) is a plain command.
+pub fn agent_of(name: Option<&str>) -> Option<harness::HarnessRef> {
+    harness::agent_of(name?)
 }
 
 pub fn status_to_wire(s: Status) -> AgentStatus {
@@ -148,10 +130,11 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
             return Err(invalid("cmd, cols and rows are required"));
         }
         // An agent without hooks starts with a screen-read status.
-        let screen_only = matches!(
-            screen_agent_of(p.agent.as_deref()),
-            Some(ScreenAgent::Gemini | ScreenAgent::Cursor)
-        );
+        let screen_only = p
+            .agent
+            .as_deref()
+            .and_then(harness::find)
+            .is_some_and(|h| h.screen().is_some() && h.launch().is_none());
         let agent = AgentInfo {
             name: p.agent.clone(),
             agent_status: screen_only.then_some(AgentStatus::Starting),
@@ -169,11 +152,12 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
             agent,
         });
     };
+    let caps = agent.capabilities();
     let token = random_hex(16).map_err(internal)?;
-    let minted = match (&p.resume, agent) {
+    let minted = match (&p.resume, caps.session_id) {
         (Some(resume), _) => Some(resume.clone()),
-        (None, Agent::Claude) => Some(uuid_v4().map_err(internal)?),
-        (None, Agent::Codex) => None,
+        (None, true) => Some(uuid_v4().map_err(internal)?),
+        (None, false) => None,
     };
     let session = match (&p.resume, &minted) {
         (Some(r), _) => AgentSession::Resume(r),
@@ -189,11 +173,11 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         extra_args.extend(["--model".to_string(), model.clone()]);
     }
     extra_args.extend(p.extra_args.iter().cloned());
-    if agent != Agent::Claude && p.claude_settings.is_some() {
+    if !caps.settings_json && p.claude_settings.is_some() {
         return Err(invalid("claudeSettings needs agent claude"));
     }
-    let spec = launch::build(&LaunchParams {
-        agent,
+    let params = LaunchParams {
+        harness: agent,
         hook_bin: &hook_bin,
         socket,
         sushiai_session_id: id,
@@ -204,8 +188,8 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         permission_wait_secs: ASK_WAIT_SECS,
         claude_settings: p.claude_settings.as_ref(),
         headless: p.headless,
-    })
-    .map_err(|e| invalid(&e.to_string()))?;
+    };
+    let spec = launch::build(&params).map_err(|e| invalid(&e.to_string()))?;
     env.extend(spec.vars);
     if p.headless {
         // A print-mode turn calls the daemon's own CLI by name (`sushiai ...`) and may start
@@ -218,8 +202,20 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
             .or_else(|| std::env::var("PATH").ok());
         env.push(("PATH".into(), path_with_dir(&hook_bin, base.as_deref())));
     }
+    // The recorded command keeps our own settings only; the caller's keys may be secrets.
+    let cmd = if p.claude_settings.is_some() {
+        let ours = LaunchParams {
+            claude_settings: None,
+            ..params
+        };
+        launch::build(&ours)
+            .map_err(|e| invalid(&e.to_string()))?
+            .argv
+    } else {
+        spec.argv.clone()
+    };
     let agent_info = AgentInfo {
-        name: Some(agent.as_str().into()),
+        name: Some(agent.id().into()),
         agent_session: minted,
         agent_status: Some(AgentStatus::Starting),
         status_source: Some(StatusSource::Heuristic),
@@ -227,18 +223,6 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         token_hash: Some(hash_token(&token)),
         ..AgentInfo::default()
     };
-    let mut cmd = spec.argv.clone();
-    if p.claude_settings.is_some() {
-        // The recorded command keeps our own settings only; the caller's keys may be secrets.
-        let ours = launch::claude_settings(&hook_bin, ASK_WAIT_SECS)
-            .map_err(|e| invalid(&e.to_string()))?
-            .to_string();
-        if let Some(at) = cmd.iter().position(|a| a == "--settings") {
-            if let Some(value) = cmd.get_mut(at + 1) {
-                *value = ours;
-            }
-        }
-    }
     Ok(Prepared {
         cmd,
         run_cmd: spec.argv,
@@ -254,7 +238,12 @@ static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// put our hooks and their trust there before Codex starts. Both steps are idempotent. The
 /// directory must be absolute and free of `~`; nothing is written otherwise.
 pub fn ensure_codex_home(p: &SessionCreate, home_dir: &std::path::Path) -> Result<(), Fail> {
-    if agent_of(p.agent.as_deref()) != Some(Agent::Codex) {
+    let hooks_in_home = p
+        .agent
+        .as_deref()
+        .and_then(harness::agent_of)
+        .is_some_and(|h| h.capabilities().hooks_in_home);
+    if !hooks_in_home {
         return Ok(());
     }
     let Some(dir) = p.env.get("CODEX_HOME").filter(|d| !d.is_empty()) else {
@@ -284,9 +273,9 @@ pub fn ensure_codex_home(p: &SessionCreate, home_dir: &std::path::Path) -> Resul
     let dir = dir.canonicalize().map_err(|e| fail("directory", &e))?;
     let (hooks, config) = (dir.join("hooks.json"), dir.join("config.toml"));
     let ts = now_ms() / 1000;
-    sushiai_agents::codex_hooks::install(&hooks, &bin, ASK_WAIT_SECS, ts)
+    harness::codex::hooks::install(&hooks, &bin, ASK_WAIT_SECS, ts)
         .map_err(|e| fail("hooks.json", &e))?;
-    sushiai_agents::codex_trust::trust(&config, &hooks, ts).map_err(|e| fail("config.toml", &e))?;
+    harness::codex::trust::trust(&config, &hooks, ts).map_err(|e| fail("config.toml", &e))?;
     Ok(())
 }
 

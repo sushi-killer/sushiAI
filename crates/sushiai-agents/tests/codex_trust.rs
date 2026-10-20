@@ -1,8 +1,8 @@
 use std::fs;
 
 use serde_json::{json, Value};
-use sushiai_agents::codex_hooks::{install, merge};
-use sushiai_agents::codex_trust::{
+use sushiai_agents::harness::codex::hooks::{install, merge};
+use sushiai_agents::harness::codex::trust::{
     apply_trust, handler_hash, remove_trust, trust, trust_entries, untrust,
 };
 

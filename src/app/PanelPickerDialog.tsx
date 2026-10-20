@@ -43,12 +43,12 @@ import type {
   Workspace,
 } from "../types";
 
-const AGENTS = ["claude", "codex", "gemini", "cursor-agent"];
+const AGENTS = ["claude", "codex", "gemini", "cursor"];
 const GLYPHS: Record<string, string> = {
   claude: "✳",
   codex: "✺",
   gemini: "✦",
-  "cursor-agent": "⌘",
+  cursor: "⌘",
 };
 const TOOLS = [
   {

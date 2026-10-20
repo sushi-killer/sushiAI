@@ -16,7 +16,7 @@ export const Icon = ({
   agent?: string;
   size?: number;
 }) =>
-  agent && ["claude", "codex", "gemini", "cursor-agent"].includes(agent) ? (
+  agent && ["claude", "codex", "gemini", "cursor"].includes(agent) ? (
     <img
       className="harness-icon"
       src={`./agents/${agent}.svg`}

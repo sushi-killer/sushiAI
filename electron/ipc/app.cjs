@@ -65,7 +65,7 @@ function registerAppIpc({
     home: os.homedir(),
     cwd: app.isPackaged ? os.homedir() : process.cwd(),
     platform: process.platform,
-    agents: ["claude", "codex", "gemini", "cursor-agent"].map((name) => ({
+    agents: ["claude", "codex", "gemini", "cursor"].map((name) => ({
       name,
       path: executable(name),
     })),

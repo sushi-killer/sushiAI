@@ -13,7 +13,7 @@ export const AGENT_NAMES: Record<string, string> = {
   claude: "Claude Code",
   codex: "Codex",
   gemini: "Gemini CLI",
-  "cursor-agent": "Cursor",
+  cursor: "Cursor Agent",
 };
 
 /** The name to show for an agent id; the id itself for anything unknown. */

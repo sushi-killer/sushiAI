@@ -5,8 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use sushiai_agents::harness::Homes;
 use sushiai_agents::skill_usage::{index, IndexStats, SkillUsage, Usage};
-use sushiai_agents::skills::{scan, Homes};
+use sushiai_agents::skills::scan;
 
 /// 2026-10-19T12:00:00Z
 const NOW: i64 = 1_792_411_200_000;

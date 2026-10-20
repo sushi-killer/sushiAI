@@ -977,6 +977,32 @@ fn gemini_and_cursor_status_is_read_from_the_screen() {
     );
 }
 
+/// Claude has hooks, so its screen is never read: the same text that blocks a Gemini session
+/// leaves this one where it started, with no hook and no ask.
+#[test]
+fn a_claude_session_never_reads_its_screen() {
+    let flow = r#"
+process.stdout.write('Waiting for user confirmation\n');
+say('screen');
+stay();
+"#;
+    let fake = Fake::new("claude", flow);
+    let mut sandbox = fake.sandbox();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = create_agent(&mut client, "claude");
+    wait_file(&fake.out("screen"), "x");
+    // The text is on the terminal; a session whose screen is read would block on it.
+    holds_for("Claude not reading its screen", ABSENCE_WINDOW, || {
+        agent_status(&mut client, &id).0 != "blocked"
+    });
+    assert_eq!(
+        agent_status(&mut client, &id),
+        ("starting".into(), "heuristic".into()),
+        "nothing but a hook may move a Claude session"
+    );
+}
+
 #[test]
 fn a_codex_dialog_no_hook_reports_blocks_the_session_until_hooks_take_over() {
     let flow = r#"

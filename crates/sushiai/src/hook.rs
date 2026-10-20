@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sushiai_agents::launch::permission_timeout;
+use sushiai_agents::harness::launch::permission_timeout;
 use sushiai_daemon::ASK_WAIT_SECS;
 use sushiai_protocol::{
     encode, method, Decoder, Frame, Hello, HookEvent, HookResult, Message, Request,

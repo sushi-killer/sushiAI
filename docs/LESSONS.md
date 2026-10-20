@@ -22,20 +22,15 @@ one index line; git history keeps the detail and updates.
 
 ## Open
 
+## 2026-10-20 - a registry replacing a per-variant match widens a predicate
+
+Root cause: one `ids()` was to replace the daemon's 4-name `AGENT_NAMES`, but the registry holds 5 agents; and a screen taken from `find(name)` would have let Claude read its screen, which only hook-less agents may do.
+Rule: when a table replaces a `match`, name every predicate its arms encoded (`process_name()`, `agent()`, `screen()`), and pin the old truth table in a contract test.
+
 ## 2026-10-19 — orch tests wrote a hook into the machine's global hooks folder
 
 Root cause: tests resolve `git rev-parse --git-path hooks`, which follows a global `core.hooksPath`; every repo on the Mac then ran the test hook.
 Rule: test repos pin `core.hooksPath` to their own `.git/hooks` or run with `GIT_CONFIG_GLOBAL` set to a temp file.
-
-## 2026-10-15 — a rejected continuation lost paid usage during fresh fallback
-
-Root cause: the fresh result replaced the rejected outcome, restoring the attempt allowance and dropping spend from task totals.
-Rule: preserve both invocation receipts, combine usage once and pass only the remaining allowance. Cover cancellation and exhaustion in `resume_fallback`.
-
-## 2026-10-15 — clearing a live amendment before publishing its plan lost the next edit
-
-Root cause: baseline IO cleared the queue before publishing its admitted contract; the next accepted RPC captured stale content.
-Rule: publish the plan and clear the queue under one lock before IO; guard results by full content identity. Persist relay carries before attempt admission; never call locking save helpers under that same lock.
 
 ## 2026-10-15 — a late save restored an owner-revoked waiver
 
@@ -45,6 +40,8 @@ Rule: compare owner authority at publication; retain paid observations, then rel
 ## Promoted
 
 - 2026-10-20 Wall-clock test bounds flaked under load → count work, order events or fake the clock. `check-conventions.mjs`.
+- 2026-10-15 A rejected continuation keeps its paid usage: `resume_fallback`.
+- 2026-10-15 A live amendment's plan is published before its queue is cleared: `amend`.
 - 2026-10-15 Acknowledged amendments survive restart: `an_acknowledged_live_wait_edit_survives_the_daemon_and_applies_after_restart`.
 - 2026-10-14 New agent turns require matching fakes: parent landing route-review replay and `tests/common`.
 - 2026-10-06 Build one real caller before generalizing: `AGENTS.md`, Core stays generic.

@@ -1,7 +1,26 @@
-/* Vault token: its own Settings tab; the field never shows the token. */
+/* Vault address and token: the Settings tab; the token field never shows it. */
+.vault-address,
 .vault-token {
   display: grid;
+  gap: 6px;
+}
+.vault-address + .vault-token {
+  margin-top: 24px;
+}
+.vault-conflict {
+  display: flex;
+  align-items: flex-start;
   gap: 8px;
+  color: var(--tone-warning);
+  font-size: var(--text-sm);
+  line-height: 18px;
+}
+.vault-conflict p {
+  flex: 1;
+  margin: 0;
+}
+.vault-address .muted {
+  margin: 0;
 }
 .vault-token-head {
   display: flex;
@@ -46,7 +65,7 @@
 }
 .pd-vault-fields {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin-top: 14px;
 }
@@ -94,24 +113,16 @@
   gap: 8px;
   margin-top: 14px;
 }
-.pd-vault-result {
-  margin-top: 14px;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
+
+/* Vault names in the Variables table; a failed read spans the data columns. */
+.pd-env .vault-env-reason {
+  grid-column: 2 / -1;
 }
-.pd-vault-result p {
-  margin: 0 0 8px;
+.pd-env .vault-env-row.overridden {
+  opacity: 0.55;
 }
-.pd-vault-result ul {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.pd-vault-result li {
+.pd-env .vault-env-name {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text);
+  gap: 6px;
 }

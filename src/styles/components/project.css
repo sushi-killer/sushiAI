@@ -194,6 +194,10 @@
   line-height: 18px;
   text-align: center;
 }
+/* Rows a module provides make the empty hint untrue. */
+.pd-table:has(.pd-row.provided) .pd-empty-row {
+  display: none;
+}
 .pd-empty {
   margin: 20px 0 0;
   color: var(--text-muted);

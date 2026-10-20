@@ -51,4 +51,10 @@ const ROUTINES_MANIFEST = {
   },
 };
 
-module.exports = { ROUTINES_MANIFEST };
+/** The skill this extension ships: its name, its file in this folder. */
+const ROUTINES_SKILL = {
+  name: "sushiai-routines",
+  file: "routines-skill.md",
+};
+
+module.exports = { ROUTINES_MANIFEST, ROUTINES_SKILL };

@@ -92,10 +92,10 @@ test("the skill scopes its example tool grant and protects enabled routines", ()
 
 test("the registered skill text equals the file and follows the enabled predicate", async () => {
   const skills = require("../electron/extensions/builtin-skills.cjs");
-  const { configureRoutinesSkill } = require("../electron/routines-skill.cjs");
   let enabled = true;
-  configureRoutinesSkill({
+  skills.registerExtensionSkill({
     extensionId: "builtin.routines",
+    ...require("../electron/extensions/builtin-routines.cjs").ROUTINES_SKILL,
     isEnabled: () => enabled,
   });
   const runs = [];

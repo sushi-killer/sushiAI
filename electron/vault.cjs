@@ -11,14 +11,20 @@ const { readStore, writeStore } = require("./app-db.cjs");
 const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
 
 const STORE = "vault-token";
-// The per-project config, keyed by project id.
+// The per-project config (mount and paths), keyed by project id.
 const PROJECTS_STORE = "vault-projects";
+// The one Vault address of This Mac and the text of an address conflict the
+// move found, until the owner dismisses it: { address, conflict? }.
+const SETTINGS_STORE = "vault-settings";
+const MAX_NOTICE_BODY = 2000;
+const MAX_NOTICE_PROJECTS = 5;
 const MAX_PATHS = 10;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = 5000;
 const MAX_TOKEN = 4096;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+const NO_ADDRESS = "Vault: no address set";
 const NO_TOKEN = "Vault: no token saved";
 const UNREACHABLE = "Vault: unreachable";
 const TIMED_OUT = "Vault: timed out";
@@ -79,6 +85,7 @@ async function readPath(token, { address, mount }, secretPath) {
 /** Every path of a project's config merged in order (a later path wins), or
  * the first failure: one failed path drops every value. */
 async function readAll(token, config) {
+  if (!config.address) return { ok: false, reason: NO_ADDRESS };
   if (!token) return { ok: false, reason: NO_TOKEN };
   const values = {};
   for (const secretPath of config.paths) {
@@ -106,15 +113,14 @@ function vaultSegments(value, what) {
   return text;
 }
 
-/** A project's Vault settings, checked: an http(s) address without
- * credentials (kept without a trailing slash), a mount (`secret` when none is
- * given) and the KV paths read in order. */
-function vaultConfig(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    throw new Error("Invalid Vault settings.");
+/** The Vault address, checked: an http(s) URL without credentials, query or
+ * hash, kept without a trailing slash. An empty text means no address. */
+function vaultAddress(input) {
+  const text = typeof input === "string" ? input.trim() : null;
+  if (text === "") return "";
   let url;
   try {
-    url = new URL(String(input.address ?? "").trim());
+    url = new URL(text);
   } catch {
     url = null;
   }
@@ -127,6 +133,15 @@ function vaultConfig(input) {
     url.hash
   )
     throw new Error("The Vault address must be an http(s) URL.");
+  return url.href.replace(/\/+$/, "");
+}
+
+/** A project's Vault settings, checked: a mount (`secret` when none is given)
+ * and the KV paths read in order. The address is global, so a key `address`
+ * in the input is ignored. */
+function vaultConfig(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Invalid Vault settings.");
   if (
     !Array.isArray(input.paths) ||
     input.paths.length > MAX_PATHS ||
@@ -134,13 +149,45 @@ function vaultConfig(input) {
   )
     throw new Error(`Enter up to ${MAX_PATHS} Vault paths.`);
   return {
-    address: url.href.replace(/\/+$/, ""),
     mount:
       input.mount === undefined || input.mount === null
         ? "secret"
         : vaultSegments(input.mount, "mount"),
     paths: input.paths.map((item) => vaultSegments(item, "path")),
   };
+}
+
+const clip = (text, max) =>
+  text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+
+/** The address most projects used (a tie goes to the first one), and the
+ * notice text when other addresses were dropped. `byProject` is
+ * [[projectName, address]] in store order. Never holds a token. */
+function addressChoice(byProject, current) {
+  const groups = new Map();
+  for (const [name, address] of byProject) {
+    if (!groups.has(address)) groups.set(address, []);
+    groups.get(address).push(name);
+  }
+  let kept = current;
+  if (!kept)
+    for (const [address, names] of groups)
+      if (!kept || names.length > groups.get(kept).length) kept = address;
+  const dropped = [...groups].filter(([address]) => address !== kept);
+  if (!dropped.length) return { kept, body: null };
+  const list = (names) =>
+    names.length > MAX_NOTICE_PROJECTS
+      ? `${names.slice(0, MAX_NOTICE_PROJECTS).join(", ")} and ${names.length - MAX_NOTICE_PROJECTS} more`
+      : names.join(", ");
+  const used = groups.size + (current && !groups.has(current) ? 1 : 0);
+  const keptCount = groups.get(kept)?.length ?? 0;
+  const body = [
+    `Projects used ${used} Vault addresses.`,
+    `Kept ${kept} (${keptCount} ${keptCount === 1 ? "project" : "projects"}).`,
+    `Not kept: ${dropped.map(([address, names]) => `${address} (${list(names)})`).join("; ")}.`,
+    "Change it in Settings, Vault tab.",
+  ].join(" ");
+  return { kept, body: clip(body, MAX_NOTICE_BODY) };
 }
 
 /** Wires the module in. Resolves `ready` once the one-time move of the old
@@ -162,6 +209,29 @@ function registerVault({
 
   const cacheKey = ({ address, mount, paths }) =>
     JSON.stringify([address, mount, paths]);
+
+  const readSettings = () => {
+    const { address, conflict } = readStore(userDataDir, SETTINGS_STORE);
+    return {
+      address: typeof address === "string" ? address : "",
+      conflict: typeof conflict === "string" ? conflict : "",
+    };
+  };
+  const readAddress = () => readSettings().address;
+  const saveSettings = ({ address, conflict }) => {
+    writeStore(
+      userDataDir,
+      SETTINGS_STORE,
+      conflict ? { address, conflict } : { address },
+    );
+    return { address, conflict };
+  };
+  // The global address always wins: a stored `address` key is never read.
+  const withAddress = ({ mount, paths }) => ({
+    address: readAddress(),
+    mount,
+    paths,
+  });
 
   function readToken() {
     const stored = readStore(userDataDir, STORE).token;
@@ -242,7 +312,7 @@ function registerVault({
 
   const storedConfig = (id) => {
     const config = readStore(userDataDir, PROJECTS_STORE)[id];
-    return config?.paths?.length ? config : null;
+    return config?.paths?.length ? withAddress(config) : null;
   };
 
   /** The project's config; entries of projects that are gone are dropped. */
@@ -254,18 +324,27 @@ function registerVault({
     );
     if (Object.keys(kept).length !== Object.keys(stored).length)
       writeStore(userDataDir, PROJECTS_STORE, kept);
-    return Object.hasOwn(kept, id) ? kept[id] : null;
+    if (!Object.hasOwn(kept, id)) return null;
+    const { mount, paths } = kept[id];
+    return { mount, paths };
   }
 
   // Old per-project settings lived in the project store: take them over once.
-  const ready = projects
+  // An old entry keeps its address until the move below reads it.
+  const moved = projects
     .retireField("vault", async (found) => {
       const stored = readStore(userDataDir, PROJECTS_STORE);
       const next = { ...stored };
       for (const [id, config] of Object.entries(found))
         if (!Object.hasOwn(next, id))
           try {
-            next[id] = vaultConfig(config);
+            let address = "";
+            try {
+              address = vaultAddress(config?.address);
+            } catch {
+              // A bad old address is dropped; the mount and paths stay.
+            }
+            next[id] = { ...vaultConfig(config), address };
           } catch {
             // An invalid old config is dropped, never copied as it is.
           }
@@ -274,6 +353,62 @@ function registerVault({
     .catch(() => {
       console.warn("Vault: could not move the project settings");
     });
+
+  // The per-project addresses of older versions become the one global
+  // address; the entries keep only mount and paths. Safe to run again.
+  async function moveAddresses() {
+    const stored = readStore(userDataDir, PROJECTS_STORE);
+    if (
+      !Object.values(stored).some((config) =>
+        Object.hasOwn(config ?? {}, "address"),
+      )
+    )
+      return;
+    const names = new Map(
+      (await projects.list()).map((item) => [item.id, item.name]),
+    );
+    // Only projects that still exist vote; the entries of gone ones go.
+    const live = Object.entries(stored).filter(([id]) => names.has(id));
+    const byProject = [];
+    for (const [id, config] of live)
+      try {
+        const address = vaultAddress(config.address);
+        if (address) byProject.push([names.get(id), address]);
+      } catch {
+        // An address that is not a URL is dropped.
+      }
+    const current = readSettings();
+    const { kept, body } = addressChoice(byProject, current.address);
+    // One write holds the kept address and the conflict text, so the text
+    // survives a notice that cannot be shown.
+    if (kept !== current.address || body)
+      saveSettings({ address: kept, conflict: body ?? current.conflict });
+    writeStore(
+      userDataDir,
+      PROJECTS_STORE,
+      Object.fromEntries(
+        live.map(([id, { mount, paths }]) => [id, { mount, paths }]),
+      ),
+    );
+    if (body)
+      try {
+        notices.publish(VAULT_MANIFEST.id, {
+          key: "vault:address",
+          kind: "info",
+          title: "Vault",
+          header: "Vault address",
+          body,
+        });
+      } catch {
+        // A notice that cannot be shown never stops the move.
+      }
+  }
+
+  const ready = moved.then(() =>
+    moveAddresses().catch(() => {
+      console.warn("Vault: could not move the Vault address");
+    }),
+  );
 
   projects.addEnvironmentProvider({
     /** The project's Vault values, {} when they cannot all be read. */
@@ -295,6 +430,25 @@ function registerVault({
     "token.status": () => ({ saved: Boolean(readToken()) }),
     "token.set": (token) => setToken(token),
     "token.clear": () => clearToken(),
+    "address.get": async () => {
+      await ready;
+      return readSettings();
+    },
+    "address.set": async (address) => {
+      await ready;
+      const reply = saveSettings({
+        address: vaultAddress(address),
+        conflict: "",
+      });
+      generation += 1;
+      cache.clear();
+      projects.environmentChanged();
+      return reply;
+    },
+    "address.dismiss": async () => {
+      await ready;
+      return saveSettings({ ...readSettings(), conflict: "" });
+    },
     "project.get": async (id) => {
       await ready;
       return configOf(id);
@@ -313,32 +467,41 @@ function registerVault({
         next ? { ...rest, [id]: next } : rest,
       );
       for (const old of [previous, next])
-        if (old?.paths) cache.delete(cacheKey(old));
+        if (old?.paths) cache.delete(cacheKey(withAddress(old)));
       projects.environmentChanged();
       return next;
     },
-    // A fresh read for the owner's Check: it replaces the cached one and sends
-    // no notice. Names and a count only, never a value.
-    "project.check": async (id) => {
+    // The variable names of the project's Vault paths for the Variables list:
+    // the cached read while it is good, else a fresh one that replaces it. It
+    // sends no notice. Names only, never a value.
+    "project.names": async (id) => {
       await ready;
       const project = await projects.get(id);
       if (!project) throw new Error("Unknown project.");
-      const config = await configOf(id);
-      if (!config?.paths?.length)
-        throw new Error("The project has no Vault paths.");
-      const started = generation;
-      const result = await readAll(readToken(), config);
-      if (started === generation)
-        cache.set(cacheKey(config), {
-          at: Date.now(),
-          result: Promise.resolve(result),
-          notified: new Set(),
-        });
+      const stored = await configOf(id);
+      if (!stored?.paths?.length) return null;
+      const config = withAddress(stored);
+      const key = cacheKey(config);
+      const cached = cache.get(key);
+      let result =
+        cached && Date.now() - cached.at < CACHE_TTL_MS
+          ? await cached.result
+          : null;
+      if (!result?.ok) {
+        const started = generation;
+        result = await readAll(readToken(), config);
+        if (started === generation)
+          cache.set(key, {
+            at: Date.now(),
+            result: Promise.resolve(result),
+            // Kept, so a names read never makes the next session repeat a notice.
+            notified: cached?.notified ?? new Set(),
+          });
+      }
       if (!result.ok) return { ok: false, reason: result.reason };
       if (noticed.delete(project.id))
         notices.retract(NOTICE_SOURCE, `vault:${project.id}`);
-      const names = Object.keys(result.values).sort();
-      return { ok: true, names, count: names.length };
+      return { ok: true, names: Object.keys(result.values).sort() };
     },
   });
   return { ready };
@@ -346,9 +509,11 @@ function registerVault({
 
 module.exports = {
   registerVault,
+  vaultAddress,
   vaultConfig,
   vaultSegments,
   CACHE_TTL_MS,
   STORE,
   PROJECTS_STORE,
+  SETTINGS_STORE,
 };

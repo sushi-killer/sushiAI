@@ -4,15 +4,20 @@
 use std::fs;
 
 use serde_json::{json, Value};
-use sushiai_agents::codex_hooks::{install, is_ours, merge, remove, uninstall};
-use sushiai_agents::hooks::parse;
-use sushiai_agents::launch::{
-    build, claude_settings, permission_timeout, AgentSession, LaunchError, LaunchParams,
+use sushiai_agents::harness::claude::claude_settings;
+use sushiai_agents::harness::codex::hooks::{install, is_ours, merge, remove, uninstall};
+use sushiai_agents::harness::launch::{
+    build, permission_timeout, AgentSession, LaunchError, LaunchParams,
 };
+use sushiai_agents::harness::{find, HarnessRef};
+use sushiai_agents::hooks::parse;
 use sushiai_agents::status::{BlockedKind, ExitInfo, Input, SessionStatus, Status, StatusSource};
-use sushiai_agents::Agent;
 
 const BIN: &str = "/home/user/.sushiai/bin/sushiai";
+
+fn harness(id: &str) -> HarnessRef {
+    find(id).expect("a registered agent")
+}
 
 fn h(seq: u64, json: &str) -> Input {
     Input::Hook {
@@ -343,9 +348,13 @@ fn permission_timeout_has_one_owner() {
 }
 
 // P2.11
-fn params<'a>(extra: &'a [String], session: AgentSession<'a>, agent: Agent) -> LaunchParams<'a> {
+fn params<'a>(
+    extra: &'a [String],
+    session: AgentSession<'a>,
+    harness: HarnessRef,
+) -> LaunchParams<'a> {
     LaunchParams {
-        agent,
+        harness,
         hook_bin: BIN,
         socket: "/s",
         sushiai_session_id: "i",
@@ -371,14 +380,14 @@ fn extra_args_cannot_override_daemon_flags() {
         "-r",
     ] {
         let extra = vec![bad.to_owned()];
-        let err = build(&params(&extra, AgentSession::New("u"), Agent::Claude)).unwrap_err();
+        let err = build(&params(&extra, AgentSession::New("u"), harness("claude"))).unwrap_err();
         assert_eq!(err, LaunchError::ForbiddenArg(bad.to_owned()), "{bad}");
     }
 }
 
 #[test]
 fn a_prompt_is_always_preceded_by_double_dash() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [harness("claude"), harness("codex")] {
         let mut p = params(&[], AgentSession::New("u"), agent);
         p.prompt = Some("hello");
         let argv = build(&p).unwrap().argv;
@@ -391,19 +400,19 @@ fn a_prompt_is_always_preceded_by_double_dash() {
 #[test]
 fn session_ids_are_validated() {
     for bad in ["", "-x", "a b", "a;b", "--settings"] {
-        let r = build(&params(&[], AgentSession::Resume(bad), Agent::Claude));
+        let r = build(&params(&[], AgentSession::Resume(bad), harness("claude")));
         assert_eq!(r.unwrap_err(), LaunchError::BadSessionId(bad.to_owned()));
-        let r = build(&params(&[], AgentSession::Resume(bad), Agent::Codex));
+        let r = build(&params(&[], AgentSession::Resume(bad), harness("codex")));
         assert!(r.is_err(), "{bad}");
     }
     assert!(build(&params(
         &[],
         AgentSession::Resume("0a1b2c3d-1111-2222-3333-444455556666"),
-        Agent::Codex
+        harness("codex")
     ))
     .is_ok());
     // A new Codex session ignores the id.
-    assert!(build(&params(&[], AgentSession::New(""), Agent::Codex)).is_ok());
+    assert!(build(&params(&[], AgentSession::New(""), harness("codex"))).is_ok());
 }
 
 #[test]

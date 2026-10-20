@@ -9,23 +9,32 @@ const {
 } = require("../electron/extensions/manifest.cjs");
 const {
   ARTIFACTS_MANIFEST,
+  ARTIFACTS_SKILL,
 } = require("../electron/extensions/builtin-artifacts.cjs");
 const {
   ExtensionManager,
 } = require("../electron/extensions/extension-manager.cjs");
-const { configureArtifactsSkill } = require("../electron/artifacts-skill.cjs");
 const {
   configureBuiltinSkillSync,
+  registerExtensionSkill,
   syncBuiltinSkillsOnHost,
   syncLocalBuiltinSkills,
   installBuiltinSkillsInto,
 } = require("../electron/extensions/builtin-skills.cjs");
 
-const NAME = "sushiai-artifacts";
+const NAME = ARTIFACTS_SKILL.name;
 const SKILL_TEXT = fs.readFileSync(
   path.join(__dirname, "../electron/extensions/artifacts-skill.md"),
   "utf8",
 );
+/** Registers the Artifacts skill the way the composition point does. */
+function configureArtifactsSkill(options) {
+  registerExtensionSkill({
+    extensionId: ARTIFACTS_MANIFEST.id,
+    ...ARTIFACTS_SKILL,
+    ...options,
+  });
+}
 configureArtifactsSkill({ isEnabled: () => true });
 
 /** Points this machine's sync at a fake binary that records each run. */

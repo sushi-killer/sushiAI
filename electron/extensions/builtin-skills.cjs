@@ -21,7 +21,7 @@ let queue = Promise.resolve();
 let warned = false;
 
 /** Registers a skill (`<name>/SKILL.md` text) owned by a built-in extension. */
-function registerBuiltinSkill({ extensionId, name, text, isEnabled }) {
+function registerBuiltinSkill({ extensionId, name, text, isEnabled, hosts }) {
   if (!extensionId || !NAME.test(name || "") || typeof text !== "string")
     throw new Error("A builtin skill needs extensionId, a plain name and text");
   skills.set(name, {
@@ -29,7 +29,35 @@ function registerBuiltinSkill({ extensionId, name, text, isEnabled }) {
     name,
     text,
     isEnabled: typeof isEnabled === "function" ? isEnabled : () => true,
+    // "local": an SSH host never gets the skill; it is removed there.
+    localOnly: hosts === "local",
   });
+}
+
+/** Registers the skill file `file` (in this folder) for the built-in
+ * extension `extensionId`. The skill is removed from every home while
+ * `isEnabled()` is false. `subscribe` (the extension manager's onChange)
+ * re-syncs this machine when that extension is turned on or off. SSH hosts
+ * follow on their next setup; `hosts: "local"` keeps the skill off them. */
+function registerExtensionSkill({
+  extensionId,
+  name,
+  file,
+  isEnabled,
+  subscribe,
+  hosts,
+}) {
+  registerBuiltinSkill({
+    extensionId,
+    name,
+    text: fs.readFileSync(path.join(__dirname, file), "utf8"),
+    isEnabled,
+    hosts,
+  });
+  if (typeof subscribe === "function")
+    subscribe((id) => {
+      if (id === extensionId) return syncLocalBuiltinSkills();
+    });
 }
 
 /** Where this machine's syncs go: `binary()` names the sushiai binary,
@@ -144,7 +172,10 @@ async function syncBuiltinSkillsOnHost(connections, endpoint, env) {
   if (!active(env)) return false;
   let ok = true;
   for (const skill of skills.values()) {
-    const { args, input } = skillCommand(skill);
+    const { args, input } = skillCommand(
+      skill,
+      skill.isEnabled() && !skill.localOnly,
+    );
     try {
       await connections.exec(
         endpoint,
@@ -161,6 +192,7 @@ async function syncBuiltinSkillsOnHost(connections, endpoint, env) {
 
 module.exports = {
   registerBuiltinSkill,
+  registerExtensionSkill,
   configureBuiltinSkillSync,
   installBuiltinSkillsInto,
   syncBuiltinSkillsOnHost,

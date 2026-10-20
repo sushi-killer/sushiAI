@@ -1,10 +1,109 @@
 import { useEffect, useState } from "react";
-import { tokenStatus, tokenSet, tokenClear } from "./client";
+import {
+  addressDismiss,
+  addressGet,
+  addressSet,
+  tokenStatus,
+  tokenSet,
+  tokenClear,
+} from "./client";
 import "./vault.css";
 
-/** The Settings tab of the Vault module: the read-only token, written here
- * and never read back. */
-export function VaultSettingsView() {
+function VaultAddress() {
+  const [stored, setStored] = useState("");
+  const [conflict, setConflict] = useState("");
+  const [address, setAddress] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    if (window.bridge)
+      addressGet()
+        .then((value) => {
+          if (!live) return;
+          setStored(value.address);
+          setAddress(value.address);
+          setConflict(value.conflict);
+        })
+        .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  async function save() {
+    setBusy(true);
+    setError("");
+    try {
+      const value = await addressSet(address.trim());
+      setStored(value.address);
+      setAddress(value.address);
+      setConflict(value.conflict);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function dismiss() {
+    setError("");
+    try {
+      setConflict((await addressDismiss()).conflict);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  return (
+    <form
+      className="vault-address"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div className="vault-token-head">
+        <strong>Vault address</strong>
+      </div>
+      <div className="vault-token-row">
+        <input
+          className="pd-mono"
+          aria-label="Vault address"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="https://vault.example.com"
+          value={address}
+          onChange={(event) => setAddress(event.target.value)}
+        />
+        <button
+          className="primary"
+          type="submit"
+          disabled={busy || address.trim() === stored}
+        >
+          Save
+        </button>
+      </div>
+      <p className="muted">One address for every project on This Mac.</p>
+      {conflict && (
+        <div className="vault-conflict" role="status">
+          <p>{conflict}</p>
+          <button
+            className="ui-button ghost"
+            type="button"
+            onClick={() => void dismiss()}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {error && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+function VaultToken() {
   const [saved, setSaved] = useState(false);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -78,5 +177,16 @@ export function VaultSettingsView() {
         </p>
       )}
     </form>
+  );
+}
+
+/** The Settings tab of the Vault module: the address, then the read-only
+ * token, written here and never read back. */
+export function VaultSettingsView() {
+  return (
+    <>
+      <VaultAddress />
+      <VaultToken />
+    </>
   );
 }

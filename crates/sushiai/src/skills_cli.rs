@@ -6,8 +6,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use sushiai_agents::harness::{Homes, Source};
 use sushiai_agents::skill_usage::{self, Usage};
-use sushiai_agents::skills::{self, Change, Homes, Source};
+use sushiai_agents::skills::{self, Change};
 
 /// The skill folders of the user home `home`, with the tools' own settings applied.
 pub fn homes_in(home: &Path) -> Homes {

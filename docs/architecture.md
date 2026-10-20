@@ -46,7 +46,7 @@ flowchart TB
       terminalFlow["daemon/terminals.cjs, terminal-flow.cjs<br/>attach, output batched per tick and per frame,<br/>bounded output credit + xterm acknowledgements"]
       hostInstall["host-install.cjs, host-setup.cjs<br/>install and update sushiai on a host"]
       projectStore[("sushiai.db<br/>projects, folders, safeStorage secrets")]
-      vaultReader["vault.cjs + extensions/builtin-vault.cjs<br/>built-in Vault module: read-only KV v2 reader, token in safeStorage,<br/>per-project config in its own app-db store,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice"]
+      vaultReader["vault.cjs + extensions/builtin-vault.cjs<br/>built-in Vault module: read-only KV v2 reader, token in safeStorage,<br/>one address in its own app-db store, per-project mount and paths in another,<br/>values cached in memory 5 min, never on disk;<br/>a failed read drops them and sends one notice"]
       gitSsh["project-git-ssh.cjs<br/>public key + Git server trust recovery"]
       attention["attention.cjs<br/>tray, Dock badge, notifications,<br/>close-to-menu-bar, app preferences"]
       mascotSvc["mascot.cjs<br/>mascot window, notice queue,<br/>mascot-* IPC, presenting watch"]
@@ -54,7 +54,7 @@ flowchart TB
       wsSnap["workspace-snapshot.cjs<br/>sync read/flush + async write"]
       devRestart["dev-restart.cjs<br/>watches electron/ in npm run dev"]
       previewSrv["preview.cjs<br/>token-granted file server;<br/>comment script for annotate HTML grants"]
-      artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>builtin skills (sushiai-artifacts, sushiai-routines) through<br/>sushiai skills install / remove: this Mac, once per Codex account home<br/>(CODEX_HOME set), SSH hosts after their sushiai install; removed when disabled"]
+      artSkill["extensions/builtin-skills.cjs<br/>builtin skills (sushiai-artifacts, sushiai-routines, sushiai-vault) through<br/>sushiai skills install / remove: this Mac, once per Codex account home<br/>(CODEX_HOME set), SSH hosts after their sushiai install; removed when disabled"]
       skillsCat["skills-catalog.cjs + skills-manager.cjs<br/>Skills screen: rows of sushiai skills --json --catalog<br/>plus per-skill usage counted from session transcripts (background index); a change is checked against the row's root"]
     end
     orchPanel <--> preload <--> orchSvc

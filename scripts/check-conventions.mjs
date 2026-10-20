@@ -404,6 +404,21 @@ const listFiles = async (dir) => {
   }
   return found;
 };
+// An agent's name for a person lives in one place, `src/app/agent-title.ts`,
+// which mirrors the Rust registry. Quoted anywhere else it is a copy that
+// drifts - the app once showed "Cursor Agent" in one list and "Cursor" in
+// another, and the chat called Claude "Claude" where every other screen said
+// "Claude Code".
+const AGENT_NAME_HOME = "src/lib/agent-title.ts";
+const AGENT_NAME = /["'](Claude Code|Gemini CLI|Cursor Agent)["']/;
+for (const file of await listFiles("src")) {
+  if (file === AGENT_NAME_HOME || !/\.[cm]?[jt]sx?$/.test(file)) continue;
+  const text = await readFile(path.join(moduleRoot, file), "utf8");
+  if (AGENT_NAME.test(text))
+    problems.push(
+      `${file} writes an agent's name; it belongs in ${AGENT_NAME_HOME}`,
+    );
+}
 const moduleDirs = new Set();
 for (const file of COMPOSITION_ROOTS) {
   const text = await readFile(path.join(moduleRoot, file), "utf8").catch(

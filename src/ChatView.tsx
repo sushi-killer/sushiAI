@@ -28,6 +28,7 @@ import {
 import { Attachment, ChatTranscript } from "./ChatTranscript";
 import { ChipPicker } from "./ChipPicker";
 import "./ChatView.css";
+import { agentTitle } from "./lib/agent-title.ts";
 
 // Models come from each CLI at runtime, so a new Codex release shows up here
 // without a change to sushiAI. Reasoning levels belong to the chosen model.
@@ -547,7 +548,7 @@ export function ChatView({
                   alt=""
                 />
               }
-              label={agent === "codex" ? "Codex" : "Claude"}
+              label={agentTitle(agent)}
               ariaLabel="Agent"
               disabled={current?.busy}
               value={agent}
@@ -559,8 +560,8 @@ export function ChatView({
                 })
               }
               options={[
-                { value: "claude", label: "Claude" },
-                { value: "codex", label: "Codex" },
+                { value: "claude", label: agentTitle("claude") },
+                { value: "codex", label: agentTitle("codex") },
               ]}
             />
             <ChipPicker

@@ -7,7 +7,7 @@ import type {
   Panel,
   Workspace,
 } from "./types";
-import { agentTitle } from "./app/agent-title.ts";
+import { agentTitle } from "./lib/agent-title.ts";
 
 /** What the desktop knows about one host's sessions. */
 export type HostSessions = {

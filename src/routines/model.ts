@@ -1,5 +1,6 @@
 // The Routines page's logic, free of React: filters, status words, the agent
 // pickers and the payload of a save. The page only draws what this returns.
+import { agentTitle } from "../lib/agent-title.ts";
 import type {
   AccessEntry,
   CatalogHost,
@@ -207,8 +208,8 @@ export function relativeTime(ms: number | undefined, now = Date.now()): string {
 // ---- agent pickers ----
 
 export const HARNESSES: { id: Harness; label: string }[] = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
+  { id: "claude", label: agentTitle("claude") },
+  { id: "codex", label: agentTitle("codex") },
 ];
 
 const EFFORTS: Record<Harness, string[]> = {

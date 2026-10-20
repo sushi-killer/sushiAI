@@ -14,7 +14,7 @@ import type { ClosedProject, Saved } from "../workspaceState.ts";
 import { applyChatEvent, startUserTurn } from "../chat-threads.ts";
 import { disposeTerminal } from "../TerminalPanel.tsx";
 import { errorText, isGone } from "../lib/errors.ts";
-import { agentTitle } from "../app/agent-title.ts";
+import { agentTitle } from "../lib/agent-title.ts";
 import type { ProjectGit } from "../app/useProjectGit.ts";
 import {
   closeBeforeWorktreeRemoval,

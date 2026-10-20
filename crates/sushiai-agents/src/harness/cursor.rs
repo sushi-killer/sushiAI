@@ -40,7 +40,7 @@ impl Harness for Cursor {
     }
 
     fn label(&self) -> &'static str {
-        "Cursor Agent"
+        "Cursor"
     }
 
     fn provider(&self) -> Option<&'static str> {

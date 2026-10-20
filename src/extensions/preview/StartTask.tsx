@@ -5,6 +5,7 @@ import { Tag } from "../../ui/index.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import type { Task } from "../../orchestrator/types.ts";
 import { worktreeBranchError } from "../../workspace/worktree.ts";
+import { agentTitle } from "../../lib/agent-title.ts";
 import {
   branchFor,
   nextBranch,
@@ -18,8 +19,8 @@ import {
 export type Runner = "claude" | "codex" | "orchestrator";
 
 const RUNNERS: { id: Runner; label: string; hint: string }[] = [
-  { id: "claude", label: "Claude Code", hint: "/goal" },
-  { id: "codex", label: "Codex", hint: "/goal" },
+  { id: "claude", label: agentTitle("claude"), hint: "/goal" },
+  { id: "codex", label: agentTitle("codex"), hint: "/goal" },
   { id: "orchestrator", label: "Orchestrator", hint: "plan → review → land" },
 ];
 
@@ -199,7 +200,7 @@ export function StartTaskCard({
       <div className="pv-start-foot">
         <span>
           {agent
-            ? `Opens a new ${runner === "claude" ? "Claude Code" : "Codex"} pane in the worktree`
+            ? `Opens a new ${agentTitle(runner)} pane in the worktree`
             : "Creates a task; the orchestrator plans, reviews and lands it"}
         </span>
         <button type="button" className="ui-button secondary" onClick={onClose}>
@@ -252,11 +253,6 @@ export function useTaskStatus(record: StartRecord | undefined): string {
   return status;
 }
 
-const AGENT_NAMES: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-};
-
 /** The plan's run, shown inline in the tag row: starting, running (Open goes
  * to it), ended or failed (Restart and Retry open the Start task card). */
 export function RunStatus({
@@ -301,7 +297,7 @@ export function RunStatus({
   if (failed)
     return row("danger", "The start failed.", { label: "Retry", run: onOpen });
   if (record?.kind === "agent") {
-    const agent = AGENT_NAMES[record.agent] || record.agent;
+    const agent = agentTitle(record.agent);
     if (ended)
       return row("", `Ended · ${record.branch}`, {
         label: "Restart",

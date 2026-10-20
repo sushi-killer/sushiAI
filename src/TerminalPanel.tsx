@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ArrowUpRight, Command, Play, RotateCcw } from "lucide-react";
-import { agentTitle } from "./app/agent-title";
+import { agentTitle } from "./lib/agent-title.ts";
 import {
   daemonHost,
   hostGenerationChange,

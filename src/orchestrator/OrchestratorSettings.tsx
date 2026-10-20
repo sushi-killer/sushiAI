@@ -33,6 +33,7 @@ import {
 } from "./autonomy";
 import type { ChatModels, ClaudeAccount, ModelProfile } from "../types";
 import type { Harness, Route, Settings, Tier, Variant } from "./types";
+import { agentTitle } from "../lib/agent-title.ts";
 
 const HARNESSES: Harness[] = ["claude", "codex"];
 
@@ -87,7 +88,7 @@ function defaultText(
 function newRoute(harness: Harness): Route {
   return {
     id: `route-${Date.now().toString(36)}`,
-    label: harness === "claude" ? "Claude" : "Codex",
+    label: agentTitle(harness),
     harness,
   };
 }

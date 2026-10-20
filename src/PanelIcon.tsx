@@ -6,6 +6,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import type { PanelKind } from "./types";
+import { AGENTS } from "./lib/agent-title.ts";
 
 export const Icon = ({
   kind,
@@ -16,7 +17,7 @@ export const Icon = ({
   agent?: string;
   size?: number;
 }) =>
-  agent && ["claude", "codex", "gemini", "cursor-agent"].includes(agent) ? (
+  agent && AGENTS.includes(agent) ? (
     <img
       className="harness-icon"
       src={`./agents/${agent}.svg`}

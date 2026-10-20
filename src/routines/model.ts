@@ -298,42 +298,6 @@ export function savePayload(routine: Routine, brief: string) {
   };
 }
 
-/** A blank routine for the builder-less path (R1 "Your own" writes its brief
- * by hand): the default agent, weekdays at 09:00. */
-export function newRoutine(
-  catalog: RoutinesCatalog | null,
-  hostId: string,
-  tz: string,
-  name: string,
-): Routine {
-  const agent = catalog?.defaults.agent ?? {
-    harness: "claude" as Harness,
-    model: "sonnet",
-    effort: "medium",
-  };
-  const id =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48) || "routine";
-  return withAgent(
-    {
-      id,
-      name,
-      where: { host: hostOf(catalog, hostId)?.hostName || "local" },
-      when: { cron: "0 9 * * 1-5", tz },
-      agent: { ...agent, extraArgs: [] },
-      howItRuns: { mode: "ask-first", promoteAfter: 5, accepted: 0 },
-      limits: { timeoutMin: 30 },
-      enabled: false,
-    },
-    {},
-    catalog,
-    hostId,
-  );
-}
-
 // ---- results ----
 
 export function actionCounts(result: RunResult | null) {

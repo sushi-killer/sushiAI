@@ -16,5 +16,8 @@ export const AGENT_NAMES: Record<string, string> = {
   "cursor-agent": "Cursor Agent",
 };
 
+/** The agents a panel can start, in picker order. */
+export const AGENTS = Object.keys(AGENT_NAMES);
+
 /** The name to show for an agent id; the id itself for anything unknown. */
 export const agentTitle = (name: string) => AGENT_NAMES[name] || name;

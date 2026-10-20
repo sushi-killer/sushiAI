@@ -8,7 +8,9 @@ const {
   trayState,
   trayIconFile,
   validateNotice,
+  noticeSuppressed,
   mascotIconPath,
+  registerAttentionIpc,
 } = require("../electron/attention.cjs");
 
 test("normalizePreferences keeps valid booleans and falls back to defaults otherwise", () => {
@@ -121,7 +123,7 @@ test("validateNotice accepts a well-formed notice and returns its fields", () =>
     title: "Agent needs input",
     body: "Waiting on your reply in the terminal.",
   };
-  assert.deepEqual(validateNotice(notice), notice);
+  assert.deepEqual(validateNotice(notice), { ...notice, seen: false });
 });
 
 test("notifications accept endpoint-scoped IDs and retain a finite bound", () => {
@@ -134,7 +136,7 @@ test("notifications accept endpoint-scoped IDs and retain a finite bound", () =>
     body: "Preparation finished",
   };
   assert.ok(notice.workspaceId.length > 200);
-  assert.deepEqual(validateNotice(notice), notice);
+  assert.deepEqual(validateNotice(notice), { ...notice, seen: false });
   assert.throws(() =>
     validateNotice({ ...notice, workspaceId: "x".repeat(4097) }),
   );
@@ -256,4 +258,62 @@ test("hibernateAfterSecs keeps a whole number of seconds and rejects anything el
       normalizePreferences({ hibernateAfterSecs: bad }).hibernateAfterSecs,
       14400,
     );
+});
+
+test("a waiting pane is skipped only when the window is focused and the pane is on screen", () => {
+  assert.equal(noticeSuppressed({ windowFocused: true, seen: true }), true);
+  // Another pane has the focused window: the owner cannot see this one.
+  assert.equal(noticeSuppressed({ windowFocused: true, seen: false }), false);
+  assert.equal(
+    noticeSuppressed({ windowFocused: true, seen: undefined }),
+    false,
+  );
+  assert.equal(noticeSuppressed({ windowFocused: false, seen: true }), false);
+  assert.equal(noticeSuppressed({ windowFocused: false, seen: false }), false);
+});
+
+test("validateNotice keeps seen only when it is exactly true", () => {
+  const base = { workspaceId: "w", panelId: "p", title: "t", body: "b" };
+  assert.equal(validateNotice({ ...base, seen: true }).seen, true);
+  assert.equal(validateNotice(base).seen, false);
+  assert.equal(validateNotice({ ...base, seen: "yes" }).seen, false);
+});
+
+test("notify shows a notification for an unseen pane in a focused window and none for a seen pane", async () => {
+  const shown = [];
+  class FakeNotification {
+    constructor(options) {
+      this.options = options;
+    }
+    on() {}
+    show() {
+      shown.push(this.options);
+    }
+    close() {}
+  }
+  const handlers = {};
+  const win = {
+    isDestroyed: () => false,
+    isVisible: () => true,
+    isFocused: () => true,
+  };
+  registerAttentionIpc({
+    handle: (name, fn) => (handlers[name] = fn),
+    send: () => {},
+    app: {},
+    getMainWindow: () => win,
+    userDataDir: "",
+    trayIconPath: "",
+    hidden: true,
+    Notification: FakeNotification,
+  });
+  const base = { workspaceId: "w", panelId: "p", title: "t", body: "b" };
+  await handlers["attention-notify"]({ ...base, seen: true });
+  assert.equal(shown.length, 0, "a pane on screen stays quiet");
+  await handlers["attention-notify"]({ ...base, seen: false });
+  await handlers["attention-notify"](base);
+  assert.equal(shown.length, 2, "a pane out of sight notifies");
+  win.isFocused = () => false;
+  await handlers["attention-notify"]({ ...base, seen: true });
+  assert.equal(shown.length, 3, "an unfocused window always notifies");
 });

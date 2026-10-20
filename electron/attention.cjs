@@ -83,7 +83,14 @@ function validateNotice(notice) {
     throw new Error("Invalid attention notice title.");
   if (!boundedString(body, 300))
     throw new Error("Invalid attention notice body.");
-  return { workspaceId, panelId, title, body };
+  return { workspaceId, panelId, title, body, seen: notice.seen === true };
+}
+
+/** A notice is skipped only when the owner already sees the waiting pane:
+ * the window is up front and the renderer says that pane is on screen. A pane
+ * waiting in the background of a focused window still notifies. */
+function noticeSuppressed({ windowFocused, seen }) {
+  return windowFocused && seen === true;
 }
 
 /** Registers the attention/preferences IPC surface and owns the tray, the
@@ -98,6 +105,8 @@ function registerAttentionIpc({
   trayIconPath,
   mascot: mascotWindow,
   hidden = false,
+  // Injectable so a test can count what would reach the OS.
+  Notification: NotificationClass = Notification,
   onPreferences = () => {},
 }) {
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -213,8 +222,11 @@ function registerAttentionIpc({
     const notice = validateNotice(rawNotice);
     if (!preferences.notifications) return;
     const win = getMainWindow();
-    if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return;
-    const notification = new Notification({
+    const windowFocused = Boolean(
+      win && !win.isDestroyed() && win.isVisible() && win.isFocused(),
+    );
+    if (noticeSuppressed({ windowFocused, seen: notice.seen })) return;
+    const notification = new NotificationClass({
       title: notice.title,
       body: notice.body,
     });
@@ -291,6 +303,7 @@ module.exports = {
   trayState,
   trayIconFile,
   validateNotice,
+  noticeSuppressed,
   mascotIconPath,
   registerAttentionIpc,
 };

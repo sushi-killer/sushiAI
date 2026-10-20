@@ -566,7 +566,12 @@ export type UpdateState = {
 };
 /** A panel an attention event points at: a notification click opens it. */
 export type AttentionTarget = { workspaceId: string; panelId: string };
-export type AttentionNotice = AttentionTarget & { title: string; body: string };
+export type AttentionNotice = AttentionTarget & {
+  title: string;
+  body: string;
+  /** The owner can see this pane right now; only then may main skip the notice. */
+  seen?: boolean;
+};
 /** Kept by the main process, which needs both before any window exists. */
 export type AppPreferences = {
   /** Closing the window hides it; sushiAI stays in the menu bar. */
@@ -597,7 +602,7 @@ export interface Bridge {
   /** Synchronous write for when the window is going away. */
   workspaceStateFlush(text: string): void;
   /** Shows a macOS notification unless notifications are off or the window
-   * is focused. Clicking it shows the window and fires `onAttentionOpen`. */
+   * is focused and the notice's pane is on screen (`seen`). Clicking it shows the window and fires `onAttentionOpen`. */
   attentionNotify(notice: AttentionNotice): Promise<void>;
   /** Waiting count for the Dock badge and the menu bar title; 0 clears both. */
   attentionBadge(count: number, working: number): Promise<void>;

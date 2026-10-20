@@ -100,16 +100,23 @@ test("reminders fire once each at 5, 10 and 20 minutes, never at 4:59", async ()
   assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 20 }]);
   state = result.state;
 
-  // Past the fixed marks the reminder repeats every 30 minutes.
-  result = dueReminders(state, 49 * MIN);
-  assert.deepEqual(result.reminders, []);
-  result = dueReminders(state, 50 * MIN);
-  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 50 }]);
-  state = result.state;
-  result = dueReminders(state, 79 * MIN);
-  assert.deepEqual(result.reminders, []);
-  result = dueReminders(state, 80 * MIN);
-  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 80 }]);
+  // Past the fixed marks the gap starts at 30 minutes and doubles.
+  for (const [at, due] of [
+    [49, false],
+    [50, true],
+    [109, false],
+    [110, true],
+    [229, false],
+    [230, true],
+  ]) {
+    result = dueReminders(state, at * MIN);
+    assert.deepEqual(
+      result.reminders,
+      due ? [{ panelId: "a", minutes: at }] : [],
+      `at ${at} min`,
+    );
+    if (due) state = result.state;
+  }
 });
 
 test("reminders keep coming for hours, one per tick, and stop once the pane is answered", async () => {
@@ -123,7 +130,7 @@ test("reminders keep coming for hours, one per tick, and stop once the pane is a
     state = result.state;
     count += result.reminders.length;
   }
-  assert.equal(count, 3 + 7, "5, 10, 20, then 50 .. 230 every 30 minutes");
+  assert.equal(count, 3 + 3, "5, 10, 20, then 50, 110 and 230");
 
   ({ state } = observe(state, at("working"), 241 * MIN));
   assert.deepEqual(dueReminders(state, 600 * MIN).reminders, []);
@@ -137,25 +144,126 @@ test("a long gap fires one reminder for the latest mark, not a burst", async () 
     0,
   );
   const result = dueReminders(state, 200 * MIN);
-  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 200 }]);
+  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 110 }]);
   assert.deepEqual(dueReminders(result.state, 200 * MIN).reminders, []);
 });
 
-test("a pane is on screen only when it is the selected or zoomed pane of the active workspace with no section open", async () => {
+test("a pane is on screen only when the Code canvas draws it as the zoomed or selected pane", async () => {
   const { isPanelOnScreen } = await library;
   const view = {
     panelId: "a",
+    mode: "Code",
     section: null,
     zoomed: null,
     selected: "a",
-    activePanelIds: ["a", "b"],
+    drawnPanelIds: ["a", "b"],
   };
   assert.equal(isPanelOnScreen(view), true);
   assert.equal(isPanelOnScreen({ ...view, selected: "b" }), false);
   assert.equal(isPanelOnScreen({ ...view, selected: "b", zoomed: "a" }), true);
   assert.equal(isPanelOnScreen({ ...view, section: { id: "inbox" } }), false);
-  assert.equal(isPanelOnScreen({ ...view, activePanelIds: ["b"] }), false);
+  // Chat and Agent mode draw no canvas, whatever pane is selected.
+  assert.equal(isPanelOnScreen({ ...view, mode: "Chat" }), false);
+  assert.equal(isPanelOnScreen({ ...view, mode: "Agent" }), false);
+  // A selected pane the canvas does not draw (another member workspace, a
+  // hidden pane) is not on screen; a merged canvas draws its members' panes.
+  assert.equal(isPanelOnScreen({ ...view, drawnPanelIds: ["b"] }), false);
   assert.equal(isPanelOnScreen({ ...view, selected: "", panelId: "" }), false);
+  // A zoomed pane that is not drawn falls back to the selected one.
+  assert.equal(isPanelOnScreen({ ...view, zoomed: "gone" }), true);
+});
+
+test("drawnPanelIds follows the merged group, else the active layout, and drops hidden panes", async () => {
+  const { drawnPanelIds } = await library;
+  const leaf = (id) => ({ type: "leaf", id });
+  const split = (a, b) => ({ type: "split", dir: "row", ratio: 0.5, a, b });
+  const active = {
+    ...workspace("w1", [panel("a", "agent"), panel("hidden", "agent")]),
+    layout: leaf("a"),
+  };
+  assert.deepEqual(
+    drawnPanelIds({ group: null, panes: [], layout: null }, active),
+    ["a"],
+  );
+  const merged = {
+    group: { id: "g" },
+    panes: [{ panel: panel("a", "agent") }, { panel: panel("m", "agent") }],
+    layout: split(leaf("a"), leaf("m")),
+  };
+  assert.deepEqual(drawnPanelIds(merged, active), ["a", "m"]);
+});
+
+test("looking at a waiting pane ends its reminders until it is blocked again", async () => {
+  const { createAttentionState, observe, dueReminders, endReminders } =
+    await library;
+  const at = (status) => [workspace("w1", [panel("a", "agent", { status })])];
+  let { state } = observe(createAttentionState(), at("blocked"), 0);
+  state = endReminders(state, "a");
+  assert.deepEqual(dueReminders(state, 60 * MIN).reminders, []);
+  assert.equal(endReminders(state, "a"), state, "a repeat is a no-op");
+  ({ state } = observe(state, at("working"), 61 * MIN));
+  ({ state } = observe(state, at("blocked"), 62 * MIN));
+  assert.deepEqual(dueReminders(state, 67 * MIN).reminders, [
+    { panelId: "a", minutes: 5 },
+  ]);
+});
+
+test("reminders due together become one notice for the oldest pane, skipping hidden hosts", async () => {
+  const { createAttentionState, observe, reminderNotice } = await library;
+  const blocked = (id, title) =>
+    panel(id, "agent", { status: "blocked", title });
+  const ws = [workspace("w1", [blocked("a", "Alpha"), blocked("b", "Beta")])];
+  const first = observe(
+    createAttentionState(),
+    [workspace("w1", [panel("a", "agent"), panel("b", "agent")])],
+    0,
+  );
+  let { state } = observe(first.state, ws, 1000);
+  state = {
+    ...state,
+    panels: {
+      a: { ...state.panels.a, since: 5000 },
+      b: { ...state.panels.b, since: 2000 },
+    },
+  };
+  const due = [
+    { panelId: "a", minutes: 5 },
+    { panelId: "b", minutes: 5 },
+  ];
+  const offScreen = () => false;
+  const one = reminderNotice(due.slice(0, 1), state, ws, [], offScreen);
+  assert.equal(one.panelId, "a");
+  assert.match(one.title, /Alpha/);
+  assert.equal(one.seen, false);
+  const both = reminderNotice(due, state, ws, [], offScreen);
+  assert.equal(both.panelId, "b", "a click opens the pane waiting longest");
+  assert.match(both.title, /^2 /);
+  // Seen only when every named pane is on screen.
+  assert.equal(
+    reminderNotice(due, state, ws, [], (id) => id === "b").seen,
+    false,
+  );
+  assert.equal(reminderNotice(due, state, ws, [], () => true).seen, true);
+  assert.equal(reminderNotice([], state, ws, [], offScreen), null);
+  // A pane on a host hidden from the sidebar is skipped like in the badge.
+  const remote = [{ ...ws[0], connection: "ssh:h1" }];
+  const profiles = [{ id: "h1", hidden: true }];
+  assert.equal(reminderNotice(due, state, remote, profiles, offScreen), null);
+});
+
+test("a transition notice carries whether its pane is on screen", async () => {
+  const { transitionNotice } = await library;
+  const ws = workspace("w1", [panel("a", "agent", { title: "Alpha" })]);
+  const event = { kind: "blocked", workspace: ws, panel: ws.panels[0] };
+  const notice = transitionNotice(event, "this-mac", (id) => id === "a");
+  assert.equal(notice.seen, true);
+  assert.equal(notice.panelId, "a");
+  assert.match(notice.title, /Alpha/);
+  assert.equal(transitionNotice(event, "this-mac", () => false).seen, false);
+  assert.match(
+    transitionNotice({ ...event, kind: "done" }, "this-mac", () => true).title,
+    /Alpha/,
+  );
 });
 
 test("leaving blocked and re-entering restarts the reminder schedule", async () => {

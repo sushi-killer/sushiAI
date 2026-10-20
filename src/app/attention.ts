@@ -1,7 +1,9 @@
+import { contains } from "../layout.ts";
 import { isHidden } from "./workspaceMerge.ts";
 import type {
   AttentionNotice,
   ConnectionProfile,
+  Layout,
   Panel,
   Workspace,
 } from "../types";
@@ -22,41 +24,57 @@ export function fitNotice(notice: AttentionNotice): AttentionNotice {
 
 /** Minutes after a panel enters `blocked` that the first reminders fire. */
 export const REMINDER_MINUTES = [5, 10, 20] as const;
-/** After the last fixed mark a still-waiting panel is reminded this often. */
-export const REMINDER_REPEAT_MINUTES = 30;
+/** After the last fixed mark the gap between reminders starts here and
+ * doubles each time, so a long wait is nudged less and less often. */
+export const REMINDER_FIRST_GAP_MINUTES = 30;
 
-/** Every reminder mark at or before `elapsedMinutes`: the fixed ones, then one
- * per repeat interval for as long as the panel keeps waiting. */
+/** Every reminder mark at or before `elapsedMinutes`: the fixed ones, then
+ * marks whose gap doubles (50, 110, 230, ...) while the panel keeps waiting. */
 function reminderMarksUpTo(elapsedMinutes: number): number[] {
   const marks: number[] = REMINDER_MINUTES.filter((m) => m <= elapsedMinutes);
-  const last = REMINDER_MINUTES[REMINDER_MINUTES.length - 1];
+  let mark: number = REMINDER_MINUTES[REMINDER_MINUTES.length - 1];
   for (
-    let m = last + REMINDER_REPEAT_MINUTES;
-    m <= elapsedMinutes;
-    m += REMINDER_REPEAT_MINUTES
-  )
-    marks.push(m);
+    let gap = REMINDER_FIRST_GAP_MINUTES;
+    mark + gap <= elapsedMinutes;
+    gap *= 2
+  ) {
+    mark += gap;
+    marks.push(mark);
+  }
   return marks;
 }
 
-/** Whether the owner can look at `panelId` right now: it belongs to the active
- * workspace, no section page covers the canvas, and it is the zoomed or
- * selected pane. The one definition behind "seen" for both marking and
- * notice suppression. */
+/** The panels the canvas really draws: a merged group's panes, else the
+ * active workspace's, each only while the visible layout still holds it (a
+ * hidden pane is listed but off the canvas). Mirrors `WorkspaceCanvas`. */
+export function drawnPanelIds(
+  merged: { group: unknown; panes: { panel: Panel }[]; layout: Layout | null },
+  active: Workspace,
+): string[] {
+  const layout = merged.group ? merged.layout : active.layout;
+  return (merged.group ? merged.panes.map((mp) => mp.panel) : active.panels)
+    .filter((panel) => contains(layout, panel.id))
+    .map((panel) => panel.id);
+}
+
+/** Whether the owner can look at `panelId` right now: the Code canvas is
+ * showing (not Chat or Agent mode, no section page) and the pane is the
+ * zoomed one, else the selected one, among the panes the canvas draws. The
+ * one definition behind "seen" for marking, reminders and notice
+ * suppression. */
 export function isPanelOnScreen(view: {
   panelId: string;
+  mode: string;
   section: unknown;
   zoomed: string | null;
   selected: string;
-  activePanelIds: string[];
+  drawnPanelIds: string[];
 }): boolean {
-  if (view.section) return false;
-  const looked = view.zoomed || view.selected;
-  return (
-    !!looked &&
-    looked === view.panelId &&
-    view.activePanelIds.includes(view.panelId)
-  );
+  if (view.section || view.mode !== "Code") return false;
+  const drawn = view.drawnPanelIds;
+  const looked =
+    view.zoomed && drawn.includes(view.zoomed) ? view.zoomed : view.selected;
+  return !!looked && looked === view.panelId && drawn.includes(looked);
 }
 
 type TrackedPanel = {
@@ -69,6 +87,9 @@ type TrackedPanel = {
    * whenever the status changes, so leaving and re-entering `blocked`
    * restarts the schedule. */
   remindersFired: number[];
+  /** The owner looked at the pane during this `blocked` episode: no more
+   * reminders until it becomes `blocked` again. */
+  remindersOff?: boolean;
 };
 
 /** Everything the Inbox needs to remember across renders: per-agent-panel
@@ -207,7 +228,7 @@ export function dueReminders(
   const panels: Record<string, TrackedPanel> = { ...state.panels };
   const reminders: DueReminder[] = [];
   for (const [panelId, tracked] of Object.entries(panels)) {
-    if (tracked.status !== "blocked") continue;
+    if (tracked.status !== "blocked" || tracked.remindersOff) continue;
     const elapsedMinutes = (now - tracked.since) / 60000;
     const missed = reminderMarksUpTo(elapsedMinutes).filter(
       (m) => !tracked.remindersFired.includes(m),
@@ -220,6 +241,85 @@ export function dueReminders(
     };
   }
   return { reminders, state: { panels, unseen: state.unseen } };
+}
+
+/** Ends a panel's reminder episode because the owner looked at it. It starts
+ * again only when the panel becomes `blocked` anew. */
+export function endReminders(
+  state: AttentionState,
+  panelId: string,
+): AttentionState {
+  const tracked = state.panels[panelId];
+  if (!tracked || tracked.status !== "blocked" || tracked.remindersOff)
+    return state;
+  return {
+    panels: { ...state.panels, [panelId]: { ...tracked, remindersOff: true } },
+    unseen: state.unseen,
+  };
+}
+
+/** The notice for a panel that just became `blocked` or `done`. */
+export function transitionNotice(
+  event: AttentionEvent,
+  hostLabel: string,
+  onScreen: (panelId: string) => boolean,
+): AttentionNotice {
+  const { workspace, panel } = event;
+  return fitNotice({
+    workspaceId: workspace.id,
+    panelId: panel.id,
+    seen: onScreen(panel.id),
+    title:
+      event.kind === "blocked"
+        ? `${panel.title} needs your input`
+        : `${panel.title} finished`,
+    body: `${workspace.name} \u00b7 ${hostLabel}`,
+  });
+}
+
+/** One notice for all reminders due in a tick, or null when none is left
+ * after skipping panels on a hidden host (as `waitingCount` does). One pane
+ * keeps its own text; several become "N panes still waiting" and a click
+ * opens the one waiting longest. It counts as seen only when every pane it
+ * names is on screen. */
+export function reminderNotice(
+  reminders: DueReminder[],
+  state: AttentionState,
+  workspaces: Workspace[],
+  profiles: ConnectionProfile[],
+  onScreen: (panelId: string) => boolean,
+): AttentionNotice | null {
+  const listed = reminders.flatMap((reminder) => {
+    for (const workspace of workspaces) {
+      const panel = workspace.panels.find((p) => p.id === reminder.panelId);
+      if (panel && !isHidden(workspace.connection, profiles))
+        return [{ reminder, workspace, panel }];
+    }
+    return [];
+  });
+  if (!listed.length) return null;
+  const since = (id: string) => state.panels[id]?.since ?? Infinity;
+  const oldest = listed.reduce((a, b) =>
+    since(b.panel.id) < since(a.panel.id) ? b : a,
+  );
+  const base = {
+    workspaceId: oldest.workspace.id,
+    panelId: oldest.panel.id,
+    seen: listed.every((item) => onScreen(item.panel.id)),
+  };
+  return fitNotice(
+    listed.length === 1
+      ? {
+          ...base,
+          title: `${oldest.panel.title} is still waiting`,
+          body: `${oldest.reminder.minutes} min \u00b7 ${oldest.workspace.name}`,
+        }
+      : {
+          ...base,
+          title: `${listed.length} panes still waiting`,
+          body: `${oldest.panel.title} has waited longest`,
+        },
+  );
 }
 
 export function markSeen(

@@ -5,8 +5,10 @@ import {
   inboxGroups,
   markSeen,
   observe,
-  fitNotice,
+  endReminders,
   isPanelOnScreen,
+  reminderNotice,
+  transitionNotice,
   waitingCount,
   workingCount,
   type AttentionState,
@@ -31,7 +33,8 @@ export function useAttention({
   workspaces,
   connectionProfiles,
   section,
-  active,
+  mode,
+  drawnPanelIds,
   selected,
   zoomed,
   switchWorkspace,
@@ -41,7 +44,10 @@ export function useAttention({
   connectionProfiles: ConnectionProfile[];
   /** No section page is open - only then can a pane actually be on screen. */
   section: SectionRef | null;
-  active: Workspace;
+  /** The Code canvas is only drawn in Code mode. */
+  mode: string;
+  /** The panes the canvas draws now (see `drawnPanelIds`). */
+  drawnPanelIds: string[];
   selected: string;
   zoomed: string | null;
   switchWorkspace(id: string): void;
@@ -57,35 +63,23 @@ export function useAttention({
   stateRef.current = state;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
-  const viewRef = useRef({ section, zoomed, selected, active });
-  viewRef.current = { section, zoomed, selected, active };
+  const profilesRef = useRef(connectionProfiles);
+  profilesRef.current = connectionProfiles;
+  const viewRef = useRef({ mode, section, zoomed, selected, drawnPanelIds });
+  viewRef.current = { mode, section, zoomed, selected, drawnPanelIds };
 
   /** Read at send time (events and timers fire outside a render) so main can
    * stay quiet only for a pane the owner is already looking at. */
-  const onScreen = useCallback((panelId: string) => {
-    const { section, zoomed, selected, active } = viewRef.current;
-    return isPanelOnScreen({
-      panelId,
-      section,
-      zoomed,
-      selected,
-      activePanelIds: active.panels.map((p) => p.id),
-    });
-  }, []);
+  const onScreen = useCallback(
+    (panelId: string) => isPanelOnScreen({ panelId, ...viewRef.current }),
+    [],
+  );
 
   const hostLabelFor = useCallback(
     (workspace: Workspace) =>
       groupLabel(groupKey(workspace.connection), connectionProfiles),
     [connectionProfiles],
   );
-
-  const findPanel = useCallback((panelId: string) => {
-    for (const workspace of workspacesRef.current) {
-      const panel = workspace.panels.find((p) => p.id === panelId);
-      if (panel) return { workspace, panel };
-    }
-    return null;
-  }, []);
 
   // Runs whenever the workspace list changes - a panel entering `blocked` or
   // `done` notifies the same render the transition is seen. Reads the latest
@@ -99,53 +93,33 @@ export function useAttention({
       Date.now(),
     );
     setState(next);
-    for (const event of events) {
-      const hostLabel = hostLabelFor(event.workspace);
-      const notice =
-        event.kind === "blocked"
-          ? {
-              title: `${event.panel.title} needs your input`,
-              body: `${event.workspace.name} · ${hostLabel}`,
-            }
-          : {
-              title: `${event.panel.title} finished`,
-              body: `${event.workspace.name} · ${hostLabel}`,
-            };
+    for (const event of events)
       void window.bridge?.attentionNotify(
-        fitNotice({
-          workspaceId: event.workspace.id,
-          panelId: event.panel.id,
-          seen: onScreen(event.panel.id),
-          ...notice,
-        }),
+        transitionNotice(event, hostLabelFor(event.workspace), onScreen),
       );
-    }
   }, [workspaces, hostLabelFor, onScreen]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      const { reminders, state: next } = dueReminders(
-        stateRef.current,
-        Date.now(),
+      // Looking at a waiting pane ends its reminders. The window must also
+      // be focused: a pane left selected in a background window is unseen.
+      let current = stateRef.current;
+      if (document.hasFocus())
+        for (const id of Object.keys(current.panels))
+          if (onScreen(id)) current = endReminders(current, id);
+      const { reminders, state: next } = dueReminders(current, Date.now());
+      if (next !== stateRef.current) setState(next);
+      const notice = reminderNotice(
+        reminders,
+        next,
+        workspacesRef.current,
+        profilesRef.current,
+        onScreen,
       );
-      if (!reminders.length) return;
-      setState(next);
-      for (const reminder of reminders) {
-        const found = findPanel(reminder.panelId);
-        if (!found) continue;
-        void window.bridge?.attentionNotify(
-          fitNotice({
-            workspaceId: found.workspace.id,
-            panelId: found.panel.id,
-            seen: onScreen(found.panel.id),
-            title: `${found.panel.title} is still waiting`,
-            body: `${reminder.minutes} min · ${found.workspace.name}`,
-          }),
-        );
-      }
+      if (notice) void window.bridge?.attentionNotify(notice);
     }, REMINDER_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [findPanel, onScreen]);
+  }, [onScreen]);
 
   const waiting = waitingCount(
     workspaces,
@@ -162,22 +136,12 @@ export function useAttention({
     void window.bridge?.attentionBadge(waiting, working);
   }, [waiting, working]);
 
-  // Seen the moment it can actually be seen: the active workspace, no section
-  // page covering the canvas, and this is the selected or zoomed pane.
+  // Seen the moment it can actually be seen (see `isPanelOnScreen`).
+  const drawnKey = drawnPanelIds.join("\n");
   useEffect(() => {
-    const looked = zoomed || selected;
-    if (
-      !isPanelOnScreen({
-        panelId: looked,
-        section,
-        zoomed,
-        selected,
-        activePanelIds: active.panels.map((p) => p.id),
-      })
-    )
-      return;
-    setState((current) => markSeen(current, looked));
-  }, [section, zoomed, selected, active]);
+    for (const id of [zoomed, selected])
+      if (id && onScreen(id)) setState((current) => markSeen(current, id));
+  }, [mode, section, zoomed, selected, drawnKey, onScreen]);
 
   useEffect(
     () =>

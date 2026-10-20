@@ -10,6 +10,7 @@ import { errorText } from "./lib/errors";
 import { useAppPersistence } from "./app/useAppPersistence";
 import { useSessionState } from "./app/useSessionState";
 import { useAttention } from "./app/useAttention";
+import { drawnPanelIds } from "./app/attention.ts";
 import { useCompact } from "./app/useCompact";
 import { useKeepAwake } from "./app/useKeepAwake";
 import { useAgentNotices } from "./app/useAgentNotices";
@@ -139,16 +140,6 @@ export function App() {
     if (window.innerWidth < 760) setSidebar(false);
     ws.switchWorkspace(id);
   }
-  const attention = useAttention({
-    workspaces,
-    connectionProfiles,
-    section,
-    active,
-    selected,
-    zoomed,
-    switchWorkspace,
-    revealPane: ws.revealPane,
-  });
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const closeDialog = useCallback(() => setDialog(null), []);
   const [settingsTab, setSettingsTab] = useSettingsTab(setDialog);
@@ -173,6 +164,17 @@ export function App() {
     workspaceGrouping,
     session,
   );
+  const attention = useAttention({
+    workspaces,
+    connectionProfiles,
+    section,
+    mode,
+    drawnPanelIds: drawnPanelIds(merged, active),
+    selected,
+    zoomed,
+    switchWorkspace,
+    revealPane: ws.revealPane,
+  });
   const { tabMode, setTabMode, views } = useProjectView(
     merged.group?.id ?? active.id,
     ws,

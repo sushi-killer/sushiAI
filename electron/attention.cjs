@@ -105,6 +105,8 @@ function registerAttentionIpc({
   trayIconPath,
   mascot: mascotWindow,
   hidden = false,
+  // Injectable so a test can count what would reach the OS.
+  Notification: NotificationClass = Notification,
   onPreferences = () => {},
 }) {
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -224,7 +226,7 @@ function registerAttentionIpc({
       win && !win.isDestroyed() && win.isVisible() && win.isFocused(),
     );
     if (noticeSuppressed({ windowFocused, seen: notice.seen })) return;
-    const notification = new Notification({
+    const notification = new NotificationClass({
       title: notice.title,
       body: notice.body,
     });

@@ -10,6 +10,7 @@ const {
   validateNotice,
   noticeSuppressed,
   mascotIconPath,
+  registerAttentionIpc,
 } = require("../electron/attention.cjs");
 
 test("normalizePreferences keeps valid booleans and falls back to defaults otherwise", () => {
@@ -276,4 +277,43 @@ test("validateNotice keeps seen only when it is exactly true", () => {
   assert.equal(validateNotice({ ...base, seen: true }).seen, true);
   assert.equal(validateNotice(base).seen, false);
   assert.equal(validateNotice({ ...base, seen: "yes" }).seen, false);
+});
+
+test("notify shows a notification for an unseen pane in a focused window and none for a seen pane", async () => {
+  const shown = [];
+  class FakeNotification {
+    constructor(options) {
+      this.options = options;
+    }
+    on() {}
+    show() {
+      shown.push(this.options);
+    }
+    close() {}
+  }
+  const handlers = {};
+  const win = {
+    isDestroyed: () => false,
+    isVisible: () => true,
+    isFocused: () => true,
+  };
+  registerAttentionIpc({
+    handle: (name, fn) => (handlers[name] = fn),
+    send: () => {},
+    app: {},
+    getMainWindow: () => win,
+    userDataDir: "",
+    trayIconPath: "",
+    hidden: true,
+    Notification: FakeNotification,
+  });
+  const base = { workspaceId: "w", panelId: "p", title: "t", body: "b" };
+  await handlers["attention-notify"]({ ...base, seen: true });
+  assert.equal(shown.length, 0, "a pane on screen stays quiet");
+  await handlers["attention-notify"]({ ...base, seen: false });
+  await handlers["attention-notify"](base);
+  assert.equal(shown.length, 2, "a pane out of sight notifies");
+  win.isFocused = () => false;
+  await handlers["attention-notify"]({ ...base, seen: true });
+  assert.equal(shown.length, 3, "an unfocused window always notifies");
 });

@@ -100,9 +100,62 @@ test("reminders fire once each at 5, 10 and 20 minutes, never at 4:59", async ()
   assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 20 }]);
   state = result.state;
 
-  // Every mark has fired; nothing left to remind, ever.
-  result = dueReminders(state, 60 * MIN);
+  // Past the fixed marks the reminder repeats every 30 minutes.
+  result = dueReminders(state, 49 * MIN);
   assert.deepEqual(result.reminders, []);
+  result = dueReminders(state, 50 * MIN);
+  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 50 }]);
+  state = result.state;
+  result = dueReminders(state, 79 * MIN);
+  assert.deepEqual(result.reminders, []);
+  result = dueReminders(state, 80 * MIN);
+  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 80 }]);
+});
+
+test("reminders keep coming for hours, one per tick, and stop once the pane is answered", async () => {
+  const { createAttentionState, observe, dueReminders } = await library;
+  const at = (status) => [workspace("w1", [panel("a", "agent", { status })])];
+  let { state } = observe(createAttentionState(), at("blocked"), 0);
+  let count = 0;
+  // A tick every 30 s of injected time over 4 hours.
+  for (let now = 0; now <= 240 * MIN; now += 30000) {
+    const result = dueReminders(state, now);
+    state = result.state;
+    count += result.reminders.length;
+  }
+  assert.equal(count, 3 + 7, "5, 10, 20, then 50 .. 230 every 30 minutes");
+
+  ({ state } = observe(state, at("working"), 241 * MIN));
+  assert.deepEqual(dueReminders(state, 600 * MIN).reminders, []);
+});
+
+test("a long gap fires one reminder for the latest mark, not a burst", async () => {
+  const { createAttentionState, observe, dueReminders } = await library;
+  const { state } = observe(
+    createAttentionState(),
+    [workspace("w1", [panel("a", "agent", { status: "blocked" })])],
+    0,
+  );
+  const result = dueReminders(state, 200 * MIN);
+  assert.deepEqual(result.reminders, [{ panelId: "a", minutes: 200 }]);
+  assert.deepEqual(dueReminders(result.state, 200 * MIN).reminders, []);
+});
+
+test("a pane is on screen only when it is the selected or zoomed pane of the active workspace with no section open", async () => {
+  const { isPanelOnScreen } = await library;
+  const view = {
+    panelId: "a",
+    section: null,
+    zoomed: null,
+    selected: "a",
+    activePanelIds: ["a", "b"],
+  };
+  assert.equal(isPanelOnScreen(view), true);
+  assert.equal(isPanelOnScreen({ ...view, selected: "b" }), false);
+  assert.equal(isPanelOnScreen({ ...view, selected: "b", zoomed: "a" }), true);
+  assert.equal(isPanelOnScreen({ ...view, section: { id: "inbox" } }), false);
+  assert.equal(isPanelOnScreen({ ...view, activePanelIds: ["b"] }), false);
+  assert.equal(isPanelOnScreen({ ...view, selected: "", panelId: "" }), false);
 });
 
 test("leaving blocked and re-entering restarts the reminder schedule", async () => {

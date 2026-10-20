@@ -8,6 +8,7 @@ const {
   trayState,
   trayIconFile,
   validateNotice,
+  noticeSuppressed,
   mascotIconPath,
 } = require("../electron/attention.cjs");
 
@@ -121,7 +122,7 @@ test("validateNotice accepts a well-formed notice and returns its fields", () =>
     title: "Agent needs input",
     body: "Waiting on your reply in the terminal.",
   };
-  assert.deepEqual(validateNotice(notice), notice);
+  assert.deepEqual(validateNotice(notice), { ...notice, seen: false });
 });
 
 test("notifications accept endpoint-scoped IDs and retain a finite bound", () => {
@@ -134,7 +135,7 @@ test("notifications accept endpoint-scoped IDs and retain a finite bound", () =>
     body: "Preparation finished",
   };
   assert.ok(notice.workspaceId.length > 200);
-  assert.deepEqual(validateNotice(notice), notice);
+  assert.deepEqual(validateNotice(notice), { ...notice, seen: false });
   assert.throws(() =>
     validateNotice({ ...notice, workspaceId: "x".repeat(4097) }),
   );
@@ -256,4 +257,23 @@ test("hibernateAfterSecs keeps a whole number of seconds and rejects anything el
       normalizePreferences({ hibernateAfterSecs: bad }).hibernateAfterSecs,
       14400,
     );
+});
+
+test("a waiting pane is skipped only when the window is focused and the pane is on screen", () => {
+  assert.equal(noticeSuppressed({ windowFocused: true, seen: true }), true);
+  // Another pane has the focused window: the owner cannot see this one.
+  assert.equal(noticeSuppressed({ windowFocused: true, seen: false }), false);
+  assert.equal(
+    noticeSuppressed({ windowFocused: true, seen: undefined }),
+    false,
+  );
+  assert.equal(noticeSuppressed({ windowFocused: false, seen: true }), false);
+  assert.equal(noticeSuppressed({ windowFocused: false, seen: false }), false);
+});
+
+test("validateNotice keeps seen only when it is exactly true", () => {
+  const base = { workspaceId: "w", panelId: "p", title: "t", body: "b" };
+  assert.equal(validateNotice({ ...base, seen: true }).seen, true);
+  assert.equal(validateNotice(base).seen, false);
+  assert.equal(validateNotice({ ...base, seen: "yes" }).seen, false);
 });

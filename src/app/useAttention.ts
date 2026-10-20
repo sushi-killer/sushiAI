@@ -6,6 +6,7 @@ import {
   markSeen,
   observe,
   fitNotice,
+  isPanelOnScreen,
   waitingCount,
   workingCount,
   type AttentionState,
@@ -17,7 +18,7 @@ import type { ModuleEntry } from "./inboxModel.ts";
 import type { SectionRef } from "./navigation.ts";
 import type { ConnectionProfile, Workspace } from "../types";
 
-/** How often the 5/10/20 minute reminders are checked - independent of
+/** How often the 5/10/20 minute and then 30 minute reminders are checked - independent of
  * whatever else re-renders the app, so a host that stopped polling still gets
  * its nudge on schedule. */
 const REMINDER_INTERVAL_MS = 30000;
@@ -56,6 +57,21 @@ export function useAttention({
   stateRef.current = state;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
+  const viewRef = useRef({ section, zoomed, selected, active });
+  viewRef.current = { section, zoomed, selected, active };
+
+  /** Read at send time (events and timers fire outside a render) so main can
+   * stay quiet only for a pane the owner is already looking at. */
+  const onScreen = useCallback((panelId: string) => {
+    const { section, zoomed, selected, active } = viewRef.current;
+    return isPanelOnScreen({
+      panelId,
+      section,
+      zoomed,
+      selected,
+      activePanelIds: active.panels.map((p) => p.id),
+    });
+  }, []);
 
   const hostLabelFor = useCallback(
     (workspace: Workspace) =>
@@ -99,11 +115,12 @@ export function useAttention({
         fitNotice({
           workspaceId: event.workspace.id,
           panelId: event.panel.id,
+          seen: onScreen(event.panel.id),
           ...notice,
         }),
       );
     }
-  }, [workspaces, hostLabelFor]);
+  }, [workspaces, hostLabelFor, onScreen]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -120,6 +137,7 @@ export function useAttention({
           fitNotice({
             workspaceId: found.workspace.id,
             panelId: found.panel.id,
+            seen: onScreen(found.panel.id),
             title: `${found.panel.title} is still waiting`,
             body: `${reminder.minutes} min · ${found.workspace.name}`,
           }),
@@ -127,7 +145,7 @@ export function useAttention({
       }
     }, REMINDER_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [findPanel]);
+  }, [findPanel, onScreen]);
 
   const waiting = waitingCount(
     workspaces,
@@ -147,10 +165,17 @@ export function useAttention({
   // Seen the moment it can actually be seen: the active workspace, no section
   // page covering the canvas, and this is the selected or zoomed pane.
   useEffect(() => {
-    if (section) return;
     const looked = zoomed || selected;
-    if (!looked) return;
-    if (!active.panels.some((p) => p.id === looked)) return;
+    if (
+      !isPanelOnScreen({
+        panelId: looked,
+        section,
+        zoomed,
+        selected,
+        activePanelIds: active.panels.map((p) => p.id),
+      })
+    )
+      return;
     setState((current) => markSeen(current, looked));
   }, [section, zoomed, selected, active]);
 

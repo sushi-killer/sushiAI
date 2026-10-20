@@ -20,8 +20,44 @@ export function fitNotice(notice: AttentionNotice): AttentionNotice {
   };
 }
 
-/** Minutes after a panel enters `blocked` that a reminder fires, each once. */
+/** Minutes after a panel enters `blocked` that the first reminders fire. */
 export const REMINDER_MINUTES = [5, 10, 20] as const;
+/** After the last fixed mark a still-waiting panel is reminded this often. */
+export const REMINDER_REPEAT_MINUTES = 30;
+
+/** Every reminder mark at or before `elapsedMinutes`: the fixed ones, then one
+ * per repeat interval for as long as the panel keeps waiting. */
+function reminderMarksUpTo(elapsedMinutes: number): number[] {
+  const marks: number[] = REMINDER_MINUTES.filter((m) => m <= elapsedMinutes);
+  const last = REMINDER_MINUTES[REMINDER_MINUTES.length - 1];
+  for (
+    let m = last + REMINDER_REPEAT_MINUTES;
+    m <= elapsedMinutes;
+    m += REMINDER_REPEAT_MINUTES
+  )
+    marks.push(m);
+  return marks;
+}
+
+/** Whether the owner can look at `panelId` right now: it belongs to the active
+ * workspace, no section page covers the canvas, and it is the zoomed or
+ * selected pane. The one definition behind "seen" for both marking and
+ * notice suppression. */
+export function isPanelOnScreen(view: {
+  panelId: string;
+  section: unknown;
+  zoomed: string | null;
+  selected: string;
+  activePanelIds: string[];
+}): boolean {
+  if (view.section) return false;
+  const looked = view.zoomed || view.selected;
+  return (
+    !!looked &&
+    looked === view.panelId &&
+    view.activePanelIds.includes(view.panelId)
+  );
+}
 
 type TrackedPanel = {
   /** The agent panel's own status the last time it was observed. */
@@ -160,8 +196,10 @@ export function observe(
 }
 
 /** The reminders due right now - every `blocked` panel whose elapsed time has
- * crossed a `REMINDER_MINUTES` mark it has not fired yet - and the state with
- * those marks recorded so each fires only once. */
+ * crossed a reminder mark it has not fired yet - and the state with those
+ * marks recorded so each fires only once. Several missed marks (a sleeping
+ * laptop) fire as one reminder for the latest. The schedule runs for as long
+ * as the panel stays `blocked`; leaving that status resets it. */
 export function dueReminders(
   state: AttentionState,
   now: number,
@@ -171,15 +209,15 @@ export function dueReminders(
   for (const [panelId, tracked] of Object.entries(panels)) {
     if (tracked.status !== "blocked") continue;
     const elapsedMinutes = (now - tracked.since) / 60000;
-    let fired = tracked.remindersFired;
-    for (const minutes of REMINDER_MINUTES) {
-      if (elapsedMinutes >= minutes && !fired.includes(minutes)) {
-        reminders.push({ panelId, minutes });
-        fired = [...fired, minutes];
-      }
-    }
-    if (fired !== tracked.remindersFired)
-      panels[panelId] = { ...tracked, remindersFired: fired };
+    const missed = reminderMarksUpTo(elapsedMinutes).filter(
+      (m) => !tracked.remindersFired.includes(m),
+    );
+    if (!missed.length) continue;
+    reminders.push({ panelId, minutes: missed[missed.length - 1] });
+    panels[panelId] = {
+      ...tracked,
+      remindersFired: [...tracked.remindersFired, ...missed],
+    };
   }
   return { reminders, state: { panels, unseen: state.unseen } };
 }

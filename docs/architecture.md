@@ -54,7 +54,7 @@ flowchart TB
       wsSnap["workspace-snapshot.cjs<br/>sync read/flush + async write"]
       devRestart["dev-restart.cjs<br/>watches electron/ in npm run dev"]
       previewSrv["preview.cjs<br/>token-granted file server;<br/>comment script for annotate HTML grants"]
-      artSkill["artifacts-skill.cjs + extensions/builtin-skills.cjs<br/>builtin skills (sushiai-artifacts, sushiai-routines) through<br/>sushiai skills install / remove: this Mac, once per Codex account home<br/>(CODEX_HOME set), SSH hosts after their sushiai install; removed when disabled"]
+      artSkill["extensions/builtin-skills.cjs<br/>builtin skills (sushiai-artifacts, sushiai-routines, sushiai-vault) through<br/>sushiai skills install / remove: this Mac, once per Codex account home<br/>(CODEX_HOME set), SSH hosts after their sushiai install; removed when disabled"]
       skillsCat["skills-catalog.cjs + skills-manager.cjs<br/>Skills screen: rows of sushiai skills --json --catalog<br/>plus per-skill usage counted from session transcripts (background index); a change is checked against the row's root"]
     end
     orchPanel <--> preload <--> orchSvc

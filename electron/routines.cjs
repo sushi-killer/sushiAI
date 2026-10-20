@@ -13,7 +13,10 @@ const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
 const { randomUUID } = require("node:crypto");
-const { ROUTINES_MANIFEST } = require("./extensions/builtin-routines.cjs");
+const {
+  ROUTINES_MANIFEST,
+  ROUTINES_SKILL,
+} = require("./extensions/builtin-routines.cjs");
 const { assembleCatalog, daemonCatalog } = require("./routines-catalog.cjs");
 const { harnessFor, isHarness } = require("./harness.cjs");
 
@@ -24,7 +27,7 @@ const SETTINGS_STORE = "routines-settings";
  * when Routines is turned on (an ssh host's schedules would stay hidden). */
 const RETIRED_STORE = "routines-retired-hosts";
 const LOCAL = "local";
-const SKILL = "sushiai-routines";
+const SKILL = ROUTINES_SKILL.name;
 const OFF_MESSAGE = "Routines are off.";
 // The probe of a host (login, models) is reused for this long.
 const FACTS_TTL_MS = 60000;

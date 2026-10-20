@@ -26,4 +26,10 @@ const ARTIFACTS_MANIFEST = {
   },
 };
 
-module.exports = { ARTIFACTS_MANIFEST };
+/** The skill this extension ships: its name, its file in this folder. */
+const ARTIFACTS_SKILL = {
+  name: "sushiai-artifacts",
+  file: "artifacts-skill.md",
+};
+
+module.exports = { ARTIFACTS_MANIFEST, ARTIFACTS_SKILL };

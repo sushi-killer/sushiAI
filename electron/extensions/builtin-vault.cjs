@@ -28,4 +28,12 @@ const VAULT_MANIFEST = {
   },
 };
 
-module.exports = { VAULT_MANIFEST };
+/** The skill this extension ships: its name, its file in this folder. */
+const VAULT_SKILL = {
+  name: "sushiai-vault",
+  file: "vault-skill.md",
+  // Vault values never go to an SSH host, so neither does the skill.
+  hosts: "local",
+};
+
+module.exports = { VAULT_MANIFEST, VAULT_SKILL };

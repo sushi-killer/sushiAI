@@ -71,16 +71,24 @@ const testMode = testWindow();
 const { SurfaceStateStore } = require("./extensions/surface-state.cjs");
 const { ExtensionManager } = require("./extensions/extension-manager.cjs");
 const { createCompanions } = require("./extensions/companion-process.cjs");
-const { ARTIFACTS_MANIFEST } = require("./extensions/builtin-artifacts.cjs");
-const { VAULT_MANIFEST } = require("./extensions/builtin-vault.cjs");
-const { ROUTINES_MANIFEST } = require("./extensions/builtin-routines.cjs");
-const { configureRoutinesSkill } = require("./routines-skill.cjs");
+const {
+  ARTIFACTS_MANIFEST,
+  ARTIFACTS_SKILL,
+} = require("./extensions/builtin-artifacts.cjs");
+const {
+  VAULT_MANIFEST,
+  VAULT_SKILL,
+} = require("./extensions/builtin-vault.cjs");
+const {
+  ROUTINES_MANIFEST,
+  ROUTINES_SKILL,
+} = require("./extensions/builtin-routines.cjs");
 const { registerRoutines } = require("./routines.cjs");
 const { createHostProbe } = require("./routines-probe.cjs");
 const { chatModels } = require("./agent-models.cjs");
-const { configureArtifactsSkill } = require("./artifacts-skill.cjs");
 const {
   configureBuiltinSkillSync,
+  registerExtensionSkill,
   syncLocalBuiltinSkills,
 } = require("./extensions/builtin-skills.cjs");
 const {
@@ -148,17 +156,19 @@ configureBuiltinSkillSync({
   binary: sushiaiBinary,
   codexAccountsDir: path.join(app.getPath("userData"), "codex-accounts"),
 });
-configureArtifactsSkill({
-  isEnabled: () => extensions.isEnabled(ARTIFACTS_MANIFEST.id),
-  subscribe: (listener) => extensions.onChange(listener),
-});
-configureRoutinesSkill({
-  extensionId: ROUTINES_MANIFEST.id,
-  isEnabled: () => extensions.isEnabled(ROUTINES_MANIFEST.id),
-  subscribe: (listener) => extensions.onChange(listener),
-});
-// After the persisted enabled state is loaded, so a disabled Artifacts
-// extension does not get its skill installed (and a stale one is removed).
+for (const [manifest, skill] of [
+  [ARTIFACTS_MANIFEST, ARTIFACTS_SKILL],
+  [ROUTINES_MANIFEST, ROUTINES_SKILL],
+  [VAULT_MANIFEST, VAULT_SKILL],
+])
+  registerExtensionSkill({
+    extensionId: manifest.id,
+    ...skill,
+    isEnabled: () => extensions.isEnabled(manifest.id),
+    subscribe: (listener) => extensions.onChange(listener),
+  });
+// After the persisted enabled state is loaded, so a disabled extension
+// does not get its skill installed (and a stale one is removed).
 extensions.ready.then(() => syncLocalBuiltinSkills());
 const surfaceState = new SurfaceStateStore(app.getPath("userData"));
 extensions.ready.then(() =>

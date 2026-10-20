@@ -9,6 +9,7 @@ import {
   swap,
   tidy,
 } from "../layout.ts";
+import { agentTitle } from "../lib/agent-title.ts";
 import { memberLabel } from "../app/workspaceMerge.ts";
 import type { MergeGroup } from "../app/workspaceMerge.ts";
 import { codePanels } from "../workspaceState.ts";
@@ -143,6 +144,21 @@ export function closeRequest(
   };
 }
 
+/** The daemon title of a launch: a worktree launch is named after its
+ * workspace and branch, a terminal "zsh". An agent session carries `title`
+ * only when it already had one; otherwise it has none and the daemon names it
+ * after its first prompt, so sessions of one agent are not all alike. */
+export function launchLabel(launch: {
+  kind: "agent" | "terminal";
+  workspaceName: string;
+  branch?: string;
+  title?: string;
+}): string {
+  if (launch.branch) return `${launch.workspaceName} · ${launch.branch}`;
+  if (launch.kind === "terminal") return "zsh";
+  return launch.title ?? "";
+}
+
 /** What Reopen asks the launch entry for: a new session in the ended panel's
  * slot, resuming the agent's own session when the daemon reported one. The
  * workspace id is the daemon group (one id for both). */
@@ -164,7 +180,15 @@ export function reopenRequest(
     operationId,
     endpoint: owner.connection || defaultEndpoint,
     cwd: (handStarted && agent && ended.agentCwd) || owner.cwd,
-    label: owner.name,
+    label: launchLabel({
+      kind: agent ? "agent" : "terminal",
+      workspaceName: owner.name,
+      // A panel title that is only the agent's own name was never a session title.
+      title:
+        ended.kind === "agent" && ended.title !== agentTitle(ended.agent || "")
+          ? ended.title
+          : undefined,
+    }),
     kind: agent ? "agent" : "terminal",
     agent: agent ? ended.agent || "claude" : undefined,
     modelProfileId: ended.modelProfileId,

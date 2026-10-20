@@ -767,6 +767,12 @@ impl Actor {
         let agent = self.agent.as_mut().ok_or_else(no_agent)?;
         agent.seq += 1;
         agent.last_hook = Instant::now();
+        let named = match &parsed.event {
+            HookEvent::UserPromptSubmit { prompt } => {
+                prompt.as_deref().and_then(hooks::prompt_title)
+            }
+            _ => None,
+        };
         let ask = match &parsed.event {
             HookEvent::PermissionRequest(r) => Some((r.tool_name.clone(), r.tool_input.clone())),
             _ => None,
@@ -776,6 +782,10 @@ impl Actor {
             payload: Box::new(parsed),
         };
         agent.status.apply(input, now_ms());
+        if let Some(title) = named {
+            self.registry.name_if_unset(&self.info.id, &title);
+        }
+        let agent = self.agent.as_mut().ok_or_else(no_agent)?;
         if agent.status.ending && agent.ending_at.is_none() {
             agent.ending_at = Some(Instant::now() + ENDING_GRACE);
         }

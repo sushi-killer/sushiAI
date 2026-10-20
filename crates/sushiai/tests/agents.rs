@@ -431,6 +431,54 @@ fn a_turn_stop_while_a_subagent_runs_keeps_the_session_working() {
 }
 
 #[test]
+fn the_first_prompt_names_an_unnamed_session_and_the_second_does_not_rename_it() {
+    named_by_first_prompt(None);
+}
+
+#[test]
+fn a_blank_title_at_create_counts_as_no_title() {
+    named_by_first_prompt(Some("   "));
+}
+
+fn named_by_first_prompt(title: Option<&str>) {
+    let fake = Fake::new(
+        "claude",
+        "say('token', process.env.SUSHIAI_SESSION_TOKEN); stay();",
+    );
+    let mut sandbox = fake.sandbox();
+    sandbox.start_daemon();
+    let mut client = sandbox.client();
+    let id = match title {
+        None => create_agent(&mut client, "claude"),
+        Some(title) => client.call(
+            "session.create",
+            json!({"agent": "claude", "cwd": "/tmp", "cols": 80, "rows": 24, "title": title}),
+        )["id"]
+            .as_str()
+            .expect("id")
+            .to_string(),
+    };
+    wait_until("token file", || !fake.read("token").is_empty());
+    let token = fake.read("token").trim().to_string();
+    let mut hook = hook_client(&sandbox);
+    let mut send = |prompt: &str| {
+        let payload = json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt});
+        hook.call("hook.event", hook_params(&id, &token, "claude", payload));
+    };
+    send("[Synthetic note]\nFix the synthetic login form");
+    send("Second synthetic prompt");
+    assert_eq!(
+        list_entry(&mut client, &id)["title"],
+        "Fix the synthetic login form"
+    );
+    client.pump_until("session.updated with the title", |c| {
+        c.notes
+            .iter()
+            .any(|n| n.0 == "session.updated" && n.1["title"] == "Fix the synthetic login form")
+    });
+}
+
+#[test]
 fn a_hook_for_another_agent_is_rejected_by_the_daemon_too() {
     let fake = Fake::new(
         "claude",

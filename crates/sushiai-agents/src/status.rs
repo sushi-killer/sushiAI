@@ -342,7 +342,7 @@ impl SessionStatus {
                     self.set(Status::Idle, None, now);
                 }
             }
-            HookEvent::UserPromptSubmit => {
+            HookEvent::UserPromptSubmit { .. } => {
                 self.stop_seen = false;
                 self.permission_seen_this_turn = false;
                 self.error = false;

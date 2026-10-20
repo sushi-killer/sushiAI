@@ -22,7 +22,7 @@ export function toDaemonLaunch(
     ...(request.kind === "agent" && request.agent
       ? { agent: request.agent }
       : {}),
-    title: request.label,
+    ...(request.label ? { title: request.label } : {}),
     ...(request.prompt ? { prompt: request.prompt } : {}),
     ...(request.resume ? { resume: request.resume } : {}),
     ...(request.workspaceId ? { group: request.workspaceId } : {}),
@@ -122,7 +122,11 @@ export function placeLaunchedPanel(
       ...workspaces,
       {
         id: targetId,
-        name: request.label || cwd.split("/").filter(Boolean).pop() || cwd,
+        name:
+          request.workspaceName ||
+          request.label ||
+          cwd.split("/").filter(Boolean).pop() ||
+          cwd,
         cwd,
         connection: request.endpoint,
         ...(request.worktree

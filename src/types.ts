@@ -270,7 +270,10 @@ export type SessionLaunchRequest = {
   modelProfileId?: string;
   env?: Record<string, string>;
   cwd: string;
+  /** The daemon session title; empty when the daemon names the session. */
   label: string;
+  /** The name of the workspace a launch creates, when it is not the label. */
+  workspaceName?: string;
   workspaceId?: string;
   targetPaneId?: string;
   paneId?: string;

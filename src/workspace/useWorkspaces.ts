@@ -41,6 +41,7 @@ import {
   type PanelUpdate,
   removeClosedSessions,
   removePanel,
+  launchLabel,
   renameRequest,
   reopenRequest,
   tidyGroupLayout,
@@ -308,7 +309,8 @@ export function useWorkspaces({
         workspaceId: newWorkspaceId(operation),
         endpoint,
         cwd,
-        label: name,
+        label: launchLabel({ kind, workspaceName: name }),
+        workspaceName: name,
         kind,
         agent: kind === "agent" ? starter : undefined,
         env,
@@ -425,12 +427,11 @@ export function useWorkspaces({
             operationId: operation,
             endpoint,
             cwd: current.cwd,
-            // The session title: the panel's own, or the new worktree workspace's.
-            label: worktree
-              ? `${current.name} · ${worktree.branch}`
-              : kind === "agent"
-                ? modelProfile?.label || agentTitle(agent)
-                : "zsh",
+            label: launchLabel({
+              kind: kind === "agent" ? "agent" : "terminal",
+              workspaceName: current.name,
+              branch: worktree?.branch,
+            }),
             kind: kind === "agent" ? "agent" : "terminal",
             agent: kind === "agent" ? agent : undefined,
             modelProfileId,

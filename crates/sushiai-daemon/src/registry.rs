@@ -18,6 +18,9 @@ use sushiai_protocol::catalog::{
 use sushiai_protocol::{method, Notification, SessionInfo, SessionRemoved, SessionStatus};
 use tokio::sync::{broadcast, Notify};
 
+use sushiai_agents::harness;
+
+use crate::agent;
 use crate::home::Home;
 use crate::launch_store::LaunchStore;
 use crate::module::Module;
@@ -206,6 +209,14 @@ pub enum RemoveError {
 /// The session as clients see it: without the token hash.
 fn public(info: &SessionInfo) -> SessionInfo {
     let mut info = info.clone();
+    // An agent whose hooks never report a prompt shows its own name, derived here so a
+    // stored title (an owner rename) always wins.
+    if info.title.is_none() {
+        let name = info.agent.name.as_deref();
+        if agent::agent_of(name).is_none() && harness::screen_of(name).is_some() {
+            info.title = name.and_then(harness::find).map(|h| h.label().to_owned());
+        }
+    }
     info.agent.token_hash = None;
     info.agent.idempotency_key = None;
     info
@@ -513,6 +524,30 @@ impl Registry {
     /// stored as given. `None` means no such session.
     pub fn update_session(&self, update: SessionUpdate) -> Option<SessionInfo> {
         let mut catalog = self.catalog();
+        self.update_locked(&mut catalog, update)
+    }
+
+    /// Gives a session the title `title` only while it has none (never set, or cleared by the
+    /// owner), under the same lock as the check, so an owner rename is never overwritten.
+    pub fn name_if_unset(&self, id: &str, title: &str) {
+        let mut catalog = self.catalog();
+        if catalog
+            .sessions
+            .get(id)
+            .is_some_and(|e| e.info.title.is_none())
+        {
+            let update = SessionUpdate {
+                id: id.to_owned(),
+                title: Some(title.to_owned()),
+                project: None,
+                group: None,
+                pinned: None,
+            };
+            self.update_locked(&mut catalog, update);
+        }
+    }
+
+    fn update_locked(&self, catalog: &mut Catalog, update: SessionUpdate) -> Option<SessionInfo> {
         let entry = catalog.sessions.get_mut(&update.id)?;
         let mut next = entry.info.clone();
         if let Some(project) = update.project {
@@ -532,7 +567,7 @@ impl Registry {
         }
         entry.info = next;
         let info = public(&entry.info);
-        self.save(&catalog);
+        self.save(catalog);
         self.notify(method::SESSION_UPDATED, &info);
         Some(info)
     }
@@ -770,6 +805,60 @@ mod tests {
             background: false,
             agent: Default::default(),
         }
+    }
+
+    fn named(id: &str, title: Option<&str>) -> (tempfile::TempDir, Registry) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::new(Home::new(dir.path().to_path_buf()));
+        let mut info = exited(1);
+        info.id = id.into();
+        info.title = title.map(str::to_owned);
+        registry.update(info);
+        (dir, registry)
+    }
+
+    fn title_of(registry: &Registry, id: &str) -> Option<String> {
+        registry.list().into_iter().find(|i| i.id == id)?.title
+    }
+
+    #[test]
+    fn an_unnamed_session_takes_the_first_prompt_name_and_keeps_it() {
+        let (_dir, registry) = named("s001", None);
+        let mut events = registry.events.subscribe();
+        registry.name_if_unset("s001", "Fix the login form");
+        assert_eq!(
+            title_of(&registry, "s001").as_deref(),
+            Some("Fix the login form")
+        );
+        assert!(events.try_recv().is_ok(), "session.updated fires");
+        registry.name_if_unset("s001", "Second prompt");
+        assert_eq!(
+            title_of(&registry, "s001").as_deref(),
+            Some("Fix the login form")
+        );
+    }
+
+    #[test]
+    fn a_session_of_an_agent_without_hooks_lists_the_agent_name_until_it_has_a_title() {
+        let (_dir, registry) = named("s001", None);
+        let mut info = exited(1);
+        info.agent.name = Some("gemini".into());
+        registry.update(info);
+        assert_eq!(title_of(&registry, "s001").as_deref(), Some("Gemini CLI"));
+        registry.name_if_unset("s001", "Fix the form");
+        assert_eq!(title_of(&registry, "s001").as_deref(), Some("Fix the form"));
+        let (_dir, hooked) = named("s002", None);
+        let mut info = exited(2);
+        info.agent.name = Some("claude".into());
+        hooked.update(info);
+        assert_eq!(title_of(&hooked, "s002"), None);
+    }
+
+    #[test]
+    fn an_owner_title_is_never_replaced_by_a_prompt_name() {
+        let (_dir, registry) = named("s001", Some("Release prep"));
+        registry.name_if_unset("s001", "Fix the login form");
+        assert_eq!(title_of(&registry, "s001").as_deref(), Some("Release prep"));
     }
 
     #[test]

@@ -64,13 +64,18 @@ export function forward(all, name, seen = new Set()) {
   return seen;
 }
 
-/** Files outside any crate folder, with the crates that include them by #[path]. */
+/** Files outside any crate folder, with the crates that include them by #[path],
+ * include_str! or include_bytes!. */
 export function sharedFiles(all, base = root) {
   const shared = new Map();
   for (const c of all)
     for (const file of rustFiles(path.join(base, c.dir))) {
       const text = fs.readFileSync(file, "utf8");
-      for (const [, rel] of text.matchAll(/#\[path\s*=\s*"([^"]+)"\]/g)) {
+      for (const [, rel] of text
+        .matchAll(
+          /#\[path\s*=\s*"([^"]+)"\]|include_(?:str|bytes)!\(\s*"([^"]+)"/g,
+        )
+        .map((m) => [m[0], m[1] ?? m[2]])) {
         const target = posix(
           path.relative(base, path.resolve(path.dirname(file), rel)),
         );

@@ -460,7 +460,8 @@ export type ChatModel = {
   defaultEffort: string;
   context: number;
 };
-export type SkillProvider = "Codex" | "Claude";
+/** A skill row's provider; the known values are `PROVIDERS` (agent-title). */
+export type SkillProvider = string;
 export type SkillUsage = {
   provider?: SkillProvider;
   at: number;
@@ -515,17 +516,25 @@ export type ClaudePlugin = {
   sourceLabel: string;
   disabled: boolean;
 };
-export type ChatModels = Record<
-  string,
-  {
-    models: ChatModel[];
-    efforts: string[];
-    defaultModel: string;
-    defaultModelId?: string;
-    defaultContext?: number;
-    defaultEffort?: string;
-  }
->;
+/** One agent of `agents.catalog`, as the daemon serves it. */
+export type AgentCatalog = {
+  id: string;
+  label: string;
+  models: ChatModel[];
+  /** The levels the chat composer offers. */
+  efforts: string[];
+  /** The smaller set the routine builder offers. */
+  builderEfforts: string[];
+  /** The permission modes the CLI accepts. */
+  permissions: string[];
+  /** The model the CLI uses when the caller names none: the id to pass back. */
+  defaultModel: string;
+  /** That model as a person reads it; the id again when the CLI lists no label. */
+  defaultModelLabel: string;
+  defaultEffort: string;
+  defaultContext: number;
+};
+export type ChatModels = Record<string, AgentCatalog>;
 export type UpdateSettings = {
   autoCheck: boolean;
   autoDownload: boolean;
@@ -763,7 +772,7 @@ export interface Bridge {
     permission?: string;
   }): Promise<unknown>;
   cancelChat(panelId: string): Promise<void>;
-  chatModels(): Promise<ChatModels>;
+  chatModels(endpoint?: string): Promise<ChatModels>;
   onChat(callback: (event: ChatEvent) => void): () => void;
   catalog(
     kind: string,

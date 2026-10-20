@@ -247,6 +247,7 @@ test("node test sleeps and wall-clock asserts fail unless marked; Rust elapsed b
         "t.mock.timers.tick(250);",
         "assert.ok(entry.expiresAt > Date.now());",
         "await next();",
+        "connect({ helloTimeoutMs: DEADLINE_MS / 12 });",
         "",
       ].join("\n"),
     );
@@ -262,6 +263,7 @@ test("node test sleeps and wall-clock asserts fail unless marked; Rust elapsed b
       "assert.ok((Date.now() - t) < 300);",
       "await new Promise((go) => setTimeout(go, 30));",
       "await new Promise((go) => setTimeout(() => go(), 30));",
+      "connect({ helloTimeoutMs: 3000 });",
     ]) {
       write(
         "tests/b.test.cjs",
@@ -561,6 +563,75 @@ test("a module directory may not import the shell", () => {
     failed.stderr,
     /src\/gadget\/Leak\.tsx imports \.\.\/app\/model\.ts; a module may not import the shell/,
   );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});
+
+test("a list of reasoning levels in the app fails unless the file marks its own scale", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "effort-list-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  const levels = 'export const levels = ["low", "high", "xhigh"];\n';
+  write(
+    "electron/own.cjs",
+    `// own effort scale: another agent's levels\n${levels}`,
+  );
+  write("src/routines/picker.ts", "export const levels = catalog.efforts;\n");
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/routines/copy.ts", levels);
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /src\/routines\/copy\.ts writes an agent's reasoning levels/,
+  );
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});
+
+test("an agent label quoted outside the catalog fails unless the file marks a key", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "agent-label-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "electron/agents.json",
+    JSON.stringify([{ id: "demo", label: "Demo Agent", native: true }]),
+  );
+  write(
+    "src/key.ts",
+    '// agent label key: stored as the provider\nconst k = "Demo Agent";\n',
+  );
+  write("src/title.ts", "export const title = agentTitle(id);\n");
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/copy.ts", 'export const name = "Demo Agent";\n');
+  write("electron/copy.cjs", 'module.exports = "Demo Agent";\n');
+  // An unmarked line in a file that has a marked line still fails.
+  write(
+    "src/mixed.ts",
+    '// agent label key: stored as the provider\nconst k = "Demo Agent";\nconst name = "Demo Agent";\n',
+  );
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  for (const file of ["src/copy.ts", "electron/copy.cjs", "src/mixed.ts"])
+    assert.match(
+      failed.stderr,
+      new RegExp(`${file.replace(".", "\\.")} writes an agent's name`),
+    );
+  assert.doesNotMatch(failed.stderr, /src\/key\.ts/);
 
   fs.rmSync(tree, { recursive: true, force: true });
 });

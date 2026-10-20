@@ -27,8 +27,6 @@ test("every harness implements the same interface", () => {
       "parseTurn",
     ])
       assert.equal(typeof harness[fn], "function", `${name}.${fn}`);
-    assert.ok(Array.isArray(harness.efforts) && harness.efforts.length);
-    assert.ok(Array.isArray(harness.builderEfforts));
     assert.ok(harness.login.length >= 2);
   }
 });

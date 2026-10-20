@@ -4,7 +4,8 @@
 
 import type { HostCliReadiness } from "../types.ts";
 
-export type Harness = "claude" | "codex";
+import type { Harness } from "../lib/agent-title.ts";
+export type { Harness };
 
 export type Route = {
   id: string;

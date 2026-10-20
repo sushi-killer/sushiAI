@@ -62,6 +62,9 @@ pub struct Config {
     pub run_path: Option<String>,
     /// How often a started session is looked at while it ends.
     pub poll: Duration,
+    /// The levels each harness offers a routine. This crate cannot depend on
+    /// `sushiai-agents`, so the bin passes them in. A harness with no entry refuses every effort.
+    pub builder_efforts: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -243,7 +246,21 @@ impl Routines {
     }
 
     fn report(&self, routine: &Routine, brief: &str, catalog: &Catalog) -> Report {
-        validate(routine, brief, catalog, &self.inner.store.dir(&routine.id))
+        validate(
+            routine,
+            brief,
+            catalog,
+            &self.inner.store.dir(&routine.id),
+            self.efforts(&routine.agent.harness),
+        )
+    }
+
+    fn efforts(&self, harness: &str) -> &[String] {
+        self.inner
+            .cfg
+            .builder_efforts
+            .get(harness)
+            .map_or(&[], Vec::as_slice)
     }
 
     // ----- methods -----
@@ -1055,6 +1072,7 @@ impl Routines {
                 read_only: &read_only,
                 read_dirs: &read_dirs,
                 skills: &routine.skills,
+                efforts: self.efforts(&routine.agent.harness),
             },
         )?;
         let cwd = self.cwd(routine, catalog);
@@ -1144,6 +1162,7 @@ impl Routines {
                 read_only: &read_only,
                 read_dirs: &read_dirs,
                 skills: &routine.skills,
+                efforts: self.efforts(&routine.agent.harness),
             },
         )
         .unwrap_or_default();

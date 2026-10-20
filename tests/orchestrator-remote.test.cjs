@@ -15,7 +15,7 @@ const {
   PREFLIGHT_SCRIPT,
 } = require("../electron/host-setup.cjs");
 
-const { until, removeDir } = require("./helpers/deadline.cjs");
+const { DEADLINE_MS, until, removeDir } = require("./helpers/deadline.cjs");
 
 const cleanups = [];
 test.afterEach(async () => {
@@ -61,7 +61,7 @@ function rig(proxy) {
         profile: PROFILE,
         ssh: proxy.script,
         args: () => ["-T", "-o", "BatchMode=yes"],
-        helloTimeoutMs: 3000,
+        helloTimeoutMs: DEADLINE_MS,
       }),
     },
     backoffMinMs: 20,

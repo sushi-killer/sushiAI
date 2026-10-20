@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { agentTitle } from "./lib/agent-title.ts";
 import { Check, Pencil, RefreshCw, ShieldOff, Trash2 } from "lucide-react";
 import type {
   ClaudeMcpServer,
@@ -451,7 +452,7 @@ export function ClaudeMcpSettings({
                             ],
                             [
                               "CLIs",
-                              `${matrix.clis.claude.installed ? "Claude" : "No Claude"} · ${matrix.clis.codex.installed ? "Codex" : "No Codex"}`,
+                              `${matrix.clis.claude.installed ? "Claude" : "No Claude"} · ${matrix.clis.codex.installed ? agentTitle("codex") : `No ${agentTitle("codex")}`}`,
                               matrix.clis.claude.installed ||
                                 matrix.clis.codex.installed,
                             ],

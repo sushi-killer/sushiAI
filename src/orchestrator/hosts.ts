@@ -4,7 +4,14 @@
 import type { Workspace } from "../types.ts";
 import { planDrafts } from "./helpers.ts";
 import { unstartedDraft } from "./planModel.ts";
-import type { OrchestratorHost, Preflight, Route, Task } from "./types.ts";
+import type {
+  Harness,
+  OrchestratorHost,
+  Preflight,
+  Route,
+  Task,
+} from "./types.ts";
+import { HARNESSES } from "../lib/agent-title.ts";
 
 export const LOCAL_HOST = "local";
 
@@ -231,7 +238,7 @@ export type PreflightItem = {
 
 /** The preflight strip: git, then each harness CLI with its login state. */
 export function preflightItems(preflight: Preflight): PreflightItem[] {
-  const harness = (name: "claude" | "codex"): PreflightItem => {
+  const harness = (name: Harness): PreflightItem => {
     const state = preflight[name];
     return {
       name,
@@ -245,8 +252,7 @@ export function preflightItems(preflight: Preflight): PreflightItem[] {
   };
   return [
     { name: "git", ok: preflight.git, note: preflight.git ? "" : "missing" },
-    harness("claude"),
-    harness("codex"),
+    ...HARNESSES.map(harness),
   ];
 }
 
@@ -257,8 +263,9 @@ export function routesFallbackNote(
   preflight: Preflight,
   hostName: string,
 ): string {
-  return (["claude", "codex"] as const)
-    .filter((name) => !(preflight[name].installed && preflight[name].loggedIn))
+  return HARNESSES.filter(
+    (name) => !(preflight[name].installed && preflight[name].loggedIn),
+  )
     .map(
       (name) =>
         `${name} is not ${preflight[name].installed ? "logged in" : "installed"} on ${hostName}; its routes fall back to an installed CLI.`,

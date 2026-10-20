@@ -80,7 +80,7 @@ Commands used inside a run
 
 DIR layout
   routine.json   {"id","name","where":{"host","projects":["id"]},"when":{"cron","tz"},
-                  "agent":{"harness":"claude|codex","model","effort":"low|medium|high",
+                  "agent":{"harness":"claude|codex","model","effort":"a level the catalog offers",
                            "account","extraArgs":[]},
                   "howItRuns":{"mode":"ask-every-time|ask-first|on-its-own","promoteAfter":5},
                   "skills":["name"],

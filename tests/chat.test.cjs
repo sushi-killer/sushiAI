@@ -1,13 +1,17 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { harnessFor, chatPrompt } = require("../electron/harness.cjs");
-const chatArgs = (agent, options) => harnessFor(agent).chatArgs(options);
+// What the daemon's `agents.catalog` serves for one agent. `chatArgs` refuses
+// anything outside it, so a value outside the entry is refused.
+const OFFERED = {
+  efforts: ["low", "high"],
+  permissions: ["default", "acceptEdits"],
+  defaultModel: "the-default",
+};
+const chatArgs = (agent, options) =>
+  harnessFor(agent).chatArgs(options, OFFERED);
 const claudeEvent = harnessFor("claude").chatEvent;
 const codexEvent = harnessFor("codex").chatEvent;
-const {
-  parseCodexCache,
-  parseTomlRoot,
-} = require("../electron/agent-models.cjs");
 const threads = import("../src/chat-threads.ts");
 
 const CLAUDE_BASE = [
@@ -109,10 +113,8 @@ test("codex keeps the stdin prompt marker last and rejects unsafe values", () =>
   assert.equal(args.at(-1), "-");
   assert.ok(args.includes("--sandbox") && args.includes("workspace-write"));
   assert.ok(args.includes('model_reasoning_effort="low"'));
-  assert.throws(
-    () => chatArgs("claude", { model: "x; rm -rf /" }),
-    /Invalid model/,
-  );
+  for (const model of ["x; rm -rf /", "--settings"])
+    assert.throws(() => chatArgs("claude", { model }), /Invalid model/);
   assert.throws(
     () => chatArgs("claude", { effort: "ultra" }),
     /Invalid effort/,
@@ -141,47 +143,28 @@ test("attachments: claude add-dir stays last, codex images precede flags", () =>
     /^user: look\n\[Attached[^\]]*\/p\/i\.png, \/p\/dir\]\n\nassistant: ok$/,
   );
 });
-test("reasoning levels follow the CLI that offers them", () => {
-  assert.ok(chatArgs("claude", { effort: "max" }).includes("max"));
-  assert.throws(
-    () => chatArgs("claude", { effort: "ultra" }),
-    /Invalid effort/,
-  );
+test("chat options are checked against the agent's catalog entry", () => {
+  const bare = (agent, options) =>
+    harnessFor(agent).chatArgs(options, undefined);
+  assert.ok(chatArgs("claude", { effort: "high" }).includes("high"));
   assert.ok(
-    chatArgs("codex", { effort: "ultra" }).includes(
-      'model_reasoning_effort="ultra"',
+    chatArgs("codex", { effort: "high" }).includes(
+      'model_reasoning_effort="high"',
     ),
   );
-});
-test("codex model cache keeps listed models in priority order", () => {
-  const models = parseCodexCache({
-    models: [
-      {
-        slug: "b",
-        display_name: "B",
-        visibility: "list",
-        priority: 9,
-        context_window: 128000,
-        default_reasoning_level: "high",
-        supported_reasoning_levels: [{ effort: "low" }, { effort: "nope" }],
-      },
-      { slug: "hidden", visibility: "hide", priority: 1 },
-      { slug: "a", display_name: "A", visibility: "list", priority: 2 },
-    ],
-  });
-  assert.deepEqual(
-    models.map((m) => m.id),
-    ["a", "b"],
-  );
-  assert.deepEqual(models[1].efforts, ["low"]);
-  assert.equal(models[1].defaultEffort, "high");
-  assert.equal(models[1].context, 128000);
-  assert.deepEqual(parseCodexCache({}), []);
-  assert.equal(
-    parseTomlRoot('model = "gpt-6"\n[x]\nmodel = "no"', "model"),
-    "gpt-6",
-  );
-  assert.equal(parseTomlRoot('[x]\nmodel = "no"', "model"), "");
+  // A model that names no level needs no catalog.
+  assert.ok(bare("claude", {}).includes("--print"));
+  // A value the entry lacks is refused; with no entry only the format is checked.
+  assert.ok(bare("claude", { effort: "high" }).includes("high"));
+  assert.ok(bare("claude", { permission: "plan" }).includes("plan"));
+  for (const [run, agent, options, error] of [
+    [chatArgs, "claude", { effort: "max" }, /Invalid effort/],
+    [chatArgs, "codex", { effort: "ultra" }, /Invalid effort/],
+    [chatArgs, "claude", { permission: "plan" }, /Invalid permission mode/],
+    [bare, "claude", { effort: "hi gh;" }, /Invalid effort/],
+    [bare, "claude", { permission: "a;b" }, /Invalid permission mode/],
+  ])
+    assert.throws(() => run(agent, options), error);
 });
 test("codex events become answer text, progress notes, usage and errors", () => {
   const answer = {
@@ -282,4 +265,105 @@ test("thread helpers: titles, relative time and grouping", async () => {
     groups.map((g) => g.threads.map((t) => t.panel.id)),
     [["new", "old"]],
   );
+});
+
+// The chat handler checks a turn against the catalog of the host it runs on.
+// `local` turns spawn `/bin/cat`; an ssh turn stops at the ssh line.
+function chatHandler(catalogs, gate) {
+  const { registerChatIpc } = require("../electron/ipc/chat.cjs");
+  const handlers = {};
+  const sent = [];
+  registerChatIpc({
+    handle: (name, fn) => (handlers[name] = fn),
+    send: (channel, data) => sent.push([channel, data]),
+    getConnections: () => ({
+      get: () => ({ id: "build-host" }),
+      args: () => {
+        throw new Error("reached ssh");
+      },
+    }),
+    agentCatalog: {
+      of: async (host) => {
+        await gate;
+        return catalogs[host] ?? {};
+      },
+    },
+    executable: () => "/bin/cat",
+    directory: () => {},
+    id: (value) => value,
+    chats: new Map(),
+  });
+  const turn = (extra = {}) =>
+    handlers.chat({
+      panelId: "p1",
+      cwd: require("node:os").tmpdir(),
+      agent: "claude",
+      messages: [{ role: "user", text: "hi" }],
+      ...extra,
+    });
+  const ssh = (options) =>
+    turn({ endpoint: "ssh:build-host", cwd: "/work/my-app", ...options });
+  return {
+    turn,
+    ssh,
+    cancel: () => handlers["chat-cancel"]("p1"),
+    handlers,
+    sent,
+  };
+}
+
+test("an ssh chat without a daemon there is checked against this Mac's catalog", async () => {
+  const { ssh } = chatHandler({ local: { claude: OFFERED } });
+  // A level this Mac's entry offers passes; one it lacks is refused.
+  await assert.rejects(ssh({ effort: "low" }), /reached ssh/);
+  await assert.rejects(ssh({ effort: "max" }), /Invalid effort/);
+});
+
+test("with no catalog entry the CLI judges the values; only their format is checked", async () => {
+  const { ssh } = chatHandler({});
+  await assert.rejects(ssh({}), /reached ssh/);
+  await assert.rejects(
+    ssh({ effort: "low", permission: "acceptEdits" }),
+    /reached ssh/,
+  );
+  await assert.rejects(ssh({ effort: "lo w" }), /Invalid effort/);
+  await assert.rejects(ssh({ permission: "a;b" }), /Invalid permission mode/);
+});
+
+test("two sends for one panel during the catalog wait start one process", async () => {
+  let open;
+  const gate = new Promise((resolve) => (open = resolve));
+  const { turn, cancel } = chatHandler({ local: { claude: OFFERED } }, gate);
+  const both = Promise.allSettled([turn(), turn()]);
+  open();
+  const results = await both;
+  assert.deepEqual(results.map((r) => r.status).sort(), [
+    "fulfilled",
+    "rejected",
+  ]);
+  cancel();
+});
+
+test("a stop during the catalog wait starts no process", async () => {
+  let open;
+  const gate = new Promise((resolve) => (open = resolve));
+  const { turn, cancel, sent } = chatHandler(
+    { local: { claude: OFFERED } },
+    gate,
+  );
+  const started = turn();
+  cancel();
+  open();
+  assert.deepEqual(await started, { started: false });
+  // The renderer leaves its busy state only on `done`.
+  assert.deepEqual(sent, [["chat-data", { panelId: "p1", done: true }]]);
+  // The panel is free again.
+  const next = await turn();
+  assert.deepEqual(next, { started: true });
+  cancel();
+});
+
+test("chat-models refuses an endpoint that is not a string", async () => {
+  const { handlers } = chatHandler({});
+  assert.throws(() => handlers["chat-models"]({}), /Invalid endpoint/);
 });

@@ -32,7 +32,8 @@ impl Harness for Gemini {
     }
 
     fn label(&self) -> &'static str {
-        "Gemini"
+        // The CLI's own name, which the app shows for a terminal panel too.
+        "Gemini CLI"
     }
 
     fn provider(&self) -> Option<&'static str> {

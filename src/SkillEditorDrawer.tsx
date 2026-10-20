@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { highlightCode } from "./syntax";
+import { PROVIDERS } from "./lib/agent-title.ts";
 import type { SkillCatalogItem, SkillManagementAction } from "./types";
 
 type Target = { root: string; path: string };
@@ -199,7 +200,9 @@ export function SkillEditorPanel({
   const dirty = draft !== source;
   const isPlugin = item.source === "Plugin";
   const isLocal = item.source === "Local";
-  const isSupportedProvider = ["Codex", "Claude"].includes(item.provider || "");
+  const isSupportedProvider = PROVIDERS.some(
+    (entry) => entry.provider === item.provider,
+  );
   const pluginAction = isPlugin && item.disabledBy !== "skill-config";
   const systemProtected =
     isLocal && Boolean(item.path?.split("/").includes(".system"));

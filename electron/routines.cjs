@@ -18,7 +18,7 @@ const {
   ROUTINES_SKILL,
 } = require("./extensions/builtin-routines.cjs");
 const { assembleCatalog, daemonCatalog } = require("./routines-catalog.cjs");
-const { harnessFor, isHarness } = require("./harness.cjs");
+const { harnessFor, isHarness, validWord } = require("./harness.cjs");
 
 const CAPABILITY = "routines";
 const EVENT = "routines.event";
@@ -99,11 +99,16 @@ const managerHostOf = (host) =>
 const hostIdOf = (managerHost) =>
   managerHost === LOCAL ? LOCAL : `ssh:${managerHost}`;
 
-/** The saved settings of the builder, repaired to something launchable. */
-function builderSettings(stored) {
+/** The saved settings of the builder, repaired to something launchable.
+ * `agents` is this Mac's agent catalog (keyed by agent id); with no catalog only
+ * the effort's format is checked and the CLI judges the level. */
+function builderSettings(stored, agents) {
   const value = { ...DEFAULT_SETTINGS, ...(stored || {}) };
   if (!isHarness(value.harness)) value.harness = DEFAULT_SETTINGS.harness;
-  if (!harnessFor(value.harness).builderEfforts.includes(value.effort))
+  const levels = agents?.[value.harness]?.builderEfforts;
+  if (
+    levels?.length ? !levels.includes(value.effort) : !validWord(value.effort)
+  )
     value.effort = DEFAULT_SETTINGS.effort;
   value.model = typeof value.model === "string" ? value.model : "";
   value.accountId = typeof value.accountId === "string" ? value.accountId : "";
@@ -229,7 +234,7 @@ function createRoutines({
   send,
   readStore,
   writeStore,
-  chatModels,
+  agentCatalog: agents,
   probeHost,
   standardSettings = async () => null,
   launch,
@@ -305,10 +310,20 @@ function createRoutines({
       getProjects().list(),
       standardSettings().catch(() => null),
     ]);
+    const offered = Object.fromEntries(
+      await Promise.all(
+        hosts
+          .filter((host) => host.state === "ready")
+          .map(async (host) => [
+            host.id,
+            await agents.of(managerHostOf(host.id)),
+          ]),
+      ),
+    );
     return assembleCatalog({
       hosts,
       facts: Object.fromEntries(entries.filter(([, value]) => value)),
-      models: chatModels(),
+      catalogs: offered,
       projects,
       settings,
     });
@@ -428,8 +443,16 @@ function createRoutines({
     return dir;
   }
 
-  function settings() {
-    return builderSettings(readStore(SETTINGS_STORE));
+  /** The builder's settings, repaired against what this Mac's daemon says the
+   * harness offers. */
+  async function settings() {
+    return repaired(readStore(SETTINGS_STORE));
+  }
+
+  /** `value` repaired against the catalog of the host the builder starts on. */
+  async function repaired(value) {
+    const host = validHost(value?.host) ? value.host : LOCAL;
+    return builderSettings(value, await agents.of(managerHostOf(host)));
   }
 
   async function startBuilder({ text, routineId } = {}) {
@@ -439,7 +462,7 @@ function createRoutines({
     if (text.length > 8000) throw new Error("The request is too long.");
     if (routineId !== undefined && typeof routineId !== "string")
       throw new Error("Invalid routine.");
-    const config = settings();
+    const config = await settings();
     await ensure(config.host);
     const cwd = await builderDir(config.host, randomUUID());
     const request = {
@@ -742,11 +765,11 @@ function createRoutines({
     delete: (host, id) => call(host, "delete", { id }),
     move: (from, to, id) => (assertOn(), move(from, to, id)),
     "settings.get": () => settings(),
-    "settings.set": (patch) => {
+    "settings.set": async (patch) => {
       if (!patch || typeof patch !== "object" || Array.isArray(patch))
         throw new Error("Invalid settings.");
-      const current = settings();
-      const next = builderSettings({
+      const current = await settings();
+      const next = await repaired({
         ...current,
         ...patch,
         // `sees` is patched key by key: {sees: {projects: false}} keeps the other.

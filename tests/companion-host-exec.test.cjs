@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { until, removeDir } = require("./helpers/deadline.cjs");
+const { DEADLINE_MS, until, removeDir } = require("./helpers/deadline.cjs");
 
 const {
   createHostExec,
@@ -470,7 +470,7 @@ async function rig(t, { permissions } = {}) {
     },
     backoffMs: [20, 20, 20],
     killGraceMs: 300,
-    helloTimeoutMs: 20000,
+    helloTimeoutMs: DEADLINE_MS,
   });
   companions.setAskOwner(async (question) => {
     asked.push(question);

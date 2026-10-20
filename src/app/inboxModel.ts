@@ -4,6 +4,7 @@ import type { InboxGroup, InboxRow } from "./attention.ts";
 import { elapsedLabel, plural } from "../lib/text.ts";
 import { groupKey } from "../lib/hostGroup.ts";
 import type { AttentionAction, AttentionItem } from "../extensions/modules.ts";
+import { agentTitle } from "../lib/agent-title.ts";
 
 export type Kind =
   "answer" | "decide" | "review" | "panels" | "working" | "idle";
@@ -42,15 +43,8 @@ export const KINDS: Kind[] = [
 const NEEDS: Kind[] = ["answer", "decide", "review", "panels"];
 export const needsYou = (item: Item) => NEEDS.includes(item.kind);
 
-export const AGENT_NAMES: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  gemini: "Gemini",
-  "cursor-agent": "Cursor",
-};
-
 export function agentName(row: InboxRow): string {
-  return (row.panel.agent && AGENT_NAMES[row.panel.agent]) || row.panel.title;
+  return (row.panel.agent && agentTitle(row.panel.agent)) || row.panel.title;
 }
 
 const SESSION_KIND = {

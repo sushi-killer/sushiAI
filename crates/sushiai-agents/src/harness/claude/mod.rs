@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use super::catalog::{self, Catalog, Facts, Model};
 use super::launch::{AgentSession, LaunchError, LaunchParams};
 use super::screen::Screen;
 use super::{
@@ -17,6 +18,14 @@ mod settings;
 pub use settings::{claude_settings, hook_command};
 
 pub(super) struct Claude;
+
+/// Claude has no listing command; each alias resolves to that model's latest build.
+static MODELS: &[(&str, &str, &str)] = &[
+    ("fable", "Fable", "Most capable for hard work."),
+    ("opus", "Opus", "Deep reasoning and long tasks."),
+    ("sonnet", "Sonnet", "Balanced everyday coding."),
+    ("haiku", "Haiku", "Fastest, for light work."),
+];
 
 /// The argv that starts Claude in a session. `build` has checked the gates.
 fn launch(p: &LaunchParams) -> Result<Vec<String>, LaunchError> {
@@ -59,6 +68,31 @@ impl Harness for Claude {
             session_id: true,
             hooks_in_home: false,
             settings_json: true,
+        }
+    }
+
+    /// Every alias takes every level; no default of ours, so the CLI's own stands.
+    fn catalog(&self, _facts: &Facts) -> Catalog {
+        let efforts = catalog::words(catalog::CLAUDE_EFFORTS);
+        Catalog {
+            id: self.id().to_owned(),
+            label: self.label().to_owned(),
+            models: MODELS
+                .iter()
+                .map(|(id, label, description)| Model {
+                    id: (*id).to_owned(),
+                    label: (*label).to_owned(),
+                    description: (*description).to_owned(),
+                    efforts: efforts.clone(),
+                    default_effort: String::new(),
+                    context: catalog::CLAUDE_CONTEXT,
+                })
+                .collect(),
+            efforts: efforts.clone(),
+            builder_efforts: efforts,
+            permissions: catalog::words(catalog::PERMISSIONS),
+            default_context: catalog::CLAUDE_CONTEXT,
+            ..Catalog::default()
         }
     }
 

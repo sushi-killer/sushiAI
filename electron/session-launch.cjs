@@ -13,8 +13,8 @@ const { sessionLaunchEnv } = require("./project-session.cjs");
 const { quote } = require("./connections.cjs");
 
 const SHELL_CMD = ["/bin/sh", "-lc", 'exec "${SHELL:-/bin/sh}" -l'];
-const NATIVE_AGENTS = ["claude", "codex"];
-const CMD_AGENTS = ["gemini", "cursor-agent"];
+const AGENTS = require("./agents.json");
+const NATIVE_AGENTS = AGENTS.filter((a) => a.native).map((a) => a.id);
 
 function launchError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -36,11 +36,7 @@ function validate(request) {
   )
     throw launchError("INVALID_LAUNCH", "Invalid launch key.");
   const { agent } = request;
-  if (
-    agent !== undefined &&
-    !NATIVE_AGENTS.includes(agent) &&
-    !CMD_AGENTS.includes(agent)
-  )
+  if (agent !== undefined && !AGENTS.some((entry) => entry.id === agent))
     throw launchError("INVALID_LAUNCH", "Unsupported agent.");
   if (request.modelProfileId && agent !== "claude")
     throw launchError(

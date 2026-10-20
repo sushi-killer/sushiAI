@@ -38,6 +38,7 @@ const {
   serializePerHost,
 } = require("./host-setup.cjs");
 const { registerChatIpc } = require("./ipc/chat.cjs");
+const { createAgentCatalog } = require("./agent-catalog.cjs");
 const { registerAppIpc } = require("./ipc/app.cjs");
 const { ipcResult } = require("./ipc/errors.cjs");
 const { createDaemonLaunch } = require("./session-launch.cjs");
@@ -85,7 +86,6 @@ const {
 } = require("./extensions/builtin-routines.cjs");
 const { registerRoutines } = require("./routines.cjs");
 const { createHostProbe } = require("./routines-probe.cjs");
-const { chatModels } = require("./agent-models.cjs");
 const {
   configureBuiltinSkillSync,
   registerExtensionSkill,
@@ -350,10 +350,13 @@ registerWorkspaceSnapshot({
   userDataDir: () => app.getPath("userData"),
   onWrite: () => catalogSync?.notifyChanged(),
 });
+// One reader of every host's agents.catalog, shared by the chat and Routines.
+const agentCatalog = createAgentCatalog({ getManager: () => daemonManager });
 const chatIpc = registerChatIpc({
   handle,
   send,
   getConnections: () => connections,
+  agentCatalog,
   executable,
   directory,
   id,
@@ -488,11 +491,11 @@ const routines = registerRoutines({
   extensions,
   send: (channel, value) => send(channel, value),
   getManager: () => daemonManager,
+  agentCatalog,
   getConnections: () => connections,
   getProjects: () => projects,
   readStore: (name) => readStore(app.getPath("userData"), name),
   writeStore: (name, value) => writeStore(app.getPath("userData"), name, value),
-  chatModels: () => chatModels(os.homedir()),
   probeHost: createHostProbe({
     exec: (...args) => connections.exec(...args),
   }),

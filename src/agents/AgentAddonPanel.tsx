@@ -1,3 +1,4 @@
+// own effort scale: Hermes has its own reasoning levels, not the agent catalog's.
 import { useEffect, useState } from "react";
 import { AgentSchedulerControl } from "./AgentSchedulerControl";
 type Resource = { id: string; kind: string; data: Record<string, unknown> };

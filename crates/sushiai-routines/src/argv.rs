@@ -83,19 +83,22 @@ pub struct RunSpec<'a> {
     /// The skills the routine declares. A Claude dry run gets the `Skill` tool only when this
     /// is not empty; a real Claude run has it denied when this is empty.
     pub skills: &'a [String],
+    /// The levels the agent catalog offers `agent.harness`. A level outside them is refused
+    /// before a process starts; an empty list refuses every level.
+    pub efforts: &'a [String],
 }
 
 /// The argument list placed after the harness name, before the prompt.
 pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String> {
     let effort = agent.effort.as_deref();
+    if let Some(e) = effort {
+        if !spec.efforts.iter().any(|level| level == e) {
+            return Err(format!("effort {e} is not offered for {}", agent.harness));
+        }
+    }
     let mut argv: Vec<String> = Vec::new();
     match agent.harness.as_str() {
         "claude" => {
-            if let Some(e) = effort {
-                if !["low", "medium", "high", "xhigh", "max"].contains(&e) {
-                    return Err(format!("effort {e} is not a Claude level"));
-                }
-            }
             argv.extend(
                 [
                     "-p",
@@ -147,11 +150,6 @@ pub fn harness_argv(agent: &Agent, spec: &RunSpec) -> Result<Vec<String>, String
         "codex" => {
             if !spec.read_dirs.is_empty() {
                 return Err("Codex cannot be given read access to project folders".into());
-            }
-            if let Some(e) = effort {
-                if !["low", "medium", "high"].contains(&e) {
-                    return Err(format!("effort {e} is not offered for Codex"));
-                }
             }
             argv.extend([
                 "exec".into(),

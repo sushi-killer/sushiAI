@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use super::catalog::Facts;
 use super::*;
 
 #[test]
@@ -172,10 +173,123 @@ fn codex_scans_a_hidden_system_folder_at_every_root() {
     }
 }
 
+/// The whole catalog of every registered agent, as the wire carries it: the one
+/// test copy of the values, so a dropped level or a renamed key fails here.
+#[test]
+fn the_catalog_of_every_agent_is_this() {
+    let claude_levels = ["low", "medium", "high", "xhigh", "max"];
+    let modes = ["default", "acceptEdits", "plan", "bypassPermissions"];
+    let model = |id: &str, label: &str, description: &str| {
+        serde_json::json!({
+            "id": id, "label": label, "description": description,
+            "efforts": claude_levels, "defaultEffort": "", "context": 200_000,
+        })
+    };
+    let none = |id: &str, label: &str| {
+        serde_json::json!({
+            "id": id, "label": label, "models": [], "efforts": [], "builderEfforts": [],
+            "permissions": [], "defaultModel": "", "defaultModelLabel": "",
+            "defaultEffort": "", "defaultContext": 0,
+        })
+    };
+    let expected = serde_json::json!([
+        {
+            "id": "claude", "label": "Claude Code",
+            "models": [
+                model("fable", "Fable", "Most capable for hard work."),
+                model("opus", "Opus", "Deep reasoning and long tasks."),
+                model("sonnet", "Sonnet", "Balanced everyday coding."),
+                model("haiku", "Haiku", "Fastest, for light work."),
+            ],
+            "efforts": claude_levels, "builderEfforts": claude_levels,
+            "permissions": modes, "defaultModel": "", "defaultModelLabel": "",
+            "defaultEffort": "", "defaultContext": 200_000,
+        },
+        {
+            "id": "codex", "label": "Codex", "models": [],
+            "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "builderEfforts": ["low", "medium", "high"],
+            "permissions": modes, "defaultModel": "", "defaultModelLabel": "",
+            "defaultEffort": "", "defaultContext": 0,
+        },
+        none("gemini", "Gemini CLI"),
+        none("cursor-agent", "Cursor Agent"),
+        none("shell", "Shell"),
+    ]);
+    assert_eq!(
+        serde_json::to_value(super::catalogs(&Facts::default())).expect("it serializes"),
+        expected
+    );
+}
+
+/// Codex's cache and config reach the catalog through `Facts`, and the default
+/// model is resolved against the listed ones.
+#[test]
+fn codexs_facts_become_its_models_and_default() {
+    let cache = r#"{"models":[{"slug":"gpt-x","display_name":"GPT-X","visibility":"list",
+        "priority":1,"context_window":400000,"default_reasoning_level":"high",
+        "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]}]}"#;
+    let catalog = |config: &str| {
+        agent("codex").catalog(&Facts {
+            codex_cache: Some(cache.into()),
+            codex_config: Some(config.into()),
+        })
+    };
+    let listed = catalog("model = \"gpt-x\"\nmodel_reasoning_effort = \"high\"\n");
+    assert_eq!(listed.models[0].label, "GPT-X");
+    assert_eq!(
+        (
+            listed.default_model.as_str(),
+            listed.default_model_label.as_str()
+        ),
+        ("gpt-x", "GPT-X")
+    );
+    assert_eq!(
+        (listed.default_effort.as_str(), listed.default_context),
+        ("high", 400_000)
+    );
+    // A slug the cache does not list is still the id, and shows itself.
+    let unlisted = catalog("model = \"gpt-unknown\"\n");
+    assert_eq!(unlisted.default_model_label, "gpt-unknown");
+    assert_eq!(unlisted.default_context, 0);
+}
+
 fn agent(id: &str) -> HarnessRef {
     find(id).expect("a registered agent is findable")
 }
 
 fn homes() -> Homes {
     Homes::new(Path::new("/home"), None, None)
+}
+
+/// The app lists agents from `electron/agents.json`; it must say what the
+/// registry says, in the same order, or a screen shows an agent the daemon
+/// cannot start.
+#[test]
+fn the_app_agent_list_matches_the_registry() {
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../../../electron/agents.json"))
+            .expect("agents.json is a JSON array");
+    let expected: Vec<_> = registry().iter().filter(|h| h.id() != "shell").collect();
+    assert_eq!(
+        listed.len(),
+        expected.len(),
+        "agents.json lists a different set"
+    );
+    for (entry, harness) in listed.iter().zip(expected) {
+        assert_eq!(entry["id"], harness.id());
+        assert_eq!(entry["label"], harness.label(), "{} label", harness.id());
+        assert_eq!(
+            entry["native"],
+            harness.launch().is_some(),
+            "{} native flag",
+            harness.id()
+        );
+        assert_eq!(
+            entry["provider"],
+            serde_json::json!(harness.provider()),
+            "{} provider",
+            harness.id()
+        );
+    }
 }

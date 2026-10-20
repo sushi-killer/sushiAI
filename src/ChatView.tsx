@@ -18,7 +18,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import type { ChatModels, Panel, Workspace } from "./types";
+import type { Panel, Workspace } from "./types";
 import {
   contextUsage,
   groupThreads,
@@ -28,6 +28,8 @@ import {
 import { Attachment, ChatTranscript } from "./ChatTranscript";
 import { ChipPicker } from "./ChipPicker";
 import "./ChatView.css";
+import { agentTitle, HARNESSES } from "./lib/agent-title.ts";
+import { useAgentCatalog } from "./lib/useAgentCatalog.ts";
 
 // Models come from each CLI at runtime, so a new Codex release shows up here
 // without a change to sushiAI. Reasoning levels belong to the chosen model.
@@ -40,12 +42,13 @@ const EFFORT_LABELS: Record<string, string> = {
   ultra: "Ultra",
 };
 const effortName = (id: string) => EFFORT_LABELS[id] || id;
-const PERMISSIONS = [
-  { id: "default", label: "Ask before edits" },
-  { id: "acceptEdits", label: "Auto-accept edits" },
-  { id: "plan", label: "Plan mode" },
-  { id: "bypassPermissions", label: "Bypass permissions" },
-];
+// The ids are the catalog's; the wording is ours.
+const PERMISSION_LABELS: Record<string, string> = {
+  default: "Ask before edits",
+  acceptEdits: "Auto-accept edits",
+  plan: "Plan mode",
+  bypassPermissions: "Bypass permissions",
+};
 const SUGGESTIONS = [
   "Explain this project",
   "Review recent changes",
@@ -100,7 +103,7 @@ export function ChatView({
     memory.attachments[current?.id || ""] || [],
   );
   const [dragging, setDragging] = useState(false);
-  const [catalog, setCatalog] = useState<ChatModels>({});
+  const catalog = useAgentCatalog(active.connection);
   const textarea = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -114,12 +117,6 @@ export function ChatView({
       .then((r) => setBranch(r?.branch || ""))
       .catch(() => setBranch(""));
   }, [active.cwd, active.connection]);
-  useEffect(() => {
-    window.bridge
-      ?.chatModels()
-      .then(setCatalog)
-      .catch(() => setCatalog({}));
-  }, []);
 
   function open(workspaceId: string, panelId: string) {
     memory.drafts[current?.id || ""] = draft;
@@ -171,8 +168,8 @@ export function ChatView({
   const modelLabel =
     chosen?.label ||
     current?.model ||
-    (provider?.defaultModel
-      ? `Default · ${provider.defaultModel}`
+    (provider?.defaultModelLabel
+      ? `Default · ${provider.defaultModelLabel}`
       : "Default model");
   const effortLabel = current?.effort
     ? effortName(current.effort)
@@ -205,10 +202,18 @@ export function ChatView({
       .filter((m) => m.role === "assistant" && m.model)
       .map((m) => m.model),
   );
-  const permissionLabel = (
-    PERMISSIONS.find((p) => p.id === (current?.permission || "default")) ||
-    PERMISSIONS[0]
-  ).label;
+  // The CLI's own modes, from the catalog; the first is the fallback.
+  const permissions = (provider?.permissions || []).map((id) => ({
+    id,
+    label: PERMISSION_LABELS[id] || id,
+  }));
+  // The mode the panel sends, named as it is even when the catalog does not
+  // list it (an old daemon lists none).
+  const currentPermission = current?.permission || "default";
+  const permissionLabel =
+    permissions.find((p) => p.id === currentPermission)?.label ||
+    PERMISSION_LABELS[currentPermission] ||
+    currentPermission;
   const item = ({
     workspace,
     panel,
@@ -527,7 +532,7 @@ export function ChatView({
                   alt=""
                 />
               }
-              label={agent === "codex" ? "Codex" : "Claude"}
+              label={agentTitle(agent)}
               ariaLabel="Agent"
               disabled={current?.busy}
               value={agent}
@@ -538,10 +543,10 @@ export function ChatView({
                   effort: "",
                 })
               }
-              options={[
-                { value: "claude", label: "Claude" },
-                { value: "codex", label: "Codex" },
-              ]}
+              options={HARNESSES.map((id) => ({
+                value: id,
+                label: agentTitle(id),
+              }))}
             />
             <ChipPicker
               label={modelLabel}
@@ -562,8 +567,8 @@ export function ChatView({
               options={[
                 {
                   value: "",
-                  label: provider?.defaultModel
-                    ? `Default · ${provider.defaultModel}`
+                  label: provider?.defaultModelLabel
+                    ? `Default · ${provider.defaultModelLabel}`
                     : "Default model",
                 },
                 ...models.map((m) => ({
@@ -604,7 +609,7 @@ export function ChatView({
                   permission: value,
                 })
               }
-              options={PERMISSIONS.map((p) => ({
+              options={permissions.map((p) => ({
                 value: p.id,
                 label: p.label,
               }))}

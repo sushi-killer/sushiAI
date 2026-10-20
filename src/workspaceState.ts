@@ -1,4 +1,5 @@
 import type { Layout, Panel, Workspace } from "./types";
+import { agentTitle } from "./lib/agent-title.ts";
 import { contains, isValidLayout, leaf, split, uid } from "./layout.ts";
 import { panelMigrations } from "./extensions/panelMigrations.ts";
 import { validRoute, type RouteRef } from "./extensions/routes.ts";
@@ -454,7 +455,7 @@ export function flushWorkspaceState(
 
 export function initialWorkspace(cwd = ""): Workspace {
   const panels: Panel[] = [
-    { id: uid(), kind: "agent", title: "Claude Code", agent: "claude" },
+    { id: uid(), kind: "agent", title: agentTitle("claude"), agent: "claude" },
     { id: uid(), kind: "terminal", title: "zsh" },
     { id: uid(), kind: "browser", title: "Browser" },
     { id: uid(), kind: "chat", title: "Thread", agent: "claude", messages: [] },

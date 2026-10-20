@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -13,6 +13,23 @@ use sushiai_routines::{Agent, Config, Connector, Git, Routines};
 
 #[path = "../../test_wait.rs"]
 mod test_wait;
+
+/// The levels the catalog offers a harness. The module crate receives them as data, so a
+/// test stands in for the composition bin here.
+fn levels(harness: &str) -> &'static [String] {
+    static CLAUDE: LazyLock<Vec<String>> = LazyLock::new(|| {
+        ["low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec()
+    });
+    static CODEX: LazyLock<Vec<String>> =
+        LazyLock::new(|| ["low", "medium", "high"].map(String::from).to_vec());
+    if harness == "claude" {
+        &CLAUDE
+    } else {
+        &CODEX
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -308,6 +325,10 @@ fn fixture_with(git: FakeGit) -> Fixture {
             Arc::new(move || clock.load(Ordering::SeqCst))
         },
         poll: Duration::from_millis(5),
+        builder_efforts: ["claude", "codex"]
+            .into_iter()
+            .map(|harness| (harness.to_string(), levels(harness).to_vec()))
+            .collect(),
         run_path: Some("/opt/sushiai/bin:/usr/bin".into()),
     });
     Fixture {
@@ -397,6 +418,11 @@ fn argv_for_claude_and_codex_is_exact() {
         read_only: &[],
         read_dirs: &[],
         skills: &[],
+        efforts: levels("claude"),
+    };
+    let codex_spec = RunSpec {
+        efforts: levels("codex"),
+        ..spec
     };
     let claude = Agent {
         harness: "claude".into(),
@@ -443,6 +469,7 @@ fn argv_for_claude_and_codex_is_exact() {
             read_only: &[],
             read_dirs: &[],
             skills: &[],
+            efforts: levels("claude"),
         }
     };
     let argv = harness_argv(&claude, &with_grants).unwrap();
@@ -469,6 +496,7 @@ fn argv_for_claude_and_codex_is_exact() {
             read_only: &[],
             read_dirs: &[],
             skills: &[],
+            efforts: levels("claude"),
         }
     };
     let argv = harness_argv(&claude, &dry_with_grants).unwrap();
@@ -496,7 +524,7 @@ fn argv_for_claude_and_codex_is_exact() {
         extra_args: vec!["--ephemeral".into()],
     };
     assert_eq!(
-        harness_argv(&codex, &spec).unwrap(),
+        harness_argv(&codex, &codex_spec).unwrap(),
         [
             "exec",
             "--ignore-user-config",
@@ -519,16 +547,27 @@ fn argv_for_claude_and_codex_is_exact() {
     // xhigh and max are Claude only.
     let mut c = codex.clone();
     c.effort = Some("xhigh".into());
-    assert!(harness_argv(&c, &spec).is_err());
+    assert!(harness_argv(&c, &codex_spec).is_err());
     // Codex has no extra readable folders to give.
     let codex_dirs = RunSpec {
         read_dirs: &dirs,
-        ..spec
+        ..codex_spec
     };
     assert!(harness_argv(&codex, &codex_dirs).is_err());
     let mut cl = claude.clone();
     cl.effort = Some("max".into());
     assert!(harness_argv(&cl, &spec).is_ok());
+    // An empty list refuses every level.
+    let mut high = claude.clone();
+    high.effort = Some("high".into());
+    assert!(harness_argv(
+        &high,
+        &RunSpec {
+            efforts: &[],
+            ..spec
+        }
+    )
+    .is_err());
     // A dry run is an allowlist, not a list of known writes.
     let dry = RunSpec {
         dry_run: true,
@@ -612,6 +651,7 @@ fn spec_with<'a>(dry_run: bool, skills: &'a [String]) -> RunSpec<'a> {
         read_only: &[],
         read_dirs: &[],
         skills,
+        efforts: levels("claude"),
     }
 }
 
@@ -1245,6 +1285,18 @@ fn validate_rejects_what_the_daemon_would_stumble_on() {
         r["agent"]["harness"] = json!("codex");
     });
     assert!(fields(&v).contains(&"agent.effort".to_string()));
+    // The list is the harness's own: `max` is Claude's, `ultra` is neither's.
+    for (harness, effort, refused) in [
+        ("claude", "max", false),
+        ("claude", "ultra", true),
+        ("codex", "ultra", true),
+    ] {
+        let v = check(&|r| {
+            r["agent"]["effort"] = json!(effort);
+            r["agent"]["harness"] = json!(harness);
+        });
+        assert_eq!(fields(&v).contains(&"agent.effort".to_string()), refused);
+    }
     for bad in [
         json!(["--dangerously-skip-permissions"]),
         json!(["--add-dir", "/etc"]),

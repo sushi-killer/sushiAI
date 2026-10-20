@@ -5,20 +5,25 @@
 // model lists, projects, orchestrator settings), so nothing here touches disk
 // or a connection.
 
-const FALLBACK_AGENT = { harness: "claude", model: "sonnet", effort: "medium" };
-const EFFORTS = ["low", "medium", "high"];
-// Claude's own scale is wider; Codex offers the first three.
-const CLAUDE_ONLY_EFFORTS = ["xhigh", "max"];
+const { isHarness } = require("./harness.cjs");
 
-/** The levels the picker offers for a harness. */
-function effortsFor(harness) {
-  return harness === "claude" ? [...EFFORTS, ...CLAUDE_ONLY_EFFORTS] : EFFORTS;
+const FALLBACK_AGENT = { harness: "claude", model: "sonnet", effort: "medium" };
+
+/** The levels a harness offers a routine, from the agent catalog the daemon
+ * serves: this Mac's, else the first host that lists the harness. No catalog
+ * means no level is offered. */
+function effortsFor(harness, catalogs) {
+  const source = [catalogs?.local, ...Object.values(catalogs || {})].find(
+    (agents) => agents?.[harness],
+  );
+  return source?.[harness]?.builderEfforts ?? [];
 }
 
 function modelRows(list) {
   return (Array.isArray(list) ? list : []).map((model) => ({
     id: String(model.id),
     label: String(model.label || model.id),
+    description: String(model.description || ""),
   }));
 }
 
@@ -34,14 +39,16 @@ function harnessEntry(fact, models) {
 
 /** The default agent of a new routine: the Standard tier's route of the
  * orchestrator settings, or Claude Sonnet at medium when there is none. */
-function standardAgent(settings) {
+function standardAgent(settings, catalogs) {
   const id = settings?.tiers?.standard;
   const route = (settings?.routes || []).find((item) => item.id === id);
-  if (!route || !["claude", "codex"].includes(route.harness))
-    return { ...FALLBACK_AGENT };
-  const effort = effortsFor(route.harness).includes(route.effort)
-    ? route.effort
-    : FALLBACK_AGENT.effort;
+  if (!route || !isHarness(route.harness)) return { ...FALLBACK_AGENT };
+  // With no catalog the route's level stands: the daemon checks it on save.
+  const levels = effortsFor(route.harness, catalogs);
+  const effort =
+    !levels.length || levels.includes(route.effort)
+      ? route.effort
+      : FALLBACK_AGENT.effort;
   return {
     harness: route.harness,
     model: route.model || "",
@@ -54,19 +61,21 @@ function standardAgent(settings) {
  * project with its folders per host, the default agent.
  *
  * hosts:    [{ id: "local" | "ssh:<profile>", name, state, routines, hostName }]
- * facts:    { [hostId]: { claude?: {installed, loggedIn}, codex?: {...}, codexModels?: [] } }
- * models:   `chatModels()`: this Mac's lists (`claude.models`, `codex.models`)
+ * facts:    { [hostId]: { claude?: {installed, loggedIn}, codex?: {...} } }
+ * catalogs: { [hostId]: <agents.catalog of that host's daemon> }
  * projects: `projects.list()` with `folders: [{ endpoint, cwd }]`
  */
-function assembleCatalog({ hosts, facts = {}, models, projects, settings }) {
-  const claudeModels = models?.claude?.models || [];
+function assembleCatalog({
+  hosts,
+  facts = {},
+  catalogs = {},
+  projects,
+  settings,
+}) {
   return {
     hosts: hosts.map((host) => {
       const fact = facts[host.id] || null;
-      const codexModels =
-        host.id === "local"
-          ? models?.codex?.models || []
-          : fact?.codexModels || [];
+      const offered = catalogs[host.id] || {};
       return {
         id: host.id,
         name: host.name,
@@ -74,8 +83,8 @@ function assembleCatalog({ hosts, facts = {}, models, projects, settings }) {
         routines: host.routines === true,
         hostName: host.hostName || "",
         harnesses: {
-          claude: harnessEntry(fact?.claude ?? null, claudeModels),
-          codex: harnessEntry(fact?.codex ?? null, codexModels),
+          claude: harnessEntry(fact?.claude ?? null, offered.claude?.models),
+          codex: harnessEntry(fact?.codex ?? null, offered.codex?.models),
         },
       };
     }),
@@ -89,7 +98,11 @@ function assembleCatalog({ hosts, facts = {}, models, projects, settings }) {
         path: String(folder.cwd),
       })),
     })),
-    defaults: { agent: standardAgent(settings) },
+    defaults: { agent: standardAgent(settings, catalogs) },
+    efforts: {
+      claude: effortsFor("claude", catalogs),
+      codex: effortsFor("codex", catalogs),
+    },
   };
 }
 

@@ -9,7 +9,7 @@ import {
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
-import { agentTitle } from "./agent-title.ts";
+import { AGENTS, agentTitle } from "../lib/agent-title.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { openSettings } from "../lib/openSettings.ts";
 import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
@@ -43,7 +43,6 @@ import type {
   Workspace,
 } from "../types";
 
-const AGENTS = ["claude", "codex", "gemini", "cursor-agent"];
 const GLYPHS: Record<string, string> = {
   claude: "✳",
   codex: "✺",

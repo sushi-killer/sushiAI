@@ -8,7 +8,12 @@ import {
   Toggle,
 } from "../ui/index.ts";
 import { routinesClient } from "./client.ts";
-import { effortsFor, harnessProblem, HARNESSES, modelsFor } from "./model.ts";
+import {
+  effortChoices,
+  harnessProblem,
+  HARNESSES,
+  modelsFor,
+} from "./model.ts";
 import type { BuilderSettings, RoutinesCatalog } from "./types.ts";
 
 type Account = { id: string; label: string };
@@ -137,11 +142,13 @@ export function RoutinesSettings() {
               value={settings.effort}
               onChange={(event) => void change({ effort: event.target.value })}
             >
-              {effortsFor(settings.harness).map((level) => (
-                <option key={level} value={level}>
-                  {level}
-                </option>
-              ))}
+              {effortChoices(settings.harness, catalog, settings.effort).map(
+                (level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ),
+              )}
             </select>
           </label>
           <label>

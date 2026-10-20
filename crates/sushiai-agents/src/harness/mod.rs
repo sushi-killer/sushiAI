@@ -19,6 +19,7 @@ use serde::{Serialize, Serializer};
 
 use self::launch::{LaunchError, LaunchParams};
 
+pub mod catalog;
 pub mod launch;
 pub mod screen;
 
@@ -155,6 +156,15 @@ pub trait Harness: Send + Sync {
         Capabilities::default()
     }
 
+    /// What this agent offers a person. The default is none of it, only the label.
+    fn catalog(&self, _facts: &catalog::Facts) -> catalog::Catalog {
+        catalog::Catalog {
+            id: self.id().to_owned(),
+            label: self.label().to_owned(),
+            ..catalog::Catalog::default()
+        }
+    }
+
     /// The process name `foreground` matches a hand-started agent by.
     fn process_name(&self) -> Option<&'static str>;
 
@@ -238,6 +248,11 @@ pub(crate) const CLAUDE: HarnessRef = HarnessRef::of(&claude::Claude);
 
 /// Codex's registry entry.
 pub(crate) const CODEX: HarnessRef = HarnessRef::of(&codex::Codex);
+
+/// What every agent offers, in registry order.
+pub fn catalogs(facts: &catalog::Facts) -> Vec<catalog::Catalog> {
+    registry().iter().map(|h| h.catalog(facts)).collect()
+}
 
 /// The agent with this name, or `None` for a plain command.
 pub fn find(id: &str) -> Option<HarnessRef> {

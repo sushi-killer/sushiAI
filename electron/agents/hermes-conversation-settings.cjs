@@ -1,3 +1,4 @@
+// own effort scale: Hermes has its own reasoning levels, not the agent catalog's.
 const { object, text } = require("./registry.cjs");
 const efforts = [
   "none",

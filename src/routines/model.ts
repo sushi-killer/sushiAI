@@ -1,5 +1,6 @@
 // The Routines page's logic, free of React: filters, status words, the agent
 // pickers and the payload of a save. The page only draws what this returns.
+import { agentTitle, HARNESSES as HARNESS_IDS } from "../lib/agent-title.ts";
 import type {
   AccessEntry,
   CatalogHost,
@@ -206,31 +207,35 @@ export function relativeTime(ms: number | undefined, now = Date.now()): string {
 
 // ---- agent pickers ----
 
-export const HARNESSES: { id: Harness; label: string }[] = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-];
+export const HARNESSES: { id: Harness; label: string }[] = HARNESS_IDS.map(
+  (id) => ({
+    id,
+    label: agentTitle(id),
+  }),
+);
 
-const EFFORTS: Record<Harness, string[]> = {
-  claude: ["low", "medium", "high", "xhigh", "max"],
-  codex: ["low", "medium", "high"],
+/** The levels a harness offers a routine, from the catalog the daemon served.
+ * An empty list offers nothing, which the page repairs rather than inventing. */
+export const effortsFor = (
+  harness: Harness,
+  catalog: RoutinesCatalog | null,
+): string[] => catalog?.efforts?.[harness] ?? [];
+
+/** The levels a picker shows: the catalog's, or only `current` while the
+ * catalog is missing, so the control keeps its value instead of going blank. */
+export const effortChoices = (
+  harness: Harness,
+  catalog: RoutinesCatalog | null,
+  current: string,
+): string[] => {
+  const levels = effortsFor(harness, catalog);
+  return levels.length ? levels : [current];
 };
-
-/** The levels a harness offers: xhigh and max are Claude's alone. */
-export const effortsFor = (harness: Harness): string[] => EFFORTS[harness];
 
 export const hostOf = (
   catalog: RoutinesCatalog | null,
   hostId: string,
 ): CatalogHost | undefined => catalog?.hosts.find((host) => host.id === hostId);
-
-/** One line under a well-known model in the picker; "" for any other. */
-export function modelNote(id: string): string {
-  if (/opus/i.test(id)) return "Hardest work, slowest";
-  if (/sonnet/i.test(id)) return "Most routines";
-  if (/haiku/i.test(id)) return "Simple digests, cheapest";
-  return "";
-}
 
 /** The models a host offers for a harness, and only those. */
 export function modelsFor(
@@ -268,9 +273,15 @@ export function withAgent(
 ): Routine {
   const agent = { ...routine.agent, ...patch };
   const models = modelsFor(catalog, hostId, agent.harness);
-  if (agent.model && !models.some((model) => model.id === agent.model))
+  // An empty list is a host that has not answered, not a host that offers none.
+  if (
+    agent.model &&
+    models.length &&
+    !models.some((model) => model.id === agent.model)
+  )
     agent.model = "";
-  if (agent.effort && !effortsFor(agent.harness).includes(agent.effort))
+  const levels = effortsFor(agent.harness, catalog);
+  if (agent.effort && levels.length && !levels.includes(agent.effort))
     agent.effort = "medium";
   return { ...routine, agent };
 }
@@ -292,42 +303,6 @@ export function savePayload(routine: Routine, brief: string) {
     },
     brief,
   };
-}
-
-/** A blank routine for the builder-less path (R1 "Your own" writes its brief
- * by hand): the default agent, weekdays at 09:00. */
-export function newRoutine(
-  catalog: RoutinesCatalog | null,
-  hostId: string,
-  tz: string,
-  name: string,
-): Routine {
-  const agent = catalog?.defaults.agent ?? {
-    harness: "claude" as Harness,
-    model: "sonnet",
-    effort: "medium",
-  };
-  const id =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48) || "routine";
-  return withAgent(
-    {
-      id,
-      name,
-      where: { host: hostOf(catalog, hostId)?.hostName || "local" },
-      when: { cron: "0 9 * * 1-5", tz },
-      agent: { ...agent, extraArgs: [] },
-      howItRuns: { mode: "ask-first", promoteAfter: 5, accepted: 0 },
-      limits: { timeoutMin: 30 },
-      enabled: false,
-    },
-    {},
-    catalog,
-    hostId,
-  );
 }
 
 // ---- results ----

@@ -17,6 +17,7 @@ import type {
   SkillProvider,
 } from "./types";
 import { SkillEditorPanel } from "./SkillEditorDrawer";
+import { agentTitle, PROVIDERS } from "./lib/agent-title.ts";
 
 type StatusFilter =
   | "all"
@@ -29,14 +30,11 @@ type StatusFilter =
 type ScopeFilter = "all" | SkillProvider;
 type AvailabilityFilter = "all" | "active" | "disabled";
 
-const skillGroups: {
-  id: SkillProvider;
-  label: string;
-  dot: string;
-}[] = [
-  { id: "Codex", label: "Codex", dot: "codex" },
-  { id: "Claude", label: "Claude", dot: "claude" },
-];
+const skillGroups = PROVIDERS.map(({ id, provider }) => ({
+  id: provider,
+  label: provider,
+  dot: id,
+}));
 
 const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -47,7 +45,7 @@ const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "unused", label: "Unused" },
   { id: "stale", label: "Stale" },
 ];
-const providers: SkillProvider[] = ["Codex", "Claude"];
+const providers: SkillProvider[] = PROVIDERS.map((item) => item.provider);
 const INITIAL_SKILLS_BATCH = 96;
 const SKILLS_BATCH_SIZE = 96;
 const day = 24 * 60 * 60 * 1000;
@@ -228,7 +226,9 @@ export function LocalSkillsView({
     return { total, unused };
   }, [items]);
   const scopeCounts = React.useMemo(() => {
-    const counts: Record<SkillProvider, number> = { Codex: 0, Claude: 0 };
+    const counts: Record<SkillProvider, number> = Object.fromEntries(
+      providers.map((provider) => [provider, 0]),
+    );
     for (const item of queryMatches)
       if (item.provider) counts[item.provider] += 1;
     return counts;
@@ -402,10 +402,11 @@ export function LocalSkillsView({
             </span>
           </div>
           <p className="skills-note">
-            <Clock3 size={13} /> Usage is counted from Claude Code and Codex
-            transcripts over the last 90 days. Active skills are loadable by the
-            owner harness; disabled skills are shown for cleanup context. Only
-            Claude Code and Codex skills are listed, each file once per harness.
+            <Clock3 size={13} /> Usage is counted from {agentTitle("claude")}{" "}
+            and {agentTitle("codex")} transcripts over the last 90 days. Active
+            skills are loadable by the owner harness; disabled skills are shown
+            for cleanup context. Only {agentTitle("claude")} and{" "}
+            {agentTitle("codex")} skills are listed, each file once per harness.
             Cache-only plugin files are excluded.
           </p>
           {filtered.length ? (

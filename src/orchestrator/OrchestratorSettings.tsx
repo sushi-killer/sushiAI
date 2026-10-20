@@ -33,8 +33,8 @@ import {
 } from "./autonomy";
 import type { ChatModels, ClaudeAccount, ModelProfile } from "../types";
 import type { Harness, Route, Settings, Tier, Variant } from "./types";
-
-const HARNESSES: Harness[] = ["claude", "codex"];
+import { agentTitle, HARNESSES } from "../lib/agent-title.ts";
+import { useAgentCatalog } from "../lib/useAgentCatalog.ts";
 
 const SETTING_LABELS: Record<DefaultableSetting, string> = {
   "tiers.mechanical": "Mechanical tier",
@@ -87,7 +87,7 @@ function defaultText(
 function newRoute(harness: Harness): Route {
   return {
     id: `route-${Date.now().toString(36)}`,
-    label: harness === "claude" ? "Claude" : "Codex",
+    label: agentTitle(harness),
     harness,
   };
 }
@@ -485,7 +485,7 @@ function OrchestratorSettingsBody({
   const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
-  const [chatModels, setChatModels] = useState<ChatModels>({});
+  const chatModels = useAgentCatalog();
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -499,14 +499,12 @@ function OrchestratorSettingsBody({
       orchestratorClient.settingsGet(),
       window.bridge?.modelProfilesList() ?? Promise.resolve([]),
       window.bridge?.claudeAccountsList() ?? Promise.resolve([]),
-      window.bridge?.chatModels() ?? Promise.resolve({}),
     ])
-      .then(([s, m, a, c]) => {
+      .then(([s, m, a]) => {
         setOwnSettings(s);
         setSaved(s);
         setProfiles(m);
         setAccounts(a);
-        setChatModels(c);
       })
       .catch((e) => {
         const message = errorText(e);

@@ -11,7 +11,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readData } from "./ci-platform.mjs";
-import { hostCrates, nextestFilter, rustSelection } from "./lib/rust-graph.mjs";
+import {
+  crates as workspaceCrates,
+  hostCrates,
+  nextestFilter,
+  rustSelection,
+  sharedFiles,
+} from "./lib/rust-graph.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Markdown that tests or tools read is code: skills, agents, prompts.
@@ -214,7 +220,10 @@ export function classify(files, change = {}) {
       reason: null,
       all: null,
     };
-  const crates = code.filter((f) => f.startsWith("crates/"));
+  // A file outside the crates that a crate includes (include_str!) counts for
+  // Rust and for everything else that reads it.
+  const shared = sharedFiles(workspaceCrates());
+  const crates = code.filter((f) => f.startsWith("crates/") || shared.has(f));
   const other = code.filter((f) => !f.startsWith("crates/"));
   const setup = other.find((f) => EVERYTHING.some((r) => r.test(f)));
   const rs = crates.length

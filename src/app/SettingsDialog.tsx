@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import "./settings-dialog.css";
 import { RenderProfiler } from "../RenderProfiler.tsx";
-import { agentTitle } from "./agent-title.ts";
+import { agentTitle } from "../lib/agent-title.ts";
 import { errorText } from "../lib/errors.ts";
 import {
   DEFAULT_HIBERNATE_SECS,

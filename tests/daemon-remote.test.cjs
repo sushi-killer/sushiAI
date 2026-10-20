@@ -17,7 +17,7 @@ test.afterEach(async () => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const { until, removeDir } = require("./helpers/deadline.cjs");
+const { DEADLINE_MS, until, removeDir } = require("./helpers/deadline.cjs");
 
 // A fake ssh (and connector command) over tests/fixtures/fake-proxy.cjs.
 function fakeProxy(mode) {
@@ -67,9 +67,9 @@ function sshManager(proxy, options = {}) {
         profile: PROFILE,
         ssh: proxy.script,
         args: () => ["-T", "-o", "BatchMode=yes"],
-        // The fake ssh is a Node process: under a loaded CI run its start alone
-        // can pass 3 s, and a hello timeout would kill it before its exit code.
-        helloTimeoutMs: 15000,
+        // The fake ssh is a Node process whose start can be slow under load; no
+        // test here needs the hello timeout to fire.
+        helloTimeoutMs: DEADLINE_MS,
       }),
     },
     backoffMinMs: options.backoffMinMs ?? 20,
@@ -802,7 +802,7 @@ test("a connection that stays up refills the budget", async () => {
       [PROFILE.id]: createSshConnector({
         profile: PROFILE,
         ssh: proxy.script,
-        helloTimeoutMs: 15000,
+        helloTimeoutMs: DEADLINE_MS,
       }),
     },
     backoffMinMs: 60000,

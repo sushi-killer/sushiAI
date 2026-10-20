@@ -51,16 +51,20 @@ function isClaudeAi(name) {
   return name.toLowerCase().startsWith("claude.ai ");
 }
 
+const claudeLabel = require("./agents.json").find(
+  (agent) => agent.id === "claude",
+).label;
+
 function sourceLabel(source, name) {
   if (isClaudeAi(name)) return "Claude.ai connector";
-  if (name === "computer-use") return "Claude Code built-in";
+  if (name === "computer-use") return `${claudeLabel} built-in`;
   return (
     {
       local: "This project · local",
       project: "Project · .mcp.json",
       user: "User scope",
       saved: "Saved project choice",
-    }[source] || "Claude Code"
+    }[source] || claudeLabel
   );
 }
 

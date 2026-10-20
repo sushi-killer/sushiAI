@@ -14,9 +14,10 @@ import { OrchestratorSettingsView } from "../orchestrator/OrchestratorSettingsVi
 import { VaultSettingsView } from "../vault/VaultSettingsView.tsx";
 import { RoutinesView } from "../routines/RoutinesView.tsx";
 import { RoutinesSettings } from "../routines/RoutinesSettings.tsx";
+import type { Harness } from "../routines/types.ts";
 
 export type LaunchAgentRequest = {
-  agent: "claude" | "codex";
+  agent: Harness;
   branch: string;
   base: string;
   prompt: string;

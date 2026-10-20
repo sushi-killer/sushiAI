@@ -33,10 +33,8 @@ import {
 } from "./autonomy";
 import type { ChatModels, ClaudeAccount, ModelProfile } from "../types";
 import type { Harness, Route, Settings, Tier, Variant } from "./types";
-import { agentTitle } from "../lib/agent-title.ts";
+import { agentTitle, HARNESSES } from "../lib/agent-title.ts";
 import { useAgentCatalog } from "../lib/useAgentCatalog.ts";
-
-const HARNESSES: Harness[] = ["claude", "codex"];
 
 const SETTING_LABELS: Record<DefaultableSetting, string> = {
   "tiers.mechanical": "Mechanical tier",

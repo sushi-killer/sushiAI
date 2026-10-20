@@ -1,0 +1,6 @@
+[
+  { "id": "claude", "label": "Claude Code", "native": true },
+  { "id": "codex", "label": "Codex", "native": true },
+  { "id": "gemini", "label": "Gemini CLI", "native": false },
+  { "id": "cursor-agent", "label": "Cursor Agent", "native": false }
+]

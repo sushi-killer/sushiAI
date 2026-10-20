@@ -261,3 +261,29 @@ fn agent(id: &str) -> HarnessRef {
 fn homes() -> Homes {
     Homes::new(Path::new("/home"), None, None)
 }
+
+/// The app lists agents from `electron/agents.json`; it must say what the
+/// registry says, in the same order, or a screen shows an agent the daemon
+/// cannot start.
+#[test]
+fn the_app_agent_list_matches_the_registry() {
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../../../electron/agents.json"))
+            .expect("agents.json is a JSON array");
+    let expected: Vec<_> = registry().iter().filter(|h| h.id() != "shell").collect();
+    assert_eq!(
+        listed.len(),
+        expected.len(),
+        "agents.json lists a different set"
+    );
+    for (entry, harness) in listed.iter().zip(expected) {
+        assert_eq!(entry["id"], harness.id());
+        assert_eq!(entry["label"], harness.label(), "{} label", harness.id());
+        assert_eq!(
+            entry["native"],
+            harness.launch().is_some(),
+            "{} native flag",
+            harness.id()
+        );
+    }
+}

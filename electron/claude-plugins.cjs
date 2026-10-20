@@ -33,6 +33,10 @@ function pluginName(value) {
   return value;
 }
 
+const claudeLabel = require("./agents.json").find(
+  (agent) => agent.id === "claude",
+).label;
+
 function sourceLabel(source) {
   return (
     {
@@ -40,7 +44,7 @@ function sourceLabel(source) {
       project: "Project · shared",
       user: "User scope",
       installed: "Installed plugin",
-    }[source] || "Claude Code"
+    }[source] || claudeLabel
   );
 }
 

@@ -3,6 +3,10 @@ const fs = require("node:fs/promises");
 const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 
+// A skill row names its agent by the catalog label (Rust serializes it so).
+const codexProvider = require("./agents.json").find(
+  (agent) => agent.id === "codex",
+).label;
 const ACTIONS = new Set(["enable", "disable", "delete"]);
 const PLUGIN_KEY =
   /^[A-Za-z0-9][A-Za-z0-9._:/-]*@[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
@@ -408,7 +412,7 @@ async function manageSkill({
         message: `${action === "disable" ? "Disabled" : "Enabled"} ${item.plugin}.`,
       };
     }
-    if (item.provider === "Codex") {
+    if (item.provider === codexProvider) {
       if (action === "delete") {
         const command = executable?.("codex");
         if (!command)
@@ -442,7 +446,7 @@ async function manageSkill({
 
   if (action === "delete") {
     const result = await deleteLocalSkill(resolvedHome, item, shell);
-    if (item.provider === "Codex")
+    if (item.provider === codexProvider)
       await removeCodexSkillConfig(resolvedHome, itemPath(resolvedHome, item));
     return {
       action,
@@ -457,7 +461,7 @@ async function manageSkill({
       item.name,
       action === "enable",
     );
-  else if (item.provider === "Codex")
+  else if (item.provider === codexProvider)
     await updateCodexSkillConfig(resolvedHome, filePath, action === "enable");
   else throw new Error("This skill provider is read-only in sushiAI.");
   return {

@@ -199,6 +199,7 @@ export function SkillEditorPanel({
   const dirty = draft !== source;
   const isPlugin = item.source === "Plugin";
   const isLocal = item.source === "Local";
+  // agent label key: the skill store is named by this provider value, not shown as an agent name
   const isSupportedProvider = ["Codex", "Claude"].includes(item.provider || "");
   const pluginAction = isPlugin && item.disabledBy !== "skill-config";
   const systemProtected =

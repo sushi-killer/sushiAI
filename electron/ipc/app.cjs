@@ -1,6 +1,7 @@
 const os = require("node:os");
 const path = require("node:path");
 const { powerSaveBlocker } = require("electron");
+const agentCatalog = require("../agents.json");
 
 function registerAppIpc({
   handle,
@@ -65,9 +66,9 @@ function registerAppIpc({
     home: os.homedir(),
     cwd: app.isPackaged ? os.homedir() : process.cwd(),
     platform: process.platform,
-    agents: ["claude", "codex", "gemini", "cursor-agent"].map((name) => ({
-      name,
-      path: executable(name),
+    agents: agentCatalog.map(({ id }) => ({
+      name: id,
+      path: executable(id),
     })),
   }));
 

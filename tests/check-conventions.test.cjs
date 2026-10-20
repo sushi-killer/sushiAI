@@ -594,6 +594,46 @@ test("a list of reasoning levels in the app fails unless the file marks its own 
   fs.rmSync(tree, { recursive: true, force: true });
 });
 
+test("an agent label quoted outside the catalog fails unless the file marks a key", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "agent-label-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  write(
+    "electron/agents.json",
+    JSON.stringify([{ id: "demo", label: "Demo Agent", native: true }]),
+  );
+  write(
+    "src/key.ts",
+    '// agent label key: stored as the provider\nconst k = "Demo Agent";\n',
+  );
+  write("src/title.ts", "export const title = agentTitle(id);\n");
+  const clean = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  write("src/copy.ts", 'export const name = "Demo Agent";\n');
+  write("electron/copy.cjs", 'module.exports = "Demo Agent";\n');
+  // An unmarked line in a file that has a marked line still fails.
+  write(
+    "src/mixed.ts",
+    '// agent label key: stored as the provider\nconst k = "Demo Agent";\nconst name = "Demo Agent";\n',
+  );
+  const failed = run({ MODULE_ROOT_OVERRIDE: tree });
+  assert.equal(failed.status, 1);
+  for (const file of ["src/copy.ts", "electron/copy.cjs", "src/mixed.ts"])
+    assert.match(
+      failed.stderr,
+      new RegExp(`${file.replace(".", "\\.")} writes an agent's name`),
+    );
+  assert.doesNotMatch(failed.stderr, /src\/key\.ts/);
+
+  fs.rmSync(tree, { recursive: true, force: true });
+});
+
 test("a test that reads a document to assert its wording fails", () => {
   const fs = require("node:fs");
   const os = require("node:os");

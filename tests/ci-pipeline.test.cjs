@@ -120,6 +120,11 @@ test("a change runs the checks that can see it, and the setup runs everything", 
   const shared = pick(["crates/process.rs"]);
   assert.ok(shared.rust.includes("sushiai-daemon"));
   assert.ok(shared.rust.includes("sushiai-orch"));
+  // A file a crate reads with include_str! reaches that crate's tests.
+  assert.ok(
+    pick(["electron/agents.json"]).rust.includes("sushiai-agents"),
+    "agents.json",
+  );
   // The binary composes every module: all Rust tests.
   assert.equal(pick(["crates/sushiai/src/main.rs"]).rust, "all");
   // A UI change runs no Rust test, every node test, the build and the desktop.

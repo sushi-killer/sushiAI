@@ -403,20 +403,48 @@ const listFiles = async (dir) => {
   }
   return found;
 };
-// An agent's name for a person lives in one place, `src/lib/agent-title.ts`,
-// which mirrors the Rust registry. Quoted anywhere else it is a copy that
-// drifts - the app once showed "Cursor Agent" in one list and "Cursor" in
-// another, and the chat called Claude "Claude" where every other screen said
-// "Claude Code".
-const AGENT_NAME_HOME = "src/lib/agent-title.ts";
-const AGENT_NAME = /["'](Claude Code|Gemini CLI|Cursor Agent)["']/;
-for (const file of await listFiles("src")) {
-  if (file === AGENT_NAME_HOME || !/\.[cm]?[jt]sx?$/.test(file)) continue;
-  const text = await readFile(path.join(moduleRoot, file), "utf8");
-  if (AGENT_NAME.test(text))
-    problems.push(
-      `${file} writes an agent's name; it belongs in ${AGENT_NAME_HOME}`,
+// An agent's name for a person lives in one place, `electron/agents.json`,
+// which a Rust test holds equal to the registry. Quoted anywhere else in the
+// app it is a copy that drifts - the app once showed "Cursor Agent" in one list
+// and "Cursor" in another, and the chat called Claude "Claude" where every
+// other screen said "Claude Code".
+// A line that uses a label as a data key says so on itself or on the line
+// above: `// agent label key: <reason>`.
+const AGENT_LABEL_MARK = /\/\/\s*agent label key:\s*\S/;
+const AGENT_NAME_HOME = "electron/agents.json";
+// Only a fixture tree may lack the catalog; the real repository must have it.
+const agentsText = await readFile(
+  path.join(moduleRoot, AGENT_NAME_HOME),
+  "utf8",
+).catch(() => {
+  if (!process.env.MODULE_ROOT_OVERRIDE)
+    problems.push(`${AGENT_NAME_HOME} is missing or unreadable`);
+  return "[]";
+});
+const agentLabels = JSON.parse(agentsText).map((agent) => agent.label);
+if (agentLabels.length) {
+  const escaped = agentLabels.map((label) =>
+    label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  );
+  const AGENT_NAME = new RegExp(`["'](${escaped.join("|")})["']`);
+  for (const file of (
+    await Promise.all(["src", "electron"].map((dir) => listFiles(dir)))
+  ).flat()) {
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const lines = (await readFile(path.join(moduleRoot, file), "utf8")).split(
+      "\n",
     );
+    if (
+      lines.some(
+        (line, i) =>
+          AGENT_NAME.test(line) &&
+          !AGENT_LABEL_MARK.test(`${lines[i - 1] ?? ""}\n${line}`),
+      )
+    )
+      problems.push(
+        `${file} writes an agent's name; it belongs in ${AGENT_NAME_HOME}`,
+      );
+  }
 }
 // The reasoning levels each agent CLI accepts live in the agent catalog
 // (`crates/sushiai-agents`), which the daemon serves as `agents.catalog`. A

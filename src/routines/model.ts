@@ -1,6 +1,6 @@
 // The Routines page's logic, free of React: filters, status words, the agent
 // pickers and the payload of a save. The page only draws what this returns.
-import { agentTitle } from "../lib/agent-title.ts";
+import { agentTitle, HARNESSES as HARNESS_IDS } from "../lib/agent-title.ts";
 import type {
   AccessEntry,
   CatalogHost,
@@ -207,10 +207,12 @@ export function relativeTime(ms: number | undefined, now = Date.now()): string {
 
 // ---- agent pickers ----
 
-export const HARNESSES: { id: Harness; label: string }[] = [
-  { id: "claude", label: agentTitle("claude") },
-  { id: "codex", label: agentTitle("codex") },
-];
+export const HARNESSES: { id: Harness; label: string }[] = HARNESS_IDS.map(
+  (id) => ({
+    id,
+    label: agentTitle(id),
+  }),
+);
 
 /** The levels a harness offers a routine, from the catalog the daemon served.
  * An empty list offers nothing, which the page repairs rather than inventing. */

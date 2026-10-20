@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Square, Sparkles, CornerDownLeft } from "lucide-react";
 import type { Panel } from "./types";
-import { agentTitle } from "./lib/agent-title.ts";
+import { agentTitle, HARNESSES } from "./lib/agent-title.ts";
 export function ChatPanel({
   panel,
   onSend,
@@ -86,8 +86,11 @@ export function ChatPanel({
             value={panel.agent || "claude"}
             onChange={(event) => onAgent(event.target.value)}
           >
-            <option value="claude">{agentTitle("claude")}</option>
-            <option value="codex">Codex</option>
+            {HARNESSES.map((id) => (
+              <option key={id} value={id}>
+                {agentTitle(id)}
+              </option>
+            ))}
           </select>
           <span className="local-tag">Local CLI</span>
           {panel.busy ? (

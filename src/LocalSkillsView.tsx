@@ -17,6 +17,7 @@ import type {
   SkillProvider,
 } from "./types";
 import { SkillEditorPanel } from "./SkillEditorDrawer";
+import { agentTitle } from "./lib/agent-title.ts";
 
 type StatusFilter =
   | "all"
@@ -34,7 +35,8 @@ const skillGroups: {
   label: string;
   dot: string;
 }[] = [
-  { id: "Codex", label: "Codex", dot: "codex" },
+  // agent label key: the skill store is named by this provider value, not shown as an agent name
+  { id: "Codex", label: agentTitle("codex"), dot: "codex" },
   { id: "Claude", label: "Claude", dot: "claude" },
 ];
 
@@ -47,6 +49,7 @@ const statusFilters: { id: StatusFilter; label: string }[] = [
   { id: "unused", label: "Unused" },
   { id: "stale", label: "Stale" },
 ];
+// agent label key: the skill store is named by this provider value, not shown as an agent name
 const providers: SkillProvider[] = ["Codex", "Claude"];
 const INITIAL_SKILLS_BATCH = 96;
 const SKILLS_BATCH_SIZE = 96;
@@ -402,10 +405,11 @@ export function LocalSkillsView({
             </span>
           </div>
           <p className="skills-note">
-            <Clock3 size={13} /> Usage is counted from Claude Code and Codex
-            transcripts over the last 90 days. Active skills are loadable by the
-            owner harness; disabled skills are shown for cleanup context. Only
-            Claude Code and Codex skills are listed, each file once per harness.
+            <Clock3 size={13} /> Usage is counted from {agentTitle("claude")}{" "}
+            and {agentTitle("codex")} transcripts over the last 90 days. Active
+            skills are loadable by the owner harness; disabled skills are shown
+            for cleanup context. Only {agentTitle("claude")} and{" "}
+            {agentTitle("codex")} skills are listed, each file once per harness.
             Cache-only plugin files are excluded.
           </p>
           {filtered.length ? (

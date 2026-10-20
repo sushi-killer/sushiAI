@@ -5,7 +5,7 @@ import { Tag } from "../../ui/index.ts";
 import { orchestratorClientFor } from "../../orchestrator/client.ts";
 import type { Task } from "../../orchestrator/types.ts";
 import { worktreeBranchError } from "../../workspace/worktree.ts";
-import { agentTitle } from "../../lib/agent-title.ts";
+import { agentTitle, HARNESSES, type Harness } from "../../lib/agent-title.ts";
 import {
   branchFor,
   nextBranch,
@@ -16,11 +16,14 @@ import {
   type StartRecord,
 } from "./artifact.ts";
 
-export type Runner = "claude" | "codex" | "orchestrator";
+export type Runner = Harness | "orchestrator";
 
 const RUNNERS: { id: Runner; label: string; hint: string }[] = [
-  { id: "claude", label: agentTitle("claude"), hint: "/goal" },
-  { id: "codex", label: agentTitle("codex"), hint: "/goal" },
+  ...HARNESSES.map((id) => ({
+    id,
+    label: agentTitle(id),
+    hint: "/goal",
+  })),
   { id: "orchestrator", label: "Orchestrator", hint: "plan → review → land" },
 ];
 

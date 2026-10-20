@@ -28,7 +28,7 @@ import {
 import { Attachment, ChatTranscript } from "./ChatTranscript";
 import { ChipPicker } from "./ChipPicker";
 import "./ChatView.css";
-import { agentTitle } from "./lib/agent-title.ts";
+import { agentTitle, HARNESSES } from "./lib/agent-title.ts";
 import { useAgentCatalog } from "./lib/useAgentCatalog.ts";
 
 // Models come from each CLI at runtime, so a new Codex release shows up here
@@ -540,10 +540,10 @@ export function ChatView({
                   effort: "",
                 })
               }
-              options={[
-                { value: "claude", label: agentTitle("claude") },
-                { value: "codex", label: agentTitle("codex") },
-              ]}
+              options={HARNESSES.map((id) => ({
+                value: id,
+                label: agentTitle(id),
+              }))}
             />
             <ChipPicker
               label={modelLabel}

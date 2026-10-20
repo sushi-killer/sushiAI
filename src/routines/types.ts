@@ -1,7 +1,8 @@
 // Mirrors the daemon's `routines.*` JSON-RPC shapes
 // (crates/sushiai-routines): two independent renderings of one contract.
 
-export type Harness = "claude" | "codex";
+import type { Harness } from "../lib/agent-title.ts";
+export type { Harness };
 
 export type RoutineAgent = {
   harness: Harness;

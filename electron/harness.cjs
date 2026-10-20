@@ -13,11 +13,10 @@
 //   headlessTurnArgs(opts)   flags of one headless builder turn
 //   parseTurn(screenText)    {state: running|done|failed, text, session}
 //
-// What a chat may ask for - the models, their reasoning levels and the
-// permission modes - is not here: it is the agent's catalog entry, which the
-// daemon serves as `agents.catalog`. `chatArgs` takes that entry and refuses
-// anything outside it. Values come from the renderer, so each is validated
-// before it reaches a process (locally argv, remotely a quoted ssh line).
+// Models, reasoning levels and permission modes are the agent's catalog entry
+// (`agents.catalog`), which `chatArgs` takes and refuses anything outside of.
+// Values come from the renderer, so each is validated before it reaches a
+// process (locally argv, remotely a quoted ssh line).
 
 /** `agent` is one entry of `agents.catalog` (its `efforts` and `permissions`).
  * A catalog that has not arrived yet has neither, so nothing is accepted: an

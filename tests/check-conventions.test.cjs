@@ -565,7 +565,7 @@ test("a module directory may not import the shell", () => {
   fs.rmSync(tree, { recursive: true, force: true });
 });
 
-test("a list of reasoning levels in the app fails; Hermes keeps its own", () => {
+test("a list of reasoning levels in the app fails unless the file marks its own scale", () => {
   const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
@@ -575,7 +575,10 @@ test("a list of reasoning levels in the app fails; Hermes keeps its own", () => 
     fs.writeFileSync(path.join(tree, file), text);
   };
   const levels = 'export const levels = ["low", "high", "xhigh"];\n';
-  write("electron/agents/hermes-addons.cjs", levels);
+  write(
+    "electron/own.cjs",
+    `// own effort scale: another agent's levels\n${levels}`,
+  );
   write("src/routines/picker.ts", "export const levels = catalog.efforts;\n");
   const clean = run({ MODULE_ROOT_OVERRIDE: tree });
   assert.equal(clean.status, 0, clean.stderr);

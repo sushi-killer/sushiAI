@@ -1,6 +1,4 @@
-//! The agent catalog on the wire: what each agent CLI of a host offers. The
-//! rules that build it live in `sushiai-agents`; the shape lives here, with
-//! every other method's, so a client of the protocol can name it.
+//! The agent catalog on the wire. `sushiai-agents` builds it.
 
 use serde::{Deserialize, Serialize};
 

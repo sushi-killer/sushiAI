@@ -145,33 +145,27 @@ test("attachments: claude add-dir stays last, codex images precede flags", () =>
     /^user: look\n\[Attached[^\]]*\/p\/i\.png, \/p\/dir\]\n\nassistant: ok$/,
   );
 });
-test("reasoning levels follow the catalog the daemon serves", () => {
+test("chat options are checked against the agent's catalog entry", () => {
+  const bare = (agent, options) =>
+    harnessFor(agent).chatArgs(options, undefined);
   assert.ok(chatArgs("claude", { effort: "high" }).includes("high"));
   assert.ok(
     chatArgs("codex", { effort: "high" }).includes(
       'model_reasoning_effort="high"',
     ),
   );
-  // A level the agent's catalog does not offer is refused before a process runs.
-  assert.throws(() => chatArgs("claude", { effort: "max" }), /Invalid effort/);
-  assert.throws(() => chatArgs("codex", { effort: "ultra" }), /Invalid effort/);
-  // So is a mode, and so is anything at all while the catalog is empty.
-  assert.throws(
-    () => chatArgs("claude", { permission: "plan" }),
-    /Invalid permission mode/,
-  );
-  const bare = (agent, options) =>
-    harnessFor(agent).chatArgs(options, undefined);
-  assert.throws(() => bare("claude", { effort: "high" }), /Invalid effort/);
-  assert.throws(
-    () => bare("claude", { permission: "default" }),
-    /Invalid permission mode/,
-  );
   // A model that names no level needs no catalog.
   assert.ok(bare("claude", {}).includes("--print"));
+  // A value the entry lacks is refused, and so is anything while it is empty.
+  for (const [run, agent, options, error] of [
+    [chatArgs, "claude", { effort: "max" }, /Invalid effort/],
+    [chatArgs, "codex", { effort: "ultra" }, /Invalid effort/],
+    [chatArgs, "claude", { permission: "plan" }, /Invalid permission mode/],
+    [bare, "claude", { effort: "high" }, /Invalid effort/],
+    [bare, "claude", { permission: "default" }, /Invalid permission mode/],
+  ])
+    assert.throws(() => run(agent, options), error);
 });
-// The Codex cache and config.toml parse moved into the Rust catalog of
-// sushiai-agents (harness/catalog.rs), which tests it there.
 test("codex events become answer text, progress notes, usage and errors", () => {
   const answer = {
     type: "item.completed",

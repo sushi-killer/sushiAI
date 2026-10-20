@@ -105,12 +105,9 @@ pub mod method {
     /// question and wait for `ask.respond`. Params: `HookAsk`. Result: `HookResult`.
     pub const HOOK_ASK: &str = "hook.ask";
 
-    // The agent catalog (additive). Unrelated to `catalog.get`, which is the
-    // projects and groups of this host.
-    /// Request: what each agent CLI on this host offers — its models, their
-    /// reasoning levels, the permission modes and the defaults. No params: it
-    /// reads the daemon's own Codex home. Result: one `AgentCatalog` per agent,
-    /// in registry order.
+    /// Request: what each agent CLI on this host offers (not `catalog.get`, the
+    /// projects and groups). No params: it reads the daemon's own Codex home.
+    /// Result: one `AgentCatalog` per agent, in registry order.
     pub const AGENTS_CATALOG: &str = "agents.catalog";
 }
 

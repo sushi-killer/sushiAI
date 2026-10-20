@@ -62,9 +62,8 @@ pub struct Config {
     pub run_path: Option<String>,
     /// How often a started session is looked at while it ends.
     pub poll: Duration,
-    /// The levels each harness offers a routine, from the agent catalog the composition bin
-    /// read (`sushiai_agents::harness::catalogs`). A module crate may not depend on that
-    /// crate, so the levels arrive as data. A harness with no entry refuses every effort.
+    /// The levels each harness offers a routine. This crate cannot depend on
+    /// `sushiai-agents`, so the bin passes them in. A harness with no entry refuses every effort.
     pub builder_efforts: HashMap<String, Vec<String>>,
 }
 
@@ -256,7 +255,6 @@ impl Routines {
         )
     }
 
-    /// The levels a harness offers a routine, from the catalog the bin passed in.
     fn efforts(&self, harness: &str) -> &[String] {
         self.inner
             .cfg

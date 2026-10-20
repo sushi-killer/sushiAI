@@ -232,8 +232,6 @@ function createRoutines({
   send,
   readStore,
   writeStore,
-  // What each host's daemon says its agent CLIs offer (`agent-catalog.cjs`).
-  // A remote host's models come from that host's daemon, never over ssh.
   agentCatalog: agents,
   probeHost,
   standardSettings = async () => null,

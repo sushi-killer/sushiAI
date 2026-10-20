@@ -8,6 +8,7 @@ import type {
   ClaudeAccount,
   CodexAccount,
 } from "./types";
+import { useAgentCatalog } from "./lib/useAgentCatalog.ts";
 
 const KIND_LABEL: Record<ModelProviderKind, string> = {
   openrouter: "OpenRouter",
@@ -65,24 +66,10 @@ function ProfileForm({
   const [saving, setSaving] = useState(false);
   // A profile runs Claude Code, so it offers Claude's levels from the daemon's
   // agent catalog. A saved level stays selectable while the catalog is away.
-  const [efforts, setEfforts] = useState<string[]>([]);
+  const efforts = useAgentCatalog().claude?.efforts ?? [];
   useEffect(() => {
     window.bridge?.providersModels(provider.id).then(setModels);
   }, [provider.id]);
-  useEffect(() => {
-    const load = () =>
-      window.bridge
-        ?.chatModels()
-        .then((catalog) => {
-          const levels = catalog?.claude?.efforts;
-          if (levels?.length) setEfforts(levels);
-        })
-        .catch(() => {});
-    load();
-    return window.bridge?.onDaemonState?.((state) => {
-      if (state.state === "ready") load();
-    });
-  }, []);
   const effortOptions = [
     "",
     ...efforts,

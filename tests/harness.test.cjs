@@ -27,10 +27,6 @@ test("every harness implements the same interface", () => {
       "parseTurn",
     ])
       assert.equal(typeof harness[fn], "function", `${name}.${fn}`);
-    // What a chat may ask for is the agent's catalog, not a list here: the
-    // daemon serves it and `chatArgs` refuses anything outside it.
-    assert.equal(harness.efforts, undefined, `${name}.efforts`);
-    assert.equal(harness.builderEfforts, undefined, `${name}.builderEfforts`);
     assert.ok(harness.login.length >= 2);
   }
 });

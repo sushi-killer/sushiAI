@@ -252,8 +252,6 @@ const CATALOG = {
     },
   ],
   defaults: { agent: { harness: "claude", model: "", effort: "medium" } },
-  // The levels each harness offers, as the main process takes them from the
-  // daemon's agents.catalog.
   efforts: {
     claude: ["low", "medium", "high", "xhigh", "max"],
     codex: ["low", "medium", "high"],

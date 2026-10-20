@@ -18,7 +18,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import type { ChatModels, Panel, Workspace } from "./types";
+import type { Panel, Workspace } from "./types";
 import {
   contextUsage,
   groupThreads,
@@ -29,6 +29,7 @@ import { Attachment, ChatTranscript } from "./ChatTranscript";
 import { ChipPicker } from "./ChipPicker";
 import "./ChatView.css";
 import { agentTitle } from "./lib/agent-title.ts";
+import { useAgentCatalog } from "./lib/useAgentCatalog.ts";
 
 // Models come from each CLI at runtime, so a new Codex release shows up here
 // without a change to sushiAI. Reasoning levels belong to the chosen model.
@@ -102,7 +103,7 @@ export function ChatView({
     memory.attachments[current?.id || ""] || [],
   );
   const [dragging, setDragging] = useState(false);
-  const [catalog, setCatalog] = useState<ChatModels>({});
+  const catalog = useAgentCatalog(active.connection);
   const textarea = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -116,27 +117,6 @@ export function ChatView({
       .then((r) => setBranch(r?.branch || ""))
       .catch(() => setBranch(""));
   }, [active.cwd, active.connection]);
-  useEffect(() => {
-    let live = true;
-    // The models, levels and modes are the agent catalog of the host the chat
-    // runs on. It is empty until a daemon is up, so an empty answer never
-    // replaces a good one.
-    const load = () =>
-      window.bridge
-        ?.chatModels(active.connection)
-        .then((value) => {
-          if (live && Object.keys(value || {}).length) setCatalog(value);
-        })
-        .catch(() => {});
-    load();
-    const off = window.bridge?.onDaemonState?.((state) => {
-      if (state.state === "ready") load();
-    });
-    return () => {
-      live = false;
-      off?.();
-    };
-  }, [active.connection]);
 
   function open(workspaceId: string, panelId: string) {
     memory.drafts[current?.id || ""] = draft;

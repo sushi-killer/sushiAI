@@ -1,5 +1,7 @@
 "use strict";
 
+// own effort scale: Hermes has its own reasoning levels, not the agent catalog's.
+
 // Fixed native routes only. The resolved agent owns every request and resource.
 const CONTENT_LIMIT = 200000;
 const str = (max = 200, min = 1, pattern) => ({

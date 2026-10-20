@@ -83,9 +83,8 @@ pub struct RunSpec<'a> {
     /// The skills the routine declares. A Claude dry run gets the `Skill` tool only when this
     /// is not empty; a real Claude run has it denied when this is empty.
     pub skills: &'a [String],
-    /// The levels this harness offers, from the agent catalog. The caller passes the ones of
-    /// `agent.harness`; a level outside them is refused here, before a process starts, and an
-    /// empty list refuses every level.
+    /// The levels the agent catalog offers `agent.harness`. A level outside them is refused
+    /// before a process starts; an empty list refuses every level.
     pub efforts: &'a [String],
 }
 

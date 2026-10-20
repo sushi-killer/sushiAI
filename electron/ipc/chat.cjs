@@ -28,8 +28,7 @@ function registerChatIpc({
       ? own
       : catalogs.of("local");
   }
-  /** One agent's entry; with no catalog at all the turn is refused with the
-   * reason, not as an invalid value. */
+  /** One agent's entry; with no catalog the turn is refused with the reason. */
   async function agentOf(agent, endpoint) {
     const entry = (await catalogFor(endpoint))[agent];
     if (!entry)
@@ -220,8 +219,6 @@ function registerChatIpc({
       return { started: true };
     },
   );
-  // The composer's models, levels and modes come from the host's daemon, which
-  // reads the one catalog in sushiai-agents. No daemon, no list.
   handle("chat-models", (endpoint) => catalogFor(endpoint));
 
   return {

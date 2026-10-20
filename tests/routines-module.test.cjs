@@ -33,20 +33,16 @@ const MODELS = {
   },
   codex: { models: [{ id: "gpt-local", label: "GPT Local" }] },
 };
+const agents = (codexModels) => ({
+  claude: { models: MODELS.claude.models, builderEfforts: LEVELS.claude },
+  codex: { models: codexModels, builderEfforts: LEVELS.codex },
+});
 const CATALOGS = {
-  local: {
-    claude: { models: MODELS.claude.models, builderEfforts: LEVELS.claude },
-    codex: { models: MODELS.codex.models, builderEfforts: LEVELS.codex },
-  },
+  local: agents(MODELS.codex.models),
   // A remote host answers through its own daemon.
-  "ssh:build-host": {
-    claude: { models: MODELS.claude.models, builderEfforts: LEVELS.claude },
-    codex: {
-      models: [{ id: "gpt-remote", label: "GPT Remote" }],
-      builderEfforts: LEVELS.codex,
-    },
-  },
+  "ssh:build-host": agents([{ id: "gpt-remote", label: "GPT Remote" }]),
 };
+const LOCAL = CATALOGS.local;
 
 const PROJECTS = [
   {
@@ -389,21 +385,16 @@ test("a session that prints the answer and then refuses reads still settles done
 
 test("the codex builder always uses mcp access and a bare config", async () => {
   assert.equal(
-    builderSettings({ harness: "codex", access: "cli" }, CATALOGS.local).access,
+    builderSettings({ harness: "codex", access: "cli" }, LOCAL).access,
     "mcp",
   );
+  assert.equal(builderSettings({ harness: "codex" }, LOCAL).access, "mcp");
   assert.equal(
-    builderSettings({ harness: "codex" }, CATALOGS.local).access,
-    "mcp",
-  );
-  assert.equal(
-    builderSettings({ harness: "codex", access: "both" }, CATALOGS.local)
-      .access,
+    builderSettings({ harness: "codex", access: "both" }, LOCAL).access,
     "both",
   );
   assert.equal(
-    builderSettings({ harness: "claude", access: "cli" }, CATALOGS.local)
-      .access,
+    builderSettings({ harness: "claude", access: "cli" }, LOCAL).access,
     "cli",
   );
   const { routines, launched } = world();
@@ -511,7 +502,7 @@ test("a failed Codex turn reports its message", async () => {
 test("builder settings repair an effort the harness lacks and a bad host", () => {
   const value = builderSettings(
     { harness: "codex", effort: "max", host: "x" },
-    CATALOGS.local,
+    LOCAL,
   );
   assert.equal(value.effort, "medium");
   assert.equal(value.host, "local");
@@ -525,7 +516,7 @@ test("builder settings repair an effort the harness lacks and a bad host", () =>
 test("the builder prompt tells both harnesses to answer in the owner's language", () => {
   for (const harness of ["claude", "codex"]) {
     const prompt = builderPrompt("Do X", null, {
-      ...builderSettings({ harness }, CATALOGS.local),
+      ...builderSettings({ harness }, LOCAL),
     });
     assert.match(prompt, /Reply in the language of the owner's request/);
   }
@@ -534,7 +525,7 @@ test("the builder prompt tells both harnesses to answer in the owner's language"
 test("the builder prompt forbids the run result JSON in its own reply", () => {
   for (const harness of ["claude", "codex"]) {
     const prompt = builderPrompt("Do X", null, {
-      ...builderSettings({ harness }, CATALOGS.local),
+      ...builderSettings({ harness }, LOCAL),
     });
     assert.match(prompt, /plain prose for the owner/);
     assert.match(prompt, /never print the run result JSON/);
@@ -713,7 +704,7 @@ test("builder settings keep what it sees and how it reaches sushiai, and repair 
   assert.deepEqual(stored["routines-settings"].sees, next.sees);
   const bad = builderSettings(
     { access: "ssh", sees: { projects: "no" } },
-    CATALOGS.local,
+    LOCAL,
   );
   assert.equal(bad.access, "cli");
   assert.deepEqual(bad.sees, { projects: true, connections: true });
@@ -876,6 +867,9 @@ test("the login command finds a harness that is on the login shell's PATH only",
 test("without this Mac's catalog a ready host still names its models and levels, and a saved effort is kept", async () => {
   const { routines } = world({ localCatalog: false });
   const catalog = await routines.catalog();
+  // An older daemon is not asked, even though it would answer.
+  const local = catalog.hosts.find((h) => h.id === "local");
+  assert.deepEqual(local.harnesses.codex.models, []);
   const box = catalog.hosts.find((h) => h.id === "ssh:build-host");
   assert.deepEqual(
     box.harnesses.claude.models.map((m) => m.id),

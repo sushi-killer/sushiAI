@@ -156,9 +156,7 @@ pub trait Harness: Send + Sync {
         Capabilities::default()
     }
 
-    /// What this agent offers a person: its models, their reasoning levels, the
-    /// levels the routine builder offers, the permission modes and the defaults.
-    /// The default is an agent with none of them — only its label.
+    /// What this agent offers a person. The default is none of it, only the label.
     fn catalog(&self, _facts: &catalog::Facts) -> catalog::Catalog {
         catalog::Catalog {
             id: self.id().to_owned(),

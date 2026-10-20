@@ -515,8 +515,7 @@ export type ClaudePlugin = {
   sourceLabel: string;
   disabled: boolean;
 };
-/** One agent of `agents.catalog`, as the daemon serves it. The table itself is
- * Rust (`sushiai-agents/src/harness/catalog.rs`). */
+/** One agent of `agents.catalog`, as the daemon serves it. */
 export type AgentCatalog = {
   id: string;
   label: string;

@@ -34,6 +34,7 @@ import {
 import type { ChatModels, ClaudeAccount, ModelProfile } from "../types";
 import type { Harness, Route, Settings, Tier, Variant } from "./types";
 import { agentTitle } from "../lib/agent-title.ts";
+import { useAgentCatalog } from "../lib/useAgentCatalog.ts";
 
 const HARNESSES: Harness[] = ["claude", "codex"];
 
@@ -486,7 +487,7 @@ function OrchestratorSettingsBody({
   const [saved, setSaved] = useState<Settings | null>(null);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
-  const [chatModels, setChatModels] = useState<ChatModels>({});
+  const chatModels = useAgentCatalog();
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -500,14 +501,12 @@ function OrchestratorSettingsBody({
       orchestratorClient.settingsGet(),
       window.bridge?.modelProfilesList() ?? Promise.resolve([]),
       window.bridge?.claudeAccountsList() ?? Promise.resolve([]),
-      window.bridge?.chatModels() ?? Promise.resolve({}),
     ])
-      .then(([s, m, a, c]) => {
+      .then(([s, m, a]) => {
         setOwnSettings(s);
         setSaved(s);
         setProfiles(m);
         setAccounts(a);
-        setChatModels(c);
       })
       .catch((e) => {
         const message = errorText(e);

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -14,22 +14,20 @@ use sushiai_routines::{Agent, Config, Connector, Git, Routines};
 #[path = "../../test_wait.rs"]
 mod test_wait;
 
-/// The levels the agent catalog offers a harness. Claude takes all five, Codex the three a
-/// routine may ask for; the same table `sushiai agents catalog` prints. The module crate
-/// receives them as data, so a test stands in for the composition bin here.
+/// The levels the catalog offers a harness. The module crate receives them as data, so a
+/// test stands in for the composition bin here.
 fn levels(harness: &str) -> &'static [String] {
-    static LEVELS: std::sync::OnceLock<(Vec<String>, Vec<String>)> = std::sync::OnceLock::new();
-    let words = |list: &[&str]| list.iter().map(|level| (*level).to_string()).collect();
-    let (claude, codex) = LEVELS.get_or_init(|| {
-        (
-            words(&["low", "medium", "high", "xhigh", "max"]),
-            words(&["low", "medium", "high"]),
-        )
+    static CLAUDE: LazyLock<Vec<String>> = LazyLock::new(|| {
+        ["low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec()
     });
+    static CODEX: LazyLock<Vec<String>> =
+        LazyLock::new(|| ["low", "medium", "high"].map(String::from).to_vec());
     if harness == "claude" {
-        claude
+        &CLAUDE
     } else {
-        codex
+        &CODEX
     }
 }
 
@@ -559,7 +557,7 @@ fn argv_for_claude_and_codex_is_exact() {
     let mut cl = claude.clone();
     cl.effort = Some("max".into());
     assert!(harness_argv(&cl, &spec).is_ok());
-    // A level the harness does not offer is refused, and an empty list refuses every one.
+    // An empty list refuses every level.
     let mut high = claude.clone();
     high.effort = Some("high".into());
     assert!(harness_argv(
@@ -1287,12 +1285,18 @@ fn validate_rejects_what_the_daemon_would_stumble_on() {
         r["agent"]["harness"] = json!("codex");
     });
     assert!(fields(&v).contains(&"agent.effort".to_string()));
-    // The list is the harness's own: the same level Claude offers is refused for Codex above
-    // and accepted here, and a level neither offers is refused for both.
-    assert!(!fields(&check(&|r| r["agent"]["effort"] = json!("max")))
-        .contains(&"agent.effort".to_string()));
-    assert!(fields(&check(&|r| r["agent"]["effort"] = json!("ultra")))
-        .contains(&"agent.effort".to_string()));
+    // The list is the harness's own: `max` is Claude's, `ultra` is neither's.
+    for (harness, effort, refused) in [
+        ("claude", "max", false),
+        ("claude", "ultra", true),
+        ("codex", "ultra", true),
+    ] {
+        let v = check(&|r| {
+            r["agent"]["effort"] = json!(effort);
+            r["agent"]["harness"] = json!(harness);
+        });
+        assert_eq!(fields(&v).contains(&"agent.effort".to_string()), refused);
+    }
     for bad in [
         json!(["--dangerously-skip-permissions"]),
         json!(["--add-dir", "/etc"]),

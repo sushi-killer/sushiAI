@@ -1,3 +1,4 @@
+// own effort scale: Hermes has its own reasoning levels, not the agent catalog's.
 import { useEffect, useId, useState } from "react";
 export function AgentConversationSettings({
   providerId,

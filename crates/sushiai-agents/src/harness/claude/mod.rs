@@ -19,8 +19,7 @@ pub use settings::{claude_settings, hook_command};
 
 pub(super) struct Claude;
 
-/// The models the composer offers. Claude has no listing command, so the
-/// aliases are static; each one always resolves to that model's latest build.
+/// Claude has no listing command; each alias resolves to that model's latest build.
 static MODELS: &[(&str, &str, &str)] = &[
     ("fable", "Fable", "Most capable for hard work."),
     ("opus", "Opus", "Deep reasoning and long tasks."),
@@ -72,8 +71,7 @@ impl Harness for Claude {
         }
     }
 
-    /// Every alias takes every level; the CLI's own default stands until the
-    /// caller names a model, so there is no default of ours to show.
+    /// Every alias takes every level; no default of ours, so the CLI's own stands.
     fn catalog(&self, _facts: &Facts) -> Catalog {
         let efforts = catalog::words(catalog::CLAUDE_EFFORTS);
         Catalog {

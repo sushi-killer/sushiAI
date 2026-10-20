@@ -90,9 +90,8 @@ impl Harness for Codex {
         }
     }
 
-    /// Codex keeps its model list in the CLI's own cache, refreshed by the CLI
-    /// itself, and its default in `config.toml`. Both are per host, so the
-    /// caller reads them and hands the text in.
+    /// Models come from the CLI's own cache and the default from `config.toml`;
+    /// both are per host, so the caller passes their text in.
     fn catalog(&self, facts: &Facts) -> Catalog {
         let models = catalog::codex_models(facts.codex_cache.as_deref(), catalog::CODEX_EFFORTS);
         let (default_model, default_model_label, default_context) =

@@ -51,4 +51,5 @@ fn an_event_serializes_with_snake_case_kinds_and_camel_case_fields() {
         })
     );
     assert!(CAPABILITIES.contains(&"schedules") && CAPABILITIES.contains(&"ownerAsk"));
+    assert!(CAPABILITIES.contains(&"agentsCatalog"));
 }

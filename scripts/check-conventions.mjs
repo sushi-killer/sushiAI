@@ -421,21 +421,16 @@ for (const file of await listFiles("src")) {
 // The reasoning levels each agent CLI accepts live in the agent catalog
 // (`crates/sushiai-agents`), which the daemon serves as `agents.catalog`. A
 // list written in the app drifts from the CLI: Codex once offered three levels
-// on one screen and six on another. `xhigh` marks such a list. Hermes is
-// another agent with its own scale, not a copy of the catalog.
+// on one screen and six on another. `xhigh` marks such a list. An agent with
+// its own scale says so in the file: `// own effort scale: <reason>`.
 const EFFORT_LEVEL = /["']xhigh["']/;
-const EFFORT_EXEMPT = new Set([
-  "electron/agents/hermes-addons.cjs",
-  "electron/agents/hermes-conversation-settings.cjs",
-  "src/agents/AgentAddonPanel.tsx",
-  "src/agents/AgentConversationSettings.tsx",
-]);
+const EFFORT_MARK = /\/\/\s*own effort scale:\s*\S/;
 for (const file of (
   await Promise.all(["src", "electron"].map((dir) => listFiles(dir)))
 ).flat()) {
-  if (EFFORT_EXEMPT.has(file) || !/\.[cm]?[jt]sx?$/.test(file)) continue;
+  if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
   const text = await readFile(path.join(moduleRoot, file), "utf8");
-  if (EFFORT_LEVEL.test(text))
+  if (EFFORT_LEVEL.test(text) && !EFFORT_MARK.test(text))
     problems.push(
       `${file} writes an agent's reasoning levels; read them from agents.catalog`,
     );

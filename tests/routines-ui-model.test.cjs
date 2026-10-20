@@ -341,12 +341,10 @@ test("the agent picker offers only the models of that host's harness", () => {
     "local",
   );
   assert.equal(kept.agent.model, "gpt-local");
-  // xhigh and max are Claude's alone.
-  assert.deepEqual(effortsFor("codex", CATALOG), ["low", "medium", "high"]);
-  assert.ok(effortsFor("claude", CATALOG).includes("max"));
-  // A catalog that has not arrived offers nothing rather than a list of ours.
+  for (const harness of ["claude", "codex"])
+    assert.deepEqual(effortsFor(harness, CATALOG), CATALOG.efforts[harness]);
+  // No catalog offers nothing; the picker then keeps the current level.
   assert.deepEqual(effortsFor("claude", null), []);
-  // ...and the picker keeps the current level as its only choice.
   assert.deepEqual(effortChoices("claude", null, "high"), ["high"]);
   assert.deepEqual(
     effortChoices("codex", CATALOG, "high"),

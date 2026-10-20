@@ -1,8 +1,8 @@
 "use strict";
 
 // What a host offers a routine's agent: whether each harness CLI is installed
-// and logged in. One read per host; the caller caches it. This Mac runs the probe in a shell, an ssh host through
-// the connection's exec path.
+// and logged in. One read per host; the caller caches it. This Mac runs the
+// probe in a shell, an ssh host through the connection's exec path.
 const childProcess = require("node:child_process");
 const { PREFLIGHT_SCRIPT, parsePreflight } = require("./host-setup.cjs");
 const { posixCommand } = require("./host-install.cjs");
@@ -30,8 +30,6 @@ function createHostProbe({ exec, run = childProcess.execFile }) {
         ? runLocal(script, PROBE_TIMEOUT_MS, run)
         : exec(hostId, posixCommand(script), { timeout: PROBE_TIMEOUT_MS });
     const preflight = parsePreflight(await read(PREFLIGHT_SCRIPT));
-    // Only whether each CLI is there and signed in: the models come from the
-    // host's own daemon (`agents.catalog`), not from a file read over ssh.
     return {
       claude: preflight.claude,
       codex: preflight.codex,

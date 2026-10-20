@@ -5,6 +5,8 @@
 // model lists, projects, orchestrator settings), so nothing here touches disk
 // or a connection.
 
+const { isHarness } = require("./harness.cjs");
+
 const FALLBACK_AGENT = { harness: "claude", model: "sonnet", effort: "medium" };
 
 /** The levels a harness offers a routine, from the agent catalog the daemon
@@ -40,8 +42,7 @@ function harnessEntry(fact, models) {
 function standardAgent(settings, catalogs) {
   const id = settings?.tiers?.standard;
   const route = (settings?.routes || []).find((item) => item.id === id);
-  if (!route || !["claude", "codex"].includes(route.harness))
-    return { ...FALLBACK_AGENT };
+  if (!route || !isHarness(route.harness)) return { ...FALLBACK_AGENT };
   // With no catalog the route's level stands: the daemon checks it on save.
   const levels = effortsFor(route.harness, catalogs);
   const effort =
@@ -98,8 +99,6 @@ function assembleCatalog({
       })),
     })),
     defaults: { agent: standardAgent(settings, catalogs) },
-    // What each harness offers a routine, so the page offers the CLI's own
-    // levels instead of a list of its own.
     efforts: {
       claude: effortsFor("claude", catalogs),
       codex: effortsFor("codex", catalogs),

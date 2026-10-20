@@ -84,9 +84,10 @@ const TIMING_MARK = /\/\/\s*timing:\s*\S/;
 const RUST_TIMING =
   /\b(?:thread::sleep|tokio::time::sleep)\s*\(|(?<![.\w])sleep\s*\(|\.elapsed\(\)(?:\.\w+\(\))*\s*[<>]|\brecv_timeout\(\s*Duration::from_/;
 // A promise resolved by setTimeout (inline or across lines), timers/promises,
-// and a wall-clock delta compared to a bound.
+// a wall-clock delta compared to a bound, and a hello deadline set to a number
+// (it races the real exit of a slow-starting fake; use DEADLINE_MS).
 const NODE_TIMING =
-  /new Promise\(\s*\(?\s*(\w+)\s*\)?\s*=>\s*setTimeout\(\s*(?:\1|\(\)\s*=>\s*\1\(\))\s*,|setTimeout\(\s*(?:resolve|res|r|done)\s*,|await\s+(?:setTimeout|scheduler\.wait)\(|(?:Date\.now|performance\.now|process\.hrtime\.bigint)\(\)\s*-\s*[\w.]+\s*\)?\s*[<>]/;
+  /\bhelloTimeoutMs\s*:\s*\d|new Promise\(\s*\(?\s*(\w+)\s*\)?\s*=>\s*setTimeout\(\s*(?:\1|\(\)\s*=>\s*\1\(\))\s*,|setTimeout\(\s*(?:resolve|res|r|done)\s*,|await\s+(?:setTimeout|scheduler\.wait)\(|(?:Date\.now|performance\.now|process\.hrtime\.bigint)\(\)\s*-\s*[\w.]+\s*\)?\s*[<>]/;
 // `const sleep = (ms) => new Promise(...setTimeout(...))`: its calls are the
 // sleeps, the definition is not counted.
 const NODE_SLEEP_HELPER =

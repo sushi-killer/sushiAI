@@ -247,6 +247,7 @@ test("node test sleeps and wall-clock asserts fail unless marked; Rust elapsed b
         "t.mock.timers.tick(250);",
         "assert.ok(entry.expiresAt > Date.now());",
         "await next();",
+        "connect({ helloTimeoutMs: DEADLINE_MS / 12 });",
         "",
       ].join("\n"),
     );
@@ -262,6 +263,7 @@ test("node test sleeps and wall-clock asserts fail unless marked; Rust elapsed b
       "assert.ok((Date.now() - t) < 300);",
       "await new Promise((go) => setTimeout(go, 30));",
       "await new Promise((go) => setTimeout(() => go(), 30));",
+      "connect({ helloTimeoutMs: 3000 });",
     ]) {
       write(
         "tests/b.test.cjs",

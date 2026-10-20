@@ -5,6 +5,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { closeAppDb, writeStore } = require("../electron/app-db.cjs");
+const { Projects } = require("../electron/projects.cjs");
 const { registerVault, STORE } = require("../electron/vault.cjs");
 const { VAULT_MANIFEST } = require("../electron/extensions/builtin-vault.cjs");
 const { createModuleIpc } = require("../electron/extensions/module-ipc.cjs");
@@ -24,6 +25,7 @@ function fakeClock() {
     time: START,
     timers: new Map(),
     next: 0,
+    resumes: [],
     now: () => clock.time,
     setTimer(callback, ms) {
       clock.next += 1;
@@ -35,10 +37,11 @@ function fakeClock() {
       clock.timers.delete(handle.id);
     },
     pending: () => [...clock.timers.values()],
-    async fire() {
+    // `late` is how long the machine slept past the planned time.
+    async fire(late = 0) {
       const [handle] = clock.pending();
       clock.timers.delete(handle.id);
-      clock.time += handle.ms;
+      clock.time += handle.ms + late;
       await handle.callback();
     },
   };
@@ -56,11 +59,16 @@ async function fakeVault(t, initial) {
     period: 0,
     created: START / 1000,
     expireTime: true,
+    capTtl: Infinity,
+    kvStatus: 200,
     renewStatus: 200,
     lookupStatus: 200,
     requests: [],
+    // With a clock the token really runs out: Vault refuses it at the end.
+    clock: null,
     ...initial,
   };
+  if (state.clock) state.liveUntil = state.clock.now() + state.ttl * SECOND;
   const server = http.createServer((request, response) => {
     state.requests.push(`${request.method} ${request.url}`);
     const reply = (status, body) => {
@@ -68,6 +76,11 @@ async function fakeVault(t, initial) {
       response.end(JSON.stringify(body ?? { errors: [TOKEN] }));
     };
     if (request.headers["x-vault-token"] !== TOKEN) return reply(403);
+    if (state.clock) {
+      const left = Math.ceil((state.liveUntil - state.clock.now()) / SECOND);
+      if (left <= 0) return reply(403);
+      state.ttl = left;
+    }
     if (request.url === "/v1/auth/token/lookup-self") {
       if (state.lookupStatus !== 200) return reply(state.lookupStatus);
       return reply(200, {
@@ -86,8 +99,15 @@ async function fakeVault(t, initial) {
     }
     if (request.url === "/v1/auth/token/renew-self") {
       if (state.renewStatus !== 200) return reply(state.renewStatus);
-      state.ttl = state.renewTtl;
-      return reply(200, { auth: { client_token: TOKEN } });
+      state.ttl = Math.min(state.renewTtl, state.capTtl);
+      if (state.clock) state.liveUntil = state.clock.now() + state.ttl * SECOND;
+      return reply(200, {
+        auth: { client_token: TOKEN, lease_duration: state.ttl },
+      });
+    }
+    if (request.url === "/v1/secret/data/app/base") {
+      if (state.kvStatus !== 200) return reply(state.kvStatus);
+      return reply(200, { data: { data: { A: "1" } } });
     }
     reply(404);
   });
@@ -116,7 +136,7 @@ const safeStorage = {
 };
 
 /** Vault registered on a stub project store, with the test clock. */
-async function setup(t, vault) {
+async function setup(t, vault, { store = safeStorage } = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "vault-token-test-"));
   t.after(async () => {
     closeAppDb(home);
@@ -141,14 +161,16 @@ async function setup(t, vault) {
     }),
     projects: {
       retireField: async () => {},
-      list: async () => [],
+      list: async () => [{ id: "p1", name: "Demo" }],
+      get: async (id) => ({ id }),
       addEnvironmentProvider() {},
       environmentChanged() {},
     },
     notices,
-    safeStorage,
+    safeStorage: store,
     userDataDir: home,
     isEnabled: () => true,
+    onResume: (callback) => clock.resumes.push(callback),
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
@@ -192,8 +214,15 @@ test("a renewable token is renewed at half of its time left, again and again", a
   assert.equal((await ipc("token.status")).autoRenews, true);
 });
 
-test("a short ttl is renewed no sooner than the floor", async (t) => {
+test("a short ttl is renewed before it ends, not after the floor", async (t) => {
   const vault = await fakeVault(t, { ttl: 20, renewTtl: 20 });
+  const { clock, ipc } = await setup(t, vault);
+  await ipc("token.set", TOKEN);
+  assert.equal(clock.pending()[0].ms, 10 * SECOND);
+});
+
+test("a long ttl is renewed at half, never sooner than the floor", async (t) => {
+  const vault = await fakeVault(t, { ttl: 100, renewTtl: 100 });
   const { clock, ipc } = await setup(t, vault);
   await ipc("token.set", TOKEN);
   assert.equal(clock.pending()[0].ms, 60 * SECOND);
@@ -213,60 +242,140 @@ test("a token that never expires is looked up once and needs no timer", async (t
   assert.deepEqual(notices.published, []);
 });
 
-test("a periodic token keeps renewing with no max ttl in the way", async (t) => {
-  const vault = await fakeVault(t, {
-    ttl: 600,
-    period: 600,
-    maxTtl: 600,
-    created: START / 1000 - 3600,
-  });
+test("a periodic token renews; a max ttl that has run out ends it", async (t) => {
+  const vault = await fakeVault(t, { ttl: 600, period: 600 });
   const { ipc } = await setup(t, vault);
   assert.equal((await ipc("token.set", TOKEN)).autoRenews, true);
+  vault.maxTtl = 600;
+  vault.created = START / 1000 - 3600;
+  assert.equal((await ipc("token.set", TOKEN)).autoRenews, false);
 });
 
-test("a 403 on renewal is a dead token: expired state and a notice, no more timer", async (t) => {
+test("a 403 on renewal with a good lookup is a token that cannot be renewed", async (t) => {
   const vault = await fakeVault(t, { ttl: 4 * 3600 });
   const { clock, notices, ipc } = await setup(t, vault);
   await ipc("token.set", TOKEN);
   vault.renewStatus = 403;
   await clock.fire();
-  assert.equal((await ipc("token.status")).state, "expired");
-  assert.equal(clock.pending().length, 0);
-  assert.equal(lastNotice(notices).kind, "failed");
-  assert.match(lastNotice(notices).body, /expired.*Settings → Vault/);
+  const status = await ipc("token.status");
+  assert.equal(status.state, "valid");
+  assert.equal(status.autoRenews, false);
+  assert.equal(lastNotice(notices).kind, "info");
+  assert.match(lastNotice(notices).body, /expires/);
+  // The renewal is not tried again.
+  const posts = () => vault.requests.filter((l) => l.startsWith("POST")).length;
+  const before = posts();
+  await clock.fire();
+  assert.equal(posts(), before);
 });
 
-test("a 403 on the first lookup is an expired token with a notice", async (t) => {
+test("a lookup 403 with nothing to ask is told honestly, not as expired", async (t) => {
   const vault = await fakeVault(t, {});
   const { notices, ipc } = await setup(t, vault);
   const status = await ipc("token.set", "hvs.synthetic-other-token");
-  assert.equal(status.state, "expired");
-  assert.equal(lastNotice(notices).key, "vault:token");
+  assert.equal(status.state, "refused");
+  assert.equal(lastNotice(notices).kind, "failed");
+  assert.match(lastNotice(notices).body, /expired, revoked, or its policy/);
 });
 
-test("a network failure on renewal retries with growing backoff and recovers", async (t) => {
+test("a lookup 403 while a project path reads is a limited token: no notice, slow recheck", async (t) => {
+  const vault = await fakeVault(t, { lookupStatus: 403 });
+  const { clock, notices, ipc } = await setup(t, vault);
+  await ipc("project.set", "p1", { paths: ["app/base"] });
+  const status = await ipc("token.set", TOKEN);
+  assert.deepEqual(status, {
+    saved: true,
+    state: "limited",
+    expiresAt: null,
+    autoRenews: false,
+  });
+  assert.deepEqual(notices.published, []);
+  assert.deepEqual(
+    clock.pending().map((timer) => timer.ms),
+    [6 * HOUR],
+  );
+});
+
+test("a lookup 403 while the project path is refused too is a dead token", async (t) => {
+  const vault = await fakeVault(t, { lookupStatus: 403, kvStatus: 403 });
+  const { notices, ipc } = await setup(t, vault);
+  await ipc("project.set", "p1", { paths: ["app/base"] });
+  assert.equal((await ipc("token.set", TOKEN)).state, "expired");
+  assert.equal(lastNotice(notices).kind, "failed");
+});
+
+test("a token capped by a system max ttl is warned about, not renewed forever", async (t) => {
   const vault = await fakeVault(t, { ttl: 4 * 3600 });
   const { clock, notices, ipc } = await setup(t, vault);
   await ipc("token.set", TOKEN);
-  vault.renewStatus = 503;
-  await clock.fire();
-  assert.equal((await ipc("token.status")).state, "unreachable");
-  assert.deepEqual(
-    clock.pending().map((timer) => timer.ms),
-    [30 * SECOND],
-  );
-  await clock.fire();
-  assert.deepEqual(
-    clock.pending().map((timer) => timer.ms),
-    [60 * SECOND],
-  );
-  vault.renewStatus = 200;
+  // The renewal at +2 h cannot move the end: 2 h are left.
+  vault.capTtl = 2 * 3600;
   await clock.fire();
   const status = await ipc("token.status");
-  assert.equal(status.state, "valid");
-  assert.equal(status.autoRenews, true);
-  assert.deepEqual(notices.published, [], "a flaky network is not a notice");
-  assert.equal(clock.pending().length, 1);
+  assert.equal(status.autoRenews, false);
+  assert.equal(lastNotice(notices).kind, "info");
+});
+
+test("a late timer looks first and does not renew a token that died while asleep", async (t) => {
+  const vault = await fakeVault(t, { ttl: 4 * 3600 });
+  const { clock, notices, ipc } = await setup(t, vault);
+  await ipc("token.set", TOKEN);
+  vault.lookupStatus = 403;
+  await clock.fire(10 * HOUR);
+  assert.equal(
+    vault.requests.some((line) => line.startsWith("POST")),
+    false,
+  );
+  assert.equal((await ipc("token.status")).state, "expired");
+  assert.equal(lastNotice(notices).kind, "failed");
+});
+
+test("a wake from sleep looks the token up again", async (t) => {
+  const vault = await fakeVault(t, { ttl: 4 * 3600 });
+  const { clock, ipc } = await setup(t, vault);
+  await ipc("token.set", TOKEN);
+  const lookups = () =>
+    vault.requests.filter((line) => line.endsWith("lookup-self")).length;
+  const before = lookups();
+  assert.equal(clock.resumes.length, 1);
+  await clock.resumes[0]();
+  assert.equal(lookups(), before + 1);
+});
+
+test("a stopped watch stays stopped", async (t) => {
+  const vault = await fakeVault(t, { ttl: 4 * 3600 });
+  const { clock, ipc, instance } = await setup(t, vault);
+  instance.stop();
+  await ipc("token.set", TOKEN);
+  assert.equal(clock.pending().length, 0);
+  assert.deepEqual(vault.requests, []);
+});
+
+test("secure storage that is not ready is retried, not reported unreadable", async (t) => {
+  const vault = await fakeVault(t, {});
+  let ready = false;
+  const store = {
+    ...safeStorage,
+    isEncryptionAvailable: () => ready,
+    decryptString: (buffer) => {
+      if (!ready) throw new Error("not ready");
+      return safeStorage.decryptString(buffer);
+    },
+  };
+  const { home, clock, notices, ipc } = await setup(t, vault, { store });
+  writeStore(home, STORE, {
+    token: { v: 1, ct: safeStorage.encryptString(TOKEN).toString("base64") },
+  });
+  await ipc("address.set", vault.address);
+  const early = await ipc("token.status");
+  assert.equal(early.saved, true);
+  assert.equal(early.state, "unchecked");
+  assert.deepEqual(notices.published, []);
+  assert.equal(clock.pending().length, 1, "tried again later");
+  ready = true;
+  await clock.fire();
+  assert.equal((await ipc("token.status")).state, "valid");
+  assert.deepEqual(notices.published, []);
 });
 
 test("a token that cannot be renewed is announced a day ahead, then reported dead", async (t) => {
@@ -417,4 +526,61 @@ test("the Settings line says valid until, auto-renews, expired or unreadable", (
   assert.match(line({ state: "expired" }), /^Expired/);
   assert.match(line({ state: "unreadable" }), /^Cannot be read/);
   assert.match(line({ state: "unreachable" }), /unreachable/);
+});
+
+test("a project keeps its Vault values past the token's first ttl", async (t) => {
+  const clock = fakeClock();
+  const vault = await fakeVault(t, {
+    ttl: 4 * 3600,
+    renewTtl: 4 * 3600,
+    clock,
+  });
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "vault-token-e2e-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(async () => {
+    process.env.HOME = previousHome;
+    closeAppDb(home);
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  const projects = new Projects({ userDataDir: home, safeStorage });
+  const cwd = path.join(home, "work");
+  await fs.mkdir(cwd);
+  const project = await projects.attach({
+    endpoint: "local",
+    cwd,
+    name: "E2E",
+  });
+  const handlers = new Map();
+  const { ready } = registerVault({
+    moduleIpc: createModuleIpc({
+      handle: (channel, callback) => handlers.set(channel, callback),
+    }),
+    projects,
+    notices: { register() {}, publish() {}, retract() {} },
+    safeStorage,
+    userDataDir: home,
+    isEnabled: () => true,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  await ready;
+  const ipc = (method, ...args) =>
+    handlers.get("module:invoke")(VAULT_MANIFEST.id, method, ...args);
+  await ipc("address.set", vault.address);
+  await ipc("project.set", project.id, { paths: ["app/base"] });
+  await ipc("token.set", TOKEN);
+  const read = async () => {
+    // Saving the project settings again drops the 5 minute read cache.
+    await ipc("project.set", project.id, { paths: ["app/base"] });
+    return projects.environmentFor(project.id, "agent", "local");
+  };
+  assert.deepEqual(await read(), { A: "1" });
+  for (let round = 0; round < 6; round += 1) await clock.fire();
+  assert.ok(clock.now() > START + 4 * HOUR, "past the first ttl");
+  assert.deepEqual(await read(), { A: "1" });
+  // Without a renewal the same Vault would have refused the token by now.
+  vault.liveUntil = START + 4 * HOUR;
+  assert.deepEqual(await read(), {});
 });

@@ -450,6 +450,8 @@ const vault = require("./vault.cjs").registerVault({
   safeStorage,
   userDataDir: app.getPath("userData"),
   isEnabled: () => extensions.isEnabled(VAULT_MANIFEST.id),
+  whenReady: app.whenReady(),
+  onResume: (callback) => powerMonitor.on("resume", callback),
 });
 const orchestratorNotices = createOrchestratorNotices({
   notices,

@@ -11,6 +11,10 @@ export function tokenStateText(status: TokenStatus): string {
   switch (status.state) {
     case "expired":
       return "Expired. Save a new token.";
+    case "refused":
+      return "Vault refused the lookup (403). The token may be expired.";
+    case "limited":
+      return "Token works; it cannot look itself up, so expiry is unknown";
     case "unreadable":
       return "Cannot be read. Save the token again.";
     case "valid":

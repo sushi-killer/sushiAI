@@ -198,6 +198,8 @@ function registerVault({
   now,
   setTimer,
   clearTimer,
+  whenReady = Promise.resolve(),
+  onResume,
 }) {
   // address+mount+paths -> { at, result: Promise, notified: Set<projectId> }
   const cache = new Map();
@@ -244,8 +246,28 @@ function registerVault({
         ? { token, unreadable: false }
         : { token: null, unreadable: true };
     } catch {
-      return { token: null, unreadable: true };
+      // Before the app is ready the store throws for any token: only a store
+      // that says it works and still fails makes the token unreadable.
+      return safeStorage.isEncryptionAvailable?.()
+        ? { token: null, unreadable: true }
+        : { token: null, unreadable: false, unavailable: true };
     }
+  }
+
+  /** Whether the token reads the first configured project path: true, false
+   * when Vault refuses it, null when there is nothing to ask or no answer. */
+  async function isTokenAccepted(token, address) {
+    const stored = Object.values(readStore(userDataDir, PROJECTS_STORE)).find(
+      (config) => config?.paths?.length,
+    );
+    if (!stored) return null;
+    const result = await readPath(
+      token,
+      { address, mount: stored.mount },
+      stored.paths[0],
+    );
+    if (result.ok) return true;
+    return result.reason === statusReason(403) ? false : null;
   }
 
   /** Every path of the config read with the saved token. */
@@ -258,6 +280,7 @@ function registerVault({
 
   const tokenWatch = createTokenWatch({
     loadToken,
+    isTokenAccepted,
     getAddress: () => readAddress(),
     isEnabled,
     notices,
@@ -285,6 +308,8 @@ function registerVault({
     });
     generation += 1;
     cache.clear();
+    // The old token's state and notice go before the new one is looked at.
+    tokenWatch.clear();
   }
 
   function clearToken() {
@@ -431,8 +456,17 @@ function registerVault({
       console.warn("Vault: could not move the Vault address");
     }),
   );
-  // Looks at the saved token once the address is known, off the ready path.
-  void ready.then(() => tokenWatch.check());
+  // Looks at the saved token once the address is known and secure storage
+  // works (after the app is ready), off the ready path; a wake from sleep
+  // looks again.
+  Promise.all([ready, whenReady])
+    .then(() => {
+      onResume?.(() => tokenWatch.check());
+      return tokenWatch.check();
+    })
+    .catch(() => {
+      console.warn("Vault: token watch did not start");
+    });
 
   projects.addEnvironmentProvider({
     /** The project's Vault values, {} when they cannot all be read. */

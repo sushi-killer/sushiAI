@@ -43,7 +43,14 @@ export function addressDismiss(): Promise<AddressState> {
 export type TokenStatus = {
   saved: boolean;
   state:
-    "none" | "unchecked" | "valid" | "expired" | "unreachable" | "unreadable";
+    | "none"
+    | "unchecked"
+    | "valid"
+    | "limited"
+    | "refused"
+    | "expired"
+    | "unreachable"
+    | "unreadable";
   expiresAt: number | null;
   autoRenews: boolean;
 };

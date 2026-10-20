@@ -29,18 +29,20 @@ fn native_check_command_gets_electron_env_and_host_does_not() {
     };
     assert_eq!(electron_env(&native), Some("1".into()));
     assert_eq!(electron_env(&host), None);
-    assert_eq!(policy.check_env_remove_prefixes, vec!["SCCACHE_"]);
-    let rustc_wrapper = |command: &tokio::process::Command| {
+    let wrapper = |command: &tokio::process::Command, name: &str| {
         command
             .as_std()
             .get_envs()
-            .find(|(key, _)| *key == "RUSTC_WRAPPER")
+            .find(|(key, _)| *key == name)
             .and_then(|(_, value)| value.map(|value| value.to_os_string()))
     };
-    assert_eq!(
-        rustc_wrapper(&native).as_deref(),
-        Some(std::ffi::OsStr::new(""))
-    );
+    for name in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
+        assert_eq!(
+            wrapper(&native, name).as_deref(),
+            Some(std::ffi::OsStr::new(""))
+        );
+        assert_eq!(wrapper(&host, name), None);
+    }
     let cargo_rustc_wrapper = |command: &tokio::process::Command| {
         command
             .as_std()

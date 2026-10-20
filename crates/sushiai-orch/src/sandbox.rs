@@ -30,7 +30,6 @@ pub struct TaskSandbox {
     pub read_metadata_subpaths: Vec<PathBuf>,
     pub daemon_socket: PathBuf,
     pub check_env: BTreeMap<String, String>,
-    pub check_env_remove_prefixes: Vec<String>,
 }
 
 // Resolve existing ancestors too: run directories and caches may not exist yet.
@@ -213,12 +212,7 @@ impl TaskSandbox {
             read_metadata_paths,
             read_metadata_subpaths,
             daemon_socket: resolved(inputs.daemon_socket),
-            check_env: [
-                ("ELECTRON_DISABLE_SANDBOX".into(), "1".into()),
-                ("RUSTC_WRAPPER".into(), String::new()),
-            ]
-            .into(),
-            check_env_remove_prefixes: vec!["SCCACHE_".into()],
+            check_env: [("ELECTRON_DISABLE_SANDBOX".into(), "1".into())].into(),
         }
     }
 
@@ -226,12 +220,19 @@ impl TaskSandbox {
     /// inherited compiler-cache configuration that cannot run inside Seatbelt.
     pub fn apply_check_env(&self, command: &mut std::process::Command) {
         command.envs(&self.check_env);
-        for (key, _) in std::env::vars_os().filter(|(key, _)| {
-            let key = key.to_string_lossy();
-            self.check_env_remove_prefixes
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-        }) {
+        disable_compiler_wrapper(command);
+    }
+}
+
+/// Turns the owner's configured compiler wrapper off for a command whose
+/// sandbox cannot reach a cache server (sccache fails there with EPERM): empty
+/// wrappers win over cargo config, and inherited `SCCACHE_*` settings are dropped.
+pub fn disable_compiler_wrapper(command: &mut std::process::Command) {
+    command
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("SCCACHE_") {
             command.env_remove(key);
         }
     }
@@ -554,11 +555,7 @@ mod tests {
         let policy = policy(tmp.path(), &[]);
         assert_eq!(
             policy.check_env,
-            [
-                ("ELECTRON_DISABLE_SANDBOX".into(), "1".into()),
-                ("RUSTC_WRAPPER".into(), String::new()),
-            ]
-            .into()
+            [("ELECTRON_DISABLE_SANDBOX".into(), "1".into())].into()
         );
     }
 

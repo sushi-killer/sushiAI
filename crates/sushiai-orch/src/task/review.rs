@@ -59,6 +59,10 @@ pub struct FindingRecord {
     pub id: String,
     pub text: String,
     pub status: FindingStatus,
+    /// The severity (0-3) the latest review that reported it gave, `None` when
+    /// it named none. Kept typed: a finding's text need not start with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<u8>,
     /// The attempt and review round that last saw it.
     pub attempt: u32,
     pub round: u32,

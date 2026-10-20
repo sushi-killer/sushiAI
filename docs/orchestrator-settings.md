@@ -113,7 +113,7 @@ Writes are allowed under the worktree, Git common directory and worktree metadat
 
 Checks and Codex task implement runs use `sandbox-exec` on macOS. That wrapper is unavailable on other systems. Codex implements, including resume, use `--sandbox danger-full-access` with the outer task profile; reviews keep `--sandbox read-only`. The specific token-less daemon socket is denied, so native Codex implement runs omit the messaging bridge and have no peer messaging or `ask_orchestrator`. A per-repo host entry restores the bridge. Incoming messages can still reach the next attempt brief. Token-checking the socket is a separate follow-up.
 
-Native task runs and checks receive `RUSTC_WRAPPER=""` and have inherited `SCCACHE_*` variables removed, so Cargo does not start sccache inside the profile. Native checks also receive `ELECTRON_DISABLE_SANDBOX=1`. This disables Electron's own renderer sandbox inside the outer sandbox; the task filesystem and socket restrictions still apply. Host checks receive neither policy-added environment change. Checks keep open network. Codex task shell commands also have open network even with `codexNetwork=false`, because its workspace-network switch does not restrict `danger-full-access`. Claude retains its `allowedDomains` filter.
+Native task runs and checks receive `RUSTC_WRAPPER=""` and `RUSTC_WORKSPACE_WRAPPER=""` and have inherited `SCCACHE_*` variables removed, so Cargo does not start sccache inside the profile. Native checks also receive `ELECTRON_DISABLE_SANDBOX=1`. This disables Electron's own renderer sandbox inside the outer sandbox; the task filesystem and socket restrictions still apply. Host checks receive neither policy-added environment change. Checks keep open network. Codex task shell commands also have open network even with `codexNetwork=false`, because its workspace-network switch does not restrict `danger-full-access`. Claude retains its `allowedDomains` filter.
 
 The same-failure retry cap is fixed at **3**, with no setting: after three
 retry answers from any source for the same failure signature, the next same
@@ -212,7 +212,7 @@ SCCACHE_SERVER_PORT=4227
 
 Port 4227 and the cache directory are dedicated to orchd, shared across its task worktrees, separate from sccache's defaults. The daemon runs `sccache --start-server` with this environment outside any sandbox and any check's process group, so stopping a check does not stop the server. orchd never sets `CARGO_TARGET_DIR`: every worktree keeps its own `target/` outputs. Without sccache, or when the owner supplies a wrapper, orchd leaves the compiler environment unchanged and writes no cache line.
 
-Agents get the same compiler environment when their sandbox can reach localhost and write the cache directory. A Codex agent with `codexNetwork: false` gets no injected wrapper, and the task records `Orchestrator: compiler cache disabled for agent: Codex codexNetwork false blocks localhost access` once. A read-only Codex agent, or an agent whose sandbox only permits writes in the worktree, also skips the wrapper with a reason line. orchd does not expand the agent's sandbox permissions for caching. Host-mode Claude agents can use the shared cache; Codex keeps its workspace sandbox even in Host mode.
+Agents get the same compiler environment when their sandbox can reach localhost and write the cache directory. A Codex agent with `codexNetwork: false` gets no injected wrapper, and the task records `Orchestrator: compiler cache disabled for agent: Codex codexNetwork false blocks localhost access` once. A read-only Codex agent, or an agent whose sandbox only permits writes in the worktree, also skips the wrapper with a reason line. In each of these cases, also when orchd's cache is off or sccache is missing, the agent gets `RUSTC_WRAPPER=""` and `RUSTC_WORKSPACE_WRAPPER=""` and no inherited `SCCACHE_*`, so a wrapper in the owner's Cargo config does not fail inside its sandbox. A `RUSTC_WRAPPER` the owner exported stays. orchd does not expand the agent's sandbox permissions for caching. Host-mode Claude agents can use the shared cache; Codex keeps its workspace sandbox even in Host mode.
 
 After a verify run, final checks or the parent gate, orchd reads its server's JSON stats before and after the run and records one line from the difference, for example `Orchestrator: compiler cache 41/52 hits (79%) in final checks`. It writes no hit-rate line when there were no compile requests or stats could not be read; reused verify results do not produce another line. These are counters from the shared server, so concurrent builds can contribute to the same interval. sccache caches eligible compilations, not Rust's incremental builds or linking; each repository controls its Cargo profiles. Rust cache keys also include a crate's working directory, so registry dependencies at stable paths can hit across fresh worktrees while copies of a worktree's own crate can still miss.
 
@@ -309,9 +309,11 @@ configured, a duplicate or built-in id, `maxAttempts` of 0, and a
   `first pass: yes|no; owner touches: N; cause: none|env|plan|impl|review_loop; cost: plan $0.02, implement $0.01`
   (only nonzero phases, in the order plan, implement, review, triage,
   advisor, finding_judge, answer_judge, pick; `cost: $0.00` with no spend).
-  First pass means done with exactly one implement attempt and no question the
-  owner answered; a parent is first pass when every subtask is and it ran no
-  attempt of its own. Owner touches count owner-answered questions plus
+  First pass means done with exactly one implement attempt, that attempt
+  passed, and no review or registered finding other than P3 (a finding with no
+  severity counts as blocking). A parent is first pass when it ran no
+  implement attempt of its own and every subtask is first pass by the same
+  rule, at every depth. Owner answers do not change it. Owner touches count owner-answered questions plus
   `Amended: ` decision lines. The cause comes from the last failure: errors,
   cost budget, a missing harness and base-check failures are `env`; a failed plan
   stage or a plan-gate drop is `plan`; verify, held-out, loop, stall,

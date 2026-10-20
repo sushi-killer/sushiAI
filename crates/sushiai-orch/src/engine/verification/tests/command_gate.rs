@@ -45,6 +45,7 @@ fn repeated_finding(scenario: &str) -> (Task, ReviewResult) {
         id: "F-1".into(),
         text: "P1: the parser drops the last row".into(),
         status: FindingStatus::Open,
+        severity: None,
         attempt: 1,
         round: 1,
         repeats: 2,

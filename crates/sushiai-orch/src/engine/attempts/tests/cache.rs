@@ -39,16 +39,41 @@ fn codex_without_network_gets_no_wrapper_and_a_reason() {
         resume: None,
     };
     let mut command = tokio::process::Command::new("codex");
-    let line = apply_agent_cache(&mut command, Some(&cache), &req, SandboxMode::Host).unwrap();
+    let line =
+        apply_agent_cache(&mut command, Some(&cache), &req, SandboxMode::Host, false).unwrap();
     assert!(line.contains("codexNetwork false") && line.contains("localhost"));
-    assert!(!command
-        .as_std()
-        .get_envs()
-        .any(|(k, _)| k == "RUSTC_WRAPPER" || k.to_string_lossy().starts_with("SCCACHE_")));
+    let var = |key: &str| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.map(|v| v.to_os_string()))
+    };
+    assert_eq!(var("RUSTC_WRAPPER"), Some(Some("".into())));
+    assert_eq!(var("RUSTC_WORKSPACE_WRAPPER"), Some(Some("".into())));
+    // An inherited value shows as removed (None); orchd's own is never set.
+    assert!(!matches!(var("SCCACHE_DIR"), Some(Some(_))));
+    assert!(!matches!(var("SCCACHE_SERVER_PORT"), Some(Some(_))));
+
+    // Without orchd's cache the configured wrapper is still turned off.
+    let mut bare = tokio::process::Command::new("codex");
     assert_eq!(
-        apply_agent_cache(&mut command, None, &req, SandboxMode::Host),
+        apply_agent_cache(&mut bare, None, &req, SandboxMode::Host, false),
         None
     );
+    let wrapper = |command: &tokio::process::Command| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "RUSTC_WRAPPER")
+            .map(|(_, v)| v.map(|v| v.to_os_string()))
+    };
+    assert_eq!(wrapper(&bare), Some(Some("".into())));
+
+    // A wrapper the owner exported stays.
+    let mut owned = tokio::process::Command::new("codex");
+    apply_agent_cache(&mut owned, None, &req, SandboxMode::Host, true);
+    assert_eq!(wrapper(&owned), None);
 }
 
 #[test]

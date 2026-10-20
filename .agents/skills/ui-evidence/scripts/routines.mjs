@@ -204,8 +204,16 @@ const CATALOG = {
           installed: true,
           loggedIn: true,
           models: [
-            { id: "sonnet", label: "Sonnet" },
-            { id: "opus", label: "Opus" },
+            {
+              id: "sonnet",
+              label: "Sonnet",
+              description: "Balanced, for most work.",
+            },
+            {
+              id: "opus",
+              label: "Opus",
+              description: "Strongest, for hard work.",
+            },
           ],
         },
         codex: {
@@ -244,6 +252,12 @@ const CATALOG = {
     },
   ],
   defaults: { agent: { harness: "claude", model: "", effort: "medium" } },
+  // The levels each harness offers, as the main process takes them from the
+  // daemon's agents.catalog.
+  efforts: {
+    claude: ["low", "medium", "high", "xhigh", "max"],
+    codex: ["low", "medium", "high"],
+  },
 };
 
 const detailOf = (

@@ -212,26 +212,28 @@ export const HARNESSES: { id: Harness; label: string }[] = [
   { id: "codex", label: agentTitle("codex") },
 ];
 
-const EFFORTS: Record<Harness, string[]> = {
-  claude: ["low", "medium", "high", "xhigh", "max"],
-  codex: ["low", "medium", "high"],
-};
+/** The levels a harness offers a routine, from the catalog the daemon served.
+ * An empty list offers nothing, which the page repairs rather than inventing. */
+export const effortsFor = (
+  harness: Harness,
+  catalog: RoutinesCatalog | null,
+): string[] => catalog?.efforts?.[harness] ?? [];
 
-/** The levels a harness offers: xhigh and max are Claude's alone. */
-export const effortsFor = (harness: Harness): string[] => EFFORTS[harness];
+/** The levels a picker shows: the catalog's, or only `current` while the
+ * catalog is missing, so the control keeps its value instead of going blank. */
+export const effortChoices = (
+  harness: Harness,
+  catalog: RoutinesCatalog | null,
+  current: string,
+): string[] => {
+  const levels = effortsFor(harness, catalog);
+  return levels.length ? levels : [current];
+};
 
 export const hostOf = (
   catalog: RoutinesCatalog | null,
   hostId: string,
 ): CatalogHost | undefined => catalog?.hosts.find((host) => host.id === hostId);
-
-/** One line under a well-known model in the picker; "" for any other. */
-export function modelNote(id: string): string {
-  if (/opus/i.test(id)) return "Hardest work, slowest";
-  if (/sonnet/i.test(id)) return "Most routines";
-  if (/haiku/i.test(id)) return "Simple digests, cheapest";
-  return "";
-}
 
 /** The models a host offers for a harness, and only those. */
 export function modelsFor(
@@ -271,7 +273,8 @@ export function withAgent(
   const models = modelsFor(catalog, hostId, agent.harness);
   if (agent.model && !models.some((model) => model.id === agent.model))
     agent.model = "";
-  if (agent.effort && !effortsFor(agent.harness).includes(agent.effort))
+  const levels = effortsFor(agent.harness, catalog);
+  if (agent.effort && levels.length && !levels.includes(agent.effort))
     agent.effort = "medium";
   return { ...routine, agent };
 }

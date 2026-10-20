@@ -10,6 +10,7 @@ const {
   routineState,
   modelsFor,
   withAgent,
+  effortChoices,
   effortsFor,
   savePayload,
   describeWhen,
@@ -107,6 +108,10 @@ const CATALOG = {
   ],
   projects: [],
   defaults: { agent: { harness: "claude", model: "sonnet", effort: "medium" } },
+  efforts: {
+    claude: ["low", "medium", "high", "xhigh", "max"],
+    codex: ["low", "medium", "high"],
+  },
 };
 
 test("states and filters: needs you, ran, failed and paused", () => {
@@ -337,8 +342,16 @@ test("the agent picker offers only the models of that host's harness", () => {
   );
   assert.equal(kept.agent.model, "gpt-local");
   // xhigh and max are Claude's alone.
-  assert.deepEqual(effortsFor("codex"), ["low", "medium", "high"]);
-  assert.ok(effortsFor("claude").includes("max"));
+  assert.deepEqual(effortsFor("codex", CATALOG), ["low", "medium", "high"]);
+  assert.ok(effortsFor("claude", CATALOG).includes("max"));
+  // A catalog that has not arrived offers nothing rather than a list of ours.
+  assert.deepEqual(effortsFor("claude", null), []);
+  // ...and the picker keeps the current level as its only choice.
+  assert.deepEqual(effortChoices("claude", null, "high"), ["high"]);
+  assert.deepEqual(
+    effortChoices("codex", CATALOG, "high"),
+    CATALOG.efforts.codex,
+  );
   const clipped = withAgent(
     routine({ agent: { harness: "claude", effort: "max", extraArgs: [] } }),
     { harness: "codex" },

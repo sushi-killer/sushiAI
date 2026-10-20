@@ -2,7 +2,6 @@
 // (crates/sushiai-routines): two independent renderings of one contract.
 
 export type Harness = "claude" | "codex";
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type RoutineAgent = {
   harness: Harness;
@@ -121,7 +120,12 @@ export type RoutineDetail = {
   latest: RunResult | null;
 };
 
-export type CatalogModel = { id: string; label: string };
+export type CatalogModel = {
+  id: string;
+  label: string;
+  /** The catalog's one line about the model; "" when it has none. */
+  description?: string;
+};
 export type CatalogHarness = {
   installed: boolean | null;
   loggedIn: boolean | null;
@@ -147,6 +151,8 @@ export type RoutinesCatalog = {
   hosts: CatalogHost[];
   projects: CatalogProject[];
   defaults: { agent: { harness: Harness; model: string; effort: string } };
+  /** The levels each harness offers a routine, from the daemon's agent catalog. */
+  efforts: Record<Harness, string[]>;
 };
 
 export type BuilderSettings = {

@@ -17,7 +17,13 @@ const {
   standardAgent,
 } = require("../electron/routines-catalog.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
+const { createAgentCatalog } = require("../electron/agent-catalog.cjs");
 
+/** What this Mac's daemon says its agents offer (agents.catalog). */
+const LEVELS = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["low", "medium", "high"],
+};
 const MODELS = {
   claude: {
     models: [
@@ -27,6 +33,21 @@ const MODELS = {
   },
   codex: { models: [{ id: "gpt-local", label: "GPT Local" }] },
 };
+const CATALOGS = {
+  local: {
+    claude: { models: MODELS.claude.models, builderEfforts: LEVELS.claude },
+    codex: { models: MODELS.codex.models, builderEfforts: LEVELS.codex },
+  },
+  // A remote host answers through its own daemon.
+  "ssh:build-host": {
+    claude: { models: MODELS.claude.models, builderEfforts: LEVELS.claude },
+    codex: {
+      models: [{ id: "gpt-remote", label: "GPT Remote" }],
+      builderEfforts: LEVELS.codex,
+    },
+  },
+};
+
 const PROJECTS = [
   {
     id: "p1",
@@ -48,13 +69,19 @@ function world({
   userDataDir,
   execs = [],
   reads = {},
+  localCatalog = true,
 } = {}) {
   const manager = fakeDaemonManager({
     hosts: {
-      local: { capabilities: caps },
-      "build-host": { capabilities: caps },
+      // An older daemon on this Mac does not serve agents.catalog.
+      local: { capabilities: localCatalog ? [...caps, "agentsCatalog"] : caps },
+      "build-host": { capabilities: [...caps, "agentsCatalog"] },
     },
     handlers: {
+      "agents.catalog": (_p, host) =>
+        Object.entries(CATALOGS[host === "local" ? host : `ssh:${host}`]).map(
+          ([id, agent]) => ({ id, ...agent }),
+        ),
       "session.read": (p) => {
         if (!(p.id in reads)) throw new Error("session is not running");
         return { text: reads[p.id] };
@@ -72,6 +99,7 @@ function world({
   const flag = { enabled };
   const routines = createRoutines({
     getManager: () => manager,
+    agentCatalog: createAgentCatalog({ getManager: () => manager }),
     getConnections: () => ({
       list: () => [{ id: "build-host", name: "build-host" }],
       get: () => ({}),
@@ -92,11 +120,9 @@ function world({
     writeStore: (name, value) => {
       stored[name] = value;
     },
-    chatModels: () => MODELS,
     probeHost: async (host) => ({
       claude: { installed: true, loggedIn: true },
       codex: { installed: true, loggedIn: host === "local" },
-      codexModels: [{ id: "gpt-remote", label: "GPT Remote" }],
     }),
     standardSettings: async () => settings,
     launch: async (request) => {
@@ -154,7 +180,7 @@ test("the default agent is the Standard route; without one it is Claude Sonnet",
   });
   const catalog = assembleCatalog({
     hosts: [],
-    models: MODELS,
+    catalogs: CATALOGS,
     projects: [],
     settings,
   });
@@ -176,10 +202,9 @@ test("the daemon catalog names only its own host and the folders on it", () => {
       "ssh:build-host": {
         claude: { installed: true, loggedIn: false },
         codex: { installed: false, loggedIn: false },
-        codexModels: [],
       },
     },
-    models: MODELS,
+    catalogs: CATALOGS,
     projects: PROJECTS,
   });
   const wire = daemonCatalog(catalog, "ssh:build-host");
@@ -237,7 +262,7 @@ const APPROVALS = [
 
 test("the builder session carries the owner's text, the Settings route and runs in the background", async () => {
   const { routines, launched } = world();
-  routines.methods["settings.set"]({
+  await routines.methods["settings.set"]({
     harness: "codex",
     model: "gpt-local",
     effort: "high",
@@ -364,21 +389,26 @@ test("a session that prints the answer and then refuses reads still settles done
 
 test("the codex builder always uses mcp access and a bare config", async () => {
   assert.equal(
-    builderSettings({ harness: "codex", access: "cli" }).access,
+    builderSettings({ harness: "codex", access: "cli" }, CATALOGS.local).access,
     "mcp",
   );
-  assert.equal(builderSettings({ harness: "codex" }).access, "mcp");
   assert.equal(
-    builderSettings({ harness: "codex", access: "both" }).access,
+    builderSettings({ harness: "codex" }, CATALOGS.local).access,
+    "mcp",
+  );
+  assert.equal(
+    builderSettings({ harness: "codex", access: "both" }, CATALOGS.local)
+      .access,
     "both",
   );
   assert.equal(
-    builderSettings({ harness: "claude", access: "cli" }).access,
+    builderSettings({ harness: "claude", access: "cli" }, CATALOGS.local)
+      .access,
     "cli",
   );
   const { routines, launched } = world();
-  routines.methods["settings.set"]({ harness: "codex", access: "cli" });
-  assert.equal(routines.methods["settings.get"]().access, "mcp");
+  await routines.methods["settings.set"]({ harness: "codex", access: "cli" });
+  assert.equal((await routines.methods["settings.get"]()).access, "mcp");
   await routines.methods["builder.start"]({ text: "Every day do X" });
   const args = launched[0].extraArgs;
   assert.ok(args.includes('mcp_servers.sushiai.command="sushiai"'));
@@ -430,7 +460,7 @@ const CODEX_EVENTS = (text, thread) =>
 test("a Codex builder turn runs headless and resumes by its thread id", async () => {
   const reads = { s1: "" };
   const { routines, launched } = world({ reads });
-  routines.methods["settings.set"]({ harness: "codex" });
+  await routines.methods["settings.set"]({ harness: "codex" });
   const started = await routines.methods["builder.start"]({ text: "digest" });
   assert.equal(started.turn.state, "running");
   assert.equal(launched[0].headless, true);
@@ -468,7 +498,7 @@ test("a failed Codex turn reports its message", async () => {
     ].join("\n"),
   };
   const { routines } = world({ reads });
-  routines.methods["settings.set"]({ harness: "codex" });
+  await routines.methods["settings.set"]({ harness: "codex" });
   await routines.methods["builder.start"]({ text: "digest" });
   const turn = await until(() => {
     const view = routines.methods["builder.turn"]({ sessionId: "s1" });
@@ -479,7 +509,10 @@ test("a failed Codex turn reports its message", async () => {
 });
 
 test("builder settings repair an effort the harness lacks and a bad host", () => {
-  const value = builderSettings({ harness: "codex", effort: "max", host: "x" });
+  const value = builderSettings(
+    { harness: "codex", effort: "max", host: "x" },
+    CATALOGS.local,
+  );
   assert.equal(value.effort, "medium");
   assert.equal(value.host, "local");
   assert.deepEqual(
@@ -492,7 +525,7 @@ test("builder settings repair an effort the harness lacks and a bad host", () =>
 test("the builder prompt tells both harnesses to answer in the owner's language", () => {
   for (const harness of ["claude", "codex"]) {
     const prompt = builderPrompt("Do X", null, {
-      ...builderSettings({ harness }),
+      ...builderSettings({ harness }, CATALOGS.local),
     });
     assert.match(prompt, /Reply in the language of the owner's request/);
   }
@@ -501,7 +534,7 @@ test("the builder prompt tells both harnesses to answer in the owner's language"
 test("the builder prompt forbids the run result JSON in its own reply", () => {
   for (const harness of ["claude", "codex"]) {
     const prompt = builderPrompt("Do X", null, {
-      ...builderSettings({ harness }),
+      ...builderSettings({ harness }, CATALOGS.local),
     });
     assert.match(prompt, /plain prose for the owner/);
     assert.match(prompt, /never print the run result JSON/);
@@ -659,9 +692,9 @@ test("the builder works in a private folder: app data locally, ~/.sushiai over s
   }
 });
 
-test("builder settings keep what it sees and how it reaches sushiai, and repair bad values", () => {
+test("builder settings keep what it sees and how it reaches sushiai, and repair bad values", async () => {
   const { routines, stored } = world();
-  assert.deepEqual(routines.methods["settings.get"](), {
+  assert.deepEqual(await routines.methods["settings.get"](), {
     harness: "claude",
     model: "",
     effort: "medium",
@@ -671,26 +704,29 @@ test("builder settings keep what it sees and how it reaches sushiai, and repair 
     access: "cli",
   });
   // A patch of one `sees` key keeps the other.
-  const next = routines.methods["settings.set"]({
+  const next = await routines.methods["settings.set"]({
     sees: { projects: false },
     access: "both",
   });
   assert.deepEqual(next.sees, { projects: false, connections: true });
   assert.equal(next.access, "both");
   assert.deepEqual(stored["routines-settings"].sees, next.sees);
-  const bad = builderSettings({ access: "ssh", sees: { projects: "no" } });
+  const bad = builderSettings(
+    { access: "ssh", sees: { projects: "no" } },
+    CATALOGS.local,
+  );
   assert.equal(bad.access, "cli");
   assert.deepEqual(bad.sees, { projects: true, connections: true });
 });
 
 test("the builder gets the sushiai MCP server only when the owner chose mcp or both", async () => {
   const { routines, launched } = world();
-  routines.methods["settings.set"]({ access: "cli" });
+  await routines.methods["settings.set"]({ access: "cli" });
   await routines.methods["builder.start"]({ text: "Every day do X" });
   assert.equal(launched[0].extraArgs.includes("--mcp-config"), false);
   assert.doesNotMatch(launched[0].extraArgs.join(" "), /mcp__/);
 
-  routines.methods["settings.set"]({ access: "mcp" });
+  await routines.methods["settings.set"]({ access: "mcp" });
   await routines.methods["builder.start"]({ text: "Every day do X" });
   const args = launched[1].extraArgs;
   const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
@@ -704,7 +740,7 @@ test("the builder gets the sushiai MCP server only when the owner chose mcp or b
   assert.ok(!tools.some((tool) => /^mcp__.*(ask|propose)/.test(tool)));
   assert.match(launched[1].prompt, /routines_validate/);
 
-  routines.methods["settings.set"]({ access: "both", harness: "codex" });
+  await routines.methods["settings.set"]({ access: "both", harness: "codex" });
   await routines.methods["builder.start"]({ text: "Every day do X" });
   const codex = launched[2].extraArgs;
   assert.ok(codex.includes('mcp_servers.sushiai.command="sushiai"'));
@@ -715,13 +751,13 @@ test("the builder prompt respects what the owner lets it see", async () => {
   const { routines, launched } = world();
   await routines.methods["builder.start"]({ text: "Every day do X" });
   assert.doesNotMatch(launched[0].prompt, /Owner's limits/);
-  routines.methods["settings.set"]({
+  await routines.methods["settings.set"]({
     sees: { projects: false, connections: false },
   });
   await routines.methods["builder.start"]({ text: "Every day do X" });
   assert.match(launched[1].prompt, /Do not read the owner's project files/);
   assert.match(launched[1].prompt, /Do not propose connector or MCP tools/);
-  routines.methods["settings.set"]({ sees: { projects: true } });
+  await routines.methods["settings.set"]({ sees: { projects: true } });
   await routines.methods["builder.start"]({ text: "Every day do X" });
   assert.doesNotMatch(launched[2].prompt, /project files/);
   assert.match(launched[2].prompt, /connector or MCP tools/);
@@ -835,4 +871,31 @@ test("the login command finds a harness that is on the login shell's PATH only",
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("without this Mac's catalog a ready host still names its models and levels, and a saved effort is kept", async () => {
+  const { routines } = world({ localCatalog: false });
+  const catalog = await routines.catalog();
+  const box = catalog.hosts.find((h) => h.id === "ssh:build-host");
+  assert.deepEqual(
+    box.harnesses.claude.models.map((m) => m.id),
+    CATALOGS["ssh:build-host"].claude.models.map((m) => m.id),
+  );
+  assert.deepEqual(
+    box.harnesses.codex.models.map((m) => m.id),
+    ["gpt-remote"],
+  );
+  // The remote host's daemon still names the levels.
+  assert.deepEqual(catalog.efforts.codex, LEVELS.codex);
+  assert.equal(
+    builderSettings({ harness: "codex", effort: "max" }, {}).effort,
+    "max",
+  );
+  assert.equal(
+    standardAgent({
+      tiers: { standard: "r" },
+      routes: [{ id: "r", harness: "codex", model: "m", effort: "xhigh" }],
+    }).effort,
+    "xhigh",
+  );
 });

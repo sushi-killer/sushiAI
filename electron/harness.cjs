@@ -4,7 +4,7 @@
 // in HARNESSES with the same interface; adding a harness means adding one
 // object here. Callers use harnessFor(name) and never branch on a name.
 //
-//   name, builderEfforts     effort levels the headless builder offers
+//   name                     the agent id
 //   login                    argv words of the harness's own login
 //   modelFromEvents          true when chat events report the resolved model
 //   chatArgs(options, agent) argv of a one-shot chat turn (validated)
@@ -200,7 +200,6 @@ function codexEvent(event) {
 
 const claude = {
   name: "claude",
-  builderEfforts: ["low", "medium", "high", "xhigh", "max"],
   login: ["claude", "/login"],
   modelFromEvents: true,
   chatArgs(options = {}, agent) {
@@ -287,7 +286,6 @@ const claude = {
 };
 const codex = {
   name: "codex",
-  builderEfforts: ["low", "medium", "high"],
   login: ["codex", "login"],
   modelFromEvents: false,
   chatArgs(options = {}, agent) {

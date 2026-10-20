@@ -4,19 +4,17 @@ const { existsSync, statSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { quote } = require("../connections.cjs");
 const { harnessFor, isHarness, chatPrompt, IMAGE } = require("../harness.cjs");
-const { createAgentCatalog } = require("../agent-catalog.cjs");
 
 function registerChatIpc({
   handle,
   send,
   getConnections,
-  getManager,
+  agentCatalog: catalogs,
   executable,
   directory,
   id,
   chats,
 }) {
-  const catalogs = createAgentCatalog({ getManager });
   /** The daemon manager's name for a chat's endpoint. */
   const hostOf = (endpoint) =>
     endpoint?.startsWith("ssh:") ? endpoint.slice(4) : "local";

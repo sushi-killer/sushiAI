@@ -13,11 +13,10 @@ import {
 import {
   briefRows,
   describeWhen,
-  effortsFor,
+  effortChoices,
   harnessProblem,
   HARNESSES,
   hostOf,
-  modelNote,
   modelsFor,
   RUN_MODES,
   runModeHelp,
@@ -207,7 +206,7 @@ export function Scheme({
                           <MenuItem
                             key={model.id || "default"}
                             title={model.label}
-                            detail={modelNote(model.id) || undefined}
+                            detail={model.description || undefined}
                             on={(routine.agent.model ?? "") === model.id}
                             onClick={() => agent({ model: model.id })}
                           />
@@ -220,10 +219,12 @@ export function Scheme({
                     <Segmented
                       label="Thinking"
                       value={effort}
-                      options={effortsFor(harness).map((level) => ({
-                        id: level,
-                        label: level,
-                      }))}
+                      options={effortChoices(harness, catalog, effort).map(
+                        (level) => ({
+                          id: level,
+                          label: level,
+                        }),
+                      )}
                       onChange={(level) => agent({ effort: level })}
                     />
                   </div>

@@ -20,8 +20,10 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   alone drops the bottom rows, the newest output.
 - `sushiai-agents`: pure agent logic: `harness`, the one registry of agent CLIs
   (id, label, config home, skill folders, screen rules, hook capability, launch
-  argv; one module per agent, `shell.rs` is the template, and `claude/`/`codex/`
-  hold the files of an agent that needs more than one), hook payload parsing, the status
+  argv and the catalog: its models, their reasoning levels, the permission
+  modes and the defaults; one module per agent, `shell.rs` is the template, and
+  `claude/`/`codex/` hold the files of an agent that needs more than one), hook
+  payload parsing, the status
   state machine, Codex `hooks.json` merging, and `skills`: the
   scan of the skill folders the registry declares (catalog rows, realpath
   dedupe, duplicates per harness) and the install and removal of a skill sushiAI
@@ -174,6 +176,14 @@ full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A part
   writer thread as `state.json`. A catalog file that cannot be read is renamed to
   `catalog.json.unreadable-<ts>` and the desktop syncs again. Bindings are opaque
   to the daemon (below), so a lost or unsynced catalog never blocks a launch.
+- **Agent catalog.** `agents.catalog {configHome?}` (capability `agentsCatalog`)
+  answers one catalog per agent, in registry order: its models, their reasoning
+  levels, the levels the routine builder offers, the permission modes and the
+  defaults. The table is `sushiai_agents::harness::catalog`; `agents_catalog` only
+  finds and reads the Codex files that table parses (`models_cache.json` and
+  `config.toml` of the named home, else `CODEX_HOME`, else `~/.codex`). A missing
+  or unreadable file is an empty list, never an error. It is unrelated to
+  `catalog.get`, which is the projects and groups of this host.
 - **Bindings.** `SessionInfo.project` / `group` are owned by the registry, as is
   `title`: `Registry::update` keeps the stored values, so an actor's stale copy
   never overwrites them. Bindings are opaque: `session.create {project?, group?}` and

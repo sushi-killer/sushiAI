@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::agent;
+use crate::agents_catalog;
 use crate::error::Fail;
 use crate::framed::FrameReader;
 use crate::holder::{self, HolderConn};
@@ -391,6 +392,14 @@ impl Conn {
                 Ok(json!(self.registry.sync_projects(&p)))
             }
             method::CATALOG_GET => Ok(json!(self.registry.catalog_snapshot())),
+            method::AGENTS_CATALOG => {
+                // No params is the common case: the daemon's own Codex home.
+                let query: agents_catalog::Query = match &request.params {
+                    Value::Null => agents_catalog::Query::default(),
+                    _ => params(request)?,
+                };
+                Ok(json!(agents_catalog::agents(&query)))
+            }
             method::GROUPS_SYNC => Ok(json!(self.registry.sync_groups(&params(request)?))),
             method::SESSION_UPDATE => {
                 let p: SessionUpdate = params(request)?;

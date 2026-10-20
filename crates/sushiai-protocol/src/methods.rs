@@ -13,6 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "hibernate",
     "schedules",
     "ownerAsk",
+    "agentsCatalog",
 ];
 
 pub mod method {
@@ -103,6 +104,14 @@ pub mod method {
     /// Request from an agent's `sushiai ask` process (token required): ask the owner a
     /// question and wait for `ask.respond`. Params: `HookAsk`. Result: `HookResult`.
     pub const HOOK_ASK: &str = "hook.ask";
+
+    // The agent catalog (additive). Unrelated to `catalog.get`, which is the
+    // projects and groups of this host.
+    /// Request: what each agent CLI on this host offers — its models, their
+    /// reasoning levels, the permission modes and the defaults. Params:
+    /// `{configHome?}`; none reads the daemon's own Codex home. Result: one
+    /// `Catalog` per agent, in registry order.
+    pub const AGENTS_CATALOG: &str = "agents.catalog";
 }
 
 pub mod code {

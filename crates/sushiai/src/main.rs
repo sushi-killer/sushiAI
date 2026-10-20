@@ -1,6 +1,7 @@
 use std::io::stderr;
 use std::path::PathBuf;
 
+mod agents_cli;
 mod daemon_client;
 mod hook;
 mod hooks_file;
@@ -18,7 +19,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 mod proxy;
 
-const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only | --routines] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | projects [show ID] | hosts | skills [--project DIR] [--json] [--catalog] | skills usage --index [--json] | skills install|remove NAME | routines [show ID|help] | routine save|validate|dry-run | ask TEXT | propose pr|commit|branch | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
+const USAGE: &str = "usage: sushiai daemon | status | shutdown | proc PID | proxy | mcp [--task ID | --read-only | --routines] | orch hook|ab|eval|costs|failures|evolve|gc|register|unregister | hook EVENT | open TARGET PATH | hooks install|uninstall | projects [show ID] | hosts | agents catalog [--json] | skills [--project DIR] [--json] [--catalog] | skills usage --index [--json] | skills install|remove NAME | routines [show ID|help] | routine save|validate|dry-run | ask TEXT | propose pr|commit|branch | hold --id ID --dir DIR --cols N --rows N --cwd DIR -- CMD [ARGS...]";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
         Some(command @ ("projects" | "hosts" | "routines" | "routine" | "ask" | "propose")) => {
             std::process::exit(routines_cli::run(command, args))
         }
+        Some("agents") => std::process::exit(agents_cli::run(args)),
         Some("skills") => std::process::exit(skills_cli::run(args)),
         Some("mcp") => std::process::exit(mcp::run(args)),
         Some("orch") => std::process::exit(orch_cli::run(args)),

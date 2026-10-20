@@ -4,6 +4,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod agent;
+pub mod agents_catalog;
 mod binlink;
 mod error;
 mod foreground;

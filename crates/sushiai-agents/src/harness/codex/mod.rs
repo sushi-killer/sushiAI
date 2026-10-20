@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::catalog::{self, Catalog, Facts};
 use super::launch::{shell_quote, AgentSession, LaunchError, LaunchParams};
 use super::screen::{Rule, Screen, ScreenMode, INPUT, PERM};
 use super::{
@@ -86,6 +87,30 @@ impl Harness for Codex {
             session_id: false,
             hooks_in_home: true,
             settings_json: false,
+        }
+    }
+
+    /// Codex keeps its model list in the CLI's own cache, refreshed by the CLI
+    /// itself, and its default in `config.toml`. Both are per host, so the
+    /// caller reads them and hands the text in.
+    fn catalog(&self, facts: &Facts) -> Catalog {
+        let models = catalog::codex_models(facts.codex_cache.as_deref(), catalog::CODEX_EFFORTS);
+        let (default_model, default_model_label, default_context) =
+            catalog::codex_default(facts.codex_config.as_deref(), &models);
+        Catalog {
+            id: self.id().to_owned(),
+            label: self.label().to_owned(),
+            models,
+            efforts: catalog::words(catalog::CODEX_EFFORTS),
+            builder_efforts: catalog::words(catalog::BUILDER_EFFORTS),
+            permissions: catalog::words(catalog::PERMISSIONS),
+            default_model,
+            default_model_label,
+            default_effort: catalog::toml_root(
+                facts.codex_config.as_deref(),
+                "model_reasoning_effort",
+            ),
+            default_context,
         }
     }
 

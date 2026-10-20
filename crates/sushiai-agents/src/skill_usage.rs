@@ -21,7 +21,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::harness::{find, Agent, Homes};
+use crate::harness::{find, HarnessRef, Homes, CLAUDE, CODEX};
 use crate::skills::{normalize, Skill};
 
 const WINDOW_MS: i64 = 90 * 24 * 60 * 60 * 1000;
@@ -88,15 +88,8 @@ fn load_cache(path: &Path) -> Cache {
 }
 
 fn save_cache(path: &Path, cache: &Cache) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     let text = serde_json::to_vec(cache).map_err(std::io::Error::other)?;
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })
+    crate::file::write_atomic(path, &text, true)
 }
 
 fn entries(dir: &Path) -> Vec<PathBuf> {
@@ -120,25 +113,25 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Every transcript file of both harnesses.
-fn transcript_files(homes: &Homes) -> Vec<(Agent, PathBuf)> {
+fn transcript_files(homes: &Homes) -> Vec<(HarnessRef, PathBuf)> {
     let mut found = Vec::new();
     for project in entries(&homes.claude.join("projects")) {
         for p in entries(&project) {
             if p.is_dir() {
                 for sub in entries(&p.join("subagents")) {
                     if is_jsonl(&sub) {
-                        found.push((Agent::Claude, sub));
+                        found.push((CLAUDE, sub));
                     }
                 }
             } else if is_jsonl(&p) {
-                found.push((Agent::Claude, p));
+                found.push((CLAUDE, p));
             }
         }
     }
     let mut codex = Vec::new();
     walk(&homes.codex.join("sessions"), &mut codex);
     walk(&homes.codex.join("archived_sessions"), &mut codex);
-    found.extend(codex.into_iter().map(|p| (Agent::Codex, p)));
+    found.extend(codex.into_iter().map(|p| (CODEX, p)));
     found
 }
 
@@ -400,7 +393,7 @@ fn codex_meta(line: &str) -> Option<(String, String)> {
 }
 
 /// Reads `path` from `entry.offset` up to the last complete line.
-fn read_file(harness: Agent, path: &Path, entry: &mut FileEntry) -> std::io::Result<u64> {
+fn read_file(harness: HarnessRef, path: &Path, entry: &mut FileEntry) -> std::io::Result<u64> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(entry.offset))?;
     let mut reader = BufReader::with_capacity(1 << 20, file);
@@ -421,7 +414,7 @@ fn read_file(harness: Agent, path: &Path, entry: &mut FileEntry) -> std::io::Res
         let Ok(line) = std::str::from_utf8(&buf) else {
             continue;
         };
-        let found = if harness == Agent::Claude {
+        let found = if harness == CLAUDE {
             claude_uses(line)
         } else {
             if entry.session.is_empty() {
@@ -463,10 +456,7 @@ pub fn index(homes: &Homes, cache_path: &Path, now_ms: i64) -> std::io::Result<I
     let mut stats = IndexStats::default();
     for (harness, path) in transcript_files(homes) {
         let key = path.to_string_lossy().into_owned();
-        let prior = old
-            .files
-            .remove(&key)
-            .filter(|e| e.harness == harness.as_str());
+        let prior = old.files.remove(&key).filter(|e| e.harness == harness.id());
         let Ok(meta) = fs::metadata(&path) else {
             stats.skipped_files += 1;
             next.files.extend(prior.map(|e| (key, e)));
@@ -488,7 +478,7 @@ pub fn index(homes: &Homes, cache_path: &Path, now_ms: i64) -> std::io::Result<I
             }
             _ => (FileEntry::default(), false),
         };
-        entry.harness = harness.as_str().to_string();
+        entry.harness = harness.id().to_string();
         // Untouched for the whole window: it cannot hold a recent use.
         if !unchanged && (mtime_ms as i64) >= cutoff_ms {
             let backup = entry.clone();
@@ -539,7 +529,7 @@ pub struct SkillUsage {
 pub struct Usage {
     indexed_at: Option<String>,
     events: Vec<Event>,
-    by_name: HashMap<(Agent, String), Vec<usize>>,
+    by_name: HashMap<(HarnessRef, String), Vec<usize>>,
     by_dir: HashMap<String, Vec<usize>>,
 }
 
@@ -552,10 +542,11 @@ impl Usage {
             ..Usage::default()
         };
         for entry in cache.files.into_values() {
-            // The cache is written by this module, so its dialect is always known.
-            let harness = find(&entry.harness)
-                .and_then(|h| h.agent())
-                .unwrap_or(Agent::Claude);
+            // A cache written before an agent was removed names a harness this
+            // build does not know; its events belong to no row, so they are dropped.
+            let Some(harness) = find(&entry.harness) else {
+                continue;
+            };
             for e in entry.events {
                 let i = usage.events.len();
                 usage
@@ -563,7 +554,7 @@ impl Usage {
                     .entry((harness, e.name.clone()))
                     .or_default()
                     .push(i);
-                if harness == Agent::Codex && !e.dir.is_empty() {
+                if harness == CODEX && !e.dir.is_empty() {
                     usage.by_dir.entry(e.dir.clone()).or_default().push(i);
                 }
                 usage.events.push(e);
@@ -587,14 +578,14 @@ impl Usage {
         keys.retain(|k| seen.insert(k.clone()));
         let cutoff = iso(now_ms - WINDOW_MS).unwrap_or_default();
         // A skill row belongs to one of the two agents that have skills.
-        let harness = skill.harness.agent().unwrap_or(Agent::Claude);
+        let harness = skill.harness;
         let mut picked: HashSet<usize> = keys
             .iter()
             .filter_map(|k| self.by_name.get(&(harness, k.clone())))
             .flatten()
             .copied()
             .collect();
-        if harness == Agent::Codex {
+        if harness == CODEX {
             // A Codex transcript names the skill by its file, not by `plugin:name`.
             if let Some(ids) = self.by_dir.get(skill.dir.trim_end_matches('/')) {
                 picked.extend(ids);
@@ -603,7 +594,7 @@ impl Usage {
                 let plugin = plugin.split('@').next().unwrap_or(plugin);
                 let ids = self
                     .by_name
-                    .get(&(Agent::Codex, normalize(&skill.name)))
+                    .get(&(harness, normalize(&skill.name)))
                     .into_iter()
                     .flatten();
                 picked.extend(

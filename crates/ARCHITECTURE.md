@@ -19,14 +19,15 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   shorter screen would drop (above the cursor) into scrollback, as a terminal does; vt100
   alone drops the bottom rows, the newest output.
 - `sushiai-agents`: pure agent logic: `harness`, the one registry of agent CLIs
-  (id, label, config home, skill folders, screen rules, hook capability; one
-  file per agent, `shell.rs` is the template), hook payload parsing, the status
-  state machine, launch specs, Codex `hooks.json` merging, and `skills`: the
+  (id, label, config home, skill folders, screen rules, hook capability, launch
+  argv; one module per agent, `shell.rs` is the template, and `claude/`/`codex/`
+  hold the files of an agent that needs more than one), hook payload parsing, the status
+  state machine, Codex `hooks.json` merging, and `skills`: the
   scan of the skill folders the registry declares (catalog rows, realpath
   dedupe, duplicates per harness) and the install and removal of a skill sushiAI
   ships. Every other module in the crate asks the registry and names no agent.
   It reads no environment. No tokio; the only IO is
-  `codex_hooks::install`/`uninstall` and `skills`.
+  `file`, `harness::codex::hooks`, `skills` and `skill_usage`.
 - `sushiai-daemon`: tokio shell. Socket server, one actor per session, holder
   client, state file IO, holder spawning.
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.
@@ -64,7 +65,7 @@ Modules attach at the composition bin (`crates/sushiai`); nothing else knows whi
 ## Agent sessions and hooks
 
 - `session.create {agent: "claude"|"codex"}` builds the command with
-  `sushiai_agents::launch::build`; the hook command is the daemon's own binary
+  `sushiai_agents::harness::launch::build`; the hook command is the daemon's own binary
   (`current_exe`). `SUSHIAI_SOCKET`, `SUSHIAI_SESSION_ID`, `SUSHIAI_SESSION_TOKEN`
   reach the child through the holder's environment, never its argv.
 - `sushiai hook EVENT` reads the hook JSON from stdin and sends `hook.event`
@@ -143,7 +144,7 @@ decided}` follows every ask that closes (answered, timed out, hook vanished,
 - `<home>/bin/sushiai` is a symlink to the running binary. The daemon ensures it at
   start and `sushiai hooks install` ensures `~/.sushiai/bin/sushiai`; a stale link is
   replaced, a regular file is never overwritten. `hooks install` then writes
-  `hooks.json` and Codex hook trust in `config.toml` (`codex_trust::trust`);
+  `hooks.json` and Codex hook trust in `config.toml` (`harness::codex::trust::trust`);
   `uninstall` removes trust first, then the hooks. `$CODEX_HOME` overrides
   `~/.codex`. Codex resolves `$CODEX_HOME` (symlinks too) and keys trust by the resolved
   path, so we resolve it the same way; the default `~/.codex` is used as is.

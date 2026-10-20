@@ -7,13 +7,14 @@
 //! `serde_json` runs with `preserve_order`, so user key order survives.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::harness::Agent;
-use crate::launch::{hook_command, permission_timeout, require_absolute, LaunchError};
+use crate::file;
+use crate::harness::launch::{permission_timeout, require_absolute, LaunchError};
+
+use super::hook_command;
 
 /// (Codex event, hook argument, timeout seconds; 0 = the permission timeout). SessionEnd and Interrupt
 /// have a 1-3 s budget on the Codex side, so the entry asks for little.
@@ -149,7 +150,7 @@ pub fn merge(
     for (event, arg, timeout) in ENTRIES {
         let ours = json!({
             "type": "command",
-            "command": hook_command(hook_bin, arg, Agent::Codex),
+            "command": hook_command(hook_bin, arg),
             "timeout": if *timeout == 0 { permission_timeout(permission_wait_secs) } else { *timeout },
         });
         let groups = hooks
@@ -236,18 +237,12 @@ pub struct FileOutcome {
     pub backup: Option<PathBuf>,
 }
 
+/// Map an io error on this file into the error the caller reports.
 pub(crate) fn io_err(path: &Path) -> impl Fn(std::io::Error) -> HooksFileError + '_ {
     move |source| HooksFileError::Io {
         path: path.to_owned(),
         source,
     }
-}
-
-pub(crate) fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || "hooks.json".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    )
 }
 
 fn read_existing(path: &Path) -> Result<Option<Value>, HooksFileError> {
@@ -259,71 +254,10 @@ fn read_existing(path: &Path) -> Result<Option<Value>, HooksFileError> {
     }
 }
 
-fn write_atomic(path: &Path, value: &Value, ts: u64) -> Result<(), HooksFileError> {
+fn write_atomic(path: &Path, value: &Value) -> Result<(), HooksFileError> {
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    write_text_atomic(path, &text, ts)
-}
-
-/// Temp file in the same directory, created with the old file's mode (0600
-/// when there is none) so the content is never readable by others, fsync,
-/// rename over it.
-pub fn write_text_atomic(path: &Path, text: &str, ts: u64) -> Result<(), HooksFileError> {
-    // Unique per process and call: two installs at once must not share a temp file.
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_file_name(format!(
-        ".{}.tmp-{ts}-{}-{n}",
-        file_name(path),
-        std::process::id()
-    ));
-    let res = (|| {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-        let mode = fs::metadata(path).map_or(0o600, |meta| meta.mode() & 0o7777);
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)?;
-        // The creation mode is cut by the umask; the old file's mode is kept exactly.
-        f.set_permissions(fs::Permissions::from_mode(mode))?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    res.map_err(io_err(path))
-}
-
-/// Copy `path` to `<name>.bak-<ts>` and keep the newest three.
-pub fn backup_file(path: &Path, ts: u64) -> Result<PathBuf, HooksFileError> {
-    let b = path.with_file_name(format!("{}.bak-{ts}", file_name(path)));
-    fs::copy(path, &b).map_err(io_err(&b))?;
-    prune_backups(path);
-    Ok(b)
-}
-
-/// Keep the newest `KEEP_BACKUPS` files named `<name>.bak-<number>`.
-const KEEP_BACKUPS: usize = 3;
-
-pub(crate) fn prune_backups(path: &Path) {
-    let prefix = format!("{}.bak-", file_name(path));
-    let Some(dir) = path.parent() else { return };
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut found: Vec<(u64, PathBuf)> = rd
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let ts = name.strip_prefix(&prefix)?.parse::<u64>().ok()?;
-            Some((ts, e.path()))
-        })
-        .collect();
-    found.sort_by_key(|a| std::cmp::Reverse(a.0));
-    for (_, old) in found.into_iter().skip(KEEP_BACKUPS) {
-        let _ = fs::remove_file(old);
-    }
+    file::write_atomic(path, text.as_bytes(), false).map_err(io_err(path))
 }
 
 fn rewrite(
@@ -348,11 +282,11 @@ fn rewrite(
         return Ok(unchanged);
     }
     let backup = if existing.is_some() {
-        Some(backup_file(path, ts)?)
+        Some(file::backup_file(path, ts).map_err(io_err(path))?)
     } else {
         None
     };
-    write_atomic(path, &next, ts)?;
+    write_atomic(path, &next)?;
     Ok(FileOutcome {
         changed: true,
         backup,

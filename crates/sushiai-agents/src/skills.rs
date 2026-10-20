@@ -436,9 +436,7 @@ fn claude_overrides(settings: &Value) -> HashSet<String> {
 
 /// Claude's installed plugins: the newest installation of each, on when `enabledPlugins` says so.
 fn claude_plugins(homes: &Homes, settings: &Value) -> Vec<Plugin> {
-    let Some(claude) = harness::of_agent(harness::Agent::Claude) else {
-        return Vec::new();
-    };
+    let claude = harness::CLAUDE;
     let installed = read_json(&homes.claude.join("plugins").join("installed_plugins.json"));
     let mut out = Vec::new();
     for (key, installs) in installed["plugins"].as_object().into_iter().flatten() {
@@ -486,9 +484,7 @@ fn newest_dir(dir: &Path) -> Option<PathBuf> {
 
 /// Codex's plugins in `config.toml`: its cached copy, else its marketplace folder.
 fn codex_plugins(homes: &Homes, config: &toml_edit::DocumentMut) -> Vec<Plugin> {
-    let Some(codex) = harness::of_agent(harness::Agent::Codex) else {
-        return Vec::new();
-    };
+    let codex = harness::CODEX;
     let marketplaces = config.get("marketplaces");
     let mut out = Vec::new();
     let Some(plugins) = config.get("plugins").and_then(|p| p.as_table_like()) else {
@@ -674,17 +670,6 @@ fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
-fn write_atomic(file: &Path, text: &str) -> std::io::Result<()> {
-    let dir = file.parent().unwrap_or(file);
-    fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{SKILL_FILE}.{}.tmp", std::process::id()));
-    fs::write(&tmp, text)
-        .and_then(|()| fs::rename(&tmp, file))
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&tmp);
-        })
-}
-
 /// Removes `<root>/<name>/SKILL.md` when it declares `name` and is not the file `keep`, then
 /// its folder when that is empty. A linked skill folder is someone else's and stays.
 fn remove_ours(root: &Path, name: &str, keep: Option<&Path>, changes: &mut Vec<Change>) {
@@ -744,7 +729,7 @@ pub fn install(homes: &Homes, name: &str, text: &str) -> Result<Vec<Change>, Err
         match fs::read_to_string(&file) {
             Ok(current) if current == text => {}
             Ok(current) if !declares(name, &current) => continue,
-            _ => match write_atomic(&file, text) {
+            _ => match crate::file::write_atomic(&file, text.as_bytes(), true) {
                 Ok(()) => changes.push(Change::Written(file.clone())),
                 Err(e) => {
                     changes.push(Change::Failed(file, e.to_string()));

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::screen::{Rule, Screen, ScreenMode, PERM};
-use super::{Agent, DisabledBy, Harness, Homes, SkillConfigs, SkillFacts, SkillRoot};
+use super::{DisabledBy, Harness, Homes, SkillConfigs, SkillFacts, SkillRoot};
 use crate::status::Detected;
 
 static RULES: &[Rule] = &[
@@ -36,10 +36,6 @@ impl Harness for Gemini {
     }
 
     fn provider(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn agent(&self) -> Option<Agent> {
         None
     }
 

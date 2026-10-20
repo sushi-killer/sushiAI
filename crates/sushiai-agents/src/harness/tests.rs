@@ -21,21 +21,45 @@ fn an_unknown_name_is_not_an_agent() {
     assert!(find("").is_none());
 }
 
-/// The launch id and the name are one fact: an adapter that can be launched
-/// takes its id from [`id_of`], so the two cannot drift apart.
+/// An agent the daemon can launch is one `foreground` also sees as a process,
+/// and there are exactly two of them.
 #[test]
-fn a_launchable_agent_agrees_with_its_launch_id() {
-    for harness in registry() {
-        if let Some(agent) = harness.agent() {
-            assert_eq!(harness.id(), id_of(agent), "{agent:?} id mismatch");
-        }
-    }
+fn the_launchable_agents_are_claude_and_codex() {
     let launchable: HashSet<&str> = registry()
         .iter()
-        .filter_map(|h| h.agent())
-        .map(|a| a.as_str())
+        .filter(|h| h.launch().is_some())
+        .map(|h| h.id())
         .collect();
     assert_eq!(launchable, HashSet::from(["claude", "codex"]));
+    for harness in registry() {
+        if harness.launch().is_some() {
+            assert!(
+                harness.process_name().is_some(),
+                "{} can be launched but has no process name",
+                harness.id()
+            );
+        }
+    }
+}
+
+/// What replaced `enum Agent`: the capabilities the daemon asks about. A
+/// launchable agent with all of them off would break session minting and the
+/// `claudeSettings` gate in silence.
+#[test]
+fn the_two_launchable_agents_declare_their_capabilities() {
+    let claude = agent("claude").capabilities();
+    assert!(claude.session_id && claude.settings_json && !claude.hooks_in_home);
+    let codex = agent("codex").capabilities();
+    assert!(codex.hooks_in_home && !codex.session_id && !codex.settings_json);
+    for harness in registry() {
+        let caps = harness.capabilities();
+        assert!(
+            harness.launch().is_some()
+                || (!caps.session_id && !caps.hooks_in_home && !caps.settings_json),
+            "{} has capabilities but cannot be launched",
+            harness.id()
+        );
+    }
 }
 
 /// `foreground` matches a hand-started process by these names and no others.

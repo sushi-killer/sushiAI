@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use sushiai_agents::codex_trust::trust;
+use sushiai_agents::harness::codex::trust::trust;
 
 fn run_codex(home: &Path, work: &Path) {
     let status = Command::new("codex")

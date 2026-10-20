@@ -1,21 +1,27 @@
 use std::process::Command;
 
 use serde_json::Value;
-use sushiai_agents::harness::Agent;
-use sushiai_agents::launch::{
-    build, claude_settings, hook_command, shell_quote, AgentSession, LaunchError, LaunchParams,
+use sushiai_agents::harness::claude::{claude_settings, hook_command};
+use sushiai_agents::harness::codex::hook_command as codex_hook_command;
+use sushiai_agents::harness::launch::{
+    build, shell_quote, AgentSession, LaunchError, LaunchParams,
 };
+use sushiai_agents::harness::{find, HarnessRef};
 
 const BIN: &str = "/home/user/.sushiai/bin/sushiai";
 
+fn harness(id: &str) -> HarnessRef {
+    find(id).expect("a registered agent")
+}
+
 fn params<'a>(
-    agent: Agent,
+    harness: HarnessRef,
     session: AgentSession<'a>,
     bin: &'a str,
     extra: &'a [String],
 ) -> LaunchParams<'a> {
     LaunchParams {
-        agent,
+        harness,
         hook_bin: bin,
         socket: "/run/sushiai.sock",
         sushiai_session_id: "sess-1",
@@ -62,7 +68,7 @@ fn quoting_round_trips_through_a_real_shell() {
 #[test]
 fn hook_command_is_quoted_when_the_path_has_spaces_and_quotes() {
     let bin = "/home/o'brien/my dir/sushiai";
-    let cmd = hook_command(bin, "stop", Agent::Claude);
+    let cmd = hook_command(bin, "stop");
     let out = Command::new("sh")
         .arg("-c")
         .arg(format!("set -- {cmd}; printf '%s|' \"$@\""))
@@ -72,13 +78,13 @@ fn hook_command_is_quoted_when_the_path_has_spaces_and_quotes() {
         String::from_utf8(out.stdout).unwrap(),
         format!("{bin}|hook|stop|")
     );
-    assert!(hook_command(BIN, "stop", Agent::Codex).ends_with("hook stop --agent codex"));
+    assert!(codex_hook_command(BIN, "stop").ends_with("hook stop --agent codex"));
 }
 
 #[test]
 fn claude_new_session_argv_has_one_settings_flag() {
     let spec = build(&params(
-        Agent::Claude,
+        harness("claude"),
         AgentSession::New("11111111-2222-3333-4444-555555555555"),
         BIN,
         &[],
@@ -101,7 +107,7 @@ fn claude_new_session_argv_has_one_settings_flag() {
 #[test]
 fn claude_resume_uses_resume_and_no_session_id() {
     let spec = build(&params(
-        Agent::Claude,
+        harness("claude"),
         AgentSession::Resume("abc"),
         BIN,
         &[],
@@ -140,12 +146,12 @@ fn claude_settings_json_shape() {
 #[test]
 fn settings_argument_survives_a_path_with_spaces_and_quotes() {
     let bin = "/home/o'brien/my dir/sushiai";
-    let spec = build(&params(Agent::Claude, AgentSession::New("u"), bin, &[])).unwrap();
+    let spec = build(&params(harness("claude"), AgentSession::New("u"), bin, &[])).unwrap();
     let json: Value = serde_json::from_str(&spec.argv[4]).unwrap();
     let cmd = json["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert_eq!(cmd, hook_command(bin, "stop", Agent::Claude));
+    assert_eq!(cmd, hook_command(bin, "stop"));
     assert!(cmd.starts_with("'/home/o'\\''brien/my dir/sushiai' hook stop"));
 }
 
@@ -155,21 +161,27 @@ fn settings_argument_survives_a_path_with_spaces_and_quotes() {
 #[test]
 fn codex_argv() {
     let spec = build(&params(
-        Agent::Codex,
+        harness("codex"),
         AgentSession::New("ignored"),
         BIN,
         &[],
     ))
     .unwrap();
     assert_eq!(spec.argv, ["codex", "--no-daemon"]);
-    let spec = build(&params(Agent::Codex, AgentSession::Resume("abc"), BIN, &[])).unwrap();
+    let spec = build(&params(
+        harness("codex"),
+        AgentSession::Resume("abc"),
+        BIN,
+        &[],
+    ))
+    .unwrap();
     assert_eq!(spec.argv, ["codex", "resume", "abc", "--no-daemon"]);
 }
 
 #[test]
 fn extra_args_then_prompt_and_dash_prompt_is_guarded() {
     let extra = vec!["--model".to_owned(), "m".to_owned()];
-    let mut p = params(Agent::Codex, AgentSession::New("x"), BIN, &extra);
+    let mut p = params(harness("codex"), AgentSession::New("x"), BIN, &extra);
     p.prompt = Some("-rf is not a flag");
     assert_eq!(
         build(&p).unwrap().argv,
@@ -188,7 +200,7 @@ fn extra_args_then_prompt_and_dash_prompt_is_guarded() {
 
 #[test]
 fn vars_carry_socket_session_and_token() {
-    let spec = build(&params(Agent::Claude, AgentSession::New("u"), BIN, &[])).unwrap();
+    let spec = build(&params(harness("claude"), AgentSession::New("u"), BIN, &[])).unwrap();
     let get = |k: &str| {
         spec.vars
             .iter()
@@ -204,7 +216,7 @@ fn vars_carry_socket_session_and_token() {
 #[test]
 fn a_relative_hook_path_is_rejected() {
     let err = build(&params(
-        Agent::Claude,
+        harness("claude"),
         AgentSession::New("u"),
         "~/.sushiai/bin/sushiai",
         &[],
@@ -217,10 +229,16 @@ fn a_relative_hook_path_is_rejected() {
 }
 
 #[test]
+fn a_plain_command_is_not_launchable() {
+    let err = build(&params(harness("shell"), AgentSession::New("u"), BIN, &[])).unwrap_err();
+    assert_eq!(err, LaunchError::NotLaunchable("shell"));
+}
+
+#[test]
 fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected() {
     let caller: serde_json::Map<String, Value> =
         serde_json::from_str(r#"{"apiKeyHelper": "/h.sh", "model": "opus"}"#).unwrap();
-    let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
+    let mut p = params(harness("claude"), AgentSession::New("abc"), BIN, &[]);
     p.claude_settings = Some(&caller);
     let spec = build(&p).unwrap();
     assert_eq!(spec.argv.iter().filter(|a| *a == "--settings").count(), 1);
@@ -240,7 +258,7 @@ fn caller_settings_merge_into_the_one_settings_flag_and_a_hooks_key_is_rejected(
 fn caller_settings_outside_the_allowlist_are_rejected() {
     let reject = |json: &str| {
         let caller: serde_json::Map<String, Value> = serde_json::from_str(json).unwrap();
-        let mut p = params(Agent::Claude, AgentSession::New("abc"), BIN, &[]);
+        let mut p = params(harness("claude"), AgentSession::New("abc"), BIN, &[]);
         p.claude_settings = Some(&caller);
         build(&p).unwrap_err()
     };

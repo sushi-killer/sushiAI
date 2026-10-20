@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use super::screen::Screen;
-use super::{Agent, DisabledBy, Harness, Homes, SkillConfigs, SkillFacts, SkillRoot};
+use super::{DisabledBy, Harness, Homes, SkillConfigs, SkillFacts, SkillRoot};
 
 pub(super) struct Shell;
 
@@ -22,10 +22,6 @@ impl Harness for Shell {
     }
 
     fn provider(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn agent(&self) -> Option<Agent> {
         None
     }
 

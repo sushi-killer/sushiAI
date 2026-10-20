@@ -1,6 +1,6 @@
 //! The one table of agent CLIs: what each one is called, where its config home
-//! is, which skill folders it reads, which dialogs its screen shows and whether
-//! hooks report it at all.
+//! is, which skill folders it reads, which dialogs its screen shows, whether
+//! hooks report it at all and how its argv is built.
 //!
 //! Every other module in this crate asks the registry and names no agent.
 //! (The app, orchd and Remote still carry their own tables; they read this one
@@ -17,10 +17,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Serialize, Serializer};
 
+use self::launch::{LaunchError, LaunchParams};
+
+pub mod launch;
 pub mod screen;
 
-mod claude;
-mod codex;
+pub mod claude;
+pub mod codex;
 mod cursor;
 mod gemini;
 mod shell;
@@ -28,27 +31,21 @@ mod shell;
 #[cfg(test)]
 mod tests;
 
-/// An agent whose session the daemon launches with hooks. The two shapes argv
-/// has; `launch.rs` matches on it. Its string id comes from [`id_of`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Agent {
-    Claude,
-    Codex,
-}
+/// The argv builder of an agent the daemon launches.
+pub type LaunchFn = fn(&LaunchParams) -> Result<Vec<String>, LaunchError>;
 
-/// The single table mapping the launch id to the agent's name. An adapter for a
-/// launchable agent takes its [`Harness::id`] from here, so the two cannot drift.
-pub fn id_of(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Claude => "claude",
-        Agent::Codex => "codex",
-    }
-}
-
-impl Agent {
-    pub fn as_str(self) -> &'static str {
-        id_of(self)
-    }
+/// What an agent's CLI accepts, so a caller asks "who are you" rather than "are
+/// you Claude?". Everything off is the safe default: a plain command and a CLI
+/// the daemon does not start.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Capabilities {
+    /// The agent takes the session id the daemon mints (`--session-id`). Claude.
+    pub session_id: bool,
+    /// The agent's hooks live in a file in its config home, which has to exist
+    /// before the launch. Codex.
+    pub hooks_in_home: bool,
+    /// The agent takes the caller's `--settings` JSON. Claude.
+    pub settings_json: bool,
 }
 
 /// The folders the skill folders hang off. The caller resolves the tool's own
@@ -147,8 +144,16 @@ pub trait Harness: Send + Sync {
     /// with no skills of its own.
     fn provider(&self) -> Option<&'static str>;
 
-    /// The launch id, for an agent whose sessions the daemon starts with hooks.
-    fn agent(&self) -> Option<Agent>;
+    /// The argv builder — only on an agent whose session the daemon launches.
+    /// `None` for the shell and for a CLI the daemon does not start.
+    fn launch(&self) -> Option<LaunchFn> {
+        None
+    }
+
+    /// What this agent's CLI accepts. Everything off by default.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
 
     /// The process name `foreground` matches a hand-started agent by.
     fn process_name(&self) -> Option<&'static str>;
@@ -218,14 +223,21 @@ impl Serialize for HarnessRef {
 /// Every agent sushiAI knows, in the order they are listed anywhere.
 pub fn registry() -> &'static [HarnessRef] {
     static ALL: &[HarnessRef] = &[
-        HarnessRef::of(&claude::Claude),
-        HarnessRef::of(&codex::Codex),
+        CLAUDE,
+        CODEX,
         HarnessRef::of(&gemini::Gemini),
         HarnessRef::of(&cursor::Cursor),
         HarnessRef::of(&shell::Shell),
     ];
     ALL
 }
+
+/// Claude's registry entry. A caller that names one agent at compile time reads
+/// it here instead of looking the name up: one entry, no second list.
+pub(crate) const CLAUDE: HarnessRef = HarnessRef::of(&claude::Claude);
+
+/// Codex's registry entry.
+pub(crate) const CODEX: HarnessRef = HarnessRef::of(&codex::Codex);
 
 /// The agent with this name, or `None` for a plain command.
 pub fn find(id: &str) -> Option<HarnessRef> {
@@ -238,13 +250,10 @@ pub fn process_names() -> impl Iterator<Item = &'static str> {
     registry().iter().filter_map(|h| h.process_name())
 }
 
-/// The agent of a launch id, for a caller that holds an [`Agent`] rather than a
-/// name.
-pub fn of_agent(agent: Agent) -> Option<HarnessRef> {
-    registry()
-        .iter()
-        .copied()
-        .find(|h| h.agent() == Some(agent))
+/// The agent the daemon launches under this name, or `None` for a plain command
+/// and for a CLI the daemon does not start (`shell`, `gemini`, `cursor-agent`).
+pub fn agent_of(name: &str) -> Option<HarnessRef> {
+    find(name).filter(|h| h.launch().is_some())
 }
 
 /// The screen rules of a named agent: `None` when hooks cover it, when the name

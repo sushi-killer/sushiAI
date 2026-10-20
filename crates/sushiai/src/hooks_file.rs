@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use sushiai_agents::codex_hooks::{self, FileOutcome};
-use sushiai_agents::codex_trust::{self, TrustOutcome};
+use sushiai_agents::harness::codex::hooks::{self, FileOutcome};
+use sushiai_agents::harness::codex::trust::{self, TrustOutcome};
 use sushiai_daemon::{ensure_bin_link, Link, ASK_WAIT_SECS};
 
 /// `$CODEX_HOME` resolved (Codex canonicalizes it and keys hook trust by the result), else
@@ -56,7 +56,7 @@ pub fn run(action: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
     let base = sushiai_daemon::Home::from_env().dir().to_path_buf();
     let codex = codex_home(&home, &base, action == Some("install"))?;
-    let hooks = codex.join("hooks.json");
+    let hooks_path = codex.join("hooks.json");
     let config = codex.join("config.toml");
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -73,25 +73,28 @@ pub fn run(action: Option<&str>) -> Result<()> {
             let bin = base.join("bin/sushiai");
             let bin = bin.to_str().context("HOME is not valid UTF-8")?;
             println!("bin link: {link:?} {bin}");
-            let installed = codex_hooks::install(&hooks, bin, ASK_WAIT_SECS, ts)?;
+            let installed = hooks::install(&hooks_path, bin, ASK_WAIT_SECS, ts)?;
             println!(
                 "hooks.json: {}",
-                hooks_line("installed", &hooks, &installed)
+                hooks_line("installed", &hooks_path, &installed)
             );
-            let trusted = codex_trust::trust(&config, &hooks, ts)?;
+            let trusted = trust::trust(&config, &hooks_path, ts)?;
             println!("config.toml: {}", trust_line("trusted", &config, &trusted));
         }
         Some("uninstall") => {
             // Trust first: it needs our handlers still in hooks.json to name its keys.
-            if hooks.exists() {
-                let untrusted = codex_trust::untrust(&config, &hooks, ts)?;
+            if hooks_path.exists() {
+                let untrusted = trust::untrust(&config, &hooks_path, ts)?;
                 println!(
                     "config.toml: {}",
                     trust_line("untrusted", &config, &untrusted)
                 );
             }
-            let removed = codex_hooks::uninstall(&hooks, ts)?;
-            println!("hooks.json: {}", hooks_line("removed", &hooks, &removed));
+            let removed = hooks::uninstall(&hooks_path, ts)?;
+            println!(
+                "hooks.json: {}",
+                hooks_line("removed", &hooks_path, &removed)
+            );
         }
         _ => bail!("usage: sushiai hooks install | uninstall"),
     }

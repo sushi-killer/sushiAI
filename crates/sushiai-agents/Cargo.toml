@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The wire shapes the crate produces (the agent catalog). No IO and no runtime.
+sushiai-protocol.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

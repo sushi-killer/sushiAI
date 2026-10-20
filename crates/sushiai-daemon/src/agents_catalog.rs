@@ -5,10 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use sushiai_agents::harness;
-use sushiai_agents::harness::catalog::{Catalog, Facts};
+use sushiai_agents::harness::catalog::Facts;
+use sushiai_protocol::agents::AgentCatalog as Catalog;
 
-/// Params of the method, re-exported so a caller names one module.
-pub use sushiai_agents::harness::catalog::Query;
+/// Params of the method, from the protocol crate where every other method's
+/// types live.
+pub use sushiai_protocol::agents::AgentsCatalogQuery as Query;
 
 /// Codex's config home: the one the caller named, else this process's own
 /// `CODEX_HOME` (the one a Codex it launches would read), else `~/.codex`.

@@ -9,58 +9,16 @@
 //! The table is the same on every host except Codex's models, which the CLI
 //! caches per host. The caller reads the files and hands the text in
 //! ([`Facts`]); this module parses and never touches the disk.
+//!
+//! The shape of what this produces is the wire shape, so it lives with the
+//! other methods' types in `sushiai-protocol` and is re-exported here: a client
+//! of the protocol names the same struct this crate builds.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-/// One model of a CLI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Model {
-    pub id: String,
-    pub label: String,
-    pub description: String,
-    /// The reasoning levels this model accepts, in the CLI's own order.
-    pub efforts: Vec<String>,
-    /// The level the CLI uses when the caller names none; empty when it has none.
-    pub default_effort: String,
-    /// The context window in tokens; 0 when the CLI does not say.
-    pub context: u64,
-}
-
-/// Everything one agent CLI offers.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Catalog {
-    pub id: String,
-    pub label: String,
-    /// The models in offer order. Empty when the CLI lists none.
-    pub models: Vec<Model>,
-    /// The levels the chat composer offers.
-    pub efforts: Vec<String>,
-    /// The smaller set the routine builder offers.
-    pub builder_efforts: Vec<String>,
-    /// The permission modes. Empty for a CLI without interactive approvals.
-    pub permissions: Vec<String>,
-    /// The model the CLI uses when the caller names none: the id to pass back to
-    /// it. Empty when the CLI has no default of its own.
-    pub default_model: String,
-    /// How that model is written for a person; the id again when the CLI lists
-    /// no label for it.
-    pub default_model_label: String,
-    /// The level the CLI uses when the caller names none.
-    pub default_effort: String,
-    /// The window of the default model; 0 when it is unknown.
-    pub default_context: u64,
-}
-
-/// Params of `agents.catalog`: which Codex home to read. The caller's own
-/// (`CODEX_HOME`, else `~/.codex`) when it names none.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Query {
-    #[serde(default)]
-    pub config_home: Option<String>,
-}
+pub use sushiai_protocol::agents::{
+    AgentCatalog as Catalog, AgentsCatalogQuery as Query, CatalogModel as Model,
+};
 
 /// What the caller read from the disk. This crate parses, never reads.
 #[derive(Debug, Default, Clone)]

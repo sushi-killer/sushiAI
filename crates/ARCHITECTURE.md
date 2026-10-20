@@ -8,7 +8,7 @@ and agent session in it. The daemon also hosts modules, such as the orchestrator
 
 ```
 sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protocol
-   │             └───────────► sushiai-agents
+   │             └───────────► sushiai-agents ─────► sushiai-protocol
    ├──────► sushiai-hold ──────────────────────► sushiai-protocol
    └──────► sushiai-agents
 ```
@@ -29,7 +29,9 @@ sushiai ──► sushiai-daemon ──► sushiai-core ──► sushiai-protoc
   dedupe, duplicates per harness) and the install and removal of a skill sushiAI
   ships. Every other module in the crate asks the registry and names no agent.
   It reads no environment. No tokio; the only IO is
-  `file`, `harness::codex::hooks`, `skills` and `skill_usage`.
+  `file`, `harness::codex::hooks`, `skills` and `skill_usage`. Its one workspace
+  dependency is `sushiai-protocol`, whose `agents` module owns the shape of the
+  catalog it produces, so a client of the protocol names the same struct.
 - `sushiai-daemon`: tokio shell. Socket server, one actor per session, holder
   client, state file IO, holder spawning.
 - `sushiai-hold`: synchronous holder. PTY, in-memory output ring, unix socket.

@@ -5,9 +5,9 @@ const {
   FIRST_ATTACH_SCROLLBACK,
 } = require("../electron/daemon/terminals.cjs");
 const { OUTPUT_CREDIT_BYTES } = require("../electron/terminal-flow.cjs");
+const { until, turn } = require("./helpers/deadline.cjs");
 
 // Output leaves main once per event-loop turn.
-const turn = () => new Promise((resolve) => setImmediate(resolve));
 
 function setup(options = {}) {
   const sent = [];
@@ -526,7 +526,7 @@ test("a failed overflow re-attach tells the renderer the terminal ended", async 
   });
   await handlers.attach(attachInput({ cols: 80, rows: 24 }));
   for (let i = 0; i < 6; i++) onBytes(Buffer.alloc(OUTPUT_CREDIT_BYTES, "c"));
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await until(() => sent.some((m) => m.exited), "the terminal to end");
   assert.deepEqual(sent.at(-1), { panelId: "p1", exited: true });
 });
 

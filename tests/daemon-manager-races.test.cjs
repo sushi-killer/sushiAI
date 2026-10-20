@@ -1,9 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { turn } = require("./helpers/deadline.cjs");
 const { createDaemonManager } = require("../electron/daemon/manager.cjs");
-
-const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 // Connector whose connect() waits until the test settles it; counts clients
 // and the ping intervals that are still live.
@@ -71,7 +70,7 @@ test("disconnect during a pending connect ends offline with the client closed", 
   try {
     h.manager.start();
     const pending = h.manager.retry("h");
-    await tick();
+    await turn();
     h.manager.disconnect("h");
     h.waiting.shift().ok();
     await pending;
@@ -91,10 +90,10 @@ test("disconnect then connect opens exactly one live client", async () => {
   try {
     h.manager.start();
     const first = h.manager.retry("h");
-    await tick();
+    await turn();
     h.manager.disconnect("h");
     const second = h.manager.retry("h");
-    await tick();
+    await turn();
     assert.equal(h.waiting.length, 2);
     h.waiting.splice(0).forEach((w) => w.ok());
     await Promise.all([first, second]);
@@ -107,16 +106,19 @@ test("disconnect then connect opens exactly one live client", async () => {
   }
 });
 
-test("a failed attempt after disconnect schedules no reconnect", async () => {
+test("a failed attempt after disconnect schedules no reconnect", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = harness();
   try {
     h.manager.start();
     const pending = h.manager.retry("h");
-    await tick();
+    await turn();
     h.manager.disconnect("h");
     h.waiting.shift().fail();
     await pending;
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // A scheduled reconnect would sit on the fake clock; run it out.
+    t.mock.timers.tick(10 * 60 * 1000);
+    await turn();
     assert.equal(h.waiting.length, 0);
     assert.equal(h.manager.states()[0].reason, "disconnected");
   } finally {
@@ -142,12 +144,14 @@ test("a loss that is being described does not overwrite a disconnect", async () 
   const manager = createDaemonManager({ connectors: { x: connector } });
   try {
     manager.start();
-    while (manager.states()[0].state !== "ready") await tick();
+    while (manager.states()[0].state !== "ready") await turn();
     live.emit("disconnect");
-    await tick();
+    await turn();
     manager.disconnect("x");
     finish({ state: "offline", reason: "daemon_died", message: "lost" });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // setImmediate runs after every pending microtask, so the loss
+    // description has been applied or dropped by now.
+    await turn();
     assert.equal(manager.states()[0].reason, "disconnected");
   } finally {
     manager.close();

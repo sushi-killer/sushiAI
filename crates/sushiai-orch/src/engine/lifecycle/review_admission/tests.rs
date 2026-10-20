@@ -8,7 +8,12 @@ use crate::task::attempts::{record_report, record_run_completion, AttemptReport,
 use crate::task::test_support::sample_task;
 use crate::task::{Assumption, AttemptStatus, QuestionKind, Task, TaskStatus, Usage};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// What is left of this test's shared wait budget.
+fn left() -> Duration {
+    crate::procs::testing::expiry().saturating_duration_since(Instant::now())
+}
 
 fn inspected_native(app: &App) -> (Task, RunReceipt) {
     let mut task = sample_task(
@@ -90,16 +95,12 @@ async fn admission_before_cancellation(
     let cancel = signals.cancel.clone();
     let (finish, watchdog) = std::sync::mpsc::channel();
     let guard = std::thread::spawn(move || {
-        if watchdog.recv_timeout(Duration::from_secs(1)).is_err() {
+        if watchdog.recv_timeout(left()).is_err() {
             cancel.cancel();
         }
     });
     let mut permit = None;
-    let result = tokio::time::timeout(
-        Duration::from_millis(500),
-        prepare(app, task, run, &signals, &mut permit),
-    )
-    .await;
+    let result = tokio::time::timeout(left(), prepare(app, task, run, &signals, &mut permit)).await;
     let _ = finish.send(());
     guard.join().unwrap();
     result.unwrap_or_else(|_| panic!("review admission kept retrying a stale authority"))

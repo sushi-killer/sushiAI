@@ -4,6 +4,7 @@ const path = require("node:path");
 const React = require("react");
 const esbuild = require("esbuild");
 const { renderToStaticMarkup } = require("react-dom/server");
+const { turn } = require("./helpers/deadline.cjs");
 
 const src = (file) => path.resolve(__dirname, "../src", file);
 
@@ -182,8 +183,6 @@ function fakeBridge() {
     },
   };
 }
-const tick = () => new Promise((resolve) => setImmediate(resolve));
-
 test("a button shows busy, then the new values; view.changed refreshes", async () => {
   const { createCompanionController } =
     await import("../src/extensions/companionModel.ts");
@@ -197,7 +196,7 @@ test("a button shows busy, then the new values; view.changed refreshes", async (
   );
   controller.start();
   bridge.pending.shift().resolve({ values: { note: "first" } });
-  await tick();
+  await turn();
   assert.equal(states.at(-1).values.note, "first");
   assert.equal(states.at(-1).loaded, true);
 
@@ -222,7 +221,7 @@ test("a button shows busy, then the new values; view.changed refreshes", async (
   bridge.emit({ extensionId: "fixture.ext", surfaceId: "fixture.page" });
   assert.equal(bridge.pending.length, 1);
   bridge.pending.shift().resolve({ values: { note: "third" } });
-  await tick();
+  await turn();
   assert.equal(states.at(-1).values.note, "third");
 
   controller.stop();
@@ -241,9 +240,9 @@ test("an older read never overwrites a newer one, and failures surface", async (
   bridge.emit({ extensionId: "e", surfaceId: "s" });
   const [older, newer] = bridge.pending.splice(0);
   newer.resolve({ values: { note: "new" } });
-  await tick();
+  await turn();
   older.resolve({ values: { note: "old" } });
-  await tick();
+  await turn();
   assert.equal(states.at(-1).values.note, "new");
 
   const failing = controller.run("add");

@@ -139,6 +139,9 @@ shim, a re-export, or an "old and new" fork — one owner, one final shape.
   claude", etc.) and no Cyrillic in commit messages.
 - A PR's commits carry no personal address: author and committer are a
   GitHub noreply or a tool's local address.
+- Tests wait on a real signal and never time themselves: no fixed sleep and
+  no wall-clock bound (`Date.now() - t < N`, `elapsed() < D`) in `tests/` or
+  Rust test code, unless the line says `// timing: <reason>`.
 
 On top of that: `npm run lint` (ESLint, `eslint.config.mjs`) catches
 React-hooks misuse (`rules-of-hooks`, `exhaustive-deps`) and general

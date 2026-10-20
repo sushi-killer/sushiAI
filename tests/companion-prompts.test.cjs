@@ -5,6 +5,7 @@ const {
   createOwnerPrompts,
 } = require("../electron/extensions/companion-prompts.cjs");
 const { registerExtensionIpc } = require("../electron/ipc/extensions.cjs");
+const { turn } = require("./helpers/deadline.cjs");
 
 function rig(options = {}) {
   let clock = 0;
@@ -19,7 +20,6 @@ function rig(options = {}) {
   return { prompts, shown, withdrawn, advance: (ms) => (clock += ms) };
 }
 const question = (extensionId, title = "t") => ({ extensionId, title });
-const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 test("one card at a time across all companions, in order; each answer shows the next", async () => {
   const r = rig({ minShownMs: 0 });
@@ -59,7 +59,7 @@ test("a click earlier than 1 s after the card was shown does not allow", async (
   const { id } = r.shown[0];
   r.advance(999);
   r.prompts.answer(id, true);
-  await tick();
+  await turn();
   assert.equal(decided, null, "the card is still waiting");
   r.advance(1);
   r.prompts.answer(id, true);
@@ -71,17 +71,23 @@ test("a click earlier than 1 s after the card was shown does not allow", async (
   assert.equal(await second, "denied");
 });
 
-test("2 minutes after the card is shown it times out, is withdrawn, and a late answer is a no-op", async () => {
+test("2 minutes after the card is shown it times out, is withdrawn, and a late answer is a no-op", async (t) => {
+  // The timeout runs on a mocked clock the test advances.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const r = rig({ timeoutMs: 40, minShownMs: 0 });
   const first = r.prompts.ask(question("ext.a"));
   const second = r.prompts.ask(question("ext.a"));
-  await tick();
   assert.equal(r.shown.length, 1);
+  t.mock.timers.tick(39);
+  await turn();
+  assert.equal(r.shown.length, 1, "still waiting before the timeout");
+  t.mock.timers.tick(1);
   assert.equal(await first, "timeout");
   assert.deepEqual(r.withdrawn, [r.shown[0].id]);
   r.prompts.answer(r.shown[0].id, true); // late
   // The queued card starts its own clock when it is shown.
   assert.equal(r.shown.length, 2);
+  t.mock.timers.tick(40);
   assert.equal(await second, "timeout");
 });
 

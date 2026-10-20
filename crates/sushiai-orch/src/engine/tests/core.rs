@@ -119,7 +119,7 @@ async fn concurrent_task_updates_preserve_every_decision() {
             std::thread::spawn(move || {
                 barrier.wait();
                 app.update_task(&id, |task| {
-                    std::thread::sleep(Duration::from_millis(5)); // wait-allow: widens the read-modify-write window the test races twelve writers through
+                    std::thread::sleep(Duration::from_millis(5)); // timing: widens the read-modify-write window the test races twelve writers through
                     task.fixture_data().decisions.push(i.to_string());
                 })
                 .unwrap();

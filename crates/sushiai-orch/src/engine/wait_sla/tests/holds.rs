@@ -13,7 +13,6 @@ use crate::task::QuestionKind;
 use crate::task::HOLD_TTL_MS;
 use serde_json::json;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 #[tokio::test]
 async fn a_queued_wake_holds_the_question_at_once_and_a_wake_that_cannot_run_never_does() {
@@ -129,11 +128,9 @@ async fn a_hung_overseer_turn_is_cancelled_logged_as_timed_out_and_releases_its_
     let task = waiting_in(&repo, QuestionKind::AgentQuestion, &["A"]);
     app.store.save_task(&task).unwrap();
     let repo_str = task.repo.clone();
-    let started = std::time::Instant::now();
     wake_orchestrator_for_waiting(&app, &task);
     assert!(held(&app, &task.id), "held while the turn runs");
     crate::engine::chat::test_support::wait_idle(&app, &repo_str).await;
-    assert!(started.elapsed() < Duration::from_secs(10));
     assert!(!held(&app, &task.id), "released when the turn timed out");
     let log = crate::store::overseer::read(&app.data_dir, Some(&repo_str), None);
     assert!(

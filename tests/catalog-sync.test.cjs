@@ -11,12 +11,13 @@ const { closeAppDb } = require("../electron/app-db.cjs");
 const {
   DEADLINE_MS,
   until,
+  untilTurns,
+  turn,
   pidStart,
   stopPid,
   removeDir,
 } = require("./helpers/deadline.cjs");
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function fakeManager(hosts) {
   const emitter = new EventEmitter();
   const calls = [];
@@ -134,7 +135,7 @@ test("groups.sync sends a host only the groups that belong to it", async () => {
   sync.stop();
 });
 
-test("a change sends one debounced full sync to every ready host and rev grows", async () => {
+test("a change sends one debounced full sync to every ready host and rev grows", async (t) => {
   const manager = fakeManager({ local: "mac", box: "box-daemon" });
   const projects = fixtureProjects();
   const store = memoryStore();
@@ -149,13 +150,20 @@ test("a change sends one debounced full sync to every ready host and rev grows",
   await until(() => manager.calls.length === 2, "first sync");
   const first = manager.calls[0].params.projects[0].rev;
   manager.calls.length = 0;
+  // The debounce runs on a mocked clock: the test advances it, so there is no
+  // wall-clock margin to lose under load.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   projects.onChange();
   projects.onChange();
   sync.notifyChanged();
   assert.equal(manager.calls.length, 0, "debounced");
-  await until(() => manager.calls.length === 4, "both hosts");
-  // Gives a forbidden second sync time to happen.
-  await wait(80);
+  t.mock.timers.tick(30);
+  await untilTurns(() => manager.calls.length >= 4, "both hosts synced");
+  // Any timer left over from the burst would fire in this much time. A late
+  // sync is a few promise hops away, so one turn after the tick is enough to
+  // see it; the final count then proves there was none.
+  t.mock.timers.tick(10 * 60 * 1000);
+  await turn();
   assert.equal(manager.calls.length, 4, "one burst, one sync per host");
   const hosts = manager.calls
     .filter((c) => c.method === "projects.sync")

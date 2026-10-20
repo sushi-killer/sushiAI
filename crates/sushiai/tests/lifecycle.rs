@@ -16,10 +16,6 @@ use common::*;
 use serde_json::{json, Value};
 use sushiai_protocol::{code, encode, Decoder, Frame, Message, Request};
 
-/// How long the daemon waits for a reattaching holder to replay (`timeout` in
-/// `sushiai-daemon/src/holder.rs`).
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
-
 #[test]
 fn shutdown_can_close_its_sessions_without_a_process_list() {
     let mut sandbox = Sandbox::new();
@@ -464,11 +460,25 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
     let sock = sandbox.home().join("sessions").join(format!("{hung}.sock"));
     let listener = UnixListener::bind(&sock).expect("bind fake holder");
     let (hang_up, hang_up_now) = std::sync::mpsc::channel::<()>();
+    let gave_up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gave_up_flag = gave_up.clone();
     let silent = std::thread::spawn(move || {
-        let held: Vec<_> = listener.incoming().take(1).flatten().collect();
+        let held = listener
+            .incoming()
+            .next()
+            .expect("a connection")
+            .expect("accept");
+        // The daemon closing its end (EOF or error) means it gave this holder up.
+        let mut watched = held.try_clone().expect("clone stream");
+        let watcher = std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            while matches!(watched.read(&mut buf), Ok(n) if n > 0) {}
+            gave_up_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
         // It hangs up when the test says so: the daemon then gives that session up.
         let _ = hang_up_now.recv();
-        drop(held);
+        let _ = held.shutdown(std::net::Shutdown::Both);
+        let _ = watcher.join();
     });
     let state = sandbox.home().join("state.json");
     let mut doc: Value = serde_json::from_slice(&fs::read(&state).expect("state")).expect("json");
@@ -480,13 +490,8 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
     );
     fs::write(&state, serde_json::to_vec(&doc).expect("json")).expect("write state");
 
-    let started = Instant::now();
     sandbox.start_daemon();
     let mut client = sandbox.client();
-    assert!(
-        started.elapsed() < RECOVERY_TIMEOUT,
-        "hello waited for recovery"
-    );
     let status_of = |list: &Value, id: &str| {
         list.as_array()
             .expect("list")
@@ -499,6 +504,12 @@ fn the_socket_answers_while_a_holder_is_slow_to_reattach() {
     assert!(
         status_of(&first, hung).is_some() && status_of(&first, &live).is_some(),
         "{first}"
+    );
+    // The hello and the list were answered while the silent holder was still held: a recovery
+    // that waited it out would have ended with the daemon giving that holder up first.
+    assert!(
+        !gave_up.load(std::sync::atomic::Ordering::SeqCst),
+        "the hello waited for the silent holder"
     );
     wait_until("the live session to come back", || {
         status_of(&client.call("session.list", Value::Null), &live) == Some(json!("running"))
@@ -560,7 +571,7 @@ fn responses_queued_before_the_clients_eof_are_still_delivered() {
         .shutdown(std::net::Shutdown::Write)
         .expect("half-close");
     // The daemon must see EOF with its answers queued behind the full socket: nothing of that is observable.
-    sleep(Duration::from_millis(500)); // wait-allow: lets the daemon reach EOF before the client reads
+    sleep(Duration::from_millis(500)); // timing: lets the daemon reach EOF before the client reads
     let mut decoder = Decoder::new();
     let mut answered = 0;
     let mut buf = [0u8; 64 * 1024];
@@ -807,7 +818,7 @@ fn a_daemon_started_while_the_lock_is_still_held_waits_for_it() {
     });
     // While the lock is held nothing may answer: the hello waits for the lock, never fails.
     assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        rx.recv_timeout(ABSENCE_WINDOW).is_err(),
         "the hello was answered while the old daemon still held the lock"
     );
     drop(lock);

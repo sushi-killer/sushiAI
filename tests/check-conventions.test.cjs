@@ -134,11 +134,11 @@ test("a private network address in source fails, a documentation example does no
   fs.rmSync(clean, { recursive: true, force: true });
 });
 
-test("a bare sleep in Rust test code fails; helpers, wait-allow and production code pass", () => {
+test("a bare sleep in Rust test code fails; helpers, timing marks and production code pass", () => {
   const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
-  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "wait-rule-"));
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "timing-rule-"));
   const write = (file, text) => {
     fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
     fs.writeFileSync(path.join(tree, file), text);
@@ -152,7 +152,7 @@ test("a bare sleep in Rust test code fails; helpers, wait-allow and production c
       "crates/x/tests/a.rs",
       [
         'fn harness() -> &\'static str { "import time; time.sleep(30)" }',
-        "fn grace() { std::thread::sleep(GRACE); } // wait-allow: the test measures the TERM grace",
+        "fn grace() { std::thread::sleep(GRACE); } // timing: the test measures the TERM grace",
         'fn shell() -> &\'static str { "sleep 30; true" }',
         "",
       ].join("\n"),
@@ -165,13 +165,13 @@ test("a bare sleep in Rust test code fails; helpers, wait-allow and production c
         "#[cfg(test)]",
         "mod tests {",
         '    fn s() -> &\'static str { "{" }',
-        "    fn ok() { std::thread::sleep(D); } // wait-allow: measures the grace",
+        "    fn ok() { std::thread::sleep(D); } // timing: measures the grace",
         "}",
         "fn g() { std::thread::sleep(D); }",
         "",
       ].join("\n"),
     );
-    const clean = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+    const clean = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
     assert.equal(clean.status, 0, clean.stderr);
 
     for (const [file, line] of [
@@ -180,17 +180,14 @@ test("a bare sleep in Rust test code fails; helpers, wait-allow and production c
         "    std::thread::sleep(Duration::from_millis(500));",
       ],
       ["crates/x/tests/c/d.rs", "    sleep(Duration::from_secs(2));"],
-      [
-        "crates/x/tests/e.rs",
-        "    tokio::time::sleep(D).await; // wait-allow:",
-      ],
+      ["crates/x/tests/e.rs", "    tokio::time::sleep(D).await; // timing:"],
     ]) {
       write(file, `fn t() {\n${line}\n}\n`);
-      const failed = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+      const failed = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
       assert.equal(failed.status, 1, file);
       assert.match(
         failed.stderr,
-        new RegExp(`${file.replace(/\./g, "\\.")}:2 sleeps in a test`),
+        new RegExp(`${file.replace(/\./g, "\\.")}:2 sleeps or times itself`),
       );
       fs.rmSync(path.join(tree, file));
     }
@@ -209,14 +206,89 @@ test("a bare sleep in Rust test code fails; helpers, wait-allow and production c
       ["crates/x/src/test_fixtures.rs", "fn t() {\n    sleep(D);\n}\n", 2],
     ]) {
       write(file, text);
-      const failed = run({ WAIT_RULE_ROOT_OVERRIDE: tree });
+      const failed = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
       assert.equal(failed.status, 1, file);
       assert.match(
         failed.stderr,
-        new RegExp(`${file.replace(/\./g, "\\.")}:${line} sleeps in a test`),
+        new RegExp(
+          `${file.replace(/\./g, "\\.")}:${line} sleeps or times itself`,
+        ),
       );
       fs.rmSync(path.join(tree, file));
     }
+  } finally {
+    fs.rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test("node test sleeps and wall-clock asserts fail unless marked; Rust elapsed bounds fail", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "timing-rule-"));
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(tree, file)), { recursive: true });
+    fs.writeFileSync(path.join(tree, file), text);
+  };
+  try {
+    write(
+      "tests/helpers/deadline.cjs",
+      "const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n",
+    );
+    write(
+      "tests/a.test.cjs",
+      [
+        "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+        "const next = () => new Promise((resolve) => setImmediate(resolve));",
+        "await sleep(50); // timing: the debounce window under test",
+        "// timing: nothing signals that no retry happened",
+        "await new Promise((resolve) => setTimeout(resolve, 20));",
+        "setTimeout(() => emit('exit'), 10);",
+        "t.mock.timers.tick(250);",
+        "assert.ok(entry.expiresAt > Date.now());",
+        "await next();",
+        "",
+      ].join("\n"),
+    );
+    const clean = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
+    assert.equal(clean.status, 0, clean.stderr);
+
+    for (const line of [
+      "await sleep(150);",
+      "await new Promise((r) => setTimeout(r, 30));",
+      "await setTimeout(100);",
+      "assert.ok(Date.now() - started < 2000);",
+      "assert.ok(performance.now() - t0 >= 5);",
+      "assert.ok((Date.now() - t) < 300);",
+      "await new Promise((go) => setTimeout(go, 30));",
+      "await new Promise((go) => setTimeout(() => go(), 30));",
+    ]) {
+      write(
+        "tests/b.test.cjs",
+        `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n${line}\n`,
+      );
+      const failed = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
+      assert.equal(failed.status, 1, line);
+      assert.match(
+        failed.stderr,
+        /tests\/b\.test\.cjs:2 sleeps or times itself/,
+      );
+    }
+    write(
+      "crates/x/tests/w.rs",
+      "fn t() {\n    assert!(began.elapsed() < Duration::from_secs(5));\n    rx.recv_timeout(Duration::from_millis(300)).unwrap_err();\n    rx.recv_timeout(deadline()).unwrap();\n}\n",
+    );
+    const timed = run({ TIMING_RULE_ROOT_OVERRIDE: tree });
+    assert.match(
+      timed.stderr,
+      /crates\/x\/tests\/w\.rs:2 sleeps or times itself/,
+    );
+    assert.match(
+      timed.stderr,
+      /crates\/x\/tests\/w\.rs:3 sleeps or times itself/,
+    );
+    assert.doesNotMatch(timed.stderr, /w\.rs:4 /);
+    fs.rmSync(path.join(tree, "crates"), { recursive: true });
   } finally {
     fs.rmSync(tree, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@ const {
   compareVersions,
   selectRelease,
 } = require("../electron/updates.cjs");
+const { until } = require("./helpers/deadline.cjs");
 const bytes = Buffer.from("synthetic DMG fixture");
 const sha = createHash("sha256").update(bytes).digest("hex");
 function release(tag = "v0.0.2", arch = "arm64", extra = {}) {
@@ -200,14 +201,21 @@ test("scheduled checks honor preferences and shutdown cancels in-flight requests
   });
   updater.automatic = true;
   await updater.configure({ autoCheck: false });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   updater.schedule(5);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  t.mock.timers.tick(60000);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 0);
   await updater.configure({ autoCheck: true });
   updater.schedule(5);
-  for (let i = 0; i < 50 && !calls; i++)
-    await new Promise((resolve) => setTimeout(resolve, 10));
+  t.mock.timers.tick(5);
+  t.mock.timers.reset();
+  await until(() => calls, "the scheduled check");
   assert.equal(calls, 1);
+  await until(
+    () => updater.snapshot().phase === "current",
+    "the check to finish",
+  );
   assert.equal(updater.snapshot().phase, "current");
   updater.fetcher = (_, { signal }) =>
     new Promise((_, reject) =>

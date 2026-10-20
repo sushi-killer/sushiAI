@@ -70,7 +70,7 @@ The daemon and orchestrator live in `crates`. The crate rules are in `crates/ARC
 
 ## Scripts
 
-- `scripts/check-conventions.mjs` holds the repository rules. `scripts/check-crate-deps.mjs` holds the crate dependency rule.
+- `scripts/check-conventions.mjs` holds the repository rules. `scripts/check-crate-deps.mjs` holds the crate dependency rule. Node tests wait with `until` from `tests/helpers/deadline.cjs`.
 - `scripts/release.mjs` cuts a release. Its notes helper is `scripts/lib/release-notes.mjs`. The skill is `.agents/skills/cut-release`.
 - `scripts/hooks` holds the agent hooks: `scripts/hooks/guard-bash.mjs`, `scripts/hooks/check-touched.mjs`, `scripts/hooks/lesson-reminder.mjs`. They are wired in `.claude/settings.json`.
 - `scripts/test-desktop.mjs` runs the desktop tests.

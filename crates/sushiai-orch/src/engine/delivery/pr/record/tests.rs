@@ -5,7 +5,12 @@ use crate::engine::test_support::{task_with_status, test_app};
 use crate::task::questions::{WAIVED, WAIVER_BY};
 use crate::task::{Assumption, QuestionKind, TaskStatus};
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// What is left of this test's shared wait budget.
+fn left() -> Duration {
+    crate::procs::testing::expiry().saturating_duration_since(Instant::now())
+}
 
 #[test]
 fn a_pr_receipt_waits_for_owner_publication_and_preserves_the_stop_and_revocation() {
@@ -57,7 +62,8 @@ fn a_pr_receipt_waits_for_owner_publication_and_preserves_the_stop_and_revocatio
             ))
             .unwrap();
     });
-    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    entered.recv_timeout(left()).unwrap();
+    // timing: an absence window; a receipt that skipped the task lock would arrive inside it
     let early = completion.recv_timeout(Duration::from_millis(250));
     let serialized = matches!(&early, Err(RecvTimeoutError::Timeout));
     owner.overturn_assumption(0, "This check must pass".into());
@@ -66,7 +72,7 @@ fn a_pr_receipt_waits_for_owner_publication_and_preserves_the_stop_and_revocatio
     drop(guard);
     let result = match early {
         Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => completion.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Err(RecvTimeoutError::Timeout) => completion.recv_timeout(left()).unwrap(),
         Err(error) => panic!("publication thread exited before recording the receipt: {error}"),
     }
     .unwrap();

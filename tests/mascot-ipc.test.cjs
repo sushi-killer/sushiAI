@@ -239,7 +239,8 @@ test("presenting is a work area that covers the whole display", () => {
   assert.equal(presentingFrom(display(full), true), false);
 });
 
-test("watchPresenting reports each change once and stops on close", async () => {
+test("watchPresenting reports each change once and stops on close", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   let current = normal;
   const changes = [];
   const close = watchPresenting({
@@ -247,15 +248,15 @@ test("watchPresenting reports each change once and stops on close", async () => 
     onChange: (value) => changes.push(value),
     intervalMs: 5,
   });
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
-  await tick();
+  const tick = () => t.mock.timers.tick(5);
+  tick();
   current = full;
-  await tick();
-  await tick();
+  tick();
+  tick();
   current = normal;
-  await tick();
+  tick();
   close();
   current = full;
-  await tick();
+  tick();
   assert.deepEqual(changes, [true, false]);
 });

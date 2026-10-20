@@ -474,17 +474,37 @@ test("runLanes runs lanes side by side and stops a lane at its first failure", a
   const { runLanes } = await import(
     pathToFileURL(path.join(root, "scripts/lib/run-lanes.mjs")).href
   );
-  const sleep = "node -e 'setTimeout(()=>{},1500)'";
-  const start = Date.now();
-  const code = await runLanes(
-    [
-      { name: "a", commands: [sleep] },
-      { name: "b", commands: [sleep] },
-    ],
-    { quiet: true },
+  // Each lane announces itself, then waits for the other's announcement. Only
+  // lanes that run side by side can both finish; one after the other, the
+  // first gives up at its own limit and the run fails.
+  const rendezvous = fs.mkdtempSync(path.join(os.tmpdir(), "lanes-meet-"));
+  const meet = path.join(rendezvous, "meet.cjs");
+  fs.writeFileSync(
+    meet,
+    `const fs = require("fs");
+const [mine, theirs] = process.argv.slice(2);
+fs.writeFileSync(mine, "1");
+const limit = Date.now() + 30000;
+const timer = setInterval(() => {
+  if (fs.existsSync(theirs)) process.exit(0);
+  if (Date.now() > limit) process.exit(1);
+}, 10);
+`,
   );
-  assert.equal(code, 0);
-  assert.ok(Date.now() - start < 2900, "lanes overlapped");
+  const mark = (name) => path.join(rendezvous, name);
+  let code;
+  try {
+    code = await runLanes(
+      [
+        { name: "a", commands: [`node ${meet} ${mark("a")} ${mark("b")}`] },
+        { name: "b", commands: [`node ${meet} ${mark("b")} ${mark("a")}`] },
+      ],
+      { quiet: true },
+    );
+  } finally {
+    fs.rmSync(rendezvous, { recursive: true, force: true });
+  }
+  assert.equal(code, 0, "lanes overlapped");
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lanes-"));
   const marker = path.join(dir, "ran");

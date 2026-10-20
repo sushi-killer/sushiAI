@@ -3,6 +3,7 @@
 // on/off switch. Synthetic hosts and projects only.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const { until } = require("./helpers/deadline.cjs");
 const {
   createRoutines,
   builderArgs,
@@ -311,12 +312,10 @@ test("a Claude builder turn runs headless and resumes the previous conversation"
   // The answer is wrapped by the terminal and the session exits right after.
   const json = ANSWER("Done: **draft** saved.", "agent-1");
   reads.s1 = `${json.slice(0, 40)}\r\n${json.slice(40)}`;
-  let turn;
-  for (let i = 0; i < 50; i++) {
-    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
-    if (turn.state !== "running") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const turn = await until(() => {
+    const view = routines.methods["builder.turn"]({ sessionId: "s1" });
+    return view.state !== "running" && view;
+  }, "the builder turn to end");
   delete reads.s1;
   assert.deepEqual(turn, {
     state: "done",
@@ -352,12 +351,10 @@ test("a session that prints the answer and then refuses reads still settles done
   );
   const { routines } = world({ reads });
   await routines.methods["builder.start"]({ text: "digest" });
-  let turn;
-  for (let i = 0; i < 50; i++) {
-    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
-    if (turn.state !== "running") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const turn = await until(() => {
+    const view = routines.methods["builder.turn"]({ sessionId: "s1" });
+    return view.state !== "running" && view;
+  }, "the builder turn to end");
   assert.deepEqual(turn, {
     state: "done",
     text: "Saved the draft.",
@@ -392,18 +389,25 @@ test("the codex builder always uses mcp access and a bare config", async () => {
 });
 
 test("a builder turn that ends without an answer fails with what the session printed", async () => {
-  const reads = { s1: "" };
+  // The module polls the session; it must read the error text once before
+  // the session disappears.
+  let text = "";
+  let seen = false;
+  const reads = {
+    get s1() {
+      if (text) seen = true;
+      return text;
+    },
+  };
   const { routines } = world({ reads });
   await routines.methods["builder.start"]({ text: "digest" });
-  reads.s1 = "Error: not logged in";
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  text = "Error: not logged in";
+  await until(() => seen, "the poll to read the error");
   delete reads.s1;
-  let turn;
-  for (let i = 0; i < 50; i++) {
-    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
-    if (turn.state !== "running") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const turn = await until(() => {
+    const view = routines.methods["builder.turn"]({ sessionId: "s1" });
+    return view.state !== "running" && view;
+  }, "the builder turn to end");
   assert.equal(turn.state, "failed");
   assert.match(turn.text, /not logged in/);
   await assert.rejects(
@@ -441,12 +445,10 @@ test("a Codex builder turn runs headless and resumes by its thread id", async ()
   const events = CODEX_EVENTS("A long answer: " + "word ".repeat(30), "t-1");
   const at = events.indexOf("agent_message") + 20;
   reads.s1 = `Reading input\nERROR rmcp: closed\n${events.slice(0, at)}\r\n${events.slice(at)}`;
-  let turn;
-  for (let i = 0; i < 50; i++) {
-    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
-    if (turn.state !== "running") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const turn = await until(() => {
+    const view = routines.methods["builder.turn"]({ sessionId: "s1" });
+    return view.state !== "running" && view;
+  }, "the builder turn to end");
   delete reads.s1;
   assert.deepEqual(turn, {
     state: "done",
@@ -468,12 +470,10 @@ test("a failed Codex turn reports its message", async () => {
   const { routines } = world({ reads });
   routines.methods["settings.set"]({ harness: "codex" });
   await routines.methods["builder.start"]({ text: "digest" });
-  let turn;
-  for (let i = 0; i < 50; i++) {
-    turn = routines.methods["builder.turn"]({ sessionId: "s1" });
-    if (turn.state !== "running") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const turn = await until(() => {
+    const view = routines.methods["builder.turn"]({ sessionId: "s1" });
+    return view.state !== "running" && view;
+  }, "the builder turn to end");
   assert.equal(turn.state, "failed");
   assert.equal(turn.text, "not logged in");
 });

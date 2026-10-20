@@ -6,6 +6,7 @@ const {
 } = require("../electron/orchestrator.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
 const { makeStore } = require("./helpers/fake-host.cjs");
+const { until } = require("./helpers/deadline.cjs");
 
 const REMOTE = "ssh:devbox-id";
 const connections = {
@@ -14,15 +15,6 @@ const connections = {
   hasShell: () => true,
   exec: async () => "git=1\nclaude=1\nclaude_login=1\n",
 };
-
-async function waitUntil(check, { timeout = 4000, interval = 5 } = {}) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  throw new Error("waitUntil: condition never became true");
-}
 
 /** Two projects on both hosts: one with a default branch, one without. */
 async function branchRig(t) {
@@ -97,14 +89,16 @@ test("a default branch edit is pushed to the daemon like any other project chang
     ...named,
     git: { ...named.git, defaultBranch: "release" },
   });
-  await waitUntil(
+  await until(
     () =>
       pushes().length > before &&
       lastSecrets().projectBranches["/home/user/sushiai/named"] === "release",
+    "the branch map entry",
   );
   // Clearing the branch drops the folder from the map.
   await projects.upsert({ ...named, git: { ...named.git, defaultBranch: "" } });
-  await waitUntil(
+  await until(
     () => !("/home/user/sushiai/named" in lastSecrets().projectBranches),
+    "the entry to be dropped",
   );
 });

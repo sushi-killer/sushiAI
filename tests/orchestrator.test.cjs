@@ -8,15 +8,7 @@ const {
   ALLOWED_METHODS,
 } = require("../electron/orchestrator.cjs");
 const { fakeDaemonManager } = require("./helpers/fake-daemon-manager.cjs");
-
-async function waitUntil(check, { timeout = 2000, interval = 5 } = {}) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
-  throw new Error("waitUntil: condition never became true");
-}
+const { until } = require("./helpers/deadline.cjs");
 
 const REMOTE = "ssh:devbox-id";
 const connections = {
@@ -555,7 +547,7 @@ test("secrets are pushed when a host becomes ready and again after its daemon re
   manager.setState("local", { state: "offline" });
   assert.equal(pushed().length, 1);
   manager.setState("local", { state: "ready" });
-  await waitUntil(() => pushed().length === 2);
+  await until(() => pushed().length === 2, "the second push");
 
   // A remote host is pushed to once it is in use and ready, not before.
   manager.setState("devbox-id", { state: "offline" });
@@ -564,7 +556,7 @@ test("secrets are pushed when a host becomes ready and again after its daemon re
   await hosts.call("task.list", {}, REMOTE);
   manager.setState("devbox-id", { state: "offline" });
   manager.setState("devbox-id", { state: "ready" });
-  await waitUntil(() => pushed().length === 3);
+  await until(() => pushed().length === 3, "the third push");
   assert.equal(pushed()[2].host, "devbox-id");
 });
 
@@ -579,7 +571,7 @@ test("a lagging subscriber's resync refetches the task list and replays it as ev
   });
   const { relayed } = await listening(manager);
   manager.notify("local", "session.resync", {});
-  await waitUntil(() => relayed.length === 2);
+  await until(() => relayed.length === 2, "two relayed events");
   assert.deepEqual(
     relayed.map(([channel, event]) => [channel, event.event, event.task.id]),
     [
@@ -1000,8 +992,11 @@ test("switching sending off empties the daemon's copy at once, and switching it 
   assert.equal(lastSecrets().projects[project.id].KEY, "invented-mine");
   const before = pushes().length;
   await projects.setHostWithheld(project.id, REMOTE, true);
-  await waitUntil(() => pushes().length > before);
-  await waitUntil(() => !lastSecrets().projects[project.id]?.KEY);
+  await until(() => pushes().length > before, "a new push");
+  await until(
+    () => !lastSecrets().projects[project.id]?.KEY,
+    "the secret to be dropped",
+  );
   assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
   // A task made while it is off carries no value either.
   await service.call("task.create", {
@@ -1011,8 +1006,9 @@ test("switching sending off empties the daemon's copy at once, and switching it 
   });
   assert.deepEqual(lastSecrets().projects[project.id] ?? {}, {});
   await projects.setHostWithheld(project.id, REMOTE, false);
-  await waitUntil(
+  await until(
     () => lastSecrets().projects[project.id]?.KEY === "invented-mine",
+    "the unwithheld secret",
   );
 });
 
@@ -1037,11 +1033,11 @@ test("a task started in a folder without naming its project still gets that proj
   // An edit in Project settings is pushed without waiting for a task.
   const before = pushes().length;
   await projects.setSecret(project.id, "KEY", "changed-value");
-  await waitUntil(
+  await until(
     () =>
       pushes().length > before &&
       lastSecrets().projects[project.id]?.KEY === "changed-value",
-    { timeout: 4000 },
+    "the edited secret",
   );
 });
 

@@ -404,7 +404,6 @@ const MANIFEST = JSON.parse(
 );
 const ID = MANIFEST.id;
 const SURFACE = "probe.companion-settings";
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function rig(t, { permissions } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "sushiai-hostexec-"));
@@ -529,10 +528,16 @@ test("hosts.changed goes to a companion with hosts.read on start and on every ch
     notes()[1].params.hosts.map((h) => h.id),
     ["h-1", "h-2", "h-3"],
   );
-  // An unchanged list is not sent again.
+  // An unchanged list is not sent again: frames arrive in order, so a resend
+  // would sit between the changed list and the next one.
   r.setProfiles([...PROFILES.slice(0, 3), PROFILES[5]]);
-  await sleep(150);
-  assert.equal(notes().length, 2);
+  r.setProfiles([...PROFILES.slice(0, 4), PROFILES[5]]);
+  await until(() => notes().length >= 3, "the next list");
+  assert.equal(notes().length, 3);
+  assert.deepEqual(
+    notes()[2].params.hosts.map((h) => h.id),
+    ["h-1", "h-2", "h-3", "h-4"],
+  );
 });
 
 test("a list row button reaches the companion, which runs host.exec through the app", async (t) => {

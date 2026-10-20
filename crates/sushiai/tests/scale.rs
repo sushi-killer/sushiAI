@@ -71,7 +71,7 @@ fn measure(phase: &str, sandbox: &Sandbox, daemon: u32) -> Row {
     let holders = sandbox.holders();
     let sizes: Vec<u64> = holders.iter().map(|pid| rss_kb(*pid)).collect();
     let before = cpu_secs(daemon);
-    sleep(Duration::from_secs(IDLE_SECS)); // wait-allow: the daemon's CPU is sampled over a fixed idle window
+    sleep(Duration::from_secs(IDLE_SECS)); // timing: the daemon's CPU is sampled over a fixed idle window
     let used = cpu_secs(daemon) - before;
     Row {
         phase: phase.to_string(),

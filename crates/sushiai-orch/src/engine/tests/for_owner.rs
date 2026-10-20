@@ -129,7 +129,7 @@ async fn fo_until_waiting_broadcast(events: &mut broadcast::Receiver<Event>) -> 
                 seen.push(*task.clone());
                 if waiting {
                     // The park's own broadcast follows the wake's: settle.
-                    tokio::time::sleep(Duration::from_millis(50)).await; // wait-allow: no signal marks the end of the broadcasts that follow the wake; the window collects them
+                    tokio::time::sleep(Duration::from_millis(50)).await; // timing: no signal marks the end of the broadcasts that follow the wake; the window collects them
                     while let Ok(Event::Task { task }) = events.try_recv() {
                         seen.push(*task);
                     }

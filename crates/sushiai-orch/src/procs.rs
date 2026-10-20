@@ -219,7 +219,7 @@ mod tests {
             if let Some(ready) = std::env::var_os(testing::READY_ENV) {
                 std::fs::write(ready, "x").unwrap();
             }
-            std::thread::sleep(Duration::from_secs(60)); // wait-allow: keeps the helper process alive for the test
+            std::thread::sleep(Duration::from_secs(60)); // timing: keeps the helper process alive for the test
         }
     }
 
@@ -234,7 +234,7 @@ mod tests {
                 .stderr(Stdio::null());
             match cmd.spawn() {
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(Duration::from_millis(20)); // wait-allow: ETXTBSY has no signal to wait on, only a retry
+                    std::thread::sleep(Duration::from_millis(20)); // timing: ETXTBSY has no signal to wait on, only a retry
                 }
                 other => return other.unwrap(),
             }

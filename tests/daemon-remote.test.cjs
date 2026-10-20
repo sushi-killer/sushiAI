@@ -17,23 +17,7 @@ test.afterEach(async () => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const { DEADLINE_MS, removeDir } = require("./helpers/deadline.cjs");
-
-// A wait for something that must happen: `ms` is only a floor, the shared
-// deadline keeps it from failing on a loaded machine.
-const until = async (check, ms = DEADLINE_MS, what = "condition") =>
-  within(check, Math.max(ms, DEADLINE_MS), what);
-
-// A bound that is the point of the test (sooner than a backoff): not stretched.
-const within = async (check, ms, what) => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const value = await check();
-    if (value) return value;
-    await sleep(10);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
+const { until, removeDir } = require("./helpers/deadline.cjs");
 
 // A fake ssh (and connector command) over tests/fixtures/fake-proxy.cjs.
 function fakeProxy(mode) {
@@ -104,7 +88,7 @@ test("ssh connector: the proxy command runs on the host and the host becomes rea
   const proxy = fakeProxy({});
   const { manager } = sshManager(proxy);
   manager.start();
-  await until(() => stateOf(manager).state === "ready", 5000, "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   const [args] = fs
     .readFileSync(path.join(proxy.dir, "spawns.log"), "utf8")
     .trim()
@@ -158,16 +142,17 @@ for (const [name, mode, expected] of [
       () =>
         stateOf(manager).state === expected.state &&
         stateOf(manager).state !== "connecting",
-      5000,
       expected.state,
     );
     assert.equal(stateOf(manager).reason, expected.reason);
     assert.ok(stateOf(manager).message);
-    await sleep(400); // many backoff periods at 20 ms
+    // timing: absence window spanning many 20 ms backoff periods
+    await sleep(400);
     assert.equal(proxy.spawns(), 1);
     assert.equal(stateOf(manager).state, expected.state);
     // An explicit retry is one more spawn, never a loop.
     await manager.retry(PROFILE.id);
+    // timing: absence window after the retry: it must not start a loop
     await sleep(200);
     assert.equal(proxy.spawns(), 2);
   });
@@ -181,13 +166,13 @@ test("ssh connector: proxy exit 2 reconnects at once, not after the backoff", as
     backoffMaxMs: 60000,
   });
   manager.start();
-  await until(() => stateOf(manager).state === "ready", 5000, "first ready");
+  await until(() => stateOf(manager).state === "ready", "first ready");
   proxy.setMode({});
-  await within(
+  await until(
     () =>
       stateOf(manager).generation === 2 && stateOf(manager).state === "ready",
-    20000,
     "reconnect",
+    { deadlineMs: 20000 },
   );
   const offline = seen.find((state) => state.state === "offline");
   assert.equal(offline.reason, "daemon_died");
@@ -201,7 +186,7 @@ test("ssh connector: another failure backs off and keeps trying", async () => {
   });
   const { manager } = sshManager(proxy);
   manager.start();
-  await until(() => proxy.spawns() >= 3, 5000, "retries");
+  await until(() => proxy.spawns() >= 3, "retries");
   assert.equal(
     stateOf(manager).state === "failed" ||
       stateOf(manager).state === "connecting",
@@ -212,7 +197,7 @@ test("ssh connector: another failure backs off and keeps trying", async () => {
     /Network is unreachable/,
   );
   proxy.setMode({});
-  await until(() => stateOf(manager).state === "ready", 5000, "ready again");
+  await until(() => stateOf(manager).state === "ready", "ready again");
 });
 
 test("an immediate reconnect is granted once: a daemon that dies at once cannot spin", async () => {
@@ -222,6 +207,7 @@ test("an immediate reconnect is granted once: a daemon that dies at once cannot 
     backoffMaxMs: 300,
   });
   manager.start();
+  // timing: spans more than one 300 ms backoff to count the spawns
   await sleep(500);
   // 1 first try + 1 immediate retry + at most 1 after one backoff.
   assert.ok(proxy.spawns() <= 3, `spawns ${proxy.spawns()}`);
@@ -244,7 +230,8 @@ test("command connector: a healthy command is pinged and stays ready", async () 
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "c1").state === "ready");
+  await until(() => stateOf(manager, "c1").state === "ready", "c1 ready");
+  // timing: absence window: pings at 30 ms must not drop the connection
   await sleep(300);
   assert.equal(stateOf(manager, "c1").state, "ready");
   assert.equal(stateOf(manager, "c1").generation, 1);
@@ -274,10 +261,9 @@ test("command connector: an unanswered $/ping drops the connection after the tim
   const seen = [];
   manager.on("state", (state) => seen.push({ ...state }));
   manager.start();
-  await until(() => stateOf(manager, "c1").state === "ready");
+  await until(() => stateOf(manager, "c1").state === "ready", "c1 ready");
   await until(
     () => seen.some((state) => state.reason === "ping_timeout"),
-    3000,
     "ping timeout",
   );
   assert.equal(seen.find((s) => s.reason === "ping_timeout").state, "offline");
@@ -286,7 +272,6 @@ test("command connector: an unanswered $/ping drops the connection after the tim
     () =>
       stateOf(manager, "c1").state === "ready" &&
       stateOf(manager, "c1").generation >= 2,
-    3000,
     "ready again",
   );
 });
@@ -307,7 +292,7 @@ test("command connector: a missing command is a failed state naming it", async (
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "c1").state === "failed");
+  await until(() => stateOf(manager, "c1").state === "failed", "c1 failed");
   assert.match(stateOf(manager, "c1").message, /nonexistent/);
 });
 
@@ -338,7 +323,7 @@ test("hosts are added, replaced and removed live from the profile list", async (
   manager.setConnectors(
     build([{ id: "h1", host: "a", autoConnect: true }], one),
   );
-  await until(() => stateOf(manager, "h1")?.state === "ready");
+  await until(() => stateOf(manager, "h1")?.state === "ready", "h1 ready");
   manager.setConnectors(
     build(
       [
@@ -353,7 +338,7 @@ test("hosts are added, replaced and removed live from the profile list", async (
       one,
     ),
   );
-  await until(() => stateOf(manager, "h2")?.state === "ready");
+  await until(() => stateOf(manager, "h2")?.state === "ready", "h2 ready");
   // An unchanged profile keeps its connection.
   assert.equal(stateOf(manager, "h1").generation, 1);
   assert.equal(one.spawns(), 1);
@@ -373,8 +358,8 @@ test("hosts are added, replaced and removed live from the profile list", async (
       one,
     ),
   );
-  await until(() => one.spawns() === 2, 3000, "replaced");
-  await until(() => stateOf(manager, "h1").state === "ready");
+  await until(() => one.spawns() === 2, "replaced");
+  await until(() => stateOf(manager, "h1").state === "ready", "h1 ready");
 
   manager.setConnectors(
     build(
@@ -401,6 +386,7 @@ test("hosts are added, replaced and removed live from the profile list", async (
   assert.equal(removed.reason, "removed");
   await assert.rejects(manager.request("h1", "session.list"), /unknown host/);
   const spawns = one.spawns();
+  // timing: absence window: a removed host must not respawn
   await sleep(150);
   assert.equal(one.spawns(), spawns);
 });
@@ -420,10 +406,13 @@ test("saving an unchanged profile retries a host that stopped without a retry", 
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "h1").state === "need_auth");
+  await until(
+    () => stateOf(manager, "h1").state === "need_auth",
+    "h1 need auth",
+  );
   proxy.setMode({});
   manager.setConnectors(build());
-  await until(() => stateOf(manager, "h1").state === "ready");
+  await until(() => stateOf(manager, "h1").state === "ready", "h1 ready");
 });
 
 test("a re-attach that fails with a plain error is tried again with backoff", async () => {
@@ -464,13 +453,12 @@ test("a re-attach that fails with a plain error is tried again with backoff", as
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "h").state === "ready");
+  await until(() => stateOf(manager, "h").state === "ready", "h ready");
   const got = [];
   await manager.attach("h", "s1", {}, (data, info) => got.push(info));
   clients[0].emit("disconnect");
   await until(
     () => got.filter((i) => i.reattach).length === 1,
-    3000,
     "retried re-attach",
   );
   assert.equal(attaches, 3);
@@ -626,10 +614,15 @@ test("a ready host whose build differs from the bundled sha is flagged for updat
     const listeners = [];
     const updates = [];
     const stored = {};
+    let compared;
+    const reachedCompare = new Promise((resolve) => (compared = resolve));
     watchHostTools({
       manager: {
         on: (name, callback) => listeners.push(callback),
-        hello: () => ({ host: "h1", build }),
+        hello: () => {
+          compared();
+          return { host: "h1", build };
+        },
         setUpdate: (host, flag) => updates.push([host, flag]),
       },
       connections: {
@@ -644,7 +637,8 @@ test("a ready host whose build differs from the bundled sha is flagged for updat
       manifest: () => ({ manifest: { "Linux x86_64": { sha256: sha } } }),
     });
     listeners[0]({ host: "h1", state: "ready", generation: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // setUpdate runs in the same turn as hello, so it has run once this resumes.
+    await reachedCompare;
     return updates;
   };
   assert.deepEqual(await run("b".repeat(64)), [["h1", true]]);
@@ -817,18 +811,25 @@ test("a connection that stays up refills the budget", async () => {
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager).state === "ready");
-  await sleep(150); // stable now: its 50 ms timer is due before this sleep ends
+  await until(() => stateOf(manager).state === "ready", "ready");
+  // timing: the connection must outlive the 50 ms stableMs
+  await sleep(150);
   await manager.retry(PROFILE.id);
-  await until(() => stateOf(manager).state === "ready");
+  await until(() => stateOf(manager).state === "ready", "ready");
   assert.equal(proxy.spawns(), 2);
-  await sleep(150); // the second connection is stable too
+  // timing: the second connection must outlive the 50 ms stableMs
+  await sleep(150);
   proxy.killLatest();
-  await within(() => proxy.spawns() >= 3, 20000, "immediate reconnect");
-  await until(() => stateOf(manager).state === "ready");
-  await sleep(150); // stable again: the one immediate retry is back
+  await until(() => proxy.spawns() >= 3, "immediate reconnect", {
+    deadlineMs: 20000,
+  });
+  await until(() => stateOf(manager).state === "ready", "ready");
+  // timing: the connection must outlive the 50 ms stableMs again
+  await sleep(150);
   proxy.killLatest();
-  await within(() => proxy.spawns() >= 4, 20000, "immediate reconnect again");
+  await until(() => proxy.spawns() >= 4, "immediate reconnect again", {
+    deadlineMs: 20000,
+  });
 });
 
 test("a daemon speaking another protocol is failed/incompatible and never retried", async () => {
@@ -839,8 +840,10 @@ test("a daemon speaking another protocol is failed/incompatible and never retrie
     () =>
       stateOf(manager).state === "failed" &&
       stateOf(manager).reason === "incompatible",
+    "a failed, incompatible host",
   );
   assert.match(stateOf(manager).message, /protocol 99/);
+  // timing: absence window: an incompatible daemon is never retried
   await sleep(400);
   assert.equal(proxy.spawns(), 1);
 });
@@ -867,7 +870,10 @@ test("a changed host key carries the exact ssh-keygen command for the resolved n
   const manager = build(proxy, { id: "h", host: "user@devbox" });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "h").reason === "host_key_changed");
+  await until(
+    () => stateOf(manager, "h").reason === "host_key_changed",
+    "h host key changed",
+  );
   assert.equal(
     stateOf(manager, "h").hint,
     "ssh-keygen -R '[devbox.example.test]:2222' -f '/data/known hosts'",
@@ -878,7 +884,10 @@ test("a changed host key carries the exact ssh-keygen command for the resolved n
   const second = build(plain, { id: "h", host: "devbox" });
   cleanups.push(() => second.close());
   second.start();
-  await until(() => stateOf(second, "h").reason === "host_key_changed");
+  await until(
+    () => stateOf(second, "h").reason === "host_key_changed",
+    "stateOf(second, 'h').reason === 'host_key_changed'",
+  );
   assert.equal(
     stateOf(second, "h").hint,
     "ssh-keygen -R 'devbox.example.test' -f '/data/known hosts'",
@@ -888,7 +897,10 @@ test("a changed host key carries the exact ssh-keygen command for the resolved n
   const third = build(saved, { id: "h", host: "devbox", port: 2200 });
   cleanups.push(() => third.close());
   third.start();
-  await until(() => stateOf(third, "h").reason === "host_key_changed");
+  await until(
+    () => stateOf(third, "h").reason === "host_key_changed",
+    "stateOf(third, 'h').reason === 'host_key_changed'",
+  );
   assert.match(
     stateOf(third, "h").hint,
     /^ssh-keygen -R '\[devbox\.example\.test\]:2200' -f /,
@@ -934,11 +946,13 @@ test("hosts of profiles without autoConnect wait for a connect; disconnect suspe
   const seen = [];
   manager.on("state", (state) => seen.push({ ...state }));
   manager.start();
+  // timing: absence window: a profile without autoConnect never spawns
   await sleep(150);
   assert.equal(proxy.spawns(), 0);
   assert.equal(stateOf(manager, "h1").state, "offline");
   // Saving the profile again does not connect it either.
   manager.setConnectors(build(profile));
+  // timing: absence window: saving the profile again never spawns
   await sleep(100);
   assert.equal(proxy.spawns(), 0);
 
@@ -949,6 +963,7 @@ test("hosts of profiles without autoConnect wait for a connect; disconnect suspe
   assert.equal(stateOf(manager, "h1").reason, "disconnected");
   assert.equal(seen.at(-1).reason, "disconnected");
   manager.setConnectors(build({ ...profile, autoConnect: true }));
+  // timing: absence window: a suspended host never reconnects
   await sleep(150);
   // Suspended: not even an autoConnect profile reconnects until a connect.
   assert.equal(proxy.spawns(), 1);
@@ -967,7 +982,7 @@ test("an autoConnect profile connects when the manager starts", async () => {
   });
   cleanups.push(() => manager.close());
   manager.start();
-  await until(() => stateOf(manager, "h1").state === "ready");
+  await until(() => stateOf(manager, "h1").state === "ready", "h1 ready");
 });
 
 test("the old-daemon stop script signals only a daemon that holds the lock", async () => {
@@ -988,6 +1003,7 @@ test("the old-daemon stop script signals only a daemon that holds the lock", asy
   const lock = path.join(home, ".sushiai", "daemon.lock");
   fs.writeFileSync(lock, String(bystander.pid));
   assert.equal(run(), "free");
+  // timing: absence window: the bystander must stay alive
   await sleep(100);
   assert.equal(bystander.exitCode, null);
   assert.equal(bystander.signalCode, null);
@@ -1008,7 +1024,7 @@ time.sleep(30)`,
   cleanups.push(() => holder.kill());
   await new Promise((resolve) => holder.stdout.once("data", resolve));
   assert.equal(run(), "stopped");
-  await until(() => holder.signalCode === "SIGTERM", 3000, "holder stopped");
+  await until(() => holder.signalCode === "SIGTERM", "holder stopped");
 });
 
 test("a port forward is its own process", async () => {
@@ -1085,19 +1101,27 @@ test("tool setup runs once per host, when it first becomes ready, and command ho
   const ready = (host) => bus.emit("state", { host, state: "ready" });
   ready("local");
   ready("devbox");
-  await sleep(20);
+  await until(() => stored.devbox, "the devbox tool setup");
   ready("devbox"); // a reconnect
   ready("cmd");
   ready("gone");
-  await sleep(20);
-  assert.deepEqual(calls, [
-    { endpoint: "ssh:devbox", options: { sushiai: null } },
-  ]);
-  assert.deepEqual(stored, { devbox: true });
+  // A host set up after those events: its setup call comes after any setup
+  // they would have started, so the checks below see all of them.
+  ready("barrier-one");
+  await until(() => stored["barrier-one"], "the first barrier setup");
+  assert.deepEqual(
+    calls.map((call) => call.endpoint),
+    ["ssh:devbox", "ssh:barrier-one"],
+  );
+  assert.equal(stored.devbox, true);
   assert.ok(logs.some((line) => /cmd.*command/.test(line)));
   // The installer records it too, so a later ready does nothing.
   tools.mark("other");
   ready("other");
-  await sleep(20);
-  assert.equal(calls.length, 1);
+  ready("barrier-two");
+  await until(() => stored["barrier-two"], "the second barrier setup");
+  assert.deepEqual(
+    calls.map((call) => call.endpoint),
+    ["ssh:devbox", "ssh:barrier-one", "ssh:barrier-two"],
+  );
 });

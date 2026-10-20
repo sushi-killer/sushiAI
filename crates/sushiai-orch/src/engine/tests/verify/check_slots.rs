@@ -98,6 +98,7 @@ async fn check_slots_two_checks_run_and_third_waits_with_a_saved_broadcast_decis
     assert_eq!(result.code, Some(0));
     assert_eq!((result.load, result.cores), (0.5, 4));
     assert!(
+        // timing: the wall time since queueing covers the held window plus the run, never less
         queued_at.elapsed().as_millis() >= u128::from(result.ms) + 150,
         "execution excludes the slot wait"
     );

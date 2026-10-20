@@ -591,7 +591,7 @@ mod tests {
             let (app, id) = (app.clone(), id.clone());
             std::thread::spawn(move || app.record_task_metrics(&id))
         };
-        std::thread::sleep(std::time::Duration::from_millis(500)); // wait-allow: the recorder must sit inside its blocked FIFO read; the test measures the owner mark landing in that gap and nothing signals the block
+        std::thread::sleep(std::time::Duration::from_millis(500)); // timing: the recorder must sit inside its blocked FIFO read; the test measures the owner mark landing in that gap and nothing signals the block
         app.handle_task_lead_touch(json!({"id": id, "touched": true, "note": "fix it"}))
             .await
             .unwrap();
@@ -630,7 +630,7 @@ mod tests {
                 let _guard = lock.lock().unwrap();
                 let mut stale = app.store.load_task(&id).unwrap().unwrap();
                 loaded_tx.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(300)); // wait-allow: the lock is held while the owner mark blocks on it; the blocked state has no observable signal
+                std::thread::sleep(std::time::Duration::from_millis(300)); // timing: the lock is held while the owner mark blocks on it; the blocked state has no observable signal
                 stale
                     .fixture_data()
                     .decisions

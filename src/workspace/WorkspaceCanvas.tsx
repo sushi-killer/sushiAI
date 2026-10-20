@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef } from "react";
 import { Columns2, Plus, X } from "lucide-react";
 import { findPanelOwner } from "./workspace-actions.ts";
-import { codePanels } from "../workspaceState.ts";
+import { contains } from "../layout.ts";
 import { liveWorktreeBranches } from "./worktreeSessions.ts";
 import { Empty } from "../app/Empty.tsx";
 import { LayoutView, PanelHost } from "../WorkspacePanels.tsx";
@@ -95,14 +95,15 @@ export function WorkspaceCanvas({
   const visitedTabs = useRef(new Set<string>());
   const group = merged.group;
   const paneById = new Map(merged.panes.map((mp) => [mp.panel.id, mp]));
-  const filteredPanels = group
-    ? merged.panes.map((mp) => mp.panel)
-    : codePanels(active);
+  const visibleLayout = group ? merged.layout : active.layout;
+  // A hidden pane is listed but off the canvas: no tab either.
+  const filteredPanels = (
+    group ? merged.panes.map((mp) => mp.panel) : active.panels
+  ).filter((p) => contains(visibleLayout, p.id));
   const compactId =
     filteredPanels.find((p) => p.id === selected)?.id || filteredPanels[0]?.id;
   const useTabs = tabMode || compact || filteredPanels.length > 6;
   if (compactId) visitedTabs.current.add(compactId);
-  const visibleLayout = group ? merged.layout : active.layout;
   function renderPanel(id: string) {
     const own = paneById.get(id);
     const panel =

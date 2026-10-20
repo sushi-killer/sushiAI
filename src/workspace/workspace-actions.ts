@@ -43,10 +43,29 @@ export function appendPanel(
   return {
     ...workspace,
     panels: [...workspace.panels, panel],
-    layout: workspace.layout
-      ? split(workspace.layout, leaf(panel.id), "row", ratio)
-      : leaf(panel.id),
+    layout: withPanel(workspace.layout, panel.id, ratio),
   };
+}
+
+/** The layout with the panel on it: unchanged when it is already there, else
+ * the panel joins on the right. A hidden or adopted panel is listed in
+ * `panels` but not in the layout until it is shown. */
+export function withPanel(
+  layout: Layout | null,
+  panelId: string,
+  ratio = 0.65,
+): Layout {
+  if (contains(layout, panelId)) return layout!;
+  return layout ? split(layout, leaf(panelId), "row", ratio) : leaf(panelId);
+}
+
+/** The workspace with a listed code panel on its canvas. A chat thread stays
+ * where it is: one that is not in the layout belongs to the Chat list. */
+export function revealPanel(workspace: Workspace, panelId: string): Workspace {
+  const panel = workspace.panels.find((item) => item.id === panelId);
+  if (!panel || panel.kind === "chat" || contains(workspace.layout, panelId))
+    return workspace;
+  return { ...workspace, layout: withPanel(workspace.layout, panelId) };
 }
 
 /** Puts the panel that replaces an ended session panel into its layout slot
@@ -240,7 +259,11 @@ export function movePanel(
 export function tidyWorkspace(workspace: Workspace): Workspace {
   return {
     ...workspace,
-    layout: tidy(codePanels(workspace).map((panel) => panel.id)),
+    layout: tidy(
+      workspace.panels
+        .filter((panel) => contains(workspace.layout, panel.id))
+        .map((panel) => panel.id),
+    ),
   };
 }
 

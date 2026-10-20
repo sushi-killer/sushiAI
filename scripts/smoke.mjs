@@ -355,6 +355,34 @@ try {
     sessionId,
   );
   assert.equal(stillRunning, "running", "Cancel leaves the session running");
+  // Hide takes the pane off the canvas and keeps the session; the sidebar
+  // puts it back, and it stays on the canvas after focus mode ends.
+  await page
+    .getByRole("button", { name: `Close ${shellTitle}`, exact: true })
+    .click();
+  await page.getByRole("button", { name: "Hide", exact: true }).waitFor();
+  await page.screenshot({
+    path: path.join(root, "artifacts/close-session.png"),
+  });
+  await page.getByRole("button", { name: "Hide", exact: true }).click();
+  assert.equal(await page.locator(".workspace-canvas .panel").count(), 3);
+  assert.equal(
+    await page.evaluate(
+      async (id) =>
+        (await window.bridge.sessionsList("local")).find((s) => s.id === id)
+          ?.status,
+      sessionId,
+    ),
+    "running",
+    "Hide leaves the session running",
+  );
+  await page.locator(`.workspace-panels button[title="${shellTitle}"]`).click();
+  await page
+    .getByRole("button", { name: `Maximize ${shellTitle}`, exact: true })
+    .click();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".workspace-canvas .panel").length === 4,
+  );
   assert.equal(await page.title(), "sushiAI");
   assert.ok(
     await page

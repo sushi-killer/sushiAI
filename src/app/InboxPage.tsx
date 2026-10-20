@@ -316,8 +316,7 @@ export function InboxPage({
     });
   const jump = (row: InboxRow) => {
     switchWorkspace(row.workspace.id);
-    ws.setSelected(row.panel.id);
-    ws.setZoomed(row.panel.id);
+    ws.revealPane(row.workspace.id, row.panel.id);
   };
   /** A module's "review all": the first click arms it, the second runs it
    * on the review rows on screen. */

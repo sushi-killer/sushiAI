@@ -88,16 +88,29 @@ const ProjectVaultBlock = lazy(() =>
   ),
 );
 
+const VaultEnvRows = lazy(() =>
+  import("../vault/VaultEnvRows.tsx").then(({ VaultEnvRows: Component }) => ({
+    default: Component,
+  })),
+);
+
 /** A block a module adds to a project's Environment page. */
 export type ProjectSection = {
   extensionId: string;
   Section: ComponentType<{ projectId: string }>;
+  /** Rows the module adds to the Variables table. `listed` holds the names
+   * of the rows entered by hand with a value, which win over a module's own. */
+  Rows?: ComponentType<{ projectId: string; listed: readonly string[] }>;
 };
 
 /** A constant list, drawn in this order. */
 export const projectEnvironmentSections: readonly ProjectSection[] =
   Object.freeze([
-    { extensionId: VAULT_EXTENSION_ID, Section: ProjectVaultBlock },
+    {
+      extensionId: VAULT_EXTENSION_ID,
+      Section: ProjectVaultBlock,
+      Rows: VaultEnvRows,
+    },
   ]);
 
 /** The sections whose extension is active in `snapshot`. */

@@ -385,7 +385,7 @@ export function ProjectEnvironmentTab({
       <div className="pd-toolbar">
         <span>
           {project
-            ? `${project.env.length} variables · ${project.env.filter((entry) => entry.secret).length} secrets`
+            ? `${project.env.length} added here · ${project.env.filter((entry) => entry.secret).length} secrets`
             : ""}
         </span>
         <button
@@ -480,6 +480,18 @@ export function ProjectEnvironmentTab({
                 onRemove={() => void updateEnv({ remove: [entry.name] })}
               />
             ))}
+            {sections.map(({ extensionId, Rows }) =>
+              Rows ? (
+                <Suspense key={extensionId} fallback={null}>
+                  <Rows
+                    projectId={project.id}
+                    listed={project.env
+                      .filter((entry) => entry.hasValue)
+                      .map((entry) => entry.name)}
+                  />
+                </Suspense>
+              ) : null,
+            )}
             {!project.env.length && !adding && (
               <p className="pd-empty-row">
                 No variables yet. Add one, or drop a .env file below.

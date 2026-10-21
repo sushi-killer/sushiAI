@@ -4,13 +4,43 @@
 use std::sync::Arc;
 
 use sushiai_core::{hibernate::can_hibernate, mark_exited, mark_hibernated};
-use sushiai_protocol::{code, SessionCreate, SessionStatus};
+use sushiai_protocol::{code, SessionCreate, SessionInfo, SessionStatus};
 
 use crate::agent::{self, now_ms};
 use crate::error::Fail;
-use crate::launch_store::OpenError;
+use crate::launch_store::{Launch, OpenError};
 use crate::registry::Registry;
 use crate::session;
+
+/// The `session.create` a wake replays: the sealed launch of the session, resuming its
+/// conversation. Interactive, because a wake continues the conversation for the owner.
+fn wake_request(
+    info: &SessionInfo,
+    name: String,
+    conversation: String,
+    launch: Launch,
+) -> SessionCreate {
+    SessionCreate {
+        cmd: Vec::new(),
+        cwd: info.cwd.clone(),
+        cols: info.cols,
+        rows: info.rows,
+        title: None,
+        agent: Some(name),
+        resume: Some(conversation),
+        prompt: None,
+        model: launch.model,
+        extra_args: launch.extra_args,
+        env: launch.env,
+        project: None,
+        group: None,
+        claude_settings: launch.claude_settings,
+        idempotency_key: None,
+        background: info.background,
+        headless: false,
+        full_access: launch.full_access,
+    }
+}
 
 /// Wakes the session `id`; a running or waking one is left as it is.
 pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
@@ -68,27 +98,7 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
             return Err(fail);
         }
     };
-    let request = SessionCreate {
-        cmd: Vec::new(),
-        cwd: info.cwd.clone(),
-        cols: info.cols,
-        rows: info.rows,
-        title: None,
-        agent: Some(name),
-        resume: Some(conversation),
-        prompt: None,
-        model: launch.model,
-        extra_args: launch.extra_args,
-        env: launch.env,
-        project: None,
-        group: None,
-        claude_settings: launch.claude_settings,
-        idempotency_key: None,
-        background: info.background,
-        // A wake resumes the conversation for the owner, so it is interactive.
-        headless: false,
-        full_access: launch.full_access,
-    };
+    let request = wake_request(&info, name, conversation, launch);
     let socket = registry.home.socket().to_string_lossy().into_owned();
     let prepared = agent::prepare(&request, &socket, id)?;
     let home_dir = registry.home.dir().to_path_buf();
@@ -132,4 +142,45 @@ async fn launch_lost(registry: &Arc<Registry>, id: &str) {
         }
     }
     registry.drop_files(id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn stored(full_access: bool) -> Launch {
+        Launch {
+            env: BTreeMap::new(),
+            claude_settings: None,
+            model: None,
+            extra_args: Vec::new(),
+            full_access,
+        }
+    }
+
+    #[test]
+    fn a_woken_session_keeps_full_access_only_when_its_launch_had_it() {
+        let info: SessionInfo = serde_json::from_value(json!({
+            "id": "s1", "cmd": ["claude"], "cwd": "/tmp", "status": "hibernated",
+            "cols": 80, "rows": 24,
+        }))
+        .expect("session info");
+        for (agent, flag) in [
+            ("claude", "bypassPermissions"),
+            ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        ] {
+            for full_access in [true, false] {
+                let request =
+                    wake_request(&info, agent.into(), "conv-1".into(), stored(full_access));
+                let prepared = agent::prepare(&request, "/tmp/x.sock", "s1").expect("prepare");
+                assert_eq!(
+                    prepared.run_cmd.contains(&flag.to_owned()),
+                    full_access,
+                    "{agent} full_access={full_access}"
+                );
+            }
+        }
+    }
 }

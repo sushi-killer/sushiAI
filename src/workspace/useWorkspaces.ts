@@ -52,6 +52,7 @@ import { launchesInWorktree } from "./worktree.ts";
 import {
   launchDaemonSession,
   launchTarget,
+  newPanelRequest,
   newWorkspaceId,
   placeLaunchedPanel,
 } from "./session-launch.ts";
@@ -395,10 +396,12 @@ export function useWorkspaces({
     accountId?: string,
     targetWorkspaceId?: string,
     worktree?: { branch: string; base?: string },
-    operationId?: string,
-    env?: Record<string, string>,
-    prompt?: string,
-    fullAccess?: boolean,
+    options: {
+      operationId?: string;
+      env?: Record<string, string>;
+      prompt?: string;
+      fullAccess?: boolean;
+    } = {},
   ): Promise<boolean> {
     const modelProfileId = modelProfile?.id;
     const accounts =
@@ -418,32 +421,25 @@ export function useWorkspaces({
     try {
       // Every agent and terminal panel runs in a daemon: the local one for a
       // workspace without a connection, the host's own for an ssh one.
-      if (prompt && !launchesInWorktree(kind))
+      if (options.prompt && !launchesInWorktree(kind))
         throw new Error("Starting with a prompt needs an agent or terminal.");
       if (launchesInWorktree(kind)) {
         const endpoint = current.connection || LOCAL_ENDPOINT;
-        const operation = operationId || uid();
+        const operation = options.operationId || uid();
         return await launchSession(
-          {
-            operationId: operation,
-            endpoint,
-            cwd: current.cwd,
-            label: launchLabel({
-              kind: kind === "agent" ? "agent" : "terminal",
-              workspaceName: current.name,
-              branch: worktree?.branch,
-            }),
+          newPanelRequest({
             kind: kind === "agent" ? "agent" : "terminal",
-            agent: kind === "agent" ? agent : undefined,
-            modelProfileId,
-            ...accounts,
-            env,
-            // A worktree launch is a workspace of its own: its id is the group.
-            workspaceId: worktree ? newWorkspaceId(operation) : current.id,
+            agent,
+            operationId: operation,
+            workspace: current,
+            endpoint,
             worktree,
-            ...(prompt ? { prompt } : {}),
-            ...(kind === "agent" && fullAccess ? { fullAccess: true } : {}),
-          },
+            modelProfileId,
+            accounts,
+            env: options.env,
+            prompt: options.prompt,
+            fullAccess: options.fullAccess,
+          }),
           {
             id: "",
             kind,

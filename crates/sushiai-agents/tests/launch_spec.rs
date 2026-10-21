@@ -156,6 +156,29 @@ fn without_full_access_no_guard_flag_is_added() {
 }
 
 #[test]
+fn extra_args_cannot_switch_the_guard_off() {
+    let refused = |agent: &str, extra: &[&str]| {
+        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        let p = params(harness(agent), AgentSession::New("abc"), BIN, &extra);
+        build(&p)
+    };
+    for (agent, extra) in [
+        ("claude", vec!["--dangerously-skip-permissions"]),
+        ("claude", vec!["--permission-mode", "bypassPermissions"]),
+        ("claude", vec!["--permission-mode=bypassPermissions"]),
+        ("codex", vec!["--dangerously-bypass-approvals-and-sandbox"]),
+    ] {
+        assert!(
+            matches!(refused(agent, &extra), Err(LaunchError::ForbiddenArg(_))),
+            "{agent} {extra:?}"
+        );
+    }
+    // Other modes stay: routines need `dontAsk`.
+    let ok = refused("claude", &["--permission-mode", "dontAsk"]);
+    assert!(ok.is_ok(), "{ok:?}");
+}
+
+#[test]
 fn claude_resume_uses_resume_and_no_session_id() {
     let spec = build(&params(
         harness("claude"),

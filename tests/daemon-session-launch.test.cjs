@@ -10,7 +10,10 @@ const {
 } = require("../electron/session-launch.cjs");
 const { sessionLaunchEnv } = require("../electron/project-session.cjs");
 const { registerDaemonIpc } = require("../electron/ipc/daemon.cjs");
-const { toDaemonLaunch } = require("../src/workspace/session-launch.ts");
+const {
+  toDaemonLaunch,
+  newPanelRequest,
+} = require("../src/workspace/session-launch.ts");
 
 const TOKEN = "tok-synthetic-subscription-123";
 const API_KEY = "key-synthetic-api-456";
@@ -250,6 +253,41 @@ test("the renderer request keeps one key per launch and maps the workspace to gr
   assert.equal(toDaemonLaunch({ ...request, endpoint: "ssh:x" }).host, "x");
   assert.equal(toDaemonLaunch({ ...request, resume: "r-1" }).resume, "r-1");
   assert.equal(first.resume, undefined);
+});
+
+test("a new panel request carries full access on an agent only", () => {
+  const input = {
+    agent: "claude",
+    operationId: "op-1",
+    workspace: { id: "w1", name: "app", cwd: "/repo" },
+    endpoint: "local",
+    accounts: {},
+    fullAccess: true,
+  };
+  const agent = newPanelRequest({ ...input, kind: "agent" });
+  assert.equal(agent.fullAccess, true);
+  assert.equal(agent.workspaceId, "w1");
+  assert.equal(toDaemonLaunch(agent).fullAccess, true);
+  assert.equal(
+    "fullAccess" in newPanelRequest({ ...input, kind: "terminal" }),
+    false,
+  );
+  assert.equal(
+    "fullAccess" in
+      newPanelRequest({ ...input, kind: "agent", fullAccess: false }),
+    false,
+  );
+  const tree = newPanelRequest({
+    ...input,
+    kind: "agent",
+    worktree: { branch: "feat-x" },
+  });
+  assert.notEqual(
+    tree.workspaceId,
+    "w1",
+    "a worktree launch is a workspace of its own",
+  );
+  assert.equal(tree.label, "app · feat-x");
 });
 
 test("no launch error carries a secret", async (t) => {

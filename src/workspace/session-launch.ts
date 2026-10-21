@@ -1,5 +1,10 @@
 import { daemonHost, sessionPanelId } from "../daemonSessions.ts";
-import { appendPanel, reopenInSlot, withPanel } from "./workspace-actions.ts";
+import {
+  appendPanel,
+  launchLabel,
+  reopenInSlot,
+  withPanel,
+} from "./workspace-actions.ts";
 import { leaf } from "../layout.ts";
 import { launchTerminalSize } from "../terminal-sizing.ts";
 import type {
@@ -65,6 +70,44 @@ export async function launchDaemonSession(
   };
   delete panel.ended;
   return { host, sessionId, cwd: cwd || request.cwd, panel };
+}
+
+/** The launch request of a new agent or terminal panel (the "+" picker and the
+ * companion's Launch). `fullAccess` rides only on an agent. A worktree launch
+ * is a workspace of its own, so its id is the daemon group. */
+export function newPanelRequest(input: {
+  kind: "agent" | "terminal";
+  agent?: string;
+  operationId: string;
+  workspace: { id: string; name: string; cwd: string };
+  endpoint: string;
+  worktree?: { branch: string; base?: string };
+  modelProfileId?: string;
+  accounts: { claudeAccountId?: string; codexAccountId?: string };
+  env?: Record<string, string>;
+  prompt?: string;
+  fullAccess?: boolean;
+}): SessionLaunchRequest {
+  const { kind, workspace, worktree } = input;
+  return {
+    operationId: input.operationId,
+    endpoint: input.endpoint,
+    cwd: workspace.cwd,
+    label: launchLabel({
+      kind,
+      workspaceName: workspace.name,
+      branch: worktree?.branch,
+    }),
+    kind,
+    agent: kind === "agent" ? input.agent : undefined,
+    modelProfileId: input.modelProfileId,
+    ...input.accounts,
+    env: input.env,
+    workspaceId: worktree ? newWorkspaceId(input.operationId) : workspace.id,
+    worktree,
+    ...(input.prompt ? { prompt: input.prompt } : {}),
+    ...(kind === "agent" && input.fullAccess ? { fullAccess: true } : {}),
+  };
 }
 
 /** The id of the workspace a launch creates, fixed before the launch so the

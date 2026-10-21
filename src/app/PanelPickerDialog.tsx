@@ -115,10 +115,7 @@ export function PanelPickerDialog({
     claudeAccountId?: string,
     targetWorkspaceId?: string,
     worktree?: { branch: string; base: string },
-    operationId?: string,
-    env?: Record<string, string>,
-    prompt?: string,
-    fullAccess?: boolean,
+    options?: { fullAccess?: boolean },
   ): void;
   connected: boolean;
   addExtensionPanel(
@@ -398,10 +395,7 @@ export function PanelPickerDialog({
               undefined,
         targetWorkspaceId,
         worktreeArg,
-        undefined,
-        undefined,
-        undefined,
-        fullAccess[agent] || undefined,
+        { fullAccess: fullAccess[agent] },
       );
     },
     [
@@ -692,7 +686,7 @@ export function PanelPickerDialog({
           ))}
         </div>
         {canWorktree && (
-          <label className={`pk-worktree${wantsWorktree ? " on" : ""}`}>
+          <label className={`pk-check${wantsWorktree ? " on" : ""}`}>
             <input
               type="checkbox"
               checked={wantsWorktree}
@@ -1013,7 +1007,7 @@ export function PanelPickerDialog({
                     aria-label={`${agentTitle(agent)} access`}
                   >
                     <label
-                      className={`pk-worktree${fullAccess[agent] ? " on" : ""}`}
+                      className={`pk-check warn${fullAccess[agent] ? " on" : ""}`}
                     >
                       <input
                         type="checkbox"
@@ -1102,11 +1096,21 @@ export function PanelPickerDialog({
       </div>
       <footer className="pk-foot">
         <span>
-          {setupPick
-            ? `${agentTitle(AGENTS[focusedAgent])} on ${setupProfile?.name}: it is prepared first, then the session starts`
-            : wantsWorktree && !worktreeInvalid
-              ? `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel} in a new worktree on ${branch}`
-              : `${agentTitle(AGENTS[focusedAgent])} on ${launchLabel}${project ? ", with this project’s variables, secrets and MCP servers" : ""}`}
+          {setupPick ? (
+            `${agentTitle(AGENTS[focusedAgent])} on ${setupProfile?.name}: it is prepared first, then the session starts`
+          ) : (
+            <>
+              {`${agentTitle(AGENTS[focusedAgent])} on ${launchLabel}`}
+              {fullAccess[AGENTS[focusedAgent]] && (
+                <span className="pk-foot-warn"> · full access</span>
+              )}
+              {wantsWorktree && !worktreeInvalid
+                ? ` in a new worktree on ${branch}`
+                : project
+                  ? ", with this project’s variables, secrets and MCP servers"
+                  : ""}
+            </>
+          )}
         </span>
         <kbd className="pk-kbd">⏎</kbd>
         <span className="pk-foot-text">

@@ -151,7 +151,7 @@
   color: var(--text);
   font-weight: 500;
 }
-.pk .pk-worktree {
+.pk .pk-check {
   position: relative;
   display: flex;
   flex: none;
@@ -164,10 +164,10 @@
   line-height: 15px;
   cursor: pointer;
 }
-.pk .pk-worktree.on {
+.pk .pk-check.on {
   color: var(--text);
 }
-.pk .pk-worktree input {
+.pk .pk-check input {
   position: absolute;
   width: 15px;
   height: 15px;
@@ -187,11 +187,15 @@
   background: var(--bg-control);
   color: var(--accent-ink);
 }
-.pk-worktree.on .pk-box {
+.pk-check.on .pk-box {
   border-color: var(--accent);
   background: var(--accent);
 }
-.pk-worktree input:focus-visible + .pk-box {
+.pk-check.warn.on .pk-box {
+  border-color: var(--tone-warning);
+  background: var(--tone-warning);
+}
+.pk-check input:focus-visible + .pk-box {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
@@ -308,8 +312,10 @@
 .pk-row {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 11px;
+  row-gap: 4px;
   padding: 8px 10px;
   border-radius: 9px;
 }
@@ -521,6 +527,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.pk-foot-warn {
+  color: var(--tone-warning);
+}
 .pk-foot-text {
   color: var(--text-faint);
   font-size: var(--text-xs);
@@ -604,4 +613,25 @@
 .pk-prepare .host-prep h2 {
   font-size: 18px;
   line-height: 22px;
+}
+
+/* The "Full access" choice of an agent: a second line inside its row, under the
+   name, above the row's click target. */
+.pk-access {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 0 0 100%;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 28px;
+}
+.pk .pk-access .pk-check {
+  margin-left: 0;
+}
+.pk-access small {
+  padding-left: 23px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
 }

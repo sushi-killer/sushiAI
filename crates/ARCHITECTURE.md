@@ -231,7 +231,11 @@ full}` and `groups.sync {groups, full}` answer `{applied, ignored, rev}`. A part
 
 ## Launch and read additions
 
-- `session.create` also takes `claudeSettings` (Claude only) and `idempotencyKey`.
+- `session.create` also takes `claudeSettings` (Claude only), `idempotencyKey` and `fullAccess`.
+  - `fullAccess` starts claude or codex with no permission prompts and no sandbox, by the
+    flags in the agent's `Capabilities::full_access` (placed before the prompt). It is the
+    only way in: `extraArgs` that carry those flags are refused. `AgentInfo.fullAccess` reports
+    it to clients only when the argv carries the flags; an agent without them ignores it.
   - `claudeSettings` is merged into the single `--settings`. It carries no secrets: it
     goes into argv, which the same user can read in `ps`. Only the top-level keys
     `apiKeyHelper` and `model` pass; `apiKeyHelper` should read the key from an
@@ -272,7 +276,7 @@ wire is additive (`PROTOCOL_VERSION` stays 1, capability `hibernate`).
   is set while asleep. `state.json` is schema 2; schema 1 still loads. A `waking`
   session is saved as `running`.
 - **Launch store.** `session.create` for claude/codex seals `{env, claudeSettings, model,
-extraArgs}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
+extraArgs, fullAccess}` into `<home>/sessions/<id>.launch` (0600) with ChaCha20-Poly1305: random
   nonce, the session id as associated data. The key is a login keychain item on macOS
   (default home only; `/usr/bin/security`, the new key on the stdin of `security -i`, never argv; made only on errSecItemNotFound), else `SUSHIAI_LAUNCH_KEY_FILE`, else `<home>/keys/launch.key`
   (0600). It is deleted when the session is closed or removed (or pruned). Env and

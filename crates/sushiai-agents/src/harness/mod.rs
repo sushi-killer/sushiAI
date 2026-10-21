@@ -47,6 +47,9 @@ pub struct Capabilities {
     pub hooks_in_home: bool,
     /// The agent takes the caller's `--settings` JSON. Claude.
     pub settings_json: bool,
+    /// The flags that start the agent with every permission prompt and sandbox off, in the
+    /// order they go on the command line. Empty when the CLI has no such mode.
+    pub full_access: &'static [&'static str],
 }
 
 /// The folders the skill folders hang off. The caller resolves the tool's own

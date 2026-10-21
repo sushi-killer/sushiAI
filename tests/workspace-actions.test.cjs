@@ -572,6 +572,16 @@ test("rename, close and reopen map a panel onto daemon calls", async () => {
     resume: "thread-9",
     restore: true,
   });
+  assert.equal(
+    reopenRequest(remote, { ...ended, fullAccess: true }, "op-1", "/tmp/sock")
+      .fullAccess,
+    true,
+    "a pane started with full access comes back the same way",
+  );
+  assert.equal(
+    "fullAccess" in reopenRequest(remote, ended, "op-1", "/tmp/sock"),
+    false,
+  );
   const shell = reopenRequest(
     local,
     panel("t", "terminal", { sessionId: "s2", ended: true }),

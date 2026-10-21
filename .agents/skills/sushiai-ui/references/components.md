@@ -191,7 +191,7 @@ badge.
   selected `--bg-selected`, `aria-pressed`). Near-copies exist as `.np-tabs`
   and legacy `.workspace-control-tabs` (Settings "Interface size") - do not
   add a fourth.
-- Checkbox: `label.pk-worktree` with a hidden input and a drawn 15px
+- Checkbox: `label.pk-check` with a hidden input and a drawn 15px
   `.pk-box` (radius 4, accent fill when on, `Check size={11} strokeWidth={3}`).
 - Switch: `Toggle` (`src/ui/Toggle.tsx`) - a real checkbox drawn
   32x18; it needs a `label` prop for its accessible name.

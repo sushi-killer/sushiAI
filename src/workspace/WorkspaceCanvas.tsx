@@ -74,9 +74,7 @@ export function WorkspaceCanvas({
         undefined,
         findPanelOwner(wsRef.current.workspaces, panelId)?.id,
         { branch: request.branch, base: request.base },
-        undefined,
-        undefined,
-        request.prompt,
+        { prompt: request.prompt },
       ),
     [],
   );

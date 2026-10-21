@@ -61,6 +61,10 @@ pub struct LaunchParams<'a> {
     /// has no `--no-daemon`, and prints JSON lines (`--json`); `--skip-git-repo-check` lets
     /// it start outside a git repository.
     pub headless: bool,
+    /// Start with no permission prompts and no sandbox, by the agent's own flags
+    /// ([`Capabilities::full_access`](super::Capabilities::full_access)). An agent without
+    /// such flags ignores it.
+    pub full_access: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +104,29 @@ fn valid_session_id(id: &str) -> bool {
 /// A flag a caller may not pass through: it would override what the daemon
 /// sets. The set is Claude's (`--settings`, `--bare`, `--session-id`);
 /// `--resume`/`-r` is both agents'. A third agent inherits the whole set.
-fn check_extra_args(args: &[String]) -> Result<(), LaunchError> {
+fn check_extra_args(harness: HarnessRef, args: &[String]) -> Result<(), LaunchError> {
+    // Full access has one way in, `LaunchParams::full_access`, so a caller cannot widen a
+    // session by an argument the owner never ticked. `--permission-mode dontAsk` stays.
+    let own = harness.capabilities().full_access;
+    // `--flag=value` and `--flag value` are the same words.
+    let words: Vec<&str> = args
+        .iter()
+        .flat_map(|a| {
+            a.split_once('=')
+                .map_or(vec![a.as_str()], |(n, v)| vec![n, v])
+        })
+        .collect();
+    let widened = words.contains(&"--dangerously-skip-permissions")
+        || (!own.is_empty() && words.windows(own.len()).any(|w| w == own));
+    if widened {
+        let flag = args.iter().find(|a| {
+            let name = a.split('=').next().unwrap_or(a);
+            name == "--dangerously-skip-permissions" || own.contains(&name)
+        });
+        return Err(LaunchError::ForbiddenArg(
+            flag.cloned().unwrap_or_else(|| own.join(" ")),
+        ));
+    }
     for a in args {
         let name = a.split('=').next().unwrap_or(a);
         if matches!(
@@ -123,7 +149,7 @@ pub(crate) fn require_absolute(bin: &str) -> Result<(), LaunchError> {
 
 pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
     require_absolute(p.hook_bin)?;
-    check_extra_args(p.extra_args)?;
+    check_extra_args(p.harness, p.extra_args)?;
     let id = match &p.session {
         AgentSession::New(id) | AgentSession::Resume(id) => *id,
     };
@@ -139,8 +165,18 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
     Ok(finish(p, launch(p)?))
 }
 
-/// The prompt and the child variables every agent's argv ends with.
+/// The prompt and the child variables every agent's argv ends with. The full-access flags go
+/// in front of the prompt, where a flag still parses.
 fn finish(p: &LaunchParams, mut argv: Vec<String>) -> LaunchSpec {
+    if p.full_access {
+        argv.extend(
+            p.harness
+                .capabilities()
+                .full_access
+                .iter()
+                .map(|f| (*f).to_owned()),
+        );
+    }
     if let Some(prompt) = p.prompt {
         argv.push("--".into());
         argv.push(prompt.into());

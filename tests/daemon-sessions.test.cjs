@@ -57,6 +57,17 @@ test("a known panel takes the session's status, title and folder", async () => {
   assert.equal(before[0].panels[0].title, "old", "the input is untouched");
 });
 
+test("a panel shows full access only while the host reports it", async () => {
+  const { reconcileSessions } = await library;
+  const before = [workspace([panel("p1", "s1")])];
+  const on = reconcileSessions(before, {
+    local: ready([session("s1", { fullAccess: true })]),
+  });
+  assert.equal(on[0].panels[0].fullAccess, true);
+  const off = reconcileSessions(on, { local: ready([session("s1")]) });
+  assert.equal("fullAccess" in off[0].panels[0], false);
+});
+
 test("an agent turn that finished reads done until it is seen", async () => {
   const { reconcileSessions } = await library;
   const idle = { local: ready([session("s1", { agentStatus: "idle" })]) };

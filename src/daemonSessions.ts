@@ -330,6 +330,8 @@ function livePanel(panel: Panel, session: DaemonSession): Panel {
   if (session.agentSession) next.agentSession = session.agentSession;
   if (session.pinned) next.keepAwake = true;
   else delete next.keepAwake;
+  if (session.fullAccess) next.fullAccess = true;
+  else delete next.fullAccess;
   // The icon follows the agent the daemon runs in the session. A terminal also
   // follows one the owner started by hand, and drops it (with its conversation
   // id and folder) when that agent is gone.

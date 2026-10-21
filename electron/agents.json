@@ -3,14 +3,28 @@
     "id": "claude",
     "label": "Claude Code",
     "native": true,
-    "provider": "Claude"
+    "provider": "Claude",
+    "fullAccess": true
   },
-  { "id": "codex", "label": "Codex", "native": true, "provider": "Codex" },
-  { "id": "gemini", "label": "Gemini CLI", "native": false, "provider": null },
+  {
+    "id": "codex",
+    "label": "Codex",
+    "native": true,
+    "provider": "Codex",
+    "fullAccess": true
+  },
+  {
+    "id": "gemini",
+    "label": "Gemini CLI",
+    "native": false,
+    "provider": null,
+    "fullAccess": false
+  },
   {
     "id": "cursor-agent",
     "label": "Cursor Agent",
     "native": false,
-    "provider": null
+    "provider": null,
+    "fullAccess": false
   }
 ]

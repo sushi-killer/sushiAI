@@ -10,7 +10,10 @@ const {
 } = require("../electron/session-launch.cjs");
 const { sessionLaunchEnv } = require("../electron/project-session.cjs");
 const { registerDaemonIpc } = require("../electron/ipc/daemon.cjs");
-const { toDaemonLaunch } = require("../src/workspace/session-launch.ts");
+const {
+  toDaemonLaunch,
+  newPanelRequest,
+} = require("../src/workspace/session-launch.ts");
 
 const TOKEN = "tok-synthetic-subscription-123";
 const API_KEY = "key-synthetic-api-456";
@@ -99,6 +102,44 @@ test("a headless launch reaches session.create as headless", async (t) => {
   await launcher.launch(base(cwd, { agent: "claude" }));
   assert.equal(requests[0].params.headless, true);
   assert.equal(requests[1].params.headless, undefined);
+});
+
+test("full access reaches session.create for Claude and Codex only, and only when true", async (t) => {
+  const { launcher, requests, cwd } = setup(t);
+  const sent = async (agent, fullAccess) => {
+    await launcher.launch(base(cwd, { agent, fullAccess }));
+    return requests[requests.length - 1].params.fullAccess;
+  };
+  assert.equal(await sent("claude", true), true);
+  assert.equal(await sent("codex", true), true);
+  assert.equal(await sent("claude", false), undefined);
+  assert.equal(await sent("claude", undefined), undefined);
+  // An agent with no such flags never claims the mode.
+  assert.equal(await sent("gemini", true), undefined);
+  assert.equal(await sent("cursor-agent", true), undefined);
+  assert.equal(
+    toDaemonLaunch({
+      operationId: "op",
+      endpoint: "/sock",
+      kind: "agent",
+      agent: "claude",
+      cwd: "/repo",
+      label: "",
+      fullAccess: true,
+    }).fullAccess,
+    true,
+  );
+  assert.equal(
+    toDaemonLaunch({
+      operationId: "op",
+      endpoint: "/sock",
+      kind: "terminal",
+      cwd: "/repo",
+      label: "",
+      fullAccess: true,
+    }).fullAccess,
+    undefined,
+  );
 });
 
 test("subscription token goes to env and never into claudeSettings", async (t) => {
@@ -212,6 +253,41 @@ test("the renderer request keeps one key per launch and maps the workspace to gr
   assert.equal(toDaemonLaunch({ ...request, endpoint: "ssh:x" }).host, "x");
   assert.equal(toDaemonLaunch({ ...request, resume: "r-1" }).resume, "r-1");
   assert.equal(first.resume, undefined);
+});
+
+test("a new panel request carries full access on an agent only", () => {
+  const input = {
+    agent: "claude",
+    operationId: "op-1",
+    workspace: { id: "w1", name: "app", cwd: "/repo" },
+    endpoint: "local",
+    accounts: {},
+    fullAccess: true,
+  };
+  const agent = newPanelRequest({ ...input, kind: "agent" });
+  assert.equal(agent.fullAccess, true);
+  assert.equal(agent.workspaceId, "w1");
+  assert.equal(toDaemonLaunch(agent).fullAccess, true);
+  assert.equal(
+    "fullAccess" in newPanelRequest({ ...input, kind: "terminal" }),
+    false,
+  );
+  assert.equal(
+    "fullAccess" in
+      newPanelRequest({ ...input, kind: "agent", fullAccess: false }),
+    false,
+  );
+  const tree = newPanelRequest({
+    ...input,
+    kind: "agent",
+    worktree: { branch: "feat-x" },
+  });
+  assert.notEqual(
+    tree.workspaceId,
+    "w1",
+    "a worktree launch is a workspace of its own",
+  );
+  assert.equal(tree.label, "app · feat-x");
 });
 
 test("no launch error carries a secret", async (t) => {

@@ -196,6 +196,7 @@ export function reopenRequest(
     claudeAccountId: handStarted && agent ? "" : ended.claudeAccountId,
     codexAccountId: handStarted && agent ? "" : ended.codexAccountId,
     workspaceId: owner.id,
+    ...(agent && ended.fullAccess ? { fullAccess: true } : {}),
     ...(agent && ended.agentSession ? { resume: ended.agentSession } : {}),
     restore: true,
   };

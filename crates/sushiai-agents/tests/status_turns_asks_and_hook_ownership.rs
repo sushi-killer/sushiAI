@@ -365,6 +365,7 @@ fn params<'a>(
         permission_wait_secs: 600,
         claude_settings: None,
         headless: false,
+        full_access: false,
     }
 }
 

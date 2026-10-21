@@ -68,6 +68,8 @@ impl Harness for Claude {
             session_id: true,
             hooks_in_home: false,
             settings_json: true,
+            // The catalog's `bypassPermissions` mode, the one the chat already offers.
+            full_access: &["--permission-mode", "bypassPermissions"],
         }
     }
 
@@ -160,6 +162,7 @@ mod tests {
             permission_wait_secs: 600,
             claude_settings: None,
             headless,
+            full_access: false,
         })
         .expect("a valid launch")
         .argv

@@ -61,6 +61,8 @@ export type DaemonSession = {
   asks?: DaemonAsk[];
   /** A job session the daemon keeps out of the session tree. */
   background?: boolean;
+  /** The agent was started with no permission prompts and no sandbox. */
+  fullAccess?: boolean;
   /** Catalog binding (gap G11) and shell title (gap G13); not in Rust yet. */
   project?: string;
   group?: string;
@@ -100,6 +102,8 @@ export type DaemonLaunchRequest = {
   group?: string;
   /** A session a job started, kept out of the sidebar's session tree. */
   background?: boolean;
+  /** Start Claude or Codex with no permission prompts and no sandbox. */
+  fullAccess?: boolean;
   claudeAccountId?: string;
   codexAccountId?: string;
   modelProfileId?: string;
@@ -192,6 +196,8 @@ type PanelState = {
   agentCwd?: string;
   /** The host's "Keep awake" flag for this pane's session. */
   keepAwake?: boolean;
+  /** The session runs with no permission prompts and no sandbox (the host reports it). */
+  fullAccess?: boolean;
   pinned?: boolean;
   updatedAt?: number;
   note?: string;
@@ -283,6 +289,8 @@ export type SessionLaunchRequest = {
   prompt?: string;
   /** The agent CLI session to resume (Reopen). */
   resume?: string;
+  /** Start the agent with no permission prompts and no sandbox. */
+  fullAccess?: boolean;
 };
 export type Layout =
   | { type: "leaf"; id: string }

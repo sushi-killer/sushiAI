@@ -210,7 +210,7 @@ test("20 additions land in one workspace and an explicit replay opens one panel"
       undefined,
       undefined,
       undefined,
-      "same-add",
+      { operationId: "same-add" },
     );
   await Promise.all([replay(), replay()]);
   assert.equal(server.sessions.size, 21);

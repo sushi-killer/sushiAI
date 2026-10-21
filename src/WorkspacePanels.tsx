@@ -7,7 +7,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import { SleepMark } from "./ui/SleepMark";
+import { SleepMark, Tag } from "./ui";
 import type { DaemonState, Layout, Panel } from "./types";
 import { TerminalPanel } from "./TerminalPanel";
 import { daemonHost, hostSupports } from "./daemonSessions";
@@ -424,6 +424,13 @@ function PanelFrame({
               keepAwake={!!panel.keepAwake}
               size={12}
             />
+            {panel.fullAccess && (
+              <span title="Started with no permission prompts and no sandbox">
+                <Tag tone="warning" dot={false}>
+                  Full access
+                </Tag>
+              </span>
+            )}
           </>
         )}
         <div className="panel-actions">

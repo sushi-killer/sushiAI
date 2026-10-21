@@ -475,6 +475,44 @@ test("a script that sets SUSHIAI_HOME without HOME is rejected", () => {
   }
 });
 
+test("a remote debugging flag in electron/ or the package build is rejected", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "debug-port-"));
+  const vars = {
+    HEAD_BRANCH: "chore/x",
+    PR_TITLE: "chore: x",
+    DEBUG_PORT_ROOT_OVERRIDE: root,
+  };
+  try {
+    fs.mkdirSync(path.join(root, "electron"));
+    fs.writeFileSync(path.join(root, "package.json"), '{"build":{}}');
+    assert.equal(run(vars).status, 0);
+    fs.writeFileSync(
+      path.join(root, "electron/main.cjs"),
+      'app.commandLine.appendSwitch("remote-debugging-port", "0");\n',
+    );
+    const hit = run(vars);
+    assert.equal(hit.status, 1);
+    assert.match(hit.stderr, /electron\/main\.cjs: a packaged build must not/);
+    fs.writeFileSync(path.join(root, "electron/main.cjs"), "// fine\n");
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      '{"build":{"mac":{"args":["--remote-debugging-port=0"]}}}',
+    );
+    assert.match(run(vars).stderr, /package\.json build: a packaged build/);
+    fs.writeFileSync(path.join(root, "package.json"), "{}");
+    fs.writeFileSync(
+      path.join(root, "electron-builder.yml"),
+      "args: --remote-debugging-port=0\n",
+    );
+    assert.match(run(vars).stderr, /electron-builder\.yml: a packaged build/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a core main-process file that requires a module main.cjs loads fails the check", () => {
   const fs = require("node:fs");
   const os = require("node:os");

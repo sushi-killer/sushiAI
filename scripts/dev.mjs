@@ -4,6 +4,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import {
+  DEV_URL,
+  DEVTOOLS_FLAGS,
+  attachEnabled,
+  publishDevtools,
+} from "./lib/devtools-endpoint.mjs";
 import { createServer } from "vite";
 
 const { exitAction } = createRequire(import.meta.url)(
@@ -36,7 +42,7 @@ if (daemon.error || daemon.status !== 0)
 // Electron exit with the restart code, and Vite stays up for the next window.
 const server = await createServer();
 await server.listen();
-const url = "http://127.0.0.1:5173";
+const url = DEV_URL;
 let electron;
 
 // A dev run keeps its own daemon home, so it never fights an installed app
@@ -107,10 +113,19 @@ function seedAppData(dir, installed) {
 }
 
 function start() {
-  electron = spawn("node_modules/.bin/electron", ["."], {
-    stdio: "inherit",
-    env: devEnv(),
-  });
+  const vars = devEnv();
+  // Dev only, on by default (SUSHIAI_DEV_ATTACH=0 turns it off): local agents
+  // attach to this live window. The port is chosen by Chromium and bound to
+  // loopback, but while dev runs ANY local process can control the window over
+  // it. The endpoint goes to ~/.sushiai-dev/devtools.json and is deleted when
+  // Electron exits.
+  const attach = attachEnabled(vars);
+  electron = spawn(
+    "node_modules/.bin/electron",
+    [...(attach ? DEVTOOLS_FLAGS : []), "."],
+    { stdio: ["inherit", "inherit", attach ? "pipe" : "inherit"], env: vars },
+  );
+  if (attach) publishDevtools(electron);
   electron.on("exit", async (code) => {
     if (exitAction(code) === "respawn") {
       console.log("\n[dev] restarting Electron\n");

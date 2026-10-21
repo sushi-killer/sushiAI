@@ -398,6 +398,7 @@ export function useWorkspaces({
     operationId?: string,
     env?: Record<string, string>,
     prompt?: string,
+    fullAccess?: boolean,
   ): Promise<boolean> {
     const modelProfileId = modelProfile?.id;
     const accounts =
@@ -441,6 +442,7 @@ export function useWorkspaces({
             workspaceId: worktree ? newWorkspaceId(operation) : current.id,
             worktree,
             ...(prompt ? { prompt } : {}),
+            ...(kind === "agent" && fullAccess ? { fullAccess: true } : {}),
           },
           {
             id: "",

@@ -87,6 +87,7 @@ pub async fn wake(registry: &Arc<Registry>, id: &str) -> Result<(), Fail> {
         background: info.background,
         // A wake resumes the conversation for the owner, so it is interactive.
         headless: false,
+        full_access: launch.full_access,
     };
     let socket = registry.home.socket().to_string_lossy().into_owned();
     let prepared = agent::prepare(&request, &socket, id)?;

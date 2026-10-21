@@ -9,7 +9,8 @@ import {
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
-import { AGENTS, agentTitle } from "../lib/agent-title.ts";
+import { AGENTS, FULL_ACCESS_AGENTS, agentTitle } from "../lib/agent-title.ts";
+import { readAllFullAccess, writeFullAccess } from "./fullAccessPref.ts";
 import { Icon } from "../PanelIcon.tsx";
 import { openSettings } from "../lib/openSettings.ts";
 import { checkoutPath, tildePath as tilde } from "../projectPrepare.ts";
@@ -114,6 +115,10 @@ export function PanelPickerDialog({
     claudeAccountId?: string,
     targetWorkspaceId?: string,
     worktree?: { branch: string; base: string },
+    operationId?: string,
+    env?: Record<string, string>,
+    prompt?: string,
+    fullAccess?: boolean,
   ): void;
   connected: boolean;
   addExtensionPanel(
@@ -147,6 +152,8 @@ export function PanelPickerDialog({
   const [hostChecks, setHostChecks] = useState<
     Record<string, ProjectHostReadiness | "checking" | "unreachable">
   >({});
+  // The last "Full access" choice per agent, remembered across launches.
+  const [fullAccess, setFullAccess] = useState(readAllFullAccess);
   const agentButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [focusedAgent, setFocusedAgent] = useState(0);
   useEffect(() => {
@@ -391,10 +398,15 @@ export function PanelPickerDialog({
               undefined,
         targetWorkspaceId,
         worktreeArg,
+        undefined,
+        undefined,
+        undefined,
+        fullAccess[agent] || undefined,
       );
     },
     [
       addPanel,
+      fullAccess,
       setupPick,
       modelProfiles,
       selectedClaudeAccountId,
@@ -994,6 +1006,36 @@ export function PanelPickerDialog({
                   </span>
                 )}
                 <kbd className="pk-kbd">{index + 1}</kbd>
+                {FULL_ACCESS_AGENTS.includes(agent) && !setupPick && (
+                  <div
+                    className="pk-access"
+                    role="group"
+                    aria-label={`${agentTitle(agent)} access`}
+                  >
+                    <label
+                      className={`pk-worktree${fullAccess[agent] ? " on" : ""}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!fullAccess[agent]}
+                        onChange={(event) => {
+                          writeFullAccess(agent, event.target.checked);
+                          setFullAccess((current) => ({
+                            ...current,
+                            [agent]: event.target.checked,
+                          }));
+                        }}
+                      />
+                      <span className="pk-box" aria-hidden>
+                        {fullAccess[agent] && (
+                          <Check size={11} strokeWidth={3} />
+                        )}
+                      </span>
+                      Full access
+                    </label>
+                    <small>No permission prompts, no sandbox.</small>
+                  </div>
+                )}
               </div>
             );
           })}

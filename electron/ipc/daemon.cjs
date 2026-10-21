@@ -63,8 +63,9 @@ const CHANNELS = {
       if (r[key] !== undefined && typeof r[key] !== "string")
         throw new Error(`Invalid ${key}.`);
     strings(r.extraArgs, "extraArgs");
-    if (r.background !== undefined && typeof r.background !== "boolean")
-      throw new Error("Invalid background.");
+    for (const key of ["background", "fullAccess"])
+      if (r[key] !== undefined && typeof r[key] !== "boolean")
+        throw new Error(`Invalid ${key}.`);
   },
   "daemon-session-close": (h, id, graceful) => {
     host(h);

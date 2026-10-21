@@ -36,6 +36,9 @@ export function toDaemonLaunch(
       ? { modelProfileId: request.modelProfileId }
       : {}),
     ...(request.worktree ? { worktree: request.worktree } : {}),
+    ...(request.kind === "agent" && request.fullAccess
+      ? { fullAccess: true }
+      : {}),
     idempotencyKey: request.operationId,
   };
 }

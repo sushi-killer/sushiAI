@@ -43,6 +43,8 @@ pub struct Launch {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub full_access: bool,
 }
 
 impl Launch {
@@ -52,6 +54,7 @@ impl Launch {
             claude_settings: p.claude_settings.clone(),
             model: p.model.clone(),
             extra_args: p.extra_args.clone(),
+            full_access: p.full_access,
         }
     }
 }
@@ -296,6 +299,7 @@ mod tests {
             claude_settings: None,
             model: Some("m1".into()),
             extra_args: vec!["--flag".into()],
+            full_access: true,
         }
     }
 
@@ -311,6 +315,7 @@ mod tests {
         let back = store.open("s1").expect("open");
         assert_eq!(back.env["API_TOKEN"], "secret-value-123");
         assert_eq!(back.extra_args, ["--flag"]);
+        assert!(back.full_access);
     }
 
     #[test]

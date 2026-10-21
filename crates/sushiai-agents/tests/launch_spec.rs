@@ -32,6 +32,7 @@ fn params<'a>(
         permission_wait_secs: 600,
         claude_settings: None,
         headless: false,
+        full_access: false,
     }
 }
 
@@ -102,6 +103,56 @@ fn claude_new_session_argv_has_one_settings_flag() {
     assert_eq!(spec.argv.iter().filter(|a| *a == "--settings").count(), 1);
     assert_eq!(spec.argv.len(), 5);
     assert!(!spec.argv.contains(&"--bare".to_owned()));
+}
+
+/// The argv of an interactive launch with a prompt, with or without full access.
+fn argv_with_access(agent: &str, session: AgentSession, full_access: bool) -> Vec<String> {
+    let mut p = params(harness(agent), session, BIN, &[]);
+    p.prompt = Some("hi");
+    p.full_access = full_access;
+    build(&p).unwrap().argv
+}
+
+#[test]
+fn full_access_adds_the_agents_own_flags_before_the_prompt() {
+    let claude = argv_with_access("claude", AgentSession::New("abc"), true);
+    let at = claude
+        .iter()
+        .position(|a| a == "--permission-mode")
+        .unwrap();
+    assert_eq!(claude[at + 1], "bypassPermissions");
+    assert_eq!(&claude[claude.len() - 2..], ["--", "hi"]);
+    assert_eq!(at + 2, claude.len() - 2);
+
+    let codex = argv_with_access("codex", AgentSession::New(""), true);
+    assert_eq!(
+        codex,
+        [
+            "codex",
+            "--no-daemon",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--",
+            "hi"
+        ]
+    );
+    let resumed = argv_with_access("codex", AgentSession::Resume("c1"), true);
+    assert_eq!(&resumed[..4], ["codex", "resume", "c1", "--no-daemon",]);
+    assert!(resumed.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()));
+}
+
+#[test]
+fn without_full_access_no_guard_flag_is_added() {
+    for agent in ["claude", "codex"] {
+        let argv = argv_with_access(agent, AgentSession::New("abc"), false);
+        for flag in [
+            "--permission-mode",
+            "bypassPermissions",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-skip-permissions",
+        ] {
+            assert!(!argv.contains(&flag.to_owned()), "{agent} carries {flag}");
+        }
+    }
 }
 
 #[test]

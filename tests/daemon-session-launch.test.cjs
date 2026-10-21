@@ -101,6 +101,44 @@ test("a headless launch reaches session.create as headless", async (t) => {
   assert.equal(requests[1].params.headless, undefined);
 });
 
+test("full access reaches session.create for Claude and Codex only, and only when true", async (t) => {
+  const { launcher, requests, cwd } = setup(t);
+  const sent = async (agent, fullAccess) => {
+    await launcher.launch(base(cwd, { agent, fullAccess }));
+    return requests[requests.length - 1].params.fullAccess;
+  };
+  assert.equal(await sent("claude", true), true);
+  assert.equal(await sent("codex", true), true);
+  assert.equal(await sent("claude", false), undefined);
+  assert.equal(await sent("claude", undefined), undefined);
+  // An agent with no such flags never claims the mode.
+  assert.equal(await sent("gemini", true), undefined);
+  assert.equal(await sent("cursor-agent", true), undefined);
+  assert.equal(
+    toDaemonLaunch({
+      operationId: "op",
+      endpoint: "/sock",
+      kind: "agent",
+      agent: "claude",
+      cwd: "/repo",
+      label: "",
+      fullAccess: true,
+    }).fullAccess,
+    true,
+  );
+  assert.equal(
+    toDaemonLaunch({
+      operationId: "op",
+      endpoint: "/sock",
+      kind: "terminal",
+      cwd: "/repo",
+      label: "",
+      fullAccess: true,
+    }).fullAccess,
+    undefined,
+  );
+});
+
 test("subscription token goes to env and never into claudeSettings", async (t) => {
   const { launcher, requests, cwd } = setup(t, {
     accounts: { claude: { a1: { kind: "subscription", value: TOKEN } } },

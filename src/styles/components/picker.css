@@ -308,8 +308,10 @@
 .pk-row {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 11px;
+  row-gap: 4px;
   padding: 8px 10px;
   border-radius: 9px;
 }
@@ -604,4 +606,25 @@
 .pk-prepare .host-prep h2 {
   font-size: 18px;
   line-height: 22px;
+}
+
+/* The "Full access" choice of an agent: a second line inside its row, under the
+   name, above the row's click target. */
+.pk-access {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 0 0 100%;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 28px;
+}
+.pk .pk-access .pk-worktree {
+  margin-left: 0;
+}
+.pk-access small {
+  padding-left: 23px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 13px;
 }

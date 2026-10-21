@@ -230,6 +230,11 @@ pub struct SessionCreate {
     /// lines. A caller reads the answer from the session output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub headless: bool,
+    /// Claude or Codex start with every permission prompt and sandbox off, by the agent's own
+    /// flags. Kept for a wake, and reported back as `AgentInfo.full_access`. An agent with no
+    /// such flags ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_access: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +325,9 @@ pub struct AgentInfo {
     /// Unix milliseconds the session went to sleep; present while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernated_at: Option<u64>,
+    /// The agent runs with no permission prompts and no sandbox.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub full_access: bool,
 }
 
 fn is_zero(n: &u32) -> bool {

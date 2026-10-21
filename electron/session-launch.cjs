@@ -180,6 +180,13 @@ function createSessionLauncher({
     if (request.background === true) params.background = true;
     // One print-mode turn (`claude -p`, `codex exec`) instead of a terminal.
     if (request.headless === true) params.headless = true;
+    // Only an agent with its own full-access flags honours it; for any other
+    // the request is dropped here, so the session never claims a mode it lacks.
+    if (
+      request.fullAccess === true &&
+      AGENTS.some((entry) => entry.id === request.agent && entry.fullAccess)
+    )
+      params.fullAccess = true;
     if (request.agent === "claude" && Object.keys(claudeSettings).length)
       params.claudeSettings = claudeSettings;
     const result = await manager.request(

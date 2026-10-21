@@ -286,6 +286,12 @@ fn the_app_agent_list_matches_the_registry() {
             harness.id()
         );
         assert_eq!(
+            entry["fullAccess"],
+            !harness.capabilities().full_access.is_empty(),
+            "{} fullAccess flag",
+            harness.id()
+        );
+        assert_eq!(
             entry["provider"],
             serde_json::json!(harness.provider()),
             "{} provider",

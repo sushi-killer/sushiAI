@@ -41,6 +41,8 @@ test("handlers reject malformed arguments before anything else", async () => {
     ["daemon-session-launch", [{ ...launch, cols: 1.5 }]],
     ["daemon-session-launch", [{ ...launch, idempotencyKey: "" }]],
     ["daemon-session-launch", [{ ...launch, extraArgs: [1] }]],
+    ["daemon-session-launch", [{ ...launch, fullAccess: "yes" }]],
+    ["daemon-session-launch", [{ ...launch, fullAccess: 1 }]],
     ["daemon-session-close", ["local", "s1", "yes"]],
     ["daemon-session-update", ["local", {}]],
     ["daemon-session-read", ["local", "s1", -1]],
@@ -63,4 +65,6 @@ test("handlers reject malformed arguments before anything else", async () => {
   assert.equal(launched.length, 0, "a bad request never reached the launcher");
   await handlers.get("daemon-session-launch")(launch);
   assert.deepEqual(launched, [launch]);
+  await handlers.get("daemon-session-launch")({ ...launch, fullAccess: true });
+  assert.equal(launched[1].fullAccess, true);
 });

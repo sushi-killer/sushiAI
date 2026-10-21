@@ -188,6 +188,7 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         permission_wait_secs: ASK_WAIT_SECS,
         claude_settings: p.claude_settings.as_ref(),
         headless: p.headless,
+        full_access: p.full_access,
     };
     let spec = launch::build(&params).map_err(|e| invalid(&e.to_string()))?;
     env.extend(spec.vars);
@@ -221,6 +222,8 @@ pub fn prepare(p: &SessionCreate, socket: &str, id: &str) -> Result<Prepared, Fa
         status_source: Some(StatusSource::Heuristic),
         status_since: Some(now_ms()),
         token_hash: Some(hash_token(&token)),
+        // Only what the argv really carries: an agent with no such flags runs guarded.
+        full_access: p.full_access && !caps.full_access.is_empty(),
         ..AgentInfo::default()
     };
     Ok(Prepared {
@@ -370,6 +373,33 @@ mod tests {
         let parts: Vec<usize> = id.split('-').map(str::len).collect();
         assert_eq!(parts, [8, 4, 4, 4, 12]);
         assert!(id.split('-').nth(2).is_some_and(|p| p.starts_with('4')));
+    }
+
+    #[test]
+    fn full_access_reaches_the_argv_and_the_record_for_claude_and_codex_only() {
+        let create = |agent: &str, full_access: bool| -> SessionCreate {
+            serde_json::from_value(json!({
+                "cwd": "/tmp", "cols": 80, "rows": 24, "agent": agent,
+                "cmd": ["/bin/sh"], "fullAccess": full_access,
+            }))
+            .expect("create")
+        };
+        for (agent, flag) in [
+            ("claude", "bypassPermissions"),
+            ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        ] {
+            let on = prepare(&create(agent, true), "/tmp/x.sock", "s1").expect("prepare");
+            assert!(on.run_cmd.contains(&flag.to_owned()), "{agent} argv");
+            assert!(on.cmd.contains(&flag.to_owned()), "{agent} recorded cmd");
+            assert!(on.agent.full_access, "{agent} record");
+            let off = prepare(&create(agent, false), "/tmp/x.sock", "s1").expect("prepare");
+            assert!(!off.run_cmd.contains(&flag.to_owned()), "{agent} argv");
+            assert!(!off.agent.full_access, "{agent} record");
+        }
+        // An agent the daemon does not launch has no such flags: the command stays as given.
+        let plain = prepare(&create("gemini", true), "/tmp/x.sock", "s1").expect("prepare");
+        assert_eq!(plain.run_cmd, ["/bin/sh"]);
+        assert!(!plain.agent.full_access);
     }
 
     #[test]

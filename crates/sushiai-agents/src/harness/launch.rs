@@ -61,6 +61,10 @@ pub struct LaunchParams<'a> {
     /// has no `--no-daemon`, and prints JSON lines (`--json`); `--skip-git-repo-check` lets
     /// it start outside a git repository.
     pub headless: bool,
+    /// Start with no permission prompts and no sandbox, by the agent's own flags
+    /// ([`Capabilities::full_access`](super::Capabilities::full_access)). An agent without
+    /// such flags ignores it.
+    pub full_access: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,8 +143,18 @@ pub fn build(p: &LaunchParams) -> Result<LaunchSpec, LaunchError> {
     Ok(finish(p, launch(p)?))
 }
 
-/// The prompt and the child variables every agent's argv ends with.
+/// The prompt and the child variables every agent's argv ends with. The full-access flags go
+/// in front of the prompt, where a flag still parses.
 fn finish(p: &LaunchParams, mut argv: Vec<String>) -> LaunchSpec {
+    if p.full_access {
+        argv.extend(
+            p.harness
+                .capabilities()
+                .full_access
+                .iter()
+                .map(|f| (*f).to_owned()),
+        );
+    }
     if let Some(prompt) = p.prompt {
         argv.push("--".into());
         argv.push(prompt.into());

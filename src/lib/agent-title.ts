@@ -17,6 +17,12 @@ export const AGENT_NAMES: Record<string, string> = Object.fromEntries(
 /** The agents a panel can start, in picker order. */
 export const AGENTS = agents.map((agent) => agent.id);
 
+/** The agents whose CLI has a no-prompts, no-sandbox mode (a Rust test holds
+ * the flag to the registry's `Capabilities::full_access`). */
+export const FULL_ACCESS_AGENTS = agents
+  .filter((agent) => agent.fullAccess)
+  .map((agent) => agent.id);
+
 /** The agents the orchestrator, routines and the headless chat can run. Not the
  * json's `native` flag: that one is only "the daemon launches it with hooks". */
 export const HARNESSES = ["claude", "codex"] as const;

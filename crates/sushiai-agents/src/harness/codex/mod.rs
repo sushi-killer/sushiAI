@@ -87,6 +87,7 @@ impl Harness for Codex {
             session_id: false,
             hooks_in_home: true,
             settings_json: false,
+            full_access: &["--dangerously-bypass-approvals-and-sandbox"],
         }
     }
 
@@ -185,6 +186,7 @@ mod tests {
             permission_wait_secs: 600,
             claude_settings: None,
             headless,
+            full_access: false,
         })
         .expect("a valid launch")
         .argv

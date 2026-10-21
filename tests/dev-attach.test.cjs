@@ -3,105 +3,102 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { EventEmitter } = require("node:events");
 
 const root = path.resolve(__dirname, "..");
-const attach = path.join(root, ".agents/skills/ui-evidence/scripts/attach.mjs");
-const electronBin = path.join(root, "node_modules/.bin/electron");
+const lib = () => import(path.join(root, "scripts/lib/devtools-endpoint.mjs"));
+const attach = () =>
+  import(path.join(root, ".agents/skills/ui-evidence/scripts/attach.mjs"));
 
-test("the debugging flag exists only in scripts/dev.mjs", () => {
-  const walk = (dir) =>
-    fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      const full = path.join(dir, entry.name);
-      return entry.isDirectory() ? walk(full) : [full];
-    });
-  const shipped = [
-    ...walk(path.join(root, "electron")),
-    path.join(root, "package.json"),
-  ];
-  for (const file of shipped)
-    assert.ok(
-      !/remote-debugging/.test(fs.readFileSync(file, "utf8")),
-      `${path.relative(root, file)} must not open a debugging port`,
-    );
-  const packaged = JSON.parse(
-    fs.readFileSync(path.join(root, "package.json"), "utf8"),
-  ).build;
-  assert.ok(!JSON.stringify(packaged).includes("remote-debugging"));
-});
+const LINE =
+  "DevTools listening on ws://127.0.0.1:41234/devtools/browser/abc-123";
 
-test("dev publishes devtools.json and attach.mjs shoots and measures the live window", async () => {
-  const { DEVTOOLS_FLAGS, publishDevtools, parseListening, readDevtools } =
-    await import(path.join(root, "scripts/lib/devtools-endpoint.mjs"));
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sushiai-attach-"));
-  const app = path.join(tmp, "app");
-  fs.mkdirSync(app);
-  fs.writeFileSync(
-    path.join(app, "package.json"),
-    JSON.stringify({ name: "fixture", main: "main.cjs" }),
-  );
-  fs.writeFileSync(
-    path.join(app, "main.cjs"),
-    `const { app, BrowserWindow } = require("electron");
-app.setPath("userData", process.env.FIXTURE_DATA);
-app.whenReady().then(() => {
-  const win = new BrowserWindow({ show: false, width: 640, height: 480 });
-  win.loadURL("data:text/html," + encodeURIComponent(
-    '<body style="margin:0"><div id="box" style="width:120px;height:40px;background:rgb(1,2,3)">hi</div></body>'));
-});
-`,
-  );
-  const home = path.join(tmp, "home");
-  fs.mkdirSync(home);
-  // SUSHIAI_TEST_WINDOW=hidden: the fixture window never shows anyway.
-  const child = spawn(electronBin, [...DEVTOOLS_FLAGS, app], {
-    stdio: ["ignore", "ignore", "pipe"],
-    env: {
-      ...process.env,
-      SUSHIAI_TEST_WINDOW: "hidden",
-      FIXTURE_DATA: path.join(tmp, "data"),
-    },
+test("parseListening reads the port and endpoint from Chromium's line", async () => {
+  const { parseListening } = await lib();
+  assert.deepEqual(parseListening(LINE), {
+    wsEndpoint: "ws://127.0.0.1:41234/devtools/browser/abc-123",
+    port: 41234,
   });
-  const exited = new Promise((resolve) => child.on("exit", resolve));
-  publishDevtools(child, home);
-  const file = path.join(home, "devtools.json");
-  try {
-    // publishDevtools listens first, so the file exists when this resolves.
-    await new Promise((resolve, reject) => {
-      child.stderr.on("data", (chunk) => {
-        if (parseListening(chunk.toString())) resolve();
-      });
-      child.on("exit", () => reject(new Error("fixture exited early")));
-    });
-    const info = readDevtools(home);
-    assert.equal(info.pid, child.pid);
-    assert.ok(info.port > 0);
-    assert.match(info.wsEndpoint, /^ws:\/\/127\.0\.0\.1:\d+\//);
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(parseListening("DevTools listening on ws://0.0.0.0:1/x"), null);
+  assert.equal(parseListening("something else"), null);
+});
 
-    const env = { ...process.env, HOME: tmp, SUSHIAI_HOME: home };
-    const run = (...args) => {
-      const result = spawnSync(process.execPath, [attach, ...args], {
-        env,
-        encoding: "utf8",
-      });
-      assert.equal(result.status, 0, result.stderr);
-      return result.stdout;
-    };
-    const png = path.join(tmp, "out.png");
-    run("shot", png);
-    assert.equal(fs.readFileSync(png).subarray(1, 4).toString(), "PNG");
-    const [measured] = JSON.parse(run("measure", "#box"));
-    assert.deepEqual(
-      [measured.matches[0].box.width, measured.matches[0].box.height],
-      [120, 40],
-    );
-    assert.equal(measured.matches[0].styles.backgroundColor, "rgb(1, 2, 3)");
-    assert.equal(JSON.parse(run("eval", "1 + 1")), 2);
+test("publishDevtools waits for a whole line and removes the file on exit", async () => {
+  const { publishDevtools } = await lib();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sushiai-devtools-"));
+  const file = path.join(dir, "nested", "devtools.json");
+  const child = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4242;
+  publishDevtools(child, file);
+  try {
+    child.stderr.emit("data", Buffer.from(LINE.slice(0, 30)));
+    assert.ok(!fs.existsSync(file), "a half line publishes nothing");
+    child.stderr.emit("data", Buffer.from(LINE.slice(30) + "\n"));
+    const info = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(info, {
+      wsEndpoint: "ws://127.0.0.1:41234/devtools/browser/abc-123",
+      port: 41234,
+      pid: 4242,
+    });
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    child.emit("exit");
+    assert.ok(!fs.existsSync(file));
   } finally {
-    child.kill();
-    await exited;
-    assert.ok(!fs.existsSync(file), "devtools.json is deleted on exit");
-    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("readDevtools rejects a missing file and any failed pid probe", async () => {
+  const { readDevtools } = await lib();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sushiai-devtools-"));
+  const file = path.join(dir, "devtools.json");
+  try {
+    assert.throws(() => readDevtools(file), /missing/);
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ port: 1, wsEndpoint: "ws://x", pid: 7 }),
+    );
+    const failing = (code) => () => {
+      throw Object.assign(new Error(code), { code });
+    };
+    assert.throws(() => readDevtools(file, failing("ESRCH")), /stale/);
+    assert.throws(() => readDevtools(file, failing("EPERM")), /stale/);
+    assert.equal(readDevtools(file, () => true).pid, 7);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("attach is on unless SUSHIAI_DEV_ATTACH=0", async () => {
+  const { attachEnabled } = await lib();
+  assert.equal(attachEnabled({}), true);
+  assert.equal(attachEnabled({ SUSHIAI_DEV_ATTACH: "1" }), true);
+  assert.equal(attachEnabled({ SUSHIAI_DEV_ATTACH: "0" }), false);
+});
+
+test("pickMainPage takes only the page at the dev URL root, visible first", async () => {
+  const { pickMainPage } = await attach();
+  const dev = "http://127.0.0.1:5173";
+  const pages = [
+    {
+      id: "devtools",
+      url: "devtools://devtools/bundled/inspector.html",
+      visible: true,
+    },
+    { id: "mascot", url: `${dev}/mascot.html`, visible: true },
+    { id: "other-origin", url: "http://127.0.0.1:9999/", visible: true },
+    { id: "blank", url: "about:blank", visible: true },
+    { id: "hidden-main", url: `${dev}/`, visible: false },
+    { id: "main", url: `${dev}/index.html`, visible: true },
+  ];
+  assert.equal(pickMainPage(pages, dev).id, "main");
+  assert.equal(
+    pickMainPage(
+      pages.filter((p) => p.id !== "main"),
+      dev,
+    ).id,
+    "hidden-main",
+  );
+  assert.equal(pickMainPage(pages.slice(0, 4), dev), null);
 });

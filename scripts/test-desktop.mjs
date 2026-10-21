@@ -11,6 +11,11 @@ if (process.platform !== "darwin") {
   );
   process.exit(0);
 }
-for (const script of ["build-once.mjs", "smoke.mjs", "smoke-companion.mjs"]) {
+for (const script of [
+  "build-once.mjs",
+  "smoke.mjs",
+  "smoke-companion.mjs",
+  "attach-smoke.mjs",
+]) {
   execFileSync(process.execPath, [`scripts/${script}`], { stdio: "inherit" });
 }

@@ -761,6 +761,29 @@ for (const entry of await readdir(path.join(docTestRoot, "tests")).catch(
       `tests/${entry}: reads a document to assert its wording; tests prove logic, a doc criterion is a check command`,
     );
 }
+// A debugging port lets any local process drive the window, so only
+// scripts/dev.mjs may open one; a packaged build never does.
+const DEBUG_PORT = /remote-debugging/;
+const debugRoot = process.env.DEBUG_PORT_ROOT_OVERRIDE || root;
+const packagedFiles = [];
+for await (const file of walkAll("electron", debugRoot))
+  packagedFiles.push(file);
+for (const entry of await readdir(debugRoot))
+  if (/^electron-builder\./.test(entry)) packagedFiles.push(entry);
+for (const file of packagedFiles)
+  if (DEBUG_PORT.test(await readFile(path.join(debugRoot, file), "utf8")))
+    problems.push(
+      `${file.split(path.sep).join("/")}: a packaged build must not open a remote debugging port`,
+    );
+if (existsSync(path.join(debugRoot, "package.json"))) {
+  const pkg = JSON.parse(
+    await readFile(path.join(debugRoot, "package.json"), "utf8"),
+  );
+  if (DEBUG_PORT.test(JSON.stringify(pkg.build ?? {})))
+    problems.push(
+      "package.json build: a packaged build must not open a remote debugging port",
+    );
+}
 // A script or test that gives a daemon its own SUSHIAI_HOME must give it a HOME
 // too: `sushiai hooks install` and Codex's files resolve from HOME, and the
 // owner's real ~/.codex and ~/.sushiai/bin link are never a test's to touch.

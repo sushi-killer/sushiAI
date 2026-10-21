@@ -54,6 +54,9 @@ const DESKTOP_SCRIPTS = [
   "scripts/build-once.mjs",
   "scripts/smoke.mjs",
   "scripts/smoke-companion.mjs",
+  "scripts/attach-smoke.mjs",
+  "scripts/lib/devtools-endpoint.mjs",
+  ".agents/skills/ui-evidence/scripts/attach.mjs",
 ];
 // A node test whose sources name one of these drives the Rust side: a real
 // daemon, the crates' files or cargo. Only these run for a crate change.

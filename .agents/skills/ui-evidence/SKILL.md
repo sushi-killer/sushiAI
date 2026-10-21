@@ -13,10 +13,16 @@ open every image you produced before you describe it.
 When the owner runs `npm run dev`, look at that window with its real data
 instead of a throwaway profile; problems of the live app show only there.
 `scripts/dev.mjs` starts Electron with `--remote-debugging-port=0` bound to
-`127.0.0.1` (dev only, never in the packaged app) and writes
-`$SUSHIAI_HOME/devtools.json` (`{port, wsEndpoint, pid}`, mode 0600, default
-home `~/.sushiai-dev`); the file is deleted when Electron exits. A missing or
-stale file means no dev app is running: fall back to the steps below.
+`127.0.0.1` (dev only, never in the packaged app; `check-conventions` enforces
+it) and writes `~/.sushiai-dev/devtools.json` (`{port, wsEndpoint, pid}`, mode
+0600). The path is fixed, whatever `SUSHIAI_HOME` the dev run uses. The file is
+deleted when Electron exits. A missing or stale file means no dev app is
+running: fall back to the steps below.
+
+**Security.** While dev runs, any local process can control the dev window
+over that port. The 0600 mode only limits who can discover the port; it is not
+protection. The feature is on by default in dev; start dev with
+`SUSHIAI_DEV_ATTACH=0` to turn it off.
 
 ```
 node .agents/skills/ui-evidence/scripts/attach.mjs shot <out.png> [--selector css] [--full]
@@ -27,9 +33,10 @@ node .agents/skills/ui-evidence/scripts/attach.mjs type <css> <text>
 node .agents/skills/ui-evidence/scripts/attach.mjs key <combo>
 ```
 
-- It picks the main app window, not DevTools or the mascot, and never resizes
+- It picks the main app window (the page at the dev URL root; not DevTools, not the mascot) and checks the port answers as the file says. It never resizes
   or moves it unless you pass `--viewport WxH`. Resize only on request, and say
   so: it changes the owner's window until the next attach resets it.
+- `type` appends at the end of the field, typing like a person; it does not clear it.
 - `shot` and `measure` are free. `click`, `type` and `key` act on the owner's
   live data: ask before any that sends, deletes or archives. `eval` must not
   mutate state. There is no route API, so there is no `goto`.

@@ -1,10 +1,11 @@
 // Attach to the owner's running `npm run dev` window over CDP and look at it.
+// The endpoint is ~/.sushiai-dev/devtools.json; dev.mjs publishes it.
 //
 //   node .agents/skills/ui-evidence/scripts/attach.mjs shot <out.png> [--selector css] [--full]
 //   node .agents/skills/ui-evidence/scripts/attach.mjs measure <css...>
 //   node .agents/skills/ui-evidence/scripts/attach.mjs eval <expr>
 //   node .agents/skills/ui-evidence/scripts/attach.mjs click <css>
-//   node .agents/skills/ui-evidence/scripts/attach.mjs type <css> <text>
+//   node .agents/skills/ui-evidence/scripts/attach.mjs type <css> <text>   (appends at the end)
 //   node .agents/skills/ui-evidence/scripts/attach.mjs key <combo>
 //
 // shot and measure only read. eval is for read-only expressions. click, type
@@ -14,7 +15,7 @@
 import { chromium } from "playwright";
 import { fileURLToPath } from "node:url";
 import {
-  defaultHome,
+  DEV_URL,
   readDevtools,
 } from "../../../../scripts/lib/devtools-endpoint.mjs";
 
@@ -47,13 +48,33 @@ function parseArgs(argv) {
   return { flags, rest };
 }
 
-/** The main app window: not DevTools, not the mascot. */
-export function pickMainPage(pages) {
-  const app = pages.filter((page) => {
-    const url = page.url();
-    return !url.startsWith("devtools:") && !/\/mascot\.html/.test(url);
+/** The main app window: the page served at the dev URL root. DevTools, the
+ * mascot (a different path) and anything else never match. A visible window
+ * wins; a hidden one (a test run) is the fallback. Entries are
+ * `{url, visible, ...}`. */
+export function pickMainPage(entries, devUrl = DEV_URL) {
+  const root = new URL(devUrl);
+  const main = entries.filter(({ url }) => {
+    let page;
+    try {
+      page = new URL(url);
+    } catch {
+      return false;
+    }
+    return (
+      page.origin === root.origin &&
+      (page.pathname === "/" || page.pathname === "/index.html")
+    );
   });
-  return app[0] ?? null;
+  return main.find((entry) => entry.visible) ?? main[0] ?? null;
+}
+
+/** The port in the file must really be the debugger of that app. */
+async function confirmEndpoint({ port, wsEndpoint }) {
+  const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+  const { webSocketDebuggerUrl } = await response.json();
+  if (webSocketDebuggerUrl !== wsEndpoint)
+    throw new Error("devtools.json does not match the running debugger");
 }
 
 function viewportOf(text) {
@@ -112,7 +133,25 @@ async function run(command, rest, flags, page) {
       return { clicked: rest[0] };
     case "type":
       if (rest.length < 2) throw new Error("type needs a selector and text");
-      await page.locator(rest[0]).first().fill(rest.slice(1).join(" "));
+      // Appends: the caret goes to the end, then keys are typed like a person.
+      await page
+        .locator(rest[0])
+        .first()
+        .evaluate((el) => {
+          el.focus();
+          if (el.setSelectionRange) {
+            const end = el.value.length;
+            el.setSelectionRange(end, end);
+          } else {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const selection = getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        });
+      await page.keyboard.type(rest.slice(1).join(" "));
       return { typed: rest[0] };
     case "key":
       await page.keyboard.press(rest[0]);
@@ -125,11 +164,22 @@ async function run(command, rest, flags, page) {
 async function main() {
   const { flags, rest } = parseArgs(process.argv.slice(2));
   const [command, ...args] = rest;
-  const { wsEndpoint } = readDevtools(defaultHome());
-  const browser = await chromium.connectOverCDP(wsEndpoint);
+  const info = readDevtools();
+  await confirmEndpoint(info);
+  const browser = await chromium.connectOverCDP(info.wsEndpoint);
   try {
-    const page = pickMainPage(browser.contexts().flatMap((c) => c.pages()));
-    if (!page) throw new Error("no app window found");
+    const entries = [];
+    for (const page of browser.contexts().flatMap((c) => c.pages()))
+      entries.push({
+        page,
+        url: page.url(),
+        visible: await page
+          .evaluate(() => document.visibilityState === "visible")
+          .catch(() => false),
+      });
+    const found = pickMainPage(entries, process.env.BRIDGE_DEV_URL || DEV_URL);
+    if (!found) throw new Error("no app window found");
+    const { page } = found;
     if (flags.viewport) await page.setViewportSize(viewportOf(flags.viewport));
     console.log(JSON.stringify(await run(command, args, flags, page), null, 2));
   } finally {

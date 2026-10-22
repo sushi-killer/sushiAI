@@ -27,7 +27,8 @@ function failure(error: unknown, path: string): string {
 }
 
 /** Reads one file and reads it again every 2 s while the pane is visible. A
- * new path loads at once; unchanged content (same hash) keeps its state, so
+ * new path loads at once; unchanged content (same hash, or for video and pdf
+ * the same size and mtime) keeps its state, so
  * the view only re-renders when the file really changed. */
 export function usePreviewFile(
   path: string,
@@ -48,14 +49,18 @@ export function usePreviewFile(
       if (busy || !window.bridge) return;
       busy = true;
       try {
+        // A video or pdf is served to its player by range; polling only needs
+        // the file's version, so it asks for no content at all.
+        const stat = kind === "video" || kind === "pdf";
         const data = await window.bridge.projectInspect(endpoint, {
           operation: "read",
           root: cwd,
           path: projectRelative(path, cwd),
+          ...(stat ? { offset: 0, length: 0 } : {}),
         });
         if (disposed || data.hash === hash.current) return;
         hash.current = data.hash;
-        const binary = kind === "image" || kind === "pdf";
+        const binary = kind === "image" || kind === "pdf" || kind === "video";
         let text = "";
         if (!binary) {
           const bytes = Uint8Array.from(atob(data.base64), (c) =>

@@ -690,11 +690,31 @@ def inspect(data):
     if operation == "read":
         if not target.is_file():
             raise ValueError("Select a regular file")
-        size = target.stat().st_size
-        if size > LIMIT:
-            raise ValueError("File exceeds the 16 MB preview limit")
-        content = target.read_bytes()
-        return {"path": str(target.relative_to(base)), "size": size, "mime": mimetypes.guess_type(str(target))[0] or "application/octet-stream", "base64": base64.b64encode(content).decode("ascii"), "hash": hashlib.sha256(content).hexdigest()}
+        metadata = target.stat()
+        size = metadata.st_size
+        # Cheap change marker: needs no read of the content.
+        version = f"{size}-{metadata.st_mtime_ns}"
+        mime = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        relative = str(target.relative_to(base))
+        offset, length = data.get("offset"), data.get("length")
+        if offset is None and length is None:
+            if size > LIMIT:
+                raise ValueError("File exceeds the 16 MB preview limit")
+            content = target.read_bytes()
+            return {"path": relative, "size": size, "mime": mime, "version": version, "base64": base64.b64encode(content).decode("ascii"), "hash": hashlib.sha256(content).hexdigest()}
+        # A slice read (offset and length 0 is a stat): the limit applies to
+        # the slice, never to the file.
+        offset = 0 if offset is None else offset
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("Invalid offset")
+        if length is not None and (not isinstance(length, int) or isinstance(length, bool) or length < 0):
+            raise ValueError("Invalid length")
+        wanted = max(size - offset, 0) if length is None else length
+        wanted = min(wanted, LIMIT, max(size - offset, 0))
+        with open(target, "rb") as handle:
+            handle.seek(offset)
+            content = handle.read(wanted)
+        return {"path": relative, "size": size, "mime": mime, "version": version, "offset": offset, "base64": base64.b64encode(content).decode("ascii"), "hash": version}
     if operation == "write":
         if not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
             raise ValueError("Editor supports existing text files up to 2 MB")
